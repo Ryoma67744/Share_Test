@@ -547,46 +547,104 @@ async function inspectXlsxColumns(buf, sheetName, headerRow1based) {
     return { sheetNames: wb.SheetNames, headers, dataRows: Math.max(0, range.e.r - hr) };
 }
 
-// Parse an Analyte (converted from imzML) txt header.
-// File layout (tab-separated):
-//   line 0: "<count>\t\t\t<compound1>\t<compound2>\t...\t<compoundN>\t..."
-//   line 1: "\t\t\t1\t2\t...\tN\t..."
-//   line 2: "\t\t\t<precursor1>\t<precursor2>\t...\t<precursorN>\t..."
-//   line 3: "\t\t\t<product1>\t<product2>\t...\t<productN>\t..."
-//   line 4+: "<idx>\t<x>\t<y>\t<v1>\t<v2>\t...\t<vN>\t<extra>\t<extra>"
-// Returns { compounds: [{ index, name, precursor, product }], dataStartLine: 4 }.
+// Parse an Analyte (converted from imzML) txt header by *dynamically* locating
+// the rows that hold precursor m/z, product m/z and compound names.
+//
+// Real-world files vary by 0-2 leading comment/header lines, so we don't assume
+// fixed line offsets. Strategy:
+//   1. For each line, count tokens at col >= 3 that are finite numbers vs.
+//      non-empty non-numeric strings.
+//   2. The first pair of CONSECUTIVE numeric-only rows (>= 3 numbers each)
+//      that is NOT a strict 1,2,3,...,N channel-index row becomes
+//      <precursor row, product row>.
+//   3. The closest line above the precursor row with non-numeric tokens
+//      becomes the compound-name row.
+//   4. Data rows start immediately after the product row.
+//
+// Returns { compounds: [{ index, name, precursor, product }], dataStartLine,
+//           precIdx, prodIdx, nameIdx }.
 function parseAnalyteHeader(buf) {
     const raw = (typeof buf === 'string') ? buf : new TextDecoder('utf-8').decode(buf);
     const linesAll = raw.split(/\r?\n/);
-    if (linesAll.length < 5) throw new Error('Analyte file too short');
-    if (!/^\s*Analyte\s*\(converted from imzML\)/i.test(linesAll[0]) &&
-        !/Analyte/i.test(linesAll[0])) {
-        // Treat as Analyte anyway if structure matches; otherwise the caller should fall back.
+    if (linesAll.length < 4) throw new Error('Analyte file too short');
+
+    const splitTab = (s) => (s == null ? [] : String(s).split('\t'));
+
+    const lineStats = linesAll.map((line) => {
+        const toks = splitTab(line).slice(3);
+        let nNumeric = 0, nString = 0;
+        for (const t of toks) {
+            const tt = t.trim();
+            if (!tt) continue;
+            if (Number.isFinite(Number(tt))) nNumeric++;
+            else nString++;
+        }
+        return { nNumeric, nString };
+    });
+
+    // A row is a "strict channel-index row" if its col>=3 tokens are
+    // exactly the integers 1, 2, 3, ... in order (with optional trailing blanks).
+    const isStrictChannelIndex = (idx) => {
+        const toks = splitTab(linesAll[idx]).slice(3);
+        let expect = 1, seen = 0;
+        for (const t of toks) {
+            const tt = t.trim();
+            if (!tt) continue;
+            const v = Number(tt);
+            if (!Number.isFinite(v) || !Number.isInteger(v)) return false;
+            if (v !== expect) return false;
+            expect++; seen++;
+        }
+        return seen >= 3;
+    };
+
+    let precIdx = -1, prodIdx = -1;
+    for (let i = 0; i < lineStats.length - 1; i++) {
+        const a = lineStats[i], b = lineStats[i + 1];
+        if (a.nNumeric >= 3 && b.nNumeric >= 3 && a.nString === 0 && b.nString === 0) {
+            if (isStrictChannelIndex(i)) continue;
+            precIdx = i; prodIdx = i + 1;
+            break;
+        }
     }
-    const split = (s) => (s == null ? [] : String(s).split('\t'));
-    const headerRow = split(linesAll[0]);
-    const precRow   = split(linesAll[2]);
-    const prodRow   = split(linesAll[3]);
-    // Compound names live at column 3+ (skipping the leading idx,x,y placeholder slots).
-    const rawNames  = headerRow.slice(3);
-    const rawPrec   = precRow.slice(3);
-    const rawProd   = prodRow.slice(3);
-    const N = rawPrec.filter(s => Number.isFinite(Number(s))).length;
-    if (!N) throw new Error('no precursor m/z values found on line 3');
+    if (precIdx < 0) throw new Error('failed to locate precursor / product m/z rows');
+
+    // Walk upward from precIdx looking for a row that holds compound names.
+    let nameIdx = -1;
+    for (let i = precIdx - 1; i >= 0; i--) {
+        if (lineStats[i].nString >= 1) { nameIdx = i; break; }
+    }
+
+    const precRow = splitTab(linesAll[precIdx]).slice(3);
+    const prodRow = splitTab(linesAll[prodIdx]).slice(3);
+    const nameRow = nameIdx >= 0 ? splitTab(linesAll[nameIdx]).slice(3) : [];
+
     const compounds = [];
-    for (let i = 0; i < N; i++) {
-        let name = (rawNames[i] || '').trim();
-        if (!name) name = 'Compound' + (i + 1);
-        const precursor = Number(rawPrec[i]);
-        const product   = Number(rawProd[i]);
+    let ordinal = 0;
+    for (let i = 0; i < precRow.length; i++) {
+        const pre = Number((precRow[i] || '').trim());
+        // precursor m/z must be positive finite (m/z = 0 is meta padding).
+        if (!Number.isFinite(pre) || pre <= 0) {
+            if (compounds.length > 0) break;
+            continue;
+        }
+        const pro = Number((prodRow[i] || '').trim());
+        let name = (nameRow[i] || '').trim();
+        ordinal++;
+        if (!name) name = 'Compound' + ordinal;
         compounds.push({
+            // Column offset within the slice(3) view; data rows have value at tok[3 + index].
             index: i,
+            // 1-based ordinal for UI display.
+            ordinal,
             name,
-            precursor: Number.isFinite(precursor) ? precursor : null,
-            product:   Number.isFinite(product) ? product : null,
+            precursor: pre,
+            product: (Number.isFinite(pro) && pro > 0) ? pro : null,
         });
     }
-    return { compounds, dataStartLine: 4 };
+    if (!compounds.length) throw new Error('no compounds detected');
+
+    return { compounds, dataStartLine: prodIdx + 1, precIdx, prodIdx, nameIdx };
 }
 
 async function buildPngFromTxtArrayBuffer(buf, def) {
@@ -1803,7 +1861,7 @@ const Wizards = {
                 row.appendChild(chk);
                 const num = document.createElement('span');
                 num.style.cssText = 'min-width:24px;color:#64748b;text-align:right;';
-                num.textContent = String(c.index + 1);
+                num.textContent = String(c.ordinal);
                 row.appendChild(num);
                 const mz = document.createElement('span');
                 mz.style.cssText = 'min-width:120px;color:#475569;font-family:ui-monospace,monospace;';
