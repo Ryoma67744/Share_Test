@@ -41,7 +41,17 @@ body { font-family: 'Inter', sans-serif; background-color: #f4f4f5; }
 .section-panel .viewer-rot { position:absolute; inset:0; transform-origin:50% 50%; transform:rotate(-90deg); }
 .section-panel canvas.disp { position:absolute; }
 .section-panel canvas.roi { position:absolute; pointer-events:none; }
-.section-panel .layer-bar { padding:4px 6px 0 6px; border-top:1px solid #f1f5f9; display:flex; flex-wrap:wrap; gap:4px; align-items:center; }
+.section-panel .layer-bar { padding:4px 6px 0 6px; border-top:1px solid #f1f5f9; display:flex; flex-direction:column; gap:4px; }
+.section-panel .layer-file-group { border:1px solid #e5e7eb; border-radius:4px; padding:2px 4px; }
+.section-panel .layer-file-group > summary { cursor:pointer; font-size:11px; color:#334155; display:flex; align-items:center; gap:4px; user-select:none; outline:none; }
+.section-panel .layer-file-group > summary::-webkit-details-marker { display:none; }
+.section-panel .layer-file-group > summary::before { content:'▶'; font-size:9px; color:#64748b; transition:transform 0.15s; }
+.section-panel .layer-file-group[open] > summary::before { transform:rotate(90deg); }
+.section-panel .layer-file-group .file-name { font-weight:600; color:#0f172a; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.section-panel .layer-file-group .file-actions { margin-left:auto; display:flex; gap:4px; }
+.section-panel .layer-file-group .file-actions button { font-size:10px; padding:1px 5px; border:1px solid #d1d5db; background:#fff; border-radius:3px; cursor:pointer; color:#475569; }
+.section-panel .layer-file-group .file-actions button:hover { background:#eef2ff; color:#1d4ed8; }
+.section-panel .layer-chip-row { display:flex; flex-wrap:wrap; gap:3px; padding:4px 0 2px 0; }
 .section-panel .layer-chip { display:inline-flex; align-items:center; gap:4px; padding:2px 6px; font-size:11px; border-radius:9999px; border:1px solid #cbd5e1; background:#f8fafc; cursor:pointer; user-select:none; }
 .section-panel .layer-chip.on { background:#dbeafe; border-color:#60a5fa; color:#1d4ed8; }
 .section-panel .layer-chip .dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
@@ -167,6 +177,25 @@ body { font-family: 'Inter', sans-serif; background-color: #f4f4f5; }
                 <div id="graph-container" class="flex-1 flex items-center justify-center border border-gray-200 rounded overflow-hidden min-h-0 bg-gray-50">
                     <p class="text-gray-400 text-xs">Select a ROI</p>
                 </div>
+                <details id="method-panel" class="mt-1 border border-gray-200 rounded shrink-0" open>
+                    <summary class="text-[11px] font-semibold text-gray-600 px-2 py-1 cursor-pointer select-none bg-gray-50 rounded-t">Method (MRM)</summary>
+                    <div id="method-body" class="overflow-x-auto">
+                        <table class="w-full text-[11px] border-collapse">
+                            <thead class="bg-gray-50">
+                                <tr>
+                                    <th class="text-left px-2 py-1 border-b border-gray-200 font-medium text-gray-500">Compound</th>
+                                    <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">Precursor</th>
+                                    <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">Fragment</th>
+                                    <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">CE</th>
+                                    <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">CV</th>
+                                </tr>
+                            </thead>
+                            <tbody id="method-rows">
+                                <tr><td colspan="5" class="px-2 py-2 text-center text-gray-400">No compound selected</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </details>
             </div>
         </aside>
     </div>
@@ -234,10 +263,20 @@ function getMsiColor(key) {
 
 function formatDisplayName(key) {
     if (!key) return '';
-    if (/^MSI_/i.test(key)) return 'MSI (' + key.substring(4).replace('_', '-') + ')';
+    if (/^MSI_/i.test(key)) return key.substring(4);
     if (/HE_STAIN/i.test(key)) return 'HE Stain';
     if (/IF_STAIN/i.test(key)) return 'IF Stain';
     return String(key).replace(/_/g, ' ');
+}
+
+// Strip the trailing _<int>_<int> (CE / CV) from a compound label.
+// "Oxylipin_13-HODE_NEG_45_14" -> { base: "Oxylipin_13-HODE_NEG", ce: 45, cv: 14 }
+// "DA"                         -> { base: "DA",                    ce: null, cv: null }
+function splitCeCv(label) {
+    const s = String(label || '');
+    const m = s.match(/^(.+?)_(\d+)_(\d+)$/);
+    if (m) return { base: m[1], ce: Number(m[2]), cv: Number(m[3]) };
+    return { base: s, ce: null, cv: null };
 }
 
 function pointInPolygon(x, y, vertices) {
@@ -632,12 +671,16 @@ function parseAnalyteHeader(buf) {
         let name = (nameRow[i] || '').trim();
         ordinal++;
         if (!name) name = 'Compound' + ordinal;
+        const split = splitCeCv(name);
         compounds.push({
             // Column offset within the slice(3) view; data rows have value at tok[3 + index].
             index: i,
             // 1-based ordinal for UI display.
             ordinal,
             name,
+            base: split.base,
+            ce: split.ce,
+            cv: split.cv,
             precursor: pre,
             product: (Number.isFinite(pro) && pro > 0) ? pro : null,
         });
@@ -1143,7 +1186,27 @@ class SectionPanel {
         bar.innerHTML = '';
         const allKeys = Object.keys(this.imageSources);
         if (!allKeys.length) return;
+
+        // Bucket layers by source file id (or HE/IF / legacy bucket).
+        const buckets = new Map(); // fileId -> { label, keys: [] }
+        const ensure = (id, label) => { if (!buckets.has(id)) buckets.set(id, { label, keys: [] }); return buckets.get(id); };
         for (const key of allKeys) {
+            const isMsi = /^MSI_/i.test(key);
+            if (!isMsi) {
+                ensure('__images__', 'HE / IF').keys.push(key);
+                continue;
+            }
+            const ent = (this.section.msiSeries || {})[key];
+            const fid = ent && ent.sourceFileId;
+            if (fid) {
+                const file = (this.section.msiFiles || {})[fid];
+                ensure(fid, (file && file.filename) || '(file)').keys.push(key);
+            } else {
+                ensure('__legacy__', '(legacy MSI)').keys.push(key);
+            }
+        }
+
+        const mkChip = (key) => {
             const chip = document.createElement('div');
             chip.className = 'layer-chip' + (this.visibleLayers.has(key) ? ' on' : '');
             const c = getMsiColor(key);
@@ -1154,7 +1217,10 @@ class SectionPanel {
                 chip.appendChild(dot);
             }
             const label = document.createElement('span');
-            label.textContent = formatDisplayName(key);
+            const ent = (this.section.msiSeries || {})[key];
+            const meta = ent && ent.compoundMeta;
+            label.textContent = (meta && meta.base) || formatDisplayName(key);
+            label.title = formatDisplayName(key);
             chip.appendChild(label);
             const gear = document.createElement('span');
             gear.className = 'gear';
@@ -1169,7 +1235,55 @@ class SectionPanel {
             x.addEventListener('click', (ev) => { ev.stopPropagation(); this.removeLayer(key); });
             chip.appendChild(x);
             chip.addEventListener('click', () => this.toggleLayer(key));
-            bar.appendChild(chip);
+            return chip;
+        };
+
+        for (const [fid, group] of buckets) {
+            const det = document.createElement('details');
+            det.className = 'layer-file-group';
+            det.open = true;
+            const sum = document.createElement('summary');
+            const fname = document.createElement('span');
+            fname.className = 'file-name';
+            fname.textContent = group.label;
+            fname.title = group.label;
+            sum.appendChild(fname);
+            const counter = document.createElement('span');
+            counter.style.cssText = 'color:#64748b;font-size:10px;';
+            counter.textContent = '(' + group.keys.length + ')';
+            sum.appendChild(counter);
+            const acts = document.createElement('span');
+            acts.className = 'file-actions';
+            const allOn = group.keys.every(k => this.visibleLayers.has(k));
+            const tBtn = document.createElement('button');
+            tBtn.textContent = allOn ? 'all off' : 'all on';
+            tBtn.title = 'Toggle visibility for all layers in this file';
+            tBtn.addEventListener('click', (ev) => {
+                ev.preventDefault(); ev.stopPropagation();
+                const turnOn = !allOn;
+                for (const k of group.keys) this.toggleLayer(k, turnOn);
+            });
+            acts.appendChild(tBtn);
+            if (fid !== '__images__' && fid !== '__legacy__') {
+                const dBtn = document.createElement('button');
+                dBtn.textContent = 'delete file';
+                dBtn.title = 'Remove all layers from this file';
+                dBtn.addEventListener('click', (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    if (!confirm('ファイル "' + group.label + '" の全 ' + group.keys.length + ' レイヤーを削除しますか?')) return;
+                    for (const k of group.keys.slice()) this.removeLayer(k, true);
+                    if (this.section.msiFiles) delete this.section.msiFiles[fid];
+                    App.queueSave();
+                });
+                acts.appendChild(dBtn);
+            }
+            sum.appendChild(acts);
+            det.appendChild(sum);
+            const row = document.createElement('div');
+            row.className = 'layer-chip-row';
+            for (const k of group.keys) row.appendChild(mkChip(k));
+            det.appendChild(row);
+            bar.appendChild(det);
         }
     }
 
@@ -1182,10 +1296,17 @@ class SectionPanel {
         this.refreshThumbHighlights();
     }
 
-    removeLayer(key) {
-        if (!confirm('レイヤー "' + formatDisplayName(key) + '" を削除しますか?')) return;
+    removeLayer(key, skipConfirm) {
+        if (!skipConfirm && !confirm('レイヤー "' + formatDisplayName(key) + '" を削除しますか?')) return;
         const ent = (this.section.images || {})[key] || (this.section.msiSeries || {})[key];
-        if (ent && ent.blobId) ProjectStorage.deleteBlob(ent.blobId).catch(() => {});
+        // Avoid orphaning a shared blob: only drop the blob when no other layer references it.
+        const blobStillUsed = (id) => {
+            if (!id) return false;
+            for (const e of Object.values(this.section.images || {})) if (e && e.blobId === id && e !== ent) return true;
+            for (const e of Object.values(this.section.msiSeries || {})) if (e && e.blobId === id && e !== ent) return true;
+            return false;
+        };
+        if (ent && ent.blobId && !blobStillUsed(ent.blobId)) ProjectStorage.deleteBlob(ent.blobId).catch(() => {});
         if (this.section.images) delete this.section.images[key];
         if (this.section.msiSeries) delete this.section.msiSeries[key];
         delete this.imageSources[key];
@@ -1353,13 +1474,39 @@ class SectionPanel {
         App.queueSave();
     }
 
-    async addMsiLayer(key, blob, def) {
-        const blobId = uid('blob');
-        await ProjectStorage.putBlob({ id: blobId, blob, mime: blob.type || 'application/octet-stream', filename: blob.name || (key + (def.kind === 'txt' ? '.txt' : '.xlsx')) });
-        const ent = Object.assign({}, def, { blobId, filename: blob.name || '' });
+    async addMsiLayer(key, blob, def, opts) {
+        opts = opts || {};
+        let blobId = opts.sharedBlobId || null;
+        if (!blobId) {
+            blobId = uid('blob');
+            await ProjectStorage.putBlob({
+                id: blobId,
+                blob,
+                mime: blob.type || 'application/octet-stream',
+                filename: blob.name || (key + (def.kind === 'txt' ? '.txt' : '.xlsx')),
+            });
+        }
+        const ent = Object.assign({}, def, {
+            blobId,
+            filename: blob.name || '',
+            sourceFileId: opts.sourceFileId || null,
+            compoundMeta: opts.compoundMeta || null,
+        });
         delete ent.src;
         this.section.msiSeries = this.section.msiSeries || {};
         this.section.msiSeries[key] = ent;
+        if (opts.sourceFileId) {
+            this.section.msiFiles = this.section.msiFiles || {};
+            if (!this.section.msiFiles[opts.sourceFileId]) {
+                this.section.msiFiles[opts.sourceFileId] = {
+                    id: opts.sourceFileId,
+                    filename: blob.name || '',
+                    kind: def.kind || (/\.xlsx$/i.test(blob.name || '') ? 'xlsx' : 'txt'),
+                    blobId,
+                    registeredAt: nowIso(),
+                };
+            }
+        }
         await this.loadMsiLayer(key, ent);
         await this.analyzeAndInitSettings();
         this.toggleLayer(key, true);
@@ -1475,17 +1622,68 @@ function populateRoiList() {
 
 function setupGraphSelector() {
     const project = App.project;
-    const compounds = collectAvailableCompoundLayers(project);
-    const opts = compounds.map(k => '<option value="' + k + '">' + formatDisplayName(k) + '</option>');
-    const opts2 = ['<option value="none">-</option>'].concat(opts);
-    document.getElementById('graph-select-1').innerHTML = opts.join('');
-    document.getElementById('graph-select-2').innerHTML = opts2.join('');
-    document.getElementById('graph-select-3').innerHTML = opts2.join('');
-    if (compounds[0]) document.getElementById('graph-select-1').value = compounds[0];
-    if (compounds[1]) document.getElementById('graph-select-2').value = compounds[1];
-    if (compounds[2]) document.getElementById('graph-select-3').value = compounds[2];
+    const groups = collectGroupedCompoundOptions(project);
+    const flatKeys = [];
+    const buildOptions = (includeNone) => {
+        const parts = [];
+        if (includeNone) parts.push('<option value="none">-</option>');
+        for (const g of groups) {
+            const grpLabel = g.label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+            parts.push('<optgroup label="' + grpLabel + '">');
+            for (const opt of g.options) {
+                const lbl = opt.label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+                const val = opt.key.replace(/"/g, '&quot;');
+                parts.push('<option value="' + val + '">' + lbl + '</option>');
+                if (!includeNone) flatKeys.push(opt.key);
+            }
+            parts.push('</optgroup>');
+        }
+        return parts.join('');
+    };
+    document.getElementById('graph-select-1').innerHTML = buildOptions(false);
+    document.getElementById('graph-select-2').innerHTML = buildOptions(true);
+    document.getElementById('graph-select-3').innerHTML = buildOptions(true);
+    if (flatKeys[0]) document.getElementById('graph-select-1').value = flatKeys[0];
+    if (flatKeys[1]) document.getElementById('graph-select-2').value = flatKeys[1];
+    if (flatKeys[2]) document.getElementById('graph-select-3').value = flatKeys[2];
 }
 
+// Group MSI option entries by (sourceFile, section) so the dropdown shows
+// each measurement file as its own <optgroup>.
+function collectGroupedCompoundOptions(project) {
+    const groups = [];
+    const grpIndex = new Map(); // key -> index in groups
+    for (const sec of (project.sections || [])) {
+        const msi = sec.msiSeries || {};
+        const files = sec.msiFiles || {};
+        for (const layerKey of Object.keys(msi)) {
+            if (!/^MSI_/i.test(layerKey)) continue;
+            const ent = msi[layerKey];
+            const fid = (ent && ent.sourceFileId) || '__legacy__';
+            const groupKey = fid + '|' + sec.id;
+            const fileLabel = (files[fid] && files[fid].filename) || (fid === '__legacy__' ? '(legacy MSI)' : '(file)');
+            const sectionLabel = sec.displayName || ('Section ' + (sec.ordinal || ''));
+            const groupLabel = fileLabel + '  @' + sectionLabel;
+            let g;
+            if (grpIndex.has(groupKey)) {
+                g = groups[grpIndex.get(groupKey)];
+            } else {
+                g = { label: groupLabel, options: [], fileId: fid, sectionId: sec.id };
+                grpIndex.set(groupKey, groups.length);
+                groups.push(g);
+            }
+            const meta = ent && ent.compoundMeta;
+            const optLabel = (meta && meta.base) || formatDisplayName(layerKey);
+            g.options.push({ key: layerKey, label: optLabel });
+        }
+    }
+    // Stable sort by group label for consistent display
+    groups.sort((a, b) => a.label.localeCompare(b.label));
+    for (const g of groups) g.options.sort((a, b) => a.label.localeCompare(b.label));
+    return groups;
+}
+
+// Backwards-compatible flat list (used by code paths that just want any layer key set).
 function collectAvailableCompoundLayers(project) {
     const set = new Set();
     for (const sec of (project.sections || [])) {
@@ -1526,14 +1724,14 @@ function renderAnalysisChart() {
     const host = document.getElementById('graph-container');
     const project = App.project;
     const roi = (project.rois || []).find(r => r.id === App.activeRoiId);
-    if (!roi) { host.innerHTML = '<p class="text-gray-400 text-xs">Select a ROI</p>'; return; }
+    if (!roi) { host.innerHTML = '<p class="text-gray-400 text-xs">Select a ROI</p>'; renderMethodTable(); return; }
     const ch1 = document.getElementById('graph-select-1').value;
     const ch2 = document.getElementById('graph-select-2').value;
     const ch3 = document.getElementById('graph-select-3').value;
     const channels = [ch1];
     if (ch2 && ch2 !== 'none' && !channels.includes(ch2)) channels.push(ch2);
     if (ch3 && ch3 !== 'none' && !channels.includes(ch3)) channels.push(ch3);
-    if (!channels[0]) { host.innerHTML = '<p class="text-gray-400 text-xs">No MSI layer to plot</p>'; return; }
+    if (!channels[0]) { host.innerHTML = '<p class="text-gray-400 text-xs">No MSI layer to plot</p>'; renderMethodTable(); return; }
 
     const sectionsWithRoi = (project.sections || []).filter(s => roi.polysBySection && roi.polysBySection[s.id] && roi.polysBySection[s.id].length);
     if (!sectionsWithRoi.length) { host.innerHTML = '<p class="text-gray-400 text-xs">This ROI is not drawn on any section yet</p>'; return; }
@@ -1559,6 +1757,53 @@ function renderAnalysisChart() {
     }
     drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi);
     document.getElementById('analysis-scope').textContent = sectionsWithRoi.length + ' section(s)';
+    renderMethodTable(channels);
+}
+
+// Look up the first compoundMeta across all sections that matches a given layer key.
+function findCompoundMeta(project, layerKey) {
+    for (const sec of (project.sections || [])) {
+        const ent = (sec.msiSeries || {})[layerKey];
+        if (ent && ent.compoundMeta) return ent.compoundMeta;
+    }
+    return null;
+}
+
+function renderMethodTable(channels) {
+    const tbody = document.getElementById('method-rows');
+    if (!tbody) return;
+    const project = App.project;
+    if (!project) { tbody.innerHTML = '<tr><td colspan="5" class="px-2 py-2 text-center text-gray-400">No project</td></tr>'; return; }
+    if (!channels) {
+        const ch1 = document.getElementById('graph-select-1').value;
+        const ch2 = document.getElementById('graph-select-2').value;
+        const ch3 = document.getElementById('graph-select-3').value;
+        channels = [ch1, ch2, ch3].filter(c => c && c !== 'none');
+    }
+    if (!channels.length) { tbody.innerHTML = '<tr><td colspan="5" class="px-2 py-2 text-center text-gray-400">No compound selected</td></tr>'; return; }
+    const seen = new Set();
+    const rows = [];
+    for (const layerKey of channels) {
+        if (seen.has(layerKey)) continue;
+        seen.add(layerKey);
+        const meta = findCompoundMeta(project, layerKey) || {};
+        const compoundName = meta.base || formatDisplayName(layerKey);
+        const pre = (meta.precursor != null) ? Number(meta.precursor).toFixed(2) : '—';
+        const pro = (meta.product   != null) ? Number(meta.product).toFixed(2)   : '—';
+        const ce  = (meta.ce  != null) ? String(meta.ce) : '—';
+        const cv  = (meta.cv  != null) ? String(meta.cv) : '—';
+        const safe = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        rows.push(
+            '<tr>' +
+                '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]">' + safe(compoundName) + '</td>' +
+                '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pre) + '</td>' +
+                '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pro) + '</td>' +
+                '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(ce) + '</td>' +
+                '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(cv) + '</td>' +
+            '</tr>'
+        );
+    }
+    tbody.innerHTML = rows.join('');
 }
 
 function drawSectionMultiBar(canvas, sections, channels, stats, roi) {
@@ -2007,8 +2252,20 @@ const Wizards = {
                 const r = await card._collect();
                 if (!r) { okBtn2.disabled = false; return; }
                 if (r.kind === 'xlsx') {
+                    const sourceFileId = uid('msifile');
+                    let sharedBlobId = null;
                     for (const pick of r.picks) {
                         const layerKey = 'MSI_' + sanitizeCompoundName(pick.name);
+                        const split = splitCeCv(pick.name);
+                        const compoundMeta = {
+                            name: pick.name,
+                            base: split.base,
+                            precursor: null,
+                            product: null,
+                            ce: split.ce,
+                            cv: split.cv,
+                            sourceFile: r.file.name || '',
+                        };
                         await panel.addMsiLayer(layerKey, r.file, {
                             kind: 'xlsx',
                             sheet: r.sheet,
@@ -2016,21 +2273,46 @@ const Wizards = {
                             col_x: r.col_x,
                             col_y: r.col_y,
                             col_v: pick.col,
-                        });
+                        }, { sourceFileId, compoundMeta, sharedBlobId });
+                        if (!sharedBlobId) sharedBlobId = panel.section.msiSeries[layerKey].blobId;
                     }
                     showToast('Registered ' + r.picks.length + ' MSI layer(s)');
                 } else if (r.kind === 'txt-analyte') {
+                    const sourceFileId = uid('msifile');
+                    let sharedBlobId = null;
                     for (const pick of r.picks) {
                         const layerKey = 'MSI_' + sanitizeCompoundName(pick.layer.replace(/^MSI_/, ''));
+                        const c = (analyteCache && analyteCache.compounds.find(cc => cc.index === pick.index)) || {};
+                        const compoundMeta = {
+                            name: c.name || pick.layer.replace(/^MSI_/, ''),
+                            base: c.base || splitCeCv(pick.layer.replace(/^MSI_/, '')).base,
+                            precursor: c.precursor != null ? c.precursor : null,
+                            product: c.product != null ? c.product : null,
+                            ce: c.ce != null ? c.ce : null,
+                            cv: c.cv != null ? c.cv : null,
+                            sourceFile: r.file.name || '',
+                        };
                         await panel.addMsiLayer(layerKey, r.file, {
                             kind: 'txt',
                             compound_index: pick.index,
                             dataStartLine: r.dataStartLine,
-                        });
+                        }, { sourceFileId, compoundMeta, sharedBlobId });
+                        if (!sharedBlobId) sharedBlobId = panel.section.msiSeries[layerKey].blobId;
                     }
                     showToast('Registered ' + r.picks.length + ' MSI layer(s)');
                 } else {
-                    await panel.addMsiLayer(r.layer, r.file, { kind: 'txt' });
+                    const sourceFileId = uid('msifile');
+                    const split = splitCeCv(r.layer.replace(/^MSI_/, ''));
+                    const compoundMeta = {
+                        name: r.layer.replace(/^MSI_/, ''),
+                        base: split.base,
+                        precursor: null,
+                        product: null,
+                        ce: split.ce,
+                        cv: split.cv,
+                        sourceFile: r.file.name || '',
+                    };
+                    await panel.addMsiLayer(r.layer, r.file, { kind: 'txt' }, { sourceFileId, compoundMeta });
                     showToast('Registered: ' + r.layer);
                 }
                 card._close(true);
@@ -2083,7 +2365,14 @@ async function exportProjectAsZip() {
             meta: sec.meta || {},
             images: {},
             msiSeries: {},
+            msiFiles: sec.msiFiles ? JSON.parse(JSON.stringify(sec.msiFiles)) : {},
         };
+        // strip blobIds from the serialized msiFiles entries; the actual files
+        // live under data/msi_*__<filename> and are repaired on import.
+        for (const fid of Object.keys(atlas.msiFiles)) {
+            const rec = atlas.msiFiles[fid] || {};
+            delete rec.blobId;
+        }
         // image blobs
         for (const [layerKey, ent] of Object.entries(sec.images || {})) {
             const rec = await ProjectStorage.getBlob(ent.blobId);
@@ -2187,6 +2476,7 @@ async function importZipFile(file) {
             meta: atlas.meta || {},
             images: {},
             msiSeries: {},
+            msiFiles: {},
         };
         sectionsBySrcId[atlas.id] = newSec.id;
         const dir = ap.replace(/atlas\.json$/, '');
@@ -2198,15 +2488,28 @@ async function importZipFile(file) {
             await ProjectStorage.putBlob({ id: blobId, blob, mime: ent.mime || 'image/tiff', filename: ent.filename || layerKey });
             newSec.images[layerKey] = { blobId, mime: ent.mime, filename: ent.filename || '' };
         }
+        // First pass: prepare msiFiles entries (carry forward filename / kind from atlas)
+        const fileBlobByFid = {};
+        for (const [fid, frec] of Object.entries(atlas.msiFiles || {})) {
+            newSec.msiFiles[fid] = Object.assign({}, frec, { id: fid });
+        }
         for (const [layerKey, ent] of Object.entries(atlas.msiSeries || {})) {
             const f = zip.file(dir + ent.path);
             if (!f) continue;
             const blob = await f.async('blob');
-            const blobId = uid('blob');
-            await ProjectStorage.putBlob({ id: blobId, blob, mime: blob.type || '', filename: ent.filename || layerKey });
+            const fid = ent.sourceFileId || null;
+            let blobId;
+            if (fid && fileBlobByFid[fid]) {
+                blobId = fileBlobByFid[fid];
+            } else {
+                blobId = uid('blob');
+                await ProjectStorage.putBlob({ id: blobId, blob, mime: blob.type || '', filename: ent.filename || layerKey });
+                if (fid) fileBlobByFid[fid] = blobId;
+            }
             const def = Object.assign({}, ent, { blobId });
             delete def.path;
             newSec.msiSeries[layerKey] = def;
+            if (fid && newSec.msiFiles[fid]) newSec.msiFiles[fid].blobId = blobId;
         }
         newProject.sections.push(newSec);
     }
