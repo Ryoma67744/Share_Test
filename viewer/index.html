@@ -47,6 +47,13 @@ body { font-family: 'Inter', sans-serif; background-color: #f4f4f5; }
 .section-panel .sec-rot input { width:50px; padding:2px 4px; font-size:11px; border:1px solid #cbd5e1; border-radius:3px; text-align:right; background:#fff; }
 .section-panel .sec-rot button.rot-reset { font-size:11px; padding:1px 5px; border:1px solid #cbd5e1; border-radius:3px; background:#fff; cursor:pointer; color:#475569; }
 .section-panel .sec-rot button.rot-reset:hover { background:#eef2ff; color:#1d4ed8; }
+.section-panel .sec-opc { display:flex; align-items:center; gap:3px; padding:2px 4px; border-left:1px solid #e5e7eb; margin-left:4px; }
+.section-panel .sec-opc .opc-label, .section-panel .sec-opc .opc-pct { font-size:10px; color:#475569; }
+.section-panel .sec-opc input { width:50px; padding:2px 4px; font-size:11px; border:1px solid #cbd5e1; border-radius:3px; text-align:right; background:#fff; }
+.section-panel .sec-opc input:disabled { background:#f1f5f9; color:#9ca3af; }
+.section-panel .sync-toggle { font-size:11px; padding:1px 4px; border:1px solid #cbd5e1; border-radius:3px; background:#fff; cursor:pointer; color:#94a3b8; line-height:1; margin-left:1px; }
+.section-panel .sync-toggle.linked { background:#dbeafe; color:#1d4ed8; border-color:#93c5fd; }
+.section-panel .sync-toggle:hover { background:#eef2ff; }
 #method-rows .marker-swatch { width:14px; height:14px; border-radius:50%; border:1px solid #cbd5e1; cursor:pointer; padding:0; vertical-align:middle; }
 #method-rows .marker-swatch:hover { border-color:#1d4ed8; }
 #method-rows .marker-input { width:0; height:0; opacity:0; pointer-events:none; position:absolute; }
@@ -109,6 +116,9 @@ body.splitting-v { cursor:row-resize !important; }
 #method-rows tr.method-row { cursor:pointer; }
 #method-rows tr.method-row:hover { background:#f1f5f9; }
 #method-rows tr.method-row.active { background:#dbeafe; }
+#method-rows tr.method-row.focus { background:#bfdbfe; outline:1px solid #2563eb; }
+#view-mode-toggle button { line-height:1; }
+#view-mode-toggle button:not(:last-child) { border-right:1px solid #e5e7eb; }
 #method-rows tr.method-row .range-input { width:64px; padding:1px 3px; border:1px solid #cbd5e1; border-radius:3px; font-size:10px; text-align:right; background:#fff; }
 #method-rows tr.method-row .range-input:focus { outline:1px solid #60a5fa; }
     </style>
@@ -123,6 +133,10 @@ body.splitting-v { cursor:row-resize !important; }
             <input id="project-name-input" type="text" class="text-xs border border-gray-300 rounded px-2 py-1 bg-white min-w-0 flex-1 max-w-[300px]" placeholder="Project name" />
         </div>
         <div class="flex items-center gap-2 shrink-0">
+            <div id="view-mode-toggle" class="flex items-center text-[11px] border border-gray-300 rounded overflow-hidden" title="Compound mode focuses on a single MSI compound across all sections; Free shows every visible layer per section.">
+                <button data-mode="free" class="px-2 py-1 bg-white text-gray-700">Free</button>
+                <button data-mode="compound" class="px-2 py-1 bg-blue-600 text-white">Compound</button>
+            </div>
             <button id="btn-new-project" class="btn">New</button>
             <button id="btn-import-zip" class="btn">Import ZIP</button>
             <button id="btn-export-zip" class="btn">Export ZIP</button>
@@ -926,16 +940,51 @@ class SectionPanel {
         }));
         header.appendChild(acts);
 
-        // Range editor (raw scale) for the currently active MSI layer.
+        // Range editor (raw scale) for the currently active MSI layer. Each
+        // edge gets its own sync toggle so the user can lock just min while
+        // sweeping max independently across sections.
         const rangeBox = document.createElement('div');
         rangeBox.className = 'sec-range';
         rangeBox.innerHTML =
             '<span class="range-label">Range:</span>' +
             '<input type="number" class="range-min" step="any" placeholder="min" disabled>' +
+            '<button type="button" class="sync-toggle sync-vmin" data-sync="vmin" title="Sync Min across sections">🔗</button>' +
             '<span class="range-sep">—</span>' +
-            '<input type="number" class="range-max" step="any" placeholder="max" disabled>';
+            '<input type="number" class="range-max" step="any" placeholder="max" disabled>' +
+            '<button type="button" class="sync-toggle sync-vmax" data-sync="vmax" title="Sync Max across sections">🔗</button>';
         rangeBox.addEventListener('click', (e) => e.stopPropagation());
         header.appendChild(rangeBox);
+        this._wireSyncToggle(rangeBox.querySelector('.sync-vmin'), 'vmin');
+        this._wireSyncToggle(rangeBox.querySelector('.sync-vmax'), 'vmax');
+
+        // Opacity (0-100 %) for the active MSI layer. Numeric input matches
+        // the Range/Rot styling so all three live as a tight cluster.
+        const opcBox = document.createElement('div');
+        opcBox.className = 'sec-opc';
+        opcBox.innerHTML =
+            '<span class="opc-label">Op:</span>' +
+            '<input type="number" class="opc-input" step="1" min="0" max="100" disabled>' +
+            '<span class="opc-pct">%</span>' +
+            '<button type="button" class="sync-toggle sync-opacity" data-sync="opacity" title="Sync Opacity across sections">🔗</button>';
+        opcBox.addEventListener('click', (e) => e.stopPropagation());
+        header.appendChild(opcBox);
+        this._wireSyncToggle(opcBox.querySelector('.sync-opacity'), 'opacity');
+        const opcInp = opcBox.querySelector('.opc-input');
+        opcInp.addEventListener('change', () => {
+            const key = this.effectiveActiveMsiKey();
+            const settings = key ? this.imageSettings[key] : null;
+            if (!settings) return;
+            let v = parseFloat(opcInp.value);
+            if (!Number.isFinite(v)) v = 100;
+            v = Math.max(0, Math.min(100, Math.round(v)));
+            settings.opacity = v / 100;
+            opcInp.value = String(v);
+            this.renderComposite();
+            App.queueSave();
+            App.broadcastSync('opacity', v, this);
+        });
+        this._pendingOpcInput = opcInp;
+        this._pendingOpcBox = opcBox;
 
         // Rotation (degrees) + Reset transform — translate/scale are wired
         // through pointer drag and wheel events on the viewer-host below.
@@ -945,9 +994,11 @@ class SectionPanel {
             '<span class="rot-label">Rot:</span>' +
             '<input type="number" class="rot-input" step="1" min="-180" max="180" value="0">' +
             '<span class="rot-deg">°</span>' +
-            '<button type="button" class="rot-reset" title="Reset translate/rotate/zoom">↻</button>';
+            '<button type="button" class="rot-reset" title="Reset translate/rotate/zoom">↻</button>' +
+            '<button type="button" class="sync-toggle sync-rot" data-sync="rot" title="Sync Rotation across sections">🔗</button>';
         rotBox.addEventListener('click', (e) => e.stopPropagation());
         header.appendChild(rotBox);
+        this._wireSyncToggle(rotBox.querySelector('.sync-rot'), 'rot');
         const rotInp = rotBox.querySelector('.rot-input');
         const rotReset = rotBox.querySelector('.rot-reset');
         rotInp.addEventListener('change', () => {
@@ -959,6 +1010,7 @@ class SectionPanel {
             rotInp.value = String(v);
             this.applyViewerTransform();
             App.queueSave();
+            App.broadcastSync('rot', v, this);
         });
         rotReset.addEventListener('click', () => {
             const t = this._ensureViewerTransform();
@@ -975,7 +1027,7 @@ class SectionPanel {
         const rangeMinInp = rangeBox.querySelector('.range-min');
         const rangeMaxInp = rangeBox.querySelector('.range-max');
         const onRangeChange = (edge) => {
-            const key = this.activeMsiKey;
+            const key = this.effectiveActiveMsiKey();
             if (!key) return;
             const settings = this.imageSettings[key];
             if (!settings) return;
@@ -996,6 +1048,7 @@ class SectionPanel {
             if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
             this.refreshRangeEditor();
             if (App.activeSectionId === this.section.id) renderMethodTable();
+            App.broadcastSync(edge === 'min' ? 'vmin' : 'vmax', parseFloat(inp.value), this);
         };
         rangeMinInp.addEventListener('change', () => onRangeChange('min'));
         rangeMaxInp.addEventListener('change', () => onRangeChange('max'));
@@ -1009,9 +1062,11 @@ class SectionPanel {
         rot.appendChild(cdisp); rot.appendChild(croi);
         host.appendChild(rot);
         root.appendChild(host);
-        this.dom = { root, header, host, rot, cdisp, croi, acts, rangeBox, rotInput: this._pendingRotInput, rotBox: this._pendingRotBox };
+        this.dom = { root, header, host, rot, cdisp, croi, acts, rangeBox, rotInput: this._pendingRotInput, rotBox: this._pendingRotBox, opcInput: this._pendingOpcInput, opcBox: this._pendingOpcBox };
         this._pendingRotInput = null;
         this._pendingRotBox = null;
+        this._pendingOpcInput = null;
+        this._pendingOpcBox = null;
         this.displayCtx = cdisp.getContext('2d', { willReadFrequently: true });
         this.roiCtx = croi.getContext('2d');
 
@@ -1175,6 +1230,12 @@ class SectionPanel {
                 vmax = lums[Math.floor(lums.length * 0.98)];
                 if (!vmax) vmax = mx;
             }
+            // Guard against degenerate cases (fully transparent MSI, decode
+            // failure leaving mn=255/mx=0). Without this the Range input on
+            // the section header ends up showing only the min value because
+            // lumToRaw(NaN) propagates as '—' and the number input drops it.
+            if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn > mx) { mn = 0; mx = 255; }
+            if (!Number.isFinite(vmax) || vmax <= mn) vmax = mx;
             this.imageSettings[key] = { opacity: 1.0, vmin: mn, vmax, actualMin: mn, actualMax: mx };
         }
     }
@@ -1244,7 +1305,19 @@ class SectionPanel {
         ctx.clearRect(0, 0, this.dom.cdisp.width, this.dom.cdisp.height);
         const T = this.section.meta && this.section.meta.world_coords && this.section.meta.world_coords.T_he_to_msi;
 
+        // In Compound mode the focus compound is the only MSI layer drawn,
+        // regardless of per-section visibility flags. HE/IF stays under
+        // per-section control so users can still toggle the histology overlay.
+        const compoundFocus = (App.viewMode === 'compound') ? App.focusCompoundKey : null;
+        const layersToDraw = [];
         for (const key of this.visibleLayers) {
+            if (compoundFocus && /^MSI_/i.test(key) && key !== compoundFocus) continue;
+            layersToDraw.push(key);
+        }
+        if (compoundFocus && this.imageSources[compoundFocus] && !layersToDraw.includes(compoundFocus)) {
+            layersToDraw.push(compoundFocus);
+        }
+        for (const key of layersToDraw) {
             const img = this.imageSources[key];
             const settings = this.imageSettings[key];
             if (!img || !img.complete || img.naturalWidth === 0 || !settings) continue;
@@ -1644,12 +1717,23 @@ class SectionPanel {
         }
     }
 
+    // The Range/Opacity editors operate on a single MSI layer. In Compound
+    // mode the global focus compound wins so every section ends up editing
+    // the same layer; Free mode falls back to whatever the user last clicked.
+    effectiveActiveMsiKey() {
+        if (App.viewMode === 'compound' && App.focusCompoundKey) {
+            const k = App.focusCompoundKey;
+            if (this.imageSources[k]) return k;
+        }
+        return this.activeMsiKey;
+    }
+
     refreshRangeEditor() {
         const box = this.dom && this.dom.rangeBox;
         if (!box) return;
         const minInp = box.querySelector('.range-min');
         const maxInp = box.querySelector('.range-max');
-        const key = this.activeMsiKey;
+        const key = this.effectiveActiveMsiKey();
         const settings = key ? this.imageSettings[key] : null;
         if (!key || !settings) {
             minInp.value = '';
@@ -1660,14 +1744,39 @@ class SectionPanel {
             return;
         }
         const ent = (this.section.msiSeries || {})[key] || {};
-        const rawRange = ent.rawRange || null;
+        const rawRangeRaw = ent.rawRange;
+        // Normalize to a [min, max] pair of finite numbers, or null.
+        const rawRange = (Array.isArray(rawRangeRaw) && rawRangeRaw.length === 2 && Number.isFinite(rawRangeRaw[0]) && Number.isFinite(rawRangeRaw[1])) ? [Number(rawRangeRaw[0]), Number(rawRangeRaw[1])] : null;
         const meta = ent.compoundMeta;
         const baseLabel = (meta && meta.base) || formatDisplayName(key);
         minInp.disabled = false;
         maxInp.disabled = false;
-        minInp.value = formatRawValue(lumToRaw(settings.vmin, rawRange));
-        maxInp.value = formatRawValue(lumToRaw(settings.vmax, rawRange));
+        // Compute raw values for the current vmin/vmax. Fall back to the raw
+        // range endpoints (or the lum-scale settings.actualMin/Max) when the
+        // conversion yields a non-finite value, matching the Method table's
+        // direct rawRange[i] lookup so the two views stay consistent.
+        let rawMin = rawRange ? lumToRaw(settings.vmin, rawRange) : Number(settings.vmin);
+        let rawMax = rawRange ? lumToRaw(settings.vmax, rawRange) : Number(settings.vmax);
+        if (!Number.isFinite(rawMin)) rawMin = rawRange ? rawRange[0] : Number(settings.actualMin);
+        if (!Number.isFinite(rawMax)) rawMax = rawRange ? rawRange[1] : Number(settings.actualMax);
+        minInp.value = formatRawValue(rawMin);
+        maxInp.value = formatRawValue(rawMax);
         box.title = 'Display range for: ' + baseLabel;
+        this.refreshOpacityEditor();
+    }
+
+    refreshOpacityEditor() {
+        const inp = this.dom && this.dom.opcInput;
+        if (!inp) return;
+        const key = this.effectiveActiveMsiKey();
+        const settings = key ? this.imageSettings[key] : null;
+        if (!settings) {
+            inp.value = '';
+            inp.disabled = true;
+            return;
+        }
+        inp.disabled = false;
+        inp.value = String(Math.round((settings.opacity != null ? settings.opacity : 1) * 100));
     }
 
     removeLayer(key, skipConfirm) {
@@ -1776,6 +1885,65 @@ class SectionPanel {
             this.applyViewerTransform();
             App.queueSave();
         }, { passive: false });
+    }
+
+    // Wire a single sync toggle button. Clicking it flips App.syncFlags[name]
+    // so every section panel sees the same linked/unlinked state on next
+    // edit. Visual state is repainted across sections by App.setSyncFlag.
+    _wireSyncToggle(btn, name) {
+        if (!btn) return;
+        btn.classList.toggle('linked', !!App.syncFlags[name]);
+        btn.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            App.setSyncFlag(name, !App.syncFlags[name]);
+        });
+    }
+
+    // Apply a value pushed in by App.broadcastSync from another section.
+    applySyncedField(field, value) {
+        if (field === 'rot') {
+            const t = this._ensureViewerTransform();
+            let v = Number(value);
+            if (!Number.isFinite(v)) v = 0;
+            v = Math.max(-180, Math.min(180, v));
+            t.rot = v;
+            this.applyViewerTransform();
+            App.queueSave();
+            return;
+        }
+        const key = this.effectiveActiveMsiKey();
+        const settings = key ? this.imageSettings[key] : null;
+        if (!settings) return;
+        if (field === 'opacity') {
+            let v = Number(value);
+            if (!Number.isFinite(v)) v = 100;
+            v = Math.max(0, Math.min(100, Math.round(v)));
+            settings.opacity = v / 100;
+            const inp = this.dom && this.dom.opcInput;
+            if (inp && document.activeElement !== inp) inp.value = String(v);
+            this.renderComposite();
+            App.queueSave();
+            return;
+        }
+        if (field === 'vmin' || field === 'vmax') {
+            const ent = (this.section.msiSeries || {})[key] || {};
+            const rawRange = ent.rawRange || null;
+            let lum = rawToLum(Number(value), rawRange);
+            if (!Number.isFinite(lum)) return;
+            lum = Math.max(0, Math.min(255, Math.round(lum)));
+            if (field === 'vmin') {
+                if (lum >= settings.vmax) lum = settings.vmax - 1;
+                settings.vmin = lum;
+            } else {
+                if (lum <= settings.vmin) lum = settings.vmin + 1;
+                settings.vmax = lum;
+            }
+            this.renderComposite();
+            if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
+            this.refreshRangeEditor();
+            App.queueSave();
+            return;
+        }
     }
 
     // Wire the thumb-row resize splitter. Drag updates a shared height value
@@ -2549,10 +2717,11 @@ function renderMethodTable() {
         const rawMean = (ent.rawMean != null) ? formatRawValue(ent.rawMean) : '—';
         const rawRange = ent.rawRange || null;
         const rawMax = (rawRange && Number.isFinite(rawRange[1])) ? formatRawValue(rawRange[1]) : '—';
-        const isActive = (panel.activeMsiKey === layerKey) || panel.visibleLayers.has(layerKey);
+        const isFocus = (App.viewMode === 'compound' && App.focusCompoundKey === layerKey);
+        const isActive = isFocus || (panel.activeMsiKey === layerKey) || panel.visibleLayers.has(layerKey);
 
         const tr = document.createElement('tr');
-        tr.className = 'method-row' + (isActive ? ' active' : '');
+        tr.className = 'method-row' + (isActive ? ' active' : '') + (isFocus ? ' focus' : '');
         tr.dataset.layerKey = layerKey;
 
         const markerColor = ent.markerColor || '';
@@ -2596,6 +2765,20 @@ function renderMethodTable() {
 
         tr.addEventListener('click', (ev) => {
             if (ev.target && (ev.target.classList.contains('marker-swatch') || ev.target.classList.contains('marker-input'))) return;
+            // In Compound mode, the Method table is the compound switcher: a
+            // click promotes that row to the focus compound and every section
+            // re-renders with that single MSI layer.
+            if (App.viewMode === 'compound') {
+                App.setFocusCompoundKey(layerKey);
+                // Make sure the layer is visible in every panel (otherwise
+                // focus would still be hidden by the per-section visibility flag).
+                for (const p of App.panels.values()) {
+                    if (p.imageSources[layerKey] && !p.visibleLayers.has(layerKey)) {
+                        p.toggleLayer(layerKey, true);
+                    }
+                }
+                return;
+            }
             const p = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
             if (p) p.handleLayerClick(layerKey, ev);
         });
@@ -3373,9 +3556,99 @@ const App = {
         try { localStorage.setItem('desi:layout:sectionThumbH', String(this.thumbHeight)); } catch (e) {}
     },
 
+    // Per-control sync flags. When a control is "linked", any change made on
+    // one section is broadcast to every other section via broadcastSync. Stored
+    // per-control because Range min vs Range max vs Rot vs Opacity all have
+    // independent comparison workflows.
+    syncFlags: { vmin: false, vmax: false, rot: false, opacity: false },
+
+    // 'compound' = focus on one MSI layer across every section side-by-side
+    // (default; tuned for WT/HET comparisons). 'free' = the previous behaviour
+    // where each section shows whichever layers it has visibility flags for.
+    viewMode: 'compound',
+    focusCompoundKey: null,
+
+    setViewMode(mode) {
+        const m = (mode === 'free') ? 'free' : 'compound';
+        if (this.viewMode === m) return;
+        this.viewMode = m;
+        try { localStorage.setItem('desi:viewMode', m); } catch (e) {}
+        this.refreshViewModeUI();
+        for (const p of this.panels.values()) {
+            try { p.renderComposite(); p.refreshActiveOutline && p.refreshActiveOutline(); } catch (e) {}
+        }
+    },
+
+    setFocusCompoundKey(key) {
+        this.focusCompoundKey = key || null;
+        try { localStorage.setItem('desi:focusCompoundKey', this.focusCompoundKey || ''); } catch (e) {}
+        for (const p of this.panels.values()) {
+            try { p.renderComposite(); } catch (e) {}
+        }
+        renderMethodTable();
+    },
+
+    refreshViewModeUI() {
+        const wrap = document.getElementById('view-mode-toggle');
+        if (!wrap) return;
+        wrap.querySelectorAll('button').forEach(btn => {
+            const on = btn.dataset.mode === this.viewMode;
+            btn.classList.toggle('bg-blue-600', on);
+            btn.classList.toggle('text-white', on);
+            btn.classList.toggle('bg-white', !on);
+            btn.classList.toggle('text-gray-700', !on);
+        });
+    },
+
+    loadSyncFlags() {
+        try {
+            const raw = localStorage.getItem('desi:syncFlags');
+            if (!raw) return;
+            const parsed = JSON.parse(raw);
+            for (const k of Object.keys(this.syncFlags)) {
+                if (typeof parsed[k] === 'boolean') this.syncFlags[k] = parsed[k];
+            }
+        } catch (e) {}
+    },
+    saveSyncFlags() {
+        try { localStorage.setItem('desi:syncFlags', JSON.stringify(this.syncFlags)); } catch (e) {}
+    },
+    setSyncFlag(name, on) {
+        if (!(name in this.syncFlags)) return;
+        this.syncFlags[name] = !!on;
+        this.saveSyncFlags();
+        document.querySelectorAll('.sync-toggle[data-sync="' + name + '"]').forEach(btn => {
+            btn.classList.toggle('linked', !!on);
+        });
+    },
+
+    // Push a value originating from `originPanel` to every other SectionPanel
+    // when the matching sync flag is on.
+    broadcastSync(field, value, originPanel) {
+        if (!this.syncFlags[field]) return;
+        for (const panel of this.panels.values()) {
+            if (panel === originPanel) continue;
+            try { panel.applySyncedField(field, value); } catch (e) { console.warn('sync apply failed', e); }
+        }
+    },
+
     async init() {
         await ProjectStorage.open();
         setupSplitters();
+        this.loadSyncFlags();
+        try {
+            const m = localStorage.getItem('desi:viewMode');
+            if (m === 'free' || m === 'compound') this.viewMode = m;
+            const f = localStorage.getItem('desi:focusCompoundKey');
+            if (f) this.focusCompoundKey = f;
+        } catch (e) {}
+        const vmt = document.getElementById('view-mode-toggle');
+        if (vmt) {
+            vmt.querySelectorAll('button').forEach(btn => {
+                btn.addEventListener('click', () => this.setViewMode(btn.dataset.mode));
+            });
+        }
+        this.refreshViewModeUI();
         const persistedTh = parseInt(localStorage.getItem('desi:layout:sectionThumbH') || '', 10);
         if (Number.isFinite(persistedTh) && persistedTh > 0) this.thumbHeight = persistedTh;
         document.documentElement.style.setProperty('--thumb-h', this.thumbHeight + 'px');
@@ -3425,6 +3698,23 @@ const App = {
         document.getElementById('project-name-input').value = project.displayName || '';
         document.getElementById('sections-empty').classList.toggle('hidden', this.project.sections.length > 0);
         await this.rebuildSectionPanels();
+        // In Compound mode pick a sane default focus compound if none persists
+        // or the persisted one no longer exists in this project.
+        if (this.viewMode === 'compound') {
+            const allMsi = new Set();
+            for (const s of (this.project.sections || [])) {
+                for (const k of Object.keys(s.msiSeries || {})) if (/^MSI_/i.test(k)) allMsi.add(k);
+            }
+            if (!this.focusCompoundKey || !allMsi.has(this.focusCompoundKey)) {
+                this.focusCompoundKey = allMsi.values().next().value || null;
+                try { localStorage.setItem('desi:focusCompoundKey', this.focusCompoundKey || ''); } catch (e) {}
+            }
+            for (const p of this.panels.values()) {
+                if (this.focusCompoundKey && p.imageSources[this.focusCompoundKey] && !p.visibleLayers.has(this.focusCompoundKey)) {
+                    p.toggleLayer(this.focusCompoundKey, true);
+                }
+            }
+        }
         populateRoiList();
         setupGraphSelector();
         this.refreshAnalysisScope();
