@@ -1479,6 +1479,11 @@ class SectionPanel {
     // doesn't preserve the click-to-pixel mapping under any non-trivial
     // rotation/scale. Instead, take the pre-transform host element as the
     // reference frame and apply a closed-form inverse of the transform chain.
+    //
+    // Note: the canvas does NOT fill .viewer-rot (no inset:0). setupCanvasSize
+    // letterboxes the canvas inside the rot/host with explicit
+    // top/left/width/height styles, so we must subtract the canvas offset and
+    // scale by the canvas's own CSS dimensions — not the host's.
     clientToCanvas(clientX, clientY) {
         const c = this.dom.croi;
         const host = this.dom.host;
@@ -1486,16 +1491,28 @@ class SectionPanel {
         const H = host.getBoundingClientRect();
         const ox = H.width / 2;
         const oy = H.height / 2;
+        // Undo translate (in screen px) and shift origin to host center.
         let hx = clientX - (H.left + ox) - (t.tx || 0);
         let hy = clientY - (H.top  + oy) - (t.ty || 0);
+        // Undo rotation by -theta.
         const theta = ((t.rot || 0) - 90) * Math.PI / 180;
         const cos = Math.cos(theta), sin = Math.sin(theta);
         let rx =  hx * cos + hy * sin;
         let ry = -hx * sin + hy * cos;
+        // Undo scale.
         const s = t.scale || 1;
         rx /= s; ry /= s;
-        const canvasX = (rx + ox) * (c.width  / Math.max(1, H.width));
-        const canvasY = (ry + oy) * (c.height / Math.max(1, H.height));
+        // (rx+ox, ry+oy) is the click position in rot's untransformed frame,
+        // measured from rot's top-left in CSS px. The canvas occupies a
+        // centered sub-rectangle of cssW×cssH inside that frame.
+        const cssW = c.offsetWidth  || parseFloat(c.style.width)  || H.width;
+        const cssH = c.offsetHeight || parseFloat(c.style.height) || H.height;
+        const cLeft = (H.width  - cssW) / 2;
+        const cTop  = (H.height - cssH) / 2;
+        const localX = (rx + ox) - cLeft;
+        const localY = (ry + oy) - cTop;
+        const canvasX = localX * (c.width  / Math.max(1, cssW));
+        const canvasY = localY * (c.height / Math.max(1, cssH));
         return [canvasX, canvasY];
     }
 
@@ -1509,8 +1526,8 @@ class SectionPanel {
             const [cx, cy] = this.clientToCanvas(e.clientX, e.clientY);
             // canvas-internal px per CSS px, used to scale the close-loop
             // hit-test threshold (~8 CSS pixels) into canvas pixels.
-            const hostW = Math.max(1, this.dom.host.getBoundingClientRect().width);
-            const sxCss = c.width / hostW;
+            const cssW = c.offsetWidth || parseFloat(c.style.width) || c.width;
+            const sxCss = c.width / Math.max(1, cssW);
             if (App.drawing.vertices.length >= 3) {
                 const ref = this.getMsiRefSize();
                 const sx = c.height / ref.w;
