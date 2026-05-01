@@ -13,12 +13,13 @@ Master-side operations (creating projects, registering layers, publishing, etc.)
 2. [Open the URL & enter the password](#2-open-the-url--enter-the-password)
 3. [Screen layout](#3-screen-layout)
 4. [Showing and adding ROIs](#4-showing-and-adding-rois)
-5. [Method (MRM) and switching compounds](#5-method-mrm-and-switching-compounds)
-6. [Range / Opacity / Rotation tweaks](#6-range--opacity--rotation-tweaks)
-7. [Editing the Memo](#7-editing-the-memo)
-8. [Export ZIP for local download](#8-export-zip-for-local-download)
-9. [What gets saved vs discarded](#9-what-gets-saved-vs-discarded)
-10. [Keyboard shortcuts](#10-keyboard-shortcuts)
+5. [View modes: Free vs Compound](#5-view-modes-free-vs-compound)
+6. [Method (MRM) and switching compounds](#6-method-mrm-and-switching-compounds)
+7. [Range / Opacity / Rotation tweaks](#7-range--opacity--rotation-tweaks)
+8. [Editing the Memo](#8-editing-the-memo)
+9. [Export ZIP for local download](#9-export-zip-for-local-download)
+10. [What gets saved vs discarded](#10-what-gets-saved-vs-discarded)
+11. [Keyboard shortcuts](#11-keyboard-shortcuts)
 
 ---
 
@@ -43,6 +44,8 @@ Master-side operations (creating projects, registering layers, publishing, etc.)
 4. A 🔒 **Share view** badge appears in the header and the editing-related buttons are hidden automatically
 
 The session expires after **12 hours**. Closing the tab is fine — re-opening the URL with the same password logs you back in.
+
+> The same URL also accepts an **admin password** set by the publisher. Opening with the admin password unlocks the additional Method (MRM) columns (Precursor / Fragment / CE / CV); a regular viewer password keeps those four columns hidden.
 
 ---
 
@@ -150,28 +153,91 @@ In share mode, **acquiring the write lock is required** to add or modify ROIs (o
 
 ---
 
-## 5. Method (MRM) and switching compounds
+## 5. View modes: Free vs Compound
+
+The **Free / Compound** toggle in the top-right of the header switches between two display modes. The same ROIs and sections look very different in each, so pick whichever fits your task.
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0;">
+  <div style="border:1px solid #cbd5e1;border-radius:6px;padding:8px;background:#f8fafc;">
+    <div style="font-weight:700;color:#0f172a;margin-bottom:4px;">🔵 Free</div>
+    <div style="color:#475569;font-size:12px;">Each section has its <b>own combination of layers</b> turned on/off. Use it when you want HE and MSI overlaid, or when different sections should show different compounds.</div>
+    <div style="margin-top:8px;display:flex;gap:4px;justify-content:space-around;">
+      <div style="border:1px solid #94a3b8;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 1</div>
+        <div style="color:#64748b;">[A, B]</div>
+      </div>
+      <div style="border:1px solid #94a3b8;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 2</div>
+        <div style="color:#64748b;">[C, D]</div>
+      </div>
+      <div style="border:1px solid #94a3b8;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 3</div>
+        <div style="color:#64748b;">[B]</div>
+      </div>
+    </div>
+  </div>
+  <div style="border:1px solid #2563eb;border-radius:6px;padding:8px;background:#eff6ff;">
+    <div style="font-weight:700;color:#1d4ed8;margin-bottom:4px;">🟦 Compound</div>
+    <div style="color:#475569;font-size:12px;"><b>One compound is shown across every section</b>. Use it when you want to compare the same molecule's distribution from slice to slice. Click a row in the Method table to change the focus compound.</div>
+    <div style="margin-top:8px;display:flex;gap:4px;justify-content:space-around;">
+      <div style="border:1px solid #2563eb;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 1</div>
+        <div style="color:#1d4ed8;">[X]</div>
+      </div>
+      <div style="border:1px solid #2563eb;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 2</div>
+        <div style="color:#1d4ed8;">[X]</div>
+      </div>
+      <div style="border:1px solid #2563eb;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 3</div>
+        <div style="color:#1d4ed8;">[X]</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+### When to pick which
+
+| Goal | Mode |
+| --- | --- |
+| Overlay HE on top of MSI to confirm position | **Free** (turn HE and MSI on together) |
+| Show different compounds per section | **Free** |
+| Compare compound X across sections 1–10 | **Compound** + select X in the Method table |
+| Hunt for an interesting compound in the ANALYSIS bar chart | **Compound** + click rows in the Method table to switch focus |
+
+### Switching modes
+
+- Click **Free / Compound** in the header
+- In Compound mode, **clicking a row in the Method table** sets the new focus compound and re-renders every section
+- In Free mode, the same row click toggles a single layer on/off
+
+---
+
+## 6. Method (MRM) and switching compounds
 
 The **Method (MRM)** table at the bottom-left lists every MSI layer in the active section.
 
-| Column | Meaning |
-| --- | --- |
-| Compound | Compound name |
-| Precursor | Precursor m/z |
-| Product | Product m/z |
-| CE | Collision Energy |
-| CV | Collision Voltage / Compensation Voltage |
-| Range | Current min / max of this layer's intensity range |
+| Column | Meaning | Visible when |
+| --- | --- | --- |
+| Compound | Compound name | Always |
+| Precursor | Precursor m/z | **Admin only** |
+| Fragment | Fragment (product) m/z | **Admin only** |
+| CE | Collision Energy | **Admin only** |
+| CV | Collision Voltage / Compensation Voltage | **Admin only** |
+| Mean | Layer's mean intensity | Always |
+| Max | Layer's max intensity | Always |
+
+> Viewers opening with the regular viewer password do **not** see the Precursor / Fragment / CE / CV columns. Those are MS-instrument parameters and are revealed only when the URL is opened with the admin password.
 
 Clicking a row:
 - **Compound mode** focuses that compound across every section (handy for cross-section comparison)
 - **Free mode** simply toggles that single layer on/off
 
-The **Free / Compound** switch lives in the top-right of the header.
+> Whole-file actions like `[all on]` / `[delete file]` live on the **thumbnail dropdown summary** (`▶ <filename>`). Recipients don't see `delete file`.
 
 ---
 
-## 6. Range / Opacity / Rotation tweaks
+## 7. Range / Opacity / Rotation tweaks
 
 Three groups in each section's toolbar:
 
@@ -189,7 +255,7 @@ The **🔗** icon on each field syncs that value across every section. The **`�
 
 ---
 
-## 7. Editing the Memo
+## 8. Editing the Memo
 
 The **Memo** form on the bottom-right lets you edit Sample / Machine / Google Keep / +α / Matrix / Derivatization.
 
@@ -197,7 +263,7 @@ The **Memo** form on the bottom-right lets you edit Sample / Machine / Google Ke
 
 ---
 
-## 8. Export ZIP for local download
+## 9. Export ZIP for local download
 
 The header's **Export ZIP** packages the entire viewable project into a single zip on your machine:
 
@@ -219,7 +285,7 @@ Each xlsx has a **0/1 flag column** appended for every ROI drawn on that section
 
 ---
 
-## 9. What gets saved vs discarded
+## 10. What gets saved vs discarded
 
 | Action | Where it persists | Visible to others | Survives reload |
 | --- | --- | --- | --- |
@@ -240,7 +306,7 @@ Bottom line:
 
 ---
 
-## 10. Keyboard shortcuts
+## 11. Keyboard shortcuts
 
 | Key | Action |
 | --- | --- |

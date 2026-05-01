@@ -13,12 +13,13 @@
 2. [URL を開く・パスワード入力](#2-url-を開くパスワード入力)
 3. [画面構成](#3-画面構成)
 4. [ROI の表示と追加](#4-roi-の表示と追加)
-5. [Method (MRM) と化合物の切替](#5-method-mrm-と化合物の切替)
-6. [Range / Opacity / Rotation の調整](#6-range--opacity--rotation-の調整)
-7. [Memo の編集](#7-memo-の編集)
-8. [Export ZIP で手元に保存](#8-export-zip-で手元に保存)
-9. [保存されること・破棄されること](#9-保存されること破棄されること)
-10. [キーボードショートカット](#10-キーボードショートカット)
+5. [View モード: Free と Compound の使い分け](#5-view-モード-free-と-compound-の使い分け)
+6. [Method (MRM) と化合物の切替](#6-method-mrm-と化合物の切替)
+7. [Range / Opacity / Rotation の調整](#7-range--opacity--rotation-の調整)
+8. [Memo の編集](#8-memo-の編集)
+9. [Export ZIP で手元に保存](#9-export-zip-で手元に保存)
+10. [保存されること・破棄されること](#10-保存されることと破棄されること)
+11. [キーボードショートカット](#11-キーボードショートカット)
 
 ---
 
@@ -41,6 +42,8 @@
 2. 「共有プロジェクト」モーダルが開くので、別途共有された **viewer password** を入力
 3. **Unlock** を押すとプロジェクトが読み込まれる
 4. ヘッダ右に 🔒 **Share view** バッジが付き、編集系ボタンは自動的に隠れる
+
+> 同じ URL でも、提供者が設定した **admin password** で開くと管理者ビューになります。管理者ビューでは Method (MRM) テーブルの Precursor / Fragment / CE / CV まで表示されます。通常の viewer password ではこれら 4 列は隠れます。
 
 セッションは **12 時間** で失効します。タブを閉じても再度 URL を開けば同じパスワードでログインし直せます。
 
@@ -150,28 +153,91 @@
 
 ---
 
-## 5. Method (MRM) と化合物の切替
+## 5. View モード: Free と Compound の使い分け
+
+ヘッダ右上の **Free / Compound** トグルで表示モードを切替えます。同じ ROI / 同じ切片でも見え方が大きく変わるため、用途に応じて選んでください。
+
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:10px 0;">
+  <div style="border:1px solid #cbd5e1;border-radius:6px;padding:8px;background:#f8fafc;">
+    <div style="font-weight:700;color:#0f172a;margin-bottom:4px;">🔵 Free</div>
+    <div style="color:#475569;font-size:12px;">切片ごとに <b>任意のレイヤー組合せ</b> を ON/OFF できる。HE と MSI を同時に重ねたい / 切片 A は化合物 X、切片 B は化合物 Y を見たい、など個別表示向け。</div>
+    <div style="margin-top:8px;display:flex;gap:4px;justify-content:space-around;">
+      <div style="border:1px solid #94a3b8;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 1</div>
+        <div style="color:#64748b;">[A, B]</div>
+      </div>
+      <div style="border:1px solid #94a3b8;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 2</div>
+        <div style="color:#64748b;">[C, D]</div>
+      </div>
+      <div style="border:1px solid #94a3b8;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 3</div>
+        <div style="color:#64748b;">[B]</div>
+      </div>
+    </div>
+  </div>
+  <div style="border:1px solid #2563eb;border-radius:6px;padding:8px;background:#eff6ff;">
+    <div style="font-weight:700;color:#1d4ed8;margin-bottom:4px;">🟦 Compound</div>
+    <div style="color:#475569;font-size:12px;"><b>1 つの化合物</b> を全切片で揃えて表示する。切片間で同じ分子の分布を見比べたい時に使う。フォーカス化合物は Method テーブルの行クリックで切替。</div>
+    <div style="margin-top:8px;display:flex;gap:4px;justify-content:space-around;">
+      <div style="border:1px solid #2563eb;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 1</div>
+        <div style="color:#1d4ed8;">[X]</div>
+      </div>
+      <div style="border:1px solid #2563eb;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 2</div>
+        <div style="color:#1d4ed8;">[X]</div>
+      </div>
+      <div style="border:1px solid #2563eb;padding:4px 6px;border-radius:3px;font-size:10px;background:#fff;">
+        <div style="font-weight:600;">Section 3</div>
+        <div style="color:#1d4ed8;">[X]</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+### 用途別の選び方
+
+| やりたいこと | 適したモード |
+| --- | --- |
+| HE と MSI を重ねて位置確認 | **Free** (HE と MSI を同時 ON) |
+| 切片ごとに別の化合物を見比べる | **Free** |
+| 化合物 X が切片 1〜10 でどう変化するか比較 | **Compound** + Method テーブルで X を選択 |
+| ANALYSIS バーグラフで候補化合物を探索 | **Compound** + Method 行クリックでフォーカス切替 |
+
+### 切替方法
+
+- ヘッダ右上の **Free / Compound** トグルでモード切替
+- Compound モード時は **Method テーブルの行をクリック** すると、その化合物が新しいフォーカスになり全切片に即時反映される
+- Free モード時は Method テーブルの行クリックで個別レイヤーの ON/OFF
+
+---
+
+## 6. Method (MRM) と化合物の切替
 
 中央下の **Method (MRM)** テーブルにアクティブ切片の MSI レイヤー一覧が出ます。
 
-| 列 | 意味 |
-| --- | --- |
-| Compound | 化合物名 |
-| Precursor | プリカーサ m/z |
-| Product | プロダクト m/z |
-| CE | Collision Energy |
-| CV | Collision Voltage / Compensation Voltage |
-| Range | レイヤーの強度値レンジ (現在の Min / Max) |
+| 列 | 意味 | 表示条件 |
+| --- | --- | --- |
+| Compound | 化合物名 | 常に表示 |
+| Precursor | プリカーサ m/z | **管理者のみ** |
+| Fragment | フラグメント (プロダクト) m/z | **管理者のみ** |
+| CE | Collision Energy | **管理者のみ** |
+| CV | Collision Voltage / Compensation Voltage | **管理者のみ** |
+| Mean | レイヤーの強度平均 | 常に表示 |
+| Max | レイヤーの強度最大値 | 常に表示 |
+
+> 通常の viewer password で開いた閲覧者には Precursor / Fragment / CE / CV の 4 列は **表示されません**。これらは MS の機械パラメタなので、管理者ビュー (admin password で開いた場合) でのみ参照できます。
 
 行をクリックすると:
 - **Compound モード** … 全切片で同じ化合物がフォーカス表示される (切片間比較に便利)
 - **Free モード** … その行のレイヤーの ON/OFF を切替
 
-ヘッダ右上の **Free / Compound** トグルでモードを切替できます。
+> ファイル単位での一括 ON/OFF や削除は、**サムネイル領域のドロップダウン (`▶ <ファイル名>`)** の右側にある `[all on]` / `[delete file]` ボタンから行えます。閲覧者には `delete file` は表示されません。
 
 ---
 
-## 6. Range / Opacity / Rotation の調整
+## 7. Range / Opacity / Rotation の調整
 
 セクションツールバー (各切片パネル上部) の 3 つのグループ:
 
@@ -189,7 +255,7 @@
 
 ---
 
-## 7. Memo の編集
+## 8. Memo の編集
 
 右下の **Memo** フォームで Sample / Machine / Google Keep / +α / Matrix / Derivatization が編集可能です。
 
@@ -197,7 +263,7 @@
 
 ---
 
-## 8. Export ZIP で手元に保存
+## 9. Export ZIP で手元に保存
 
 ヘッダの **Export ZIP** で、現在閲覧中のプロジェクト全体を ZIP にまとめてダウンロードできます。
 
@@ -219,7 +285,7 @@ xlsx には、その切片で描画されている全 ROI が **0/1 のフラグ
 
 ---
 
-## 9. 保存されること・破棄されること
+## 10. 保存されること・破棄されること
 
 | 操作 | 保存先 | 他の閲覧者に見える | 再ロード後に残る |
 | --- | --- | --- | --- |
@@ -240,7 +306,7 @@ xlsx には、その切片で描画されている全 ROI が **0/1 のフラグ
 
 ---
 
-## 10. キーボードショートカット
+## 11. キーボードショートカット
 
 | キー | 機能 |
 | --- | --- |
