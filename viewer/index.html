@@ -38,7 +38,7 @@ body.share-mode #btn-add-section,
 body.share-mode #btn-delete-project,
 body.share-mode #btn-publish-share,
 body.share-mode #btn-share-info,
-body.share-mode .project-picker-wrap,
+body.share-mode #project-picker,
 body.share-mode #project-name-input,
 body.share-mode #tb-add-heif,
 body.share-mode #tb-add-msi,
@@ -205,6 +205,20 @@ body.splitting-v { cursor:row-resize !important; }
 #view-mode-toggle button:not(:last-child) { border-right:1px solid #e5e7eb; }
 #method-rows tr.method-row .range-input { width:64px; padding:1px 3px; border:1px solid #cbd5e1; border-radius:3px; font-size:10px; text-align:right; background:#fff; }
 #method-rows tr.method-row .range-input:focus { outline:1px solid #60a5fa; }
+/* In share mode, hide MSI machine-parameter columns (Precursor / Fragment /
+   CE / CV) from non-admin viewers. Master and admin (logged in via the
+   admin password) keep the full table. */
+body.share-mode:not(.share-admin) #method-table thead th:nth-child(3),
+body.share-mode:not(.share-admin) #method-table thead th:nth-child(4),
+body.share-mode:not(.share-admin) #method-table thead th:nth-child(5),
+body.share-mode:not(.share-admin) #method-table thead th:nth-child(6),
+body.share-mode:not(.share-admin) #method-rows tr > td:nth-child(3),
+body.share-mode:not(.share-admin) #method-rows tr > td:nth-child(4),
+body.share-mode:not(.share-admin) #method-rows tr > td:nth-child(5),
+body.share-mode:not(.share-admin) #method-rows tr > td:nth-child(6) { display:none !important; }
+/* In share mode, hide the per-file "delete" action regardless of admin
+   role — share recipients shouldn't ever delete file groups. */
+body.share-mode .thumb-file-group .file-actions [data-action="delete-file"] { display:none !important; }
     </style>
 </head>
 <body class="text-gray-800">
@@ -268,7 +282,7 @@ body.splitting-v { cursor:row-resize !important; }
             <details id="method-panel" class="bg-white rounded shadow-sm border border-gray-200 shrink-0 flex flex-col overflow-hidden" style="height:240px; min-height:80px;" open>
                 <summary class="text-[11px] font-semibold text-gray-600 px-2 py-1 cursor-pointer select-none bg-gray-50 rounded-t shrink-0">Method (MRM)</summary>
                 <div id="method-body" class="overflow-auto flex-1 min-h-0">
-                    <table class="w-full text-[11px] border-collapse">
+                    <table id="method-table" class="w-full text-[11px] border-collapse">
                         <thead class="bg-gray-50" style="position:sticky;top:0;z-index:1;">
                             <tr>
                                 <th class="px-1 py-1 border-b border-gray-200 font-medium text-gray-500" title="Click to set marker colour"></th>
@@ -1654,6 +1668,13 @@ class SectionPanel {
         };
 
         for (const [fid, group] of buckets) {
+            const isFileGroup = (fid !== '__images__' && fid !== '__legacy__');
+            // Real MSI file groups have no chip body to show in the layer-bar
+            // (their layers are already represented by the thumbnail dropdown
+            // below). Rendering them here just leaves an empty header row, so
+            // skip them. The all-on / delete-file controls for these groups
+            // live on the thumb-file-group summary instead.
+            if (isFileGroup) continue;
             const det = document.createElement('details');
             det.className = 'layer-file-group';
             det.open = true;
@@ -1679,19 +1700,6 @@ class SectionPanel {
                 for (const k of group.keys) this.toggleLayer(k, turnOn);
             });
             acts.appendChild(tBtn);
-            if (fid !== '__images__' && fid !== '__legacy__') {
-                const dBtn = document.createElement('button');
-                dBtn.textContent = 'delete file';
-                dBtn.title = 'Remove all layers from this file';
-                dBtn.addEventListener('click', (ev) => {
-                    ev.preventDefault(); ev.stopPropagation();
-                    if (!confirm('ファイル "' + group.label + '" の全 ' + group.keys.length + ' レイヤーを削除しますか?')) return;
-                    for (const k of group.keys.slice()) this.removeLayer(k, true);
-                    if (this.section.msiFiles) delete this.section.msiFiles[fid];
-                    App.queueSave();
-                });
-                acts.appendChild(dBtn);
-            }
             if (fid === '__legacy__') {
                 // Old-format layers (no compoundMeta when first loaded) — give the
                 // user a one-click escape hatch to wipe them all.
@@ -1714,16 +1722,10 @@ class SectionPanel {
             }
             sum.appendChild(acts);
             det.appendChild(sum);
-            // For MSI groups bucketed under a real sourceFileId, skip the chip
-            // row entirely — those layers are identified through the thumbnail
-            // panel below, and a duplicate chip strip just adds noise.
-            const isFileGroup = (fid !== '__images__' && fid !== '__legacy__');
-            if (!isFileGroup) {
-                const row = document.createElement('div');
-                row.className = 'layer-chip-row';
-                for (const k of group.keys) row.appendChild(mkChip(k));
-                det.appendChild(row);
-            }
+            const row = document.createElement('div');
+            row.className = 'layer-chip-row';
+            for (const k of group.keys) row.appendChild(mkChip(k));
+            det.appendChild(row);
             bar.appendChild(det);
         }
     }
@@ -2306,7 +2308,7 @@ class SectionPanel {
             return cell;
         };
 
-        for (const [, group] of buckets) {
+        for (const [fid, group] of buckets) {
             const det = document.createElement('details');
             det.className = 'thumb-file-group';
             det.open = true;
@@ -2320,6 +2322,43 @@ class SectionPanel {
             counter.style.cssText = 'color:#64748b;font-size:10px;';
             counter.textContent = '(' + group.keys.length + ')';
             sum.appendChild(counter);
+            // For real MSI file groups (those that no longer appear in the
+            // layer-bar), surface the all-on / delete-file controls right
+            // here on the thumbnail dropdown's summary so users still have a
+            // single-click way to toggle or remove the whole file.
+            const isRealMsiFile = (fid !== '__images__' && fid !== '__legacy__' && fid !== '__other__');
+            if (isRealMsiFile) {
+                const acts = document.createElement('span');
+                acts.className = 'file-actions';
+                acts.style.cssText = 'margin-left:auto; display:flex; gap:4px;';
+                const allOn = group.keys.every(k => this.visibleLayers.has(k));
+                const tBtn = document.createElement('button');
+                tBtn.type = 'button';
+                tBtn.textContent = allOn ? 'all off' : 'all on';
+                tBtn.title = 'Toggle visibility for all layers in this file';
+                tBtn.style.cssText = 'font-size:10px;padding:1px 5px;border:1px solid #d1d5db;background:#fff;border-radius:3px;cursor:pointer;color:#475569;';
+                tBtn.addEventListener('click', (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    const turnOn = !allOn;
+                    for (const k of group.keys) this.toggleLayer(k, turnOn);
+                });
+                acts.appendChild(tBtn);
+                const dBtn = document.createElement('button');
+                dBtn.type = 'button';
+                dBtn.textContent = 'delete file';
+                dBtn.title = 'Remove all layers from this file';
+                dBtn.dataset.action = 'delete-file';
+                dBtn.style.cssText = 'font-size:10px;padding:1px 5px;border:1px solid #d1d5db;background:#fff;border-radius:3px;cursor:pointer;color:#475569;';
+                dBtn.addEventListener('click', (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    if (!confirm('ファイル "' + group.label + '" の全 ' + group.keys.length + ' レイヤーを削除しますか?')) return;
+                    for (const k of group.keys.slice()) this.removeLayer(k, true);
+                    if (this.section.msiFiles) delete this.section.msiFiles[fid];
+                    App.queueSave();
+                });
+                acts.appendChild(dBtn);
+                sum.appendChild(acts);
+            }
             det.appendChild(sum);
             const grid = document.createElement('div');
             grid.className = 'thumb-grid';
@@ -3715,11 +3754,12 @@ async function openPublishMetaModal(project) {
           <label>Viewer password (受け手が入力するもの)
             <input type="password" name="viewer_pw" required minlength="4">
           </label>
-          <label>Admin password (任意)
-            <input type="password" name="admin_pw" minlength="4">
+          <label>Admin password (管理者ビュー用 / 既定: MSIadomine)
+            <input type="password" name="admin_pw" minlength="4" value="MSIadomine">
           </label>
           <p style="font-size:11px;color:#475569;">
-            ※ 同じ slug で再 publish するとサーバ側のプロジェクトは丸ごと上書きされます。
+            ※ 同じ slug で再 publish するとサーバ側のプロジェクトは丸ごと上書きされます。<br>
+            ※ Admin password で開いた閲覧者は Method (MRM) の Precursor / Fragment / CE / CV まで見えます。Viewer password だとこれらは隠れます。
           </p>
           <p data-err style="color:#b91c1c;font-size:11px;min-height:14px;"></p>
           <div class="modal-actions">
@@ -4574,6 +4614,10 @@ const App = {
         }
 
         this.shareMode = session;
+        // Toggle the share-admin body class so CSS can show admin-only
+        // bits (e.g. Method MRM machine-parameter columns) when the
+        // session was unlocked with the admin password.
+        document.body.classList.toggle('share-admin', session.role === 'admin');
         await this._hydrateSharedProject(session);
     },
 
@@ -4675,6 +4719,8 @@ const App = {
         renderMemoForm();
         this.refreshAnalysisScope();
         this.refreshShareInfoButton();
+        // Drop the admin-view flag whenever no project is loaded.
+        document.body.classList.remove('share-admin');
     },
 
     async refreshProjectPicker() {
