@@ -95,7 +95,15 @@ grant execute on function public.acquire_roi_lock(text, text) to anon, authentic
 grant execute on function public.heartbeat_roi_lock(text)      to anon, authenticated;
 grant execute on function public.release_roi_lock(text)        to anon, authenticated;
 
--- ---- 2. upsert_project_doc: Master-side publish helper ------
+-- ---- 2. Schema patches required by upsert_project_doc -------
+-- schema.sql predates the share_locks add-on, so it is missing a
+-- couple of columns that the publish helper writes to. Add them
+-- idempotently so a fresh "schema.sql then share_locks.sql" run
+-- works end-to-end.
+alter table public.projects add column if not exists updated_at timestamptz not null default now();
+alter table public.rois     add column if not exists name        text;
+
+-- ---- 3. upsert_project_doc: Master-side publish helper ------
 -- Pushes the entire project document (meta + sections + rois) plus
 -- a fresh viewer/admin password set, in one transaction. Designed to
 -- be called once per "Publish to share" click.
@@ -184,3 +192,58 @@ end;
 $$;
 
 grant execute on function public.upsert_project_doc(text, text, jsonb, text, text, jsonb, jsonb) to anon, authenticated;
+
+-- ---- 4. Storage policies for the `atlases` bucket -----------
+-- schema.sql creates the bucket with `public = true`, which only governs
+-- public READ. Writes (INSERT/UPDATE/DELETE on storage.objects) are still
+-- subject to RLS, and Supabase ships with no default policies. Without
+-- the policies below the master-side publish flow fails on its very
+-- first blob upload with:
+--   "new row violates row-level security policy"
+--
+-- We grant anon + authenticated full write access scoped to the
+-- `atlases` bucket. The publish handler runs from the browser with
+-- only the anon key; this matches that trust model (anyone who can
+-- reach the page can already publish, and the bucket is already
+-- public-read by design).
+do $$
+begin
+    if not exists (
+        select 1 from pg_policies
+         where schemaname = 'storage' and tablename = 'objects'
+           and policyname = 'atlases anon read'
+    ) then
+        create policy "atlases anon read" on storage.objects
+            for select to anon, authenticated
+            using (bucket_id = 'atlases');
+    end if;
+    if not exists (
+        select 1 from pg_policies
+         where schemaname = 'storage' and tablename = 'objects'
+           and policyname = 'atlases anon insert'
+    ) then
+        create policy "atlases anon insert" on storage.objects
+            for insert to anon, authenticated
+            with check (bucket_id = 'atlases');
+    end if;
+    if not exists (
+        select 1 from pg_policies
+         where schemaname = 'storage' and tablename = 'objects'
+           and policyname = 'atlases anon update'
+    ) then
+        create policy "atlases anon update" on storage.objects
+            for update to anon, authenticated
+            using (bucket_id = 'atlases')
+            with check (bucket_id = 'atlases');
+    end if;
+    if not exists (
+        select 1 from pg_policies
+         where schemaname = 'storage' and tablename = 'objects'
+           and policyname = 'atlases anon delete'
+    ) then
+        create policy "atlases anon delete" on storage.objects
+            for delete to anon, authenticated
+            using (bucket_id = 'atlases');
+    end if;
+end
+$$;
