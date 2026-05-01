@@ -4339,13 +4339,26 @@ const App = {
         if (!session) {
             const password = await openShareUnlockModal(slug);
             if (!password) { this.renderEmpty(); return; }
-            const result = await SupabaseClient.unlockProject(slug, password);
-            if (!result || !result.token) {
+            // unlock_project is declared `returns table (...)`, so PostgREST
+            // returns an array. Unwrap the single row, and treat any thrown
+            // exception (wrong password raises 28P01) as a normal "wrong pw"
+            // outcome rather than a fatal init error.
+            let raw;
+            try {
+                raw = await SupabaseClient.unlockProject(slug, password);
+            } catch (e) {
+                console.warn('unlock_project failed:', e);
                 showToast('パスワードが違います');
                 this.renderEmpty();
                 return;
             }
-            session = { slug, token: result.token, role: result.role || 'viewer', expiresAt: result.expires_at };
+            const row = Array.isArray(raw) ? raw[0] : raw;
+            if (!row || !row.token) {
+                showToast('パスワードが違います');
+                this.renderEmpty();
+                return;
+            }
+            session = { slug, token: row.token, role: row.role || 'viewer', expiresAt: row.expires_at };
             try { sessionStorage.setItem('desi:share:' + slug, JSON.stringify(session)); } catch (e) {}
         }
 
