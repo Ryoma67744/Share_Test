@@ -3477,11 +3477,20 @@ const Wizards = {
 
         // ---- Thumbnails for landmark picking --------------------------------
         const populateThumbs = async () => {
-            // HE
-            const heRec = sec.images[state.layerKey];
-            if (heRec && heRec.blobId) {
-                const b = await ProjectStorage.getBlob(heRec.blobId);
-                if (b && b.blob) heImg.src = URL.createObjectURL(b.blob);
+            // HE: prefer the decoded PNG dataURL cached on the panel; the raw
+            // storage blob is the original TIFF which <img> can't render.
+            const heCached = panel.imageSources && panel.imageSources[state.layerKey];
+            if (heCached && heCached.src) {
+                heImg.src = heCached.src;
+            } else {
+                const heRec = sec.images[state.layerKey];
+                if (heRec && heRec.blobId) {
+                    const b = await ProjectStorage.getBlob(heRec.blobId);
+                    if (b && b.blob) {
+                        const dataUrl = await decodeImageBlobToDataUrl(b.blob, b.mime || heRec.mime);
+                        if (dataUrl) heImg.src = dataUrl;
+                    }
+                }
             }
             // MSI: use the first available MSI series source
             const msiKeys = Object.keys(sec.msiSeries || {}).filter(k => /^MSI_/i.test(k));
