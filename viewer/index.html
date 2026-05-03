@@ -1345,9 +1345,27 @@ class SectionPanel {
         this.rebuildLayerBar();
         this.populateThumbnails();
         this.setupCanvasSize();
+        // Restore the user's last visibility choice for this section, then
+        // fall back to a "HE + first MSI" default so the histology backdrop is
+        // never lost across reloads / first-time loads of a project.
+        const persistedVis = (this.section.meta && this.section.meta.visibleLayers) || null;
+        if (Array.isArray(persistedVis)) {
+            for (const k of persistedVis) {
+                if (this.imageSources[k]) this.visibleLayers.add(k);
+            }
+        }
         if (this.visibleLayers.size === 0) {
-            const first = this.firstLayerKey();
-            if (first) this.toggleLayer(first, true);
+            // Default: first MSI + every registered HE/IF. HE is always
+            // wanted as a backdrop alongside the MSI heatmap.
+            const msiKeys = Object.keys(this.section.msiSeries || {});
+            const heKeys  = Object.keys(this.section.images || {})
+                                  .filter(k => /HE_STAIN|IF_STAIN/i.test(k));
+            if (msiKeys.length) this.toggleLayer(msiKeys[0], true);
+            for (const k of heKeys) this.toggleLayer(k, true);
+            if (!msiKeys.length && !heKeys.length) {
+                const first = this.firstLayerKey();
+                if (first) this.toggleLayer(first, true);
+            }
         } else {
             this.renderComposite();
             this.drawAllRois();
@@ -2011,6 +2029,12 @@ class SectionPanel {
         }
     }
 
+    _persistVisibleLayers() {
+        if (!this.section.meta) this.section.meta = {};
+        this.section.meta.visibleLayers = [...this.visibleLayers];
+        if (typeof App !== 'undefined' && App && App.queueSave) App.queueSave();
+    }
+
     toggleLayer(key, force) {
         const want = (force === undefined) ? !this.visibleLayers.has(key) : !!force;
         if (want) this.visibleLayers.add(key); else this.visibleLayers.delete(key);
@@ -2018,6 +2042,7 @@ class SectionPanel {
             if (want) this.activeMsiKey = key;
             else if (this.activeMsiKey === key) this.activeMsiKey = this.fallbackActiveMsiKey();
         }
+        this._persistVisibleLayers();
         this.rebuildLayerBar();
         this.renderComposite();
         this.drawAllRois();
@@ -2028,15 +2053,23 @@ class SectionPanel {
     }
 
     // User-driven layer click: bare click = solo (show only this), modifier = additive toggle.
+    // Bare click on a non-HE/IF layer preserves any visible HE/IF as the backdrop —
+    // soloing an MSI compound shouldn't accidentally hide the histology context.
     handleLayerClick(key, ev) {
         const additive = !!(ev && (ev.shiftKey || ev.ctrlKey || ev.metaKey));
         if (additive) {
             this.toggleLayer(key);
             return;
         }
+        const isHeLikeClick = /HE_STAIN|IF_STAIN/i.test(key);
+        const preservedHe = isHeLikeClick
+            ? []
+            : [...this.visibleLayers].filter(k => /HE_STAIN|IF_STAIN/i.test(k));
         this.visibleLayers.clear();
+        for (const h of preservedHe) this.visibleLayers.add(h);
         this.visibleLayers.add(key);
         if (/^MSI_/i.test(key)) this.activeMsiKey = key;
+        this._persistVisibleLayers();
         this.rebuildLayerBar();
         this.renderComposite();
         this.drawAllRois();
@@ -2220,6 +2253,7 @@ class SectionPanel {
         delete this.imageSettings[key];
         delete this.imageDataUrls[key];
         this.visibleLayers.delete(key);
+        this._persistVisibleLayers();
         this.msiThumbRefs.delete(key);
         if (this.activeMsiKey === key) {
             this.activeMsiKey = this.fallbackActiveMsiKey() || Object.keys(this.section.msiSeries || {})[0] || null;
