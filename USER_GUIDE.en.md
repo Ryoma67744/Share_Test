@@ -319,20 +319,32 @@ The **Memo** form on the bottom-right lets you edit Sample / Machine / Google Ke
 The header's **Export ZIP** packages the entire viewable project into a single zip on your machine:
 
 ```
-<project>_<timestamp>.zip
-├─ project.json                      ← project meta + all ROIs
+<projectName>_<timestamp>.zip
+├─ <projectName>.json                ← project meta + all ROIs + memo
 └─ sections/
    └─ <sectionId>/
-      ├─ atlas.json                  ← section meta + meta.specimen + transforms
+      ├─ atlas.json                  ← section meta + Align / display state
       └─ data/
-         ├─ img_HE_Stain__<file>.tif
-         ├─ img_IF_Stain__<file>.tif (optional)
-         └─ msi_MSI_DA__<file>.xlsx  ← xlsx with appended User-ROI flag columns
+         ├─ img_HE_Stain__<original>.tif         ← HE/IF: one file per layer
+         ├─ img_IF_Stain__<original>.tif (optional)
+         ├─ msi__Analyte_1.txt                    ← MSI: one file per source
+         └─ msi__Analyte_2.xlsx                   ← xlsx with ROI flag columns appended
 ```
 
-Each xlsx has a **0/1 flag column** appended for every ROI drawn on that section (the original file's last 2 columns are preserved).
+### Highlights
 
-> ZIP is for local use only. **You cannot re-upload or publish** from the viewer side (the buttons aren't shown to viewers).
+- **Root JSON is named after the project** (non-ASCII / unsafe chars replaced with `_`)
+- **MSI numerical data is consolidated per source file**: registering many compounds from one Analyte / xlsx produces a single ZIP entry (acquisition-side Image_X / Image_Y are shared within a source, so consolidation is lossless)
+- **xlsx gets ROI columns appended**: every ROI drawn on the section becomes a **0/1 flag column** at the end (column header = ROI name; original layout preserved)
+- **txt is left untouched**: the raw bytes go straight into the ZIP (polygon coordinates remain available in the root JSON's `polysBySection`)
+
+### What recipients can do
+
+- ZIP is **local backup / offline distribution** (no share URL is created)
+- Receiving viewer reloads it via **Import ZIP** — same machine or a different one
+- Recipients **cannot re-upload or publish** from share mode (those buttons are hidden)
+
+> Old-format ZIPs (fixed `project.json` + one file per compound) are **not importable** in the new viewer. If you only have an old ZIP, open it in the previous viewer build and re-export.
 
 ---
 

@@ -14,12 +14,13 @@
 6. [レイヤー個別の表示設定 (歯車 ⚙)](#6-レイヤー個別の表示設定-歯車-)
 7. [ROI を引く](#7-roi-を引く)
 8. [Memo の入力](#8-memo-の入力)
-9. [Publish to share](#9-publish-to-share)
-10. [共有 URL とパスワードの渡し方](#10-共有-url-とパスワードの渡し方)
-11. [再 publish の挙動](#11-再-publish-の挙動)
-12. [アップロード進捗 / 大ファイル対策](#12-アップロード進捗--大ファイル対策)
-13. [Storage 容量の目安](#13-storage-容量の目安)
-14. [困ったときは](#14-困ったときは)
+9. [Export ZIP — 手元バックアップと配布](#9-export-zip--手元バックアップと配布)
+10. [Publish to share](#10-publish-to-share)
+11. [共有 URL とパスワードの渡し方](#11-共有-url-とパスワードの渡し方)
+12. [再 publish の挙動](#12-再-publish-の挙動)
+13. [アップロード進捗 / 大ファイル対策](#13-アップロード進捗--大ファイル対策)
+14. [Storage 容量の目安](#14-storage-容量の目安)
+15. [困ったときは](#15-困ったときは)
 
 ---
 
@@ -235,7 +236,81 @@
 
 ---
 
-## 9. Publish to share
+## 9. Export ZIP — 手元バックアップと配布
+
+ヘッダの **Export ZIP** で、現在のプロジェクト全体(画像・MSI 数値・ROI・Memo・Align など)を 1 つの ZIP にまとめてダウンロードできます。Publish と違ってサーバを介さず、後日 `Import ZIP` で同じビューア(あるいは別環境)に復元できます。
+
+### 9-1. ファイル構造(新形式)
+
+```
+<プロジェクト名>_<YYYY-MM-DDTHH-MM-SS>.zip
+├── <プロジェクト名>.json            ← プロジェクトメタ + 全 ROI + Memo (ルート JSON 名 = プロジェクト名)
+└── sections/
+    └── <sectionId>/
+        ├── atlas.json               ← 切片メタ + 各レイヤー定義 (Align / Display / 表示状態)
+        └── data/
+            ├── img_HE_Stain__<元ファイル名>.tif    ← HE/IF はレイヤーごと
+            ├── msi__Analyte_1.txt                   ← MSI はソースファイル単位で 1 ファイル
+            └── msi__Analyte_2.xlsx                   ← 同上(ROI 列追記済み)
+```
+
+### 9-2. ルート JSON 名がプロジェクト名
+
+`<プロジェクト名>.json` というファイル名で出力されます (ASCII 英数字 + `_` `-` 以外は `_` に置換)。Import 時はルート直下の任意の `*.json` を `format` フィールドで判別して読むので、リネームしても問題ありません。
+
+### 9-3. MSI データはソースファイル単位で 1 ファイルに統合
+
+旧形式では 1 化合物 = 1 ファイル(同じ xlsx でも複数 MSI レイヤーを登録すると同じバイナリが複製出力)。**新形式では同じソースファイルから登録された MSI 化合物は ZIP 内で 1 ファイルにまとめられます**。
+
+例: `Analyte 1.txt` から 17 化合物登録 → 旧形式では 17 ファイル、新形式では `data/msi__Analyte_1.txt` の **1 ファイル**(中身に 17 化合物全件あり)。
+
+<div style="border:1px solid #cbd5e1;border-radius:6px;padding:8px;background:#f8fafc;margin:10px 0;font-size:12px;">
+  <div style="font-weight:600;color:#0f172a;margin-bottom:6px;">同一切片の MSI ファイルが「同じ XY」を共有する根拠</div>
+  <div style="color:#475569;">DESI/MSI 取得は通常、1 ソース内の全 MRM トランジションが同期スキャンで取得されるため、同一切片で同一ソース由来のデータは Image_X / Image_Y が完全に一致します。新形式はこれを利用して 1 ファイルに集約しています。</div>
+</div>
+
+### 9-4. xlsx には ROI 列が追記される
+
+xlsx ソースは元の列構造を保持したまま、**末尾に各 ROI ごとの 0/1 フラグ列が追加** されます(列名 = ROI 名)。受け手は Excel / R / Python でそのまま読んで「化合物 × ROI」の集計を実行可能。txt は安全に書き換える術が無いため無加工で出力(ROI 情報は ルート JSON の `polysBySection` で参照可能)。
+
+| 列 | 意味 |
+|---|---|
+| Image_X / Image_Y | 取得位置(MSI ピクセル) |
+| (元の強度列) | 化合物 1, 化合物 2, ..., 化合物 N |
+| (元の末尾 2 列) | 元 xlsx のレイアウト維持 |
+| **Cortex (新規)** | ROI Cortex 内なら 1、外なら 0 |
+| **Hippocampus (新規)** | 同上 |
+
+### 9-5. atlas.json の `path` 解釈
+
+各切片の `atlas.json` は MSI レイヤー定義に `path` フィールドを持ちます。**複数の `msiSeries[layerKey]` が同じ `path` を共有するのが新形式の正常状態**。Import 時はこの path をキーに blob を 1 度だけ復元 → IDB 容量も圧縮されます。
+
+### 9-6. Import (= 復元)
+
+ヘッダの **Import ZIP** で取り込み:
+- ZIP ルート直下の `*.json` を探索 → `format=desi_data_share_v1` を持つものをプロジェクトメタとして採用
+- `sections/<id>/atlas.json` から各切片を再構築
+- `path` が共有された MSI 化合物は **1 つの blob に集約** されて IDB に格納
+- 新しい id を採番(元プロジェクトと衝突しない)
+
+> **旧形式の ZIP**(`project.json` 固定名 + `msi_<layerKey>__` 個別ファイル)は **非対応**。Import すると「旧形式の ZIP は非対応です」エラーが出ます。最新版で再 Export してください。
+
+### 9-7. ZIP は Publish とは独立
+
+- Export ZIP は **手元保存と他者への配布専用**(共有 URL は生成されない)
+- 受け手は viewer の **Import ZIP** から取り込めば同等のビューアで閲覧可能
+- 受け手側は Publish to share / Export 操作を **再度行えない**(共有モードでは該当ボタン非表示)
+- ZIP は self-contained。サーバ不要で完結
+
+### 9-8. サイズ目安
+
+- 切片 1 つあたり: HE TIFF 50–300 MB / MSI xlsx 50–500 MB
+- ソース単位重複排除のため、新形式は旧形式比で **同一ソース複数化合物登録時の ZIP サイズが 1 / N に縮小**(N = 化合物数)
+- 1 GB 超のケースは Publish to share でなく ZIP 配布が現実的(帯域節約)
+
+---
+
+## 10. Publish to share
 
 ヘッダの `Publish to share` ボタン:
 
@@ -257,11 +332,11 @@
 
 > Master password を知らない第三者は、たとえ Supabase の anon key を取得していても publish も Storage 書き込みもできません。サーバ側 (Supabase) の bcrypt 照合で守られています。
 
-> 再 publish の挙動は次節「11. 再 publish の挙動」を必ずご確認ください。
+> 再 publish の挙動は次節「12. 再 publish の挙動」を必ずご確認ください。
 
 ---
 
-## 10. 共有 URL とパスワードの渡し方
+## 11. 共有 URL とパスワードの渡し方
 
 - URL: `https://.../viewer/index.html#share=<slug>`
 - viewer password を **別チャネル** (Slack / メール) で
@@ -271,7 +346,7 @@
 
 ---
 
-## 11. 再 publish の挙動
+## 12. 再 publish の挙動
 
 ★重要: **同じ slug で 2 回目以降の publish を実行すると、サーバ側のプロジェクトは完全に上書きされます。**
 
@@ -292,7 +367,7 @@
 
 ---
 
-## 12. アップロード進捗 / 大ファイル対策
+## 13. アップロード進捗 / 大ファイル対策
 
 実装済みの対策:
 
@@ -308,7 +383,7 @@
 
 ---
 
-## 13. Storage 容量の目安
+## 14. Storage 容量の目安
 
 | プラン | Storage | 帯域 | 月額 |
 | --- | --- | --- | --- |
@@ -321,7 +396,7 @@
 
 ---
 
-## 14. 困ったときは
+## 15. 困ったときは
 
 | 症状 | 対処 |
 | --- | --- |

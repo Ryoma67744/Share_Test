@@ -4652,6 +4652,7 @@ async function exportProjectAsZip() {
     const project = App.project;
     if (!project) return;
     const zip = new JSZip();
+    const safeName = (project.displayName || 'project').replace(/[^A-Za-z0-9_\-]/g, '_');
 
     const projDoc = {
         format: 'desi_data_share_v1',
@@ -4665,7 +4666,10 @@ async function exportProjectAsZip() {
         roiHidden: project.roiHidden || {},
         memo: ensureMemoShape(project.memo),
     };
-    zip.file('project.json', JSON.stringify(projDoc, null, 2));
+    // Root JSON name follows the project's display name so the ZIP is
+    // self-identifying (the importer scans the ZIP root for a *.json with
+    // format=desi_data_share_v1 rather than expecting a fixed filename).
+    zip.file(safeName + '.json', JSON.stringify(projDoc, null, 2));
 
     for (const sec of (project.sections || [])) {
         const dir = 'sections/' + sec.id + '/';
@@ -4678,12 +4682,6 @@ async function exportProjectAsZip() {
             msiSeries: {},
             msiFiles: sec.msiFiles ? JSON.parse(JSON.stringify(sec.msiFiles)) : {},
         };
-        // strip blobIds from the serialized msiFiles entries; the actual files
-        // live under data/msi_*__<filename> and are repaired on import.
-        for (const fid of Object.keys(atlas.msiFiles)) {
-            const rec = atlas.msiFiles[fid] || {};
-            delete rec.blobId;
-        }
         // image blobs
         for (const [layerKey, ent] of Object.entries(sec.images || {})) {
             const rec = await ProjectStorage.getBlob(ent.blobId);
@@ -4693,26 +4691,58 @@ async function exportProjectAsZip() {
             zip.file(path, rec.blob);
             atlas.images[layerKey] = { mime: ent.mime, filename: fname, path: 'data/img_' + layerKey + '__' + fname };
         }
-        // msi blobs
+        // MSI blobs — group by sourceFileId (or blobId fallback) so the same
+        // source file is written exactly once even when many compounds share
+        // it. ROI columns are appended once per source.
+        const msiGroups = new Map();
         for (const [layerKey, ent] of Object.entries(sec.msiSeries || {})) {
-            const rec = await ProjectStorage.getBlob(ent.blobId);
+            const groupKey = ent.sourceFileId || ent.blobId;
+            if (!groupKey) continue;
+            if (!msiGroups.has(groupKey)) {
+                msiGroups.set(groupKey, { entRepr: ent, blobId: ent.blobId, layerKeys: [] });
+            }
+            msiGroups.get(groupKey).layerKeys.push(layerKey);
+        }
+        const groupPath = new Map();
+        const usedPaths = new Set();
+        for (const [groupKey, group] of msiGroups) {
+            const ent = group.entRepr;
+            const rec = await ProjectStorage.getBlob(group.blobId);
             if (!rec) continue;
-            const fname = ent.filename || (layerKey + (ent.kind === 'txt' ? '.txt' : '.xlsx'));
-            const path = dir + 'data/msi_' + layerKey + '__' + fname;
-            const augmented = ent.kind === 'xlsx' ? await tryAppendUserRoiColumns(rec.blob, sec, ent, project) : null;
-            if (augmented) zip.file(path, augmented);
-            else zip.file(path, rec.blob);
+            const baseName = ent.filename || (groupKey + (ent.kind === 'txt' ? '.txt' : '.xlsx'));
+            let relPath = 'data/msi__' + baseName;
+            if (usedPaths.has(relPath)) {
+                const dot = baseName.lastIndexOf('.');
+                const stem = dot >= 0 ? baseName.slice(0, dot) : baseName;
+                const ext  = dot >= 0 ? baseName.slice(dot) : '';
+                relPath = 'data/msi__' + stem + '__' + groupKey + ext;
+            }
+            usedPaths.add(relPath);
+            groupPath.set(groupKey, relPath);
+            const augmented = ent.kind === 'xlsx'
+                ? await tryAppendUserRoiColumns(rec.blob, sec, ent, project)
+                : null;
+            zip.file(dir + relPath, augmented || rec.blob);
+        }
+        for (const [layerKey, ent] of Object.entries(sec.msiSeries || {})) {
+            const groupKey = ent.sourceFileId || ent.blobId;
             const def = Object.assign({}, ent);
             delete def.blobId;
-            def.path = 'data/msi_' + layerKey + '__' + fname;
+            def.path = groupPath.get(groupKey) || null;
             atlas.msiSeries[layerKey] = def;
+        }
+        // msiFiles: strip blobIds and stamp the shared path so import can
+        // reattach the right blob even though multiple compounds share it.
+        for (const fid of Object.keys(atlas.msiFiles)) {
+            const rec = atlas.msiFiles[fid] || {};
+            delete rec.blobId;
+            rec.path = groupPath.get(fid) || null;
         }
         zip.file(dir + 'atlas.json', JSON.stringify(atlas, null, 2));
     }
 
     const blob = await zip.generateAsync({ type: 'blob' });
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    const safeName = (project.displayName || 'project').replace(/[^A-Za-z0-9_\-]/g, '_');
     downloadAsFile(blob, safeName + '_' + ts + '.zip');
     showToast('Export ready');
 }
@@ -4758,6 +4788,24 @@ async function tryAppendUserRoiColumns(srcBlob, section, msiEnt, project) {
     } catch (e) {
         console.warn('[tryAppendUserRoiColumns] skipped:', e);
         return null;
+    }
+}
+
+// Best-effort MIME guess for Import when the ZIP entry doesn't carry one.
+function guessMimeFromPath(path) {
+    const m = (path || '').toLowerCase().match(/\.([a-z0-9]+)$/);
+    if (!m) return 'application/octet-stream';
+    switch (m[1]) {
+        case 'xlsx': return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+        case 'xls':  return 'application/vnd.ms-excel';
+        case 'txt':  return 'text/plain';
+        case 'csv':  return 'text/csv';
+        case 'tif':
+        case 'tiff': return 'image/tiff';
+        case 'png':  return 'image/png';
+        case 'jpg':
+        case 'jpeg': return 'image/jpeg';
+        default:     return 'application/octet-stream';
     }
 }
 
@@ -5520,9 +5568,42 @@ async function openProjectsManagerModal() {
 
 async function importZipFile(file) {
     const zip = await JSZip.loadAsync(file);
-    const projDocFile = zip.file('project.json');
-    if (!projDocFile) throw new Error('project.json not found in ZIP');
-    const projDoc = JSON.parse(await projDocFile.async('string'));
+    // Find the project doc — root-level *.json with format=desi_data_share_v1.
+    // The exporter now names the root JSON after the project, so we scan
+    // instead of expecting a fixed 'project.json'.
+    const rootJsonPaths = Object.keys(zip.files).filter(p => /^[^/]+\.json$/i.test(p));
+    let projDocPath = null;
+    let projDoc = null;
+    for (const p of rootJsonPaths) {
+        try {
+            const candidate = JSON.parse(await zip.file(p).async('string'));
+            if (candidate && candidate.format === 'desi_data_share_v1') {
+                projDocPath = p;
+                projDoc = candidate;
+                break;
+            }
+        } catch (e) {}
+    }
+    if (!projDoc) throw new Error('Project JSON (format=desi_data_share_v1) not found in ZIP root');
+
+    // Detect old-style ZIPs (project.json + per-layer msi_<layerKey>__ paths)
+    // and refuse with a clear message — the new format uses msi__<filename>.
+    if (projDocPath === 'project.json') {
+        const firstAtlasPath = Object.keys(zip.files).find(p => /sections\/[^/]+\/atlas\.json$/.test(p));
+        if (firstAtlasPath) {
+            try {
+                const firstAtlas = JSON.parse(await zip.file(firstAtlasPath).async('string'));
+                const sample = Object.values(firstAtlas.msiSeries || {})[0];
+                const samplePath = sample && sample.path || '';
+                if (samplePath.startsWith('data/msi_') && !samplePath.startsWith('data/msi__')) {
+                    throw new Error('旧形式の ZIP は非対応です。最新版で再 Export してください。');
+                }
+            } catch (e) {
+                if (/旧形式/.test(e.message || '')) throw e;
+            }
+        }
+    }
+
     const newProject = {
         id: uid('proj'),
         displayName: projDoc.displayName || 'Imported',
@@ -5549,37 +5630,54 @@ async function importZipFile(file) {
         };
         sectionsBySrcId[atlas.id] = newSec.id;
         const dir = ap.replace(/atlas\.json$/, '');
-        for (const [layerKey, ent] of Object.entries(atlas.images || {})) {
-            const f = zip.file(dir + ent.path);
-            if (!f) continue;
+
+        // Path-keyed cache so any number of msiSeries entries (and the
+        // msiFiles parent record) sharing one ZIP file share a single
+        // IndexedDB blob — matching the exporter's source-file dedup.
+        const pathToBlobId = new Map();
+        const ensureBlob = async (relPath, mimeHint, fnameHint) => {
+            if (!relPath) return null;
+            if (pathToBlobId.has(relPath)) return pathToBlobId.get(relPath);
+            const f = zip.file(dir + relPath);
+            if (!f) return null;
             const blob = await f.async('blob');
             const blobId = uid('blob');
-            await ProjectStorage.putBlob({ id: blobId, blob, mime: ent.mime || 'image/tiff', filename: ent.filename || layerKey });
+            await ProjectStorage.putBlob({
+                id: blobId,
+                blob,
+                mime: mimeHint || guessMimeFromPath(relPath),
+                filename: fnameHint || (relPath.split('/').pop() || ''),
+            });
+            pathToBlobId.set(relPath, blobId);
+            return blobId;
+        };
+
+        // image blobs (HE / IF) — usually unique per layerKey, but use
+        // ensureBlob in case a future export shares them too.
+        for (const [layerKey, ent] of Object.entries(atlas.images || {})) {
+            const blobId = await ensureBlob(ent.path, ent.mime || 'image/tiff', ent.filename || layerKey);
+            if (!blobId) continue;
             newSec.images[layerKey] = { blobId, mime: ent.mime, filename: ent.filename || '' };
         }
-        // First pass: prepare msiFiles entries (carry forward filename / kind from atlas)
-        const fileBlobByFid = {};
-        for (const [fid, frec] of Object.entries(atlas.msiFiles || {})) {
-            newSec.msiFiles[fid] = Object.assign({}, frec, { id: fid });
-        }
+
+        // MSI series — multiple compounds can point at the same path.
         for (const [layerKey, ent] of Object.entries(atlas.msiSeries || {})) {
-            const f = zip.file(dir + ent.path);
-            if (!f) continue;
-            const blob = await f.async('blob');
-            const fid = ent.sourceFileId || null;
-            let blobId;
-            if (fid && fileBlobByFid[fid]) {
-                blobId = fileBlobByFid[fid];
-            } else {
-                blobId = uid('blob');
-                await ProjectStorage.putBlob({ id: blobId, blob, mime: blob.type || '', filename: ent.filename || layerKey });
-                if (fid) fileBlobByFid[fid] = blobId;
-            }
+            const blobId = await ensureBlob(ent.path, null, ent.filename || layerKey);
+            if (!blobId) continue;
             const def = Object.assign({}, ent, { blobId });
             delete def.path;
             newSec.msiSeries[layerKey] = def;
-            if (fid && newSec.msiFiles[fid]) newSec.msiFiles[fid].blobId = blobId;
         }
+
+        // msiFiles — restore the file-level blobId via its own path entry.
+        for (const [fid, frec] of Object.entries(atlas.msiFiles || {})) {
+            const blobId = await ensureBlob(frec.path, frec.mime, frec.filename);
+            const newRec = Object.assign({}, frec, { id: fid });
+            delete newRec.path;
+            if (blobId) newRec.blobId = blobId;
+            newSec.msiFiles[fid] = newRec;
+        }
+
         newProject.sections.push(newSec);
     }
     if (Array.isArray(projDoc.sectionOrder)) {

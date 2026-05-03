@@ -14,12 +14,13 @@ This guide is for the **master / admin** publishing data with DESI Data Share. I
 6. [Per-layer display settings (gear ⚙)](#6-per-layer-display-settings-gear-)
 7. [Drawing ROIs](#7-drawing-rois)
 8. [Filling in the Memo](#8-filling-in-the-memo)
-9. [Publish to share](#9-publish-to-share)
-10. [Sharing the URL & passwords](#10-sharing-the-url--passwords)
-11. [What happens on re-publish](#11-what-happens-on-re-publish)
-12. [Upload progress / large files](#12-upload-progress--large-files)
-13. [Storage capacity](#13-storage-capacity)
-14. [Troubleshooting](#14-troubleshooting)
+9. [Export ZIP — local backup & distribution](#9-export-zip--local-backup--distribution)
+10. [Publish to share](#10-publish-to-share)
+11. [Sharing the URL & passwords](#11-sharing-the-url--passwords)
+12. [What happens on re-publish](#12-what-happens-on-re-publish)
+13. [Upload progress / large files](#13-upload-progress--large-files)
+14. [Storage capacity](#14-storage-capacity)
+15. [Troubleshooting](#15-troubleshooting)
 
 ---
 
@@ -235,7 +236,81 @@ Values auto-save to IndexedDB (~400 ms debounce). On Publish they're also writte
 
 ---
 
-## 9. Publish to share
+## 9. Export ZIP — local backup & distribution
+
+The **Export ZIP** button packages the entire project (images, MSI numerical data, ROIs, memo, alignment, etc.) into a single download. Unlike Publish, no server is involved; the receiver re-imports it later via **Import ZIP** in the same or another viewer instance.
+
+### 9-1. File layout (new format)
+
+```
+<projectName>_<YYYY-MM-DDTHH-MM-SS>.zip
+├── <projectName>.json               ← project meta + all ROIs + memo (root JSON name = project name)
+└── sections/
+    └── <sectionId>/
+        ├── atlas.json               ← per-section meta + layer definitions (Align / Display / state)
+        └── data/
+            ├── img_HE_Stain__<original>.tif    ← HE/IF: one file per layer
+            ├── msi__Analyte_1.txt              ← MSI: one file per source file
+            └── msi__Analyte_2.xlsx             ← (with ROI columns appended)
+```
+
+### 9-2. Root JSON named after the project
+
+The root JSON is `<projectName>.json` (non-ASCII / unsafe chars replaced with `_`). On import the loader scans for any root-level `*.json` whose `format` field equals `desi_data_share_v1`, so renaming the file outside the viewer is fine.
+
+### 9-3. MSI data is consolidated per source file
+
+Old format wrote one ZIP entry per compound, so 17 compounds registered from the same `Analyte 1.txt` produced 17 identical-content files. **The new format writes one file per source file**, regardless of how many compounds it produced.
+
+Example: 17 compounds from `Analyte 1.txt` → old format = 17 files, **new format = single `data/msi__Analyte_1.txt` containing all 17 compounds**.
+
+<div style="border:1px solid #cbd5e1;border-radius:6px;padding:8px;background:#f8fafc;margin:10px 0;font-size:12px;">
+  <div style="font-weight:600;color:#0f172a;margin-bottom:6px;">Why "same section ⇒ same XY" holds</div>
+  <div style="color:#475569;">DESI/MSI typically acquires every MRM transition in a single source file with synchronised raster, so all compounds from one source share Image_X / Image_Y exactly. The new format leverages this so consolidation is lossless.</div>
+</div>
+
+### 9-4. ROI columns appended to xlsx
+
+xlsx sources keep their original column layout, with **0/1 flag columns appended at the end** — one per ROI drawn on the section (column header = ROI name). Recipients can open the file in Excel / R / Python and immediately compute "compound × ROI" aggregates. txt sources are written as-is (their format is too free-form to safely augment); the polygon coordinates remain available in the root JSON's `polysBySection`.
+
+| Column | Meaning |
+|---|---|
+| Image_X / Image_Y | Acquisition position (MSI pixel) |
+| (original intensity columns) | Compound 1, Compound 2, …, Compound N |
+| (original trailing columns) | Preserves the source xlsx layout |
+| **Cortex (new)** | 1 if inside ROI Cortex, else 0 |
+| **Hippocampus (new)** | Same |
+
+### 9-5. atlas.json `path` semantics
+
+Each section's `atlas.json` carries a `path` for every MSI layer entry. **Multiple `msiSeries[layerKey]` entries pointing at the same `path` is the new normal.** On import the path becomes the dedup key — only one IndexedDB blob is created per unique path, even if many compounds reference it.
+
+### 9-6. Import (= restore)
+
+Use the header's **Import ZIP**:
+- The loader finds the root-level `*.json` whose `format` is `desi_data_share_v1` and treats it as project metadata
+- Each `sections/<id>/atlas.json` rebuilds one section
+- Compounds sharing a `path` collapse to a single IDB blob
+- Fresh ids are minted so the imported project never collides with the source
+
+> **Old-format ZIPs** (fixed `project.json` + per-layer `msi_<layerKey>__` paths) are **not supported**. The importer raises a clear "old-format ZIP not supported" error. Re-export with the latest viewer.
+
+### 9-7. ZIP is independent of Publish
+
+- Export ZIP is for **local backup and offline distribution** (no share URL is generated)
+- Recipients use the viewer's **Import ZIP** to load it back into IndexedDB
+- The receiving viewer cannot re-publish or re-export from share mode (those buttons are hidden)
+- ZIP is fully self-contained — nothing depends on Supabase being reachable
+
+### 9-8. Size guidance
+
+- Per section: HE TIFF 50–300 MB / MSI xlsx 50–500 MB
+- Source-file dedup means the new format shrinks ZIPs by **roughly 1 / N** (N = compounds per source) compared to the old per-compound layout
+- For projects > 1 GB, ZIP distribution is often more practical than Publish (avoids upload-bandwidth bottleneck)
+
+---
+
+## 10. Publish to share
 
 The header's `Publish to share` button:
 
@@ -261,7 +336,7 @@ Pressing `Publish`:
 
 ---
 
-## 10. Sharing the URL & passwords
+## 11. Sharing the URL & passwords
 
 - URL: `https://.../viewer/index.html#share=<slug>`
 - Send the viewer password on a **separate channel** (Slack, e-mail)
@@ -271,7 +346,7 @@ Pressing `Publish`:
 
 ---
 
-## 11. What happens on re-publish
+## 12. What happens on re-publish
 
 ★ Important: **publishing the same slug a second time fully overwrites the server-side project.**
 
@@ -292,7 +367,7 @@ Caveats:
 
 ---
 
-## 12. Upload progress / large files
+## 13. Upload progress / large files
 
 Already implemented:
 
@@ -308,7 +383,7 @@ Tips for large (~1.5 GB) projects:
 
 ---
 
-## 13. Storage capacity
+## 14. Storage capacity
 
 | Plan | Storage | Bandwidth | Monthly |
 | --- | --- | --- | --- |
@@ -321,7 +396,7 @@ Per-file size cap defaults to 50 MB on both plans, raisable to 5 GB from the das
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 | Symptom | Action |
 | --- | --- |

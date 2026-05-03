@@ -319,20 +319,32 @@ MSI レイヤーが表示されていて、提供者側で **MSI pixel size (μm
 ヘッダの **Export ZIP** で、現在閲覧中のプロジェクト全体を ZIP にまとめてダウンロードできます。
 
 ```
-<project>_<timestamp>.zip
-├─ project.json                      ← プロジェクトメタ + ROI 全体
+<プロジェクト名>_<timestamp>.zip
+├─ <プロジェクト名>.json                  ← プロジェクトメタ + ROI 全体 + Memo
 └─ sections/
    └─ <sectionId>/
-      ├─ atlas.json                  ← 切片メタ + meta.specimen + 変換情報
+      ├─ atlas.json                       ← 切片メタ + Align / 表示状態
       └─ data/
-         ├─ img_HE_Stain__<file>.tif
-         ├─ img_IF_Stain__<file>.tif (任意)
-         └─ msi_MSI_DA__<file>.xlsx  ← User ROI 列を追加した版 (xlsx のみ)
+         ├─ img_HE_Stain__<元ファイル名>.tif        ← HE/IF はレイヤー単位
+         ├─ img_IF_Stain__<元ファイル名>.tif (任意)
+         ├─ msi__Analyte_1.txt              ← MSI はソースファイル単位で 1 ファイル
+         └─ msi__Analyte_2.xlsx             ← xlsx には ROI 0/1 列が追記される
 ```
 
-xlsx には、その切片で描画されている全 ROI が **0/1 のフラグ列** として末尾に追加されます (xlsx 元ファイル末尾 2 列はそのまま温存)。
+### 主な特徴
 
-> ZIP は手元に持ち帰る用途のみ。**再アップロードや Publish はできません** (受け手側に該当ボタンが表示されません)。
+- **ルート JSON 名はプロジェクト名と同じ**(ASCII 英数字 + `_-` 以外は `_` に置換)
+- **MSI 数値データはソースファイル単位で 1 ファイル**: 同じ Analyte / xlsx から複数化合物を登録していても、ZIP 内では 1 ファイルにまとめられます(同一切片・同一ソースは Image_X / Image_Y が一致するため)
+- **xlsx には ROI 列を追記**: その切片で描画されている全 ROI が **0/1 のフラグ列** として末尾に追加されます(列名 = ROI 名、xlsx の元レイアウトは保持)
+- **txt は無加工**: 元バイナリそのままを格納(ROI 情報はルート JSON の `polysBySection` で参照可能)
+
+### 受け手側での扱い
+
+- ZIP は **手元バックアップ / オフライン配布用**(共有 URL は生成されない)
+- 受け手は **Import ZIP** で同じビューアに取り込めます(別環境でも可)
+- 受け手側からの **再アップロード / Publish は不可**(共有モードでは該当ボタン非表示)
+
+> 旧形式の ZIP(`project.json` 固定名・化合物ごとに別ファイル)は **新ビューアでは Import 非対応** です。古い ZIP しか手元にない場合は、旧ビューアで開いてから再 Export してください。
 
 ---
 
