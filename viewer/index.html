@@ -221,6 +221,18 @@ body.splitting-v { cursor:row-resize !important; }
 #view-mode-toggle button:not(:last-child) { border-right:1px solid #e5e7eb; }
 #method-rows tr.method-row .range-input { width:64px; padding:1px 3px; border:1px solid #cbd5e1; border-radius:3px; font-size:10px; text-align:right; background:#fff; }
 #method-rows tr.method-row .range-input:focus { outline:1px solid #60a5fa; }
+/* Force vertical scrolling on the Method (MRM) panel: <details> + flex-col
+   has an anonymous slot in Chrome that can stop flex-1 / overflow-auto
+   from kicking in on the body. Pinning max-height + overflow-y here
+   guarantees the compound list scrolls even when the splitter shrinks
+   the panel below the table's natural height. */
+#method-panel { display:flex !important; flex-direction:column; }
+#method-panel > #method-body {
+    flex:1 1 0;
+    min-height:0;
+    max-height:calc(100% - 28px);
+    overflow-y:auto !important;
+}
 /* In share mode, hide MSI machine-parameter columns (Precursor / Fragment /
    CE / CV) from non-admin viewers. Master and admin (logged in via the
    admin password) keep the full table. */
@@ -1555,9 +1567,9 @@ class SectionPanel {
         // regardless of per-section visibility flags. HE/IF stays under
         // per-section control so users can still toggle the histology overlay.
         const compoundFocus = (App.viewMode === 'compound') ? App.focusCompoundKey : null;
-        // Force HE/IF below MSI so the additive 'lighter' MSI overlay reads on
-        // top of the histology context (otherwise insertion order leaves HE
-        // covering MSI in source-over mode).
+        // Force HE/IF below MSI so source-over MSI covers HE only where MSI
+        // has signal — keeping HE as the histology backdrop and giving MSI
+        // Opacity its intuitive meaning (100 % covers HE, 0 % reveals it).
         const heLikeKeys = [];
         const msiKeys = [];
         const others = [];
@@ -1623,7 +1635,10 @@ class SectionPanel {
             }
 
             ctx.globalAlpha = (settings.applyOpacity === false) ? 1.0 : settings.opacity;
-            ctx.globalCompositeOperation = isMsiLayer ? 'lighter' : 'source-over';
+            // Always use source-over so MSI Opacity behaves intuitively (100 %
+            // covers HE, 0 % reveals it). Additive 'lighter' would let HE bleed
+            // through and distort signal/intensity reading on light histology.
+            ctx.globalCompositeOperation = 'source-over';
 
             const ref = this.getMsiRefSize();
 
