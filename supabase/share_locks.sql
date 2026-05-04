@@ -476,3 +476,70 @@ end
 $$;
 
 grant execute on function public.list_projects(text) to anon, authenticated;
+
+-- ---- 7. Storage RLS helper for publish_sessions (Phase 1 fix) ------
+-- The atlases write policies in section 4 reference publish_sessions
+-- from a subquery that is evaluated as the request's role (anon when
+-- the browser uses the publishable key). publish_sessions has RLS on
+-- and `revoke all ... from anon`, so the anon role can read no rows
+-- from it; the `exists (...)` subquery in those policies therefore
+-- returns false unconditionally and every Storage upload fails with:
+--     "new row violates row-level security policy"
+-- Wrap the lookup in a SECURITY DEFINER function so the storage RLS
+-- subquery runs with the function owner's privileges and can see the
+-- session row that request_publish_session just inserted. The function
+-- still validates the publish-token header and the slug-prefixed path,
+-- so the gate semantics are unchanged.
+create or replace function public._publish_session_valid_for_path(p_token text, p_path text)
+returns boolean
+language sql security definer set search_path = public, extensions
+as $$
+    select exists (
+        select 1 from public.publish_sessions ps
+         where ps.token = p_token
+           and ps.expires_at > now()
+           and p_path like ps.slug || '/%'
+    );
+$$;
+revoke all on function public._publish_session_valid_for_path(text, text) from public;
+grant execute on function public._publish_session_valid_for_path(text, text) to anon, authenticated;
+
+-- Replace the broken atlases write policies with ones that delegate
+-- the publish_sessions lookup to the SECURITY DEFINER helper above.
+do $$
+begin
+    if exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='atlases publish-token insert') then
+        drop policy "atlases publish-token insert" on storage.objects;
+    end if;
+    if exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='atlases publish-token update') then
+        drop policy "atlases publish-token update" on storage.objects;
+    end if;
+
+    create policy "atlases publish-token insert" on storage.objects
+        for insert to anon, authenticated
+        with check (
+            bucket_id = 'atlases'
+            and public._publish_session_valid_for_path(
+                nullif(current_setting('request.headers', true), '')::jsonb->>'x-publish-token',
+                storage.objects.name
+            )
+        );
+
+    create policy "atlases publish-token update" on storage.objects
+        for update to anon, authenticated
+        using (
+            bucket_id = 'atlases'
+            and public._publish_session_valid_for_path(
+                nullif(current_setting('request.headers', true), '')::jsonb->>'x-publish-token',
+                storage.objects.name
+            )
+        )
+        with check (
+            bucket_id = 'atlases'
+            and public._publish_session_valid_for_path(
+                nullif(current_setting('request.headers', true), '')::jsonb->>'x-publish-token',
+                storage.objects.name
+            )
+        );
+end
+$$;

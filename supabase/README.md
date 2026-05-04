@@ -107,7 +107,7 @@ Supabase の **Project Settings → API** から:
 | 症状 | 原因 / 対処 |
 | --- | --- |
 | `permission denied for function …` | RPC 実行権限。`schema.sql` の `grant execute …` が走っていない可能性。再実行する |
-| `Publish に失敗しました: new row violates row-level security policy` | `atlases` バケットに対する anon の書き込みポリシーが未設定。最新の [`share_locks.sql`](./share_locks.sql) を SQL Editor で再実行する（`storage.objects` に `atlases anon insert/update/delete/read` ポリシーを追加します） |
+| `Publish に失敗しました: new row violates row-level security policy` | (1) `atlases` バケットに対する anon の書き込みポリシーが未設定、または (2) `publish_sessions` テーブルが anon から読めず Storage RLS のサブクエリが常に false になる旧版ポリシーを使っている。**最新の [`share_locks.sql`](./share_locks.sql) を SQL Editor で再実行する**（`_publish_session_valid_for_path` SECURITY DEFINER ヘルパーと、それを使う新しい `atlases publish-token insert/update` ポリシーに置き換わる） |
 | `invalid credentials` | パスワード違い、または `set_project_password` のスペル違い |
 | HE TIFF が読めない | Storage 側でパスが違う／signed URL の有効期限切れ。`get_signed_url` の `p_expires` を伸ばす |
 | ROI が他ブラウザに反映されない | リロード必須仕様（Realtime 同期は Phase 2 以降の検討事項） |
