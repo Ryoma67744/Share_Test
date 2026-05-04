@@ -6426,31 +6426,58 @@ const App = {
         // Pull blobs referenced in storage_paths, drop them into IndexedDB
         // (so the existing rendering pipeline can address them by blobId),
         // and rebuild section.images / msiSeries entries.
+        const fetchBlob = async (path) => {
+            const url = SupabaseClient.publicUrl('atlases', path);
+            if (!url) throw new Error('publicUrl returned null for ' + path);
+            let lastErr = null;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    const resp = await fetch(url);
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status + ' for ' + path);
+                    return await resp.blob();
+                } catch (e) {
+                    lastErr = e;
+                    if (attempt < 2) await new Promise(r => setTimeout(r, 600 * Math.pow(2, attempt)));
+                }
+            }
+            throw lastErr;
+        };
+        const failed = [];
         for (let i = 0; i < project.sections.length; i++) {
             const sec = project.sections[i];
             const sp = (doc.sections[i] && doc.sections[i].storage_paths) || (doc.sections[i] && doc.sections[i].storagePaths) || {};
             // images: { HE_Stain: { path, mime, filename }, ... }
             for (const [key, ref] of Object.entries(sp.images || {})) {
                 try {
-                    const url = SupabaseClient.publicUrl('atlases', ref.path);
-                    const blob = await (await fetch(url)).blob();
+                    const blob = await fetchBlob(ref.path);
                     const blobId = uid('blob');
                     await ProjectStorage.putBlob({ id: blobId, blob, mime: ref.mime || blob.type, filename: ref.filename || ref.path.split('/').pop() });
                     sec.images[key] = { blobId, mime: ref.mime || blob.type, filename: ref.filename };
-                } catch (e) { console.warn('share blob fetch failed', key, e); }
+                } catch (e) {
+                    console.warn('share blob fetch failed', key, e);
+                    failed.push({ kind: 'image', key, path: ref.path, error: e });
+                }
             }
             for (const [key, ref] of Object.entries(sp.msiSeries || {})) {
                 try {
-                    const url = SupabaseClient.publicUrl('atlases', ref.path);
-                    const blob = await (await fetch(url)).blob();
+                    const blob = await fetchBlob(ref.path);
                     const blobId = uid('blob');
                     await ProjectStorage.putBlob({ id: blobId, blob, mime: ref.mime || blob.type, filename: ref.filename || ref.path.split('/').pop() });
                     sec.msiSeries[key] = Object.assign({}, ref, { blobId });
                     if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
                         sec.msiFiles[ref.sourceFileId] = { id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, blobId };
                     }
-                } catch (e) { console.warn('share msi fetch failed', key, e); }
+                } catch (e) {
+                    console.warn('share msi fetch failed', key, e);
+                    failed.push({ kind: 'msi', key, path: ref.path, error: e });
+                }
             }
+        }
+        if (failed.length) {
+            const summary = failed.length + ' 件のレイヤーをダウンロードできませんでした (' +
+                failed.slice(0, 3).map(f => f.kind + ':' + f.key).join(', ') +
+                (failed.length > 3 ? ', ...' : '') + ')';
+            showToast(summary, 6000);
         }
 
         // Hydrate ROIs.
