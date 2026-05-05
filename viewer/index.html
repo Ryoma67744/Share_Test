@@ -247,6 +247,138 @@ body.share-mode:not(.share-admin) #method-rows tr > td:nth-child(6) { display:no
    role — share recipients shouldn't ever delete file groups. */
 body.share-mode .thumb-file-group .file-actions [data-action="delete-file"],
 body.share-mode .thumb-file-group .file-actions [data-action="rename"] { display:none !important; }
+
+/* Share-Only result preview overlay. Shown immediately after a share-mode
+   bootstrap so the recipient sees a clean compound-comparison view first; the
+   close button just removes the overlay so the full detailed UI underneath is
+   still operable. */
+#share-preview-overlay {
+    position:fixed; inset:0; z-index:9000;
+    background:#000; color:#e5e7eb;
+    display:flex; flex-direction:column; overflow:hidden;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+#share-preview-overlay .preview-header {
+    display:flex; align-items:flex-start; justify-content:space-between;
+    padding:14px 22px 10px 22px; gap:18px;
+    background:#fff; color:#0f172a; border-bottom:1px solid #cbd5e1;
+}
+#share-preview-overlay .preview-title {
+    font-size:20px; font-weight:700; line-height:1.25;
+    word-break:break-all;
+}
+#share-preview-overlay .preview-header-right {
+    display:flex; align-items:flex-start; gap:14px; flex-shrink:0;
+}
+#share-preview-overlay .preview-headerbar { display:flex; align-items:center; gap:6px; }
+#share-preview-overlay .preview-headerbar .bar {
+    display:inline-block; height:3px; background:#0f172a; box-shadow:0 0 0 1px #fff;
+}
+#share-preview-overlay .preview-headerbar .label { font-size:12px; font-weight:600; color:#0f172a; }
+#share-preview-overlay .preview-close {
+    appearance:none; border:1px solid #cbd5e1; background:#fff; color:#475569;
+    width:32px; height:32px; border-radius:4px; cursor:pointer; font-size:18px; line-height:1;
+    display:inline-flex; align-items:center; justify-content:center;
+}
+#share-preview-overlay .preview-close:hover { background:#fee2e2; color:#b91c1c; border-color:#fca5a5; }
+
+#share-preview-overlay .preview-body {
+    flex:1 1 auto; display:grid; grid-template-columns: 260px 1fr 80px;
+    min-height:0; min-width:0;
+}
+
+#share-preview-overlay .preview-method-panel {
+    background:#0f172a; color:#e5e7eb; overflow:auto; padding:12px 10px;
+    border-right:1px solid #1f2937;
+}
+#share-preview-overlay .preview-method-panel h3 {
+    font-size:12px; font-weight:700; color:#cbd5e1; margin-bottom:8px;
+    letter-spacing:0.05em; text-transform:uppercase;
+}
+#share-preview-overlay .preview-method-table { width:100%; border-collapse:collapse; font-size:11px; }
+#share-preview-overlay .preview-method-table thead th {
+    text-align:left; padding:4px 6px; color:#94a3b8; font-weight:600;
+    border-bottom:1px solid #334155;
+}
+#share-preview-overlay .preview-method-table tbody tr {
+    cursor:pointer; transition:background-color 0.12s;
+}
+#share-preview-overlay .preview-method-table tbody tr:hover { background:#1e293b; }
+#share-preview-overlay .preview-method-table tbody tr.active {
+    background:#1d4ed8; color:#fff;
+}
+#share-preview-overlay .preview-method-table tbody td {
+    padding:4px 6px; border-bottom:1px solid #1f2937; vertical-align:top;
+}
+#share-preview-overlay .preview-method-table tbody td.compound-cell {
+    font-weight:600;
+}
+
+#share-preview-overlay .preview-main {
+    background:#000; display:flex; flex-direction:column; min-width:0; min-height:0;
+    padding:14px 18px;
+}
+#share-preview-overlay .preview-image-grid {
+    flex:1 1 auto; display:grid; gap:18px; min-height:0; min-width:0;
+    grid-auto-flow:column; grid-auto-columns: minmax(0, 1fr);
+}
+#share-preview-overlay .preview-image-cell {
+    display:flex; flex-direction:column; align-items:center; min-height:0; min-width:0;
+}
+#share-preview-overlay .preview-image-cell .cell-title {
+    font-size:13px; font-weight:600; color:#f1f5f9;
+    margin-bottom:6px; text-align:center;
+}
+#share-preview-overlay .preview-image-cell .cell-img-wrap {
+    flex:1 1 auto; min-height:0; min-width:0; width:100%;
+    background:#000; display:flex; align-items:center; justify-content:center; overflow:hidden;
+}
+#share-preview-overlay .preview-image-cell img {
+    max-width:100%; max-height:100%; object-fit:contain; background:#000;
+}
+#share-preview-overlay .preview-image-cell .cell-empty {
+    color:#64748b; font-size:11px; padding:12px;
+}
+
+#share-preview-overlay .preview-stats {
+    margin-top:14px; background:#0f172a; border:1px solid #1f2937; border-radius:4px;
+    padding:8px 10px;
+}
+#share-preview-overlay .preview-stats table { width:100%; border-collapse:collapse; font-size:12px; color:#e5e7eb; }
+#share-preview-overlay .preview-stats th,
+#share-preview-overlay .preview-stats td {
+    padding:5px 8px; border:1px solid #1f2937; text-align:center;
+}
+#share-preview-overlay .preview-stats thead th {
+    background:#1d4ed8; color:#fff; font-weight:600;
+}
+#share-preview-overlay .preview-stats thead th.row-label-head {
+    background:#1e293b; color:#cbd5e1; width:120px;
+}
+#share-preview-overlay .preview-stats tbody th {
+    background:#1e293b; color:#cbd5e1; font-weight:600; text-align:left;
+}
+
+#share-preview-overlay .preview-colorbar {
+    background:#000; border-left:1px solid #1f2937;
+    display:flex; flex-direction:column; align-items:center;
+    padding:14px 6px; min-width:0;
+}
+#share-preview-overlay .preview-colorbar .cb-label {
+    font-size:11px; color:#cbd5e1; margin-bottom:6px;
+}
+#share-preview-overlay .preview-colorbar canvas {
+    flex:1 1 auto; width:18px; min-height:0; image-rendering:pixelated;
+}
+
+/* Re-open button injected next to the share-mode banner. */
+#btn-share-preview {
+    display:none; align-items:center; gap:4px; padding:2px 8px;
+    background:#1d4ed8; color:#fff; font-size:11px; border-radius:3px;
+    border:1px solid #1d4ed8; cursor:pointer; margin-right:4px;
+}
+#btn-share-preview:hover { background:#1e40af; border-color:#1e40af; }
+body.share-mode #btn-share-preview { display:inline-flex; }
     </style>
 </head>
 <body class="text-gray-800">
@@ -262,6 +394,9 @@ body.share-mode .thumb-file-group .file-actions [data-action="rename"] { display
             <div id="share-mode-banner" title="Read-only Share mode. ROI editing requires acquiring an exclusive lock.">
                 <span>🔒</span><span>Share view</span>
             </div>
+            <button type="button" id="btn-share-preview" title="Open the simplified compound comparison preview">
+                <span>📊</span><span>Preview</span>
+            </button>
             <div id="view-mode-toggle" class="flex items-center text-[11px] border border-gray-300 rounded overflow-hidden" title="Compound mode focuses on a single MSI compound across all sections; Free shows every visible layer per section.">
                 <button data-mode="free" class="px-2 py-1 bg-white text-gray-700">Free</button>
                 <button data-mode="compound" class="px-2 py-1 bg-blue-600 text-white">Compound</button>
@@ -570,6 +705,89 @@ function backfillLegacyCompoundMeta(project) {
             };
         }
     }
+}
+
+// =============================================================
+// Share-Only result preview helpers
+// =============================================================
+
+// Format a positive number as "M.MM*10^E" matching the screenshots in the
+// admin briefing. Falls back to a plain "—" when the value isn't finite.
+function formatScientific(v) {
+    if (!Number.isFinite(v)) return '—';
+    if (v === 0) return '0';
+    const sign = v < 0 ? '-' : '';
+    const abs = Math.abs(v);
+    const exp = Math.floor(Math.log10(abs));
+    const m = abs / Math.pow(10, exp);
+    if (exp === 0) return sign + m.toFixed(2);
+    return sign + m.toFixed(2) + '*10^' + exp;
+}
+
+// Longest leading substring shared by every section displayName.
+// Used as the row-1 column header in the preview stats table so projects
+// such as "260415_Sho_Lung_Ctrl1" / "_KO1" surface the common prefix
+// "260415_Sho_Lung_" once instead of repeating it per column.
+function findCommonNamePrefix(names) {
+    const arr = (names || []).map(s => String(s == null ? '' : s));
+    if (arr.length === 0) return '';
+    if (arr.length === 1) return arr[0];
+    let prefix = arr[0];
+    for (let i = 1; i < arr.length; i++) {
+        let j = 0;
+        while (j < prefix.length && j < arr[i].length && prefix[j] === arr[i][j]) j++;
+        prefix = prefix.slice(0, j);
+        if (!prefix) break;
+    }
+    return prefix;
+}
+
+// Produce the preview header title.
+//   role === 'admin' → "Urea (m/z)61.15>44,(Cone)25,(Collision)23_50x50μm"
+//   role !== 'admin' → "Urea"  (compound name only — keeps machine params
+//                                 hidden from share recipients)
+function buildCompoundTitle(focusKey, project, role) {
+    if (!focusKey) return '';
+    let meta = null;
+    let pixelSize = null;
+    for (const sec of (project && project.sections) || []) {
+        const ent = (sec.msiSeries || {})[focusKey];
+        if (ent && ent.compoundMeta && !meta) meta = ent.compoundMeta;
+        const wc = sec.meta && sec.meta.world_coords;
+        if (wc && wc.msi_um_per_px && !pixelSize) pixelSize = wc.msi_um_per_px;
+        if (meta && pixelSize) break;
+    }
+    const base = (meta && meta.base) || formatDisplayName(focusKey);
+    if (role !== 'admin') return base;
+    const parts = [];
+    if (meta && (meta.precursor != null || meta.product != null)) {
+        const prec = meta.precursor != null ? meta.precursor : '?';
+        const prod = meta.product != null ? meta.product : '?';
+        parts.push('(m/z)' + prec + '>' + prod);
+    }
+    if (meta && meta.cv != null) parts.push('(Cone)' + meta.cv);
+    if (meta && meta.ce != null) parts.push('(Collision)' + meta.ce);
+    let title = base;
+    if (parts.length) title += ' ' + parts.join(',');
+    if (pixelSize && Number.isFinite(pixelSize.x) && Number.isFinite(pixelSize.y)) {
+        title += '_' + pixelSize.x + 'x' + pixelSize.y + 'μm';
+    }
+    return title;
+}
+
+// Choose a "round" physical length (μm) for the preview scalebar so the
+// drawn width lands somewhere near the requested target (~140 px). Mirrors
+// the NICE table used in SectionPanel.updateScaleBar so the preview's
+// scalebar reads in the same units users already see in the main view.
+function pickPreviewScalebarLength(umPerPx, targetPx) {
+    if (!Number.isFinite(umPerPx) || umPerPx <= 0) return null;
+    const NICE = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
+    const wantUm = targetPx * umPerPx;
+    let chosen = NICE[0];
+    for (const v of NICE) {
+        if (v <= wantUm) chosen = v;
+    }
+    return chosen;
 }
 
 function pointInPolygon(x, y, vertices) {
@@ -1607,13 +1825,16 @@ class SectionPanel {
                     const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
                     const lum = 0.299*r + 0.587*g + 0.114*b;
                     const n = Math.max(0, Math.min(1, (lum - settings.vmin) / range));
-                    // Only the source PNG's truly out-of-raster pixels (alpha=0
-                    // from rasterRowsToPngDataUrl) stay transparent. Everything
-                    // inside the raster — even very low signal — gets a Plasma
-                    // colour so MSI Opacity at 100 % covers HE across the whole
-                    // measured area, not just the bright peaks.
+                    // Out-of-raster pixels stay transparent; near-zero raster
+                    // pixels are forced to opaque black so MSI Opacity still
+                    // covers HE across the whole measured area but the dark
+                    // Plasma navy doesn't show through. Matches the rule used
+                    // by renderMsiThumbnail() so the main canvas and the
+                    // thumbnails share the same near-zero appearance.
                     if (a === 0) {
                         d[i] = 0; d[i+1] = 0; d[i+2] = 0; d[i+3] = 0;
+                    } else if (lum < 1) {
+                        d[i] = 0; d[i+1] = 0; d[i+2] = 0; d[i+3] = 255;
                     } else {
                         const c = PLASMA_LUT[Math.round(n * 255)];
                         d[i] = c[0]; d[i+1] = c[1]; d[i+2] = c[2]; d[i+3] = 255;
@@ -5357,6 +5578,263 @@ function openShareInfoModal(info, opts) {
 }
 
 // ---------------------------------------------------------------------------
+// Share-Only Result Preview overlay
+// ---------------------------------------------------------------------------
+// Shown immediately after a share-mode bootstrap. Mirrors the "compound vs.
+// compound" comparison sheet shown in admin briefings: a single MSI compound
+// is compared across every section side-by-side, with a small Max/Avg
+// intensity table. The overlay sits on top of the fully-hydrated detailed
+// UI; the close button just removes the overlay so the underlying viewer
+// (Range editor, ROI tools, Method table) is immediately operable.
+
+const SharePreview = {
+    overlay: null,
+    role: 'viewer',
+    compoundKeys: [],
+
+    isOpen() { return !!(this.overlay && document.body.contains(this.overlay)); },
+
+    close() {
+        if (this.overlay) {
+            this.overlay.remove();
+            this.overlay = null;
+        }
+    },
+
+    open(project, role) {
+        if (!project || !Array.isArray(project.sections) || project.sections.length === 0) return;
+        this.role = role || 'viewer';
+        this.close();
+
+        const allKeys = new Set();
+        for (const sec of project.sections) {
+            for (const k of Object.keys(sec.msiSeries || {})) {
+                if (/^MSI_/i.test(k)) allKeys.add(k);
+            }
+        }
+        if (allKeys.size === 0) return;
+        this.compoundKeys = Array.from(allKeys);
+
+        if (App.viewMode !== 'compound') App.setViewMode('compound');
+        const desiredFocus = (App.focusCompoundKey && allKeys.has(App.focusCompoundKey))
+            ? App.focusCompoundKey
+            : this.compoundKeys[0];
+        // Always call setFocusCompoundKey so every panel runs renderComposite
+        // once more — guarantees the cdisp canvases reflect the current focus
+        // before we sample them with toDataURL().
+        App.setFocusCompoundKey(desiredFocus);
+
+        const overlay = document.createElement('div');
+        overlay.id = 'share-preview-overlay';
+        overlay.innerHTML = `
+            <div class="preview-header">
+                <div class="preview-title" data-preview-title></div>
+                <div class="preview-header-right">
+                    <div class="preview-headerbar">
+                        <span class="bar" data-headerbar-bar></span>
+                        <span class="label" data-headerbar-label></span>
+                    </div>
+                    <button type="button" class="preview-close" title="Close preview" data-preview-close>×</button>
+                </div>
+            </div>
+            <div class="preview-body">
+                <div class="preview-method-panel">
+                    <h3>Method (MRM)</h3>
+                    <table class="preview-method-table">
+                        <thead data-method-head></thead>
+                        <tbody data-method-body></tbody>
+                    </table>
+                </div>
+                <div class="preview-main">
+                    <div class="preview-image-grid" data-image-grid></div>
+                    <div class="preview-stats">
+                        <table>
+                            <thead data-stats-head></thead>
+                            <tbody data-stats-body></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="preview-colorbar">
+                    <span class="cb-label">×10<sup>4</sup></span>
+                    <canvas data-colorbar></canvas>
+                </div>
+            </div>`;
+        document.body.appendChild(overlay);
+        this.overlay = overlay;
+
+        overlay.querySelector('[data-preview-close]').addEventListener('click', () => this.close());
+
+        this._drawColorbar();
+        this._renderMethodList(project);
+        this.refresh(project);
+    },
+
+    refresh(project) {
+        if (!this.isOpen()) return;
+        const focusKey = App.focusCompoundKey;
+        const titleEl = this.overlay.querySelector('[data-preview-title]');
+        if (titleEl) titleEl.textContent = buildCompoundTitle(focusKey, project, this.role);
+        this._renderMethodHighlight(focusKey);
+        this._renderImageGrid(project, focusKey);
+        this._renderStatsTable(project, focusKey);
+        this._renderHeaderScalebar(project);
+    },
+
+    _drawColorbar() {
+        const cv = this.overlay.querySelector('[data-colorbar]');
+        if (!cv) return;
+        cv.width = 18;
+        cv.height = 256;
+        const ctx = cv.getContext('2d');
+        const img = ctx.createImageData(cv.width, cv.height);
+        for (let y = 0; y < cv.height; y++) {
+            const t = 1 - (y / (cv.height - 1));
+            const c = PLASMA_LUT[Math.round(t * 255)];
+            for (let x = 0; x < cv.width; x++) {
+                const idx = (y * cv.width + x) * 4;
+                img.data[idx] = c[0];
+                img.data[idx + 1] = c[1];
+                img.data[idx + 2] = c[2];
+                img.data[idx + 3] = 255;
+            }
+        }
+        ctx.putImageData(img, 0, 0);
+    },
+
+    _renderMethodList(project) {
+        const head = this.overlay.querySelector('[data-method-head]');
+        const body = this.overlay.querySelector('[data-method-body]');
+        if (!head || !body) return;
+        const isAdmin = this.role === 'admin';
+        const cols = isAdmin
+            ? ['Compound', 'Precursor', 'Product', 'CV', 'CE']
+            : ['Compound'];
+        head.innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
+
+        const rows = this.compoundKeys.map(key => {
+            let meta = null;
+            for (const sec of project.sections) {
+                const ent = (sec.msiSeries || {})[key];
+                if (ent && ent.compoundMeta) { meta = ent.compoundMeta; break; }
+            }
+            const base = (meta && meta.base) || formatDisplayName(key);
+            const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+            const tds = isAdmin
+                ? [
+                    `<td class="compound-cell">${safe(base)}</td>`,
+                    `<td>${meta && meta.precursor != null ? safe(meta.precursor) : '—'}</td>`,
+                    `<td>${meta && meta.product != null ? safe(meta.product) : '—'}</td>`,
+                    `<td>${meta && meta.cv != null ? safe(meta.cv) : '—'}</td>`,
+                    `<td>${meta && meta.ce != null ? safe(meta.ce) : '—'}</td>`,
+                  ]
+                : [`<td class="compound-cell">${safe(base)}</td>`];
+            return `<tr data-key="${safe(key)}">${tds.join('')}</tr>`;
+        });
+        body.innerHTML = rows.join('');
+
+        body.querySelectorAll('tr[data-key]').forEach(tr => {
+            tr.addEventListener('click', () => {
+                const key = tr.getAttribute('data-key');
+                if (!key || key === App.focusCompoundKey) return;
+                App.setFocusCompoundKey(key);
+                this.refresh(App.project);
+            });
+        });
+    },
+
+    _renderMethodHighlight(focusKey) {
+        const body = this.overlay.querySelector('[data-method-body]');
+        if (!body) return;
+        body.querySelectorAll('tr').forEach(tr => {
+            tr.classList.toggle('active', tr.getAttribute('data-key') === focusKey);
+        });
+    },
+
+    _renderImageGrid(project, focusKey) {
+        const grid = this.overlay.querySelector('[data-image-grid]');
+        if (!grid) return;
+        const sections = project.sections || [];
+        grid.style.gridTemplateColumns = `repeat(${Math.max(sections.length, 1)}, minmax(0, 1fr))`;
+        const cells = sections.map(sec => {
+            const safeName = String(sec.displayName || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+            const ent = (sec.msiSeries || {})[focusKey];
+            const projName = String(project.displayName || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+            const captionParts = [projName, safeName].filter(Boolean);
+            const caption = captionParts.join('_');
+            const panel = App.panels && App.panels.get(sec.id);
+            let body;
+            if (!ent || !panel || !panel.dom || !panel.dom.cdisp || panel.dom.cdisp.width === 0) {
+                body = '<div class="cell-empty">No data for this compound</div>';
+            } else {
+                let dataUrl = '';
+                try { dataUrl = panel.dom.cdisp.toDataURL('image/png'); }
+                catch (e) { console.warn('preview toDataURL failed', e); }
+                body = dataUrl
+                    ? `<img src="${dataUrl}" alt="${safeName}">`
+                    : '<div class="cell-empty">Render failed</div>';
+            }
+            return `
+                <div class="preview-image-cell">
+                    <div class="cell-title">${caption}</div>
+                    <div class="cell-img-wrap">${body}</div>
+                </div>`;
+        });
+        grid.innerHTML = cells.join('');
+    },
+
+    _renderStatsTable(project, focusKey) {
+        const head = this.overlay.querySelector('[data-stats-head]');
+        const body = this.overlay.querySelector('[data-stats-body]');
+        if (!head || !body) return;
+        const sections = project.sections || [];
+        const names = sections.map(s => s.displayName || '');
+        const commonPrefix = findCommonNamePrefix(names);
+        const colCount = sections.length;
+        const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const groupHead = commonPrefix
+            ? `<tr><th class="row-label-head" rowspan="2">File Name</th><th colspan="${colCount}">${safe(commonPrefix)}</th></tr>`
+            : `<tr><th class="row-label-head" rowspan="2">File Name</th><th colspan="${colCount}">&nbsp;</th></tr>`;
+        const colHead = '<tr>' + sections.map(s => {
+            const tail = (s.displayName || '').slice(commonPrefix.length) || (s.displayName || '');
+            return `<th>${safe(tail)}</th>`;
+        }).join('') + '</tr>';
+        head.innerHTML = groupHead + colHead;
+
+        const cellsFor = (extract) => sections.map(sec => {
+            const ent = (sec.msiSeries || {})[focusKey];
+            const v = ent ? extract(ent) : NaN;
+            return `<td>${formatScientific(Number(v))}</td>`;
+        }).join('');
+        body.innerHTML =
+            `<tr><th>Max Intensity</th>${cellsFor(ent => Array.isArray(ent.rawRange) ? ent.rawRange[1] : NaN)}</tr>` +
+            `<tr><th>Avg Intensity</th>${cellsFor(ent => ent.rawMean)}</tr>`;
+    },
+
+    _renderHeaderScalebar(project) {
+        const barEl = this.overlay.querySelector('[data-headerbar-bar]');
+        const labelEl = this.overlay.querySelector('[data-headerbar-label]');
+        if (!barEl || !labelEl) return;
+        let umPerPx = null;
+        for (const sec of project.sections || []) {
+            const wc = sec.meta && sec.meta.world_coords;
+            if (wc && wc.msi_um_per_px && Number.isFinite(wc.msi_um_per_px.x)) {
+                umPerPx = wc.msi_um_per_px.x;
+                break;
+            }
+        }
+        const chosen = pickPreviewScalebarLength(umPerPx, 140);
+        if (!chosen) {
+            barEl.style.width = '0';
+            labelEl.textContent = '';
+            return;
+        }
+        const px = chosen / umPerPx;
+        barEl.style.width = Math.max(40, Math.min(220, px)) + 'px';
+        labelEl.textContent = chosen >= 1000 ? (chosen / 1000) + ' mm' : chosen + ' μm';
+    },
+};
+
+// ---------------------------------------------------------------------------
 // Project management modal: lists local + server-side projects, lets the
 // master open / copy share URL / delete, and create new projects with all
 // the metadata up-front (name, experiment date, machine, matrix, Google
@@ -6515,6 +6993,21 @@ const App = {
         renderMemoForm();
         this.renderAnalysis();
         Toolbar.refreshAll();
+        // Show the simplified compound-comparison preview on top of the
+        // freshly-hydrated detailed view. The overlay is only auto-shown for
+        // share-mode visitors (recipients and admins); the master / local
+        // project flow keeps going straight to the detailed UI.
+        if (this.shareMode) {
+            const role = this.shareMode.role || 'viewer';
+            // Two rAFs so the section panels' ResizeObserver has had a chance
+            // to run setupCanvasSize() and renderComposite() once. Without
+            // this the cdisp width is still 0 and toDataURL would yield
+            // blank images.
+            requestAnimationFrame(() => requestAnimationFrame(() => {
+                try { SharePreview.open(project, role); }
+                catch (e) { console.warn('SharePreview.open failed', e); }
+            }));
+        }
     },
 
     renderEmpty() {
@@ -6891,6 +7384,13 @@ const App = {
         if (shareInfoBtn) shareInfoBtn.addEventListener('click', () => {
             if (!this.project || !this.project.shareInfo) return;
             openShareInfoModal(this.project.shareInfo);
+        });
+        const sharePreviewBtn = document.getElementById('btn-share-preview');
+        if (sharePreviewBtn) sharePreviewBtn.addEventListener('click', () => {
+            if (!this.shareMode || !this.project) return;
+            const role = this.shareMode.role || 'viewer';
+            try { SharePreview.open(this.project, role); }
+            catch (e) { console.warn('SharePreview.open failed', e); }
         });
         const helpBtn = document.getElementById('btn-help');
         if (helpBtn) helpBtn.addEventListener('click', () => { openHelpModal().catch(e => console.error(e)); });
