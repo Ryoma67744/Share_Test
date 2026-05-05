@@ -281,13 +281,22 @@ body.share-mode .thumb-file-group .file-actions [data-action="rename"] { display
     font-size:12px; padding:2px 6px; border:1px solid #cbd5e1;
     border-radius:3px; background:#fff;
 }
-#share-preview-overlay .preview-controls .preview-reset-zoom {
+#share-preview-overlay .preview-controls .preview-reset-zoom,
+#share-preview-overlay .preview-controls .preview-admin-login {
     padding:3px 10px; border:1px solid #cbd5e1; background:#fff;
     border-radius:3px; cursor:pointer; font-size:12px;
 }
 #share-preview-overlay .preview-controls .preview-reset-zoom:hover {
     background:#eef2ff; color:#1d4ed8; border-color:#93c5fd;
 }
+#share-preview-overlay .preview-controls .preview-admin-login {
+    border-color:#fbbf24; background:#fef3c7; color:#92400e;
+}
+#share-preview-overlay .preview-controls .preview-admin-login:hover {
+    background:#fde68a; color:#78350f; border-color:#f59e0b;
+}
+/* Already admin? hide the elevation button. */
+body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
 #share-preview-overlay .preview-controls [data-opacity-value] {
     font-variant-numeric:tabular-nums; min-width:42px; text-align:right;
 }
@@ -1949,22 +1958,23 @@ class SectionPanel {
                     const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
                     const lum = 0.299*r + 0.587*g + 0.114*b;
                     const n = Math.max(0, Math.min(1, (lum - settings.vmin) / range));
-                    // Compositing rule:
-                    //   - Out-of-raster pixels (a === 0) stay transparent so
-                    //     HE/IF can fill the area outside the MSI scan box.
-                    //   - In-raster pixels are always opaque, regardless of
-                    //     signal strength. Near-zero luminance gets forced to
-                    //     pure black instead of `lut[0]` so the colormap
-                    //     floor (Plasma navy / Hot black / Viridis purple)
-                    //     doesn't show as a tinted backdrop.
-                    // ctx.globalAlpha = settings.opacity controls the blend
-                    // with the HE layer drawn earlier, so 100 % opacity
-                    // gives a complete cover (HE invisible inside the
-                    // raster, only visible around it) and lower opacity
-                    // proportionally reveals HE through the entire raster.
-                    if (a === 0) {
-                        d[i] = 0; d[i+1] = 0; d[i+2] = 0; d[i+3] = 0;
-                    } else if (lum < 1) {
+                    // Compositing rule (requirement: "完全な重ね合わせ" —
+                    // at 100 % MSI opacity HE is fully invisible inside the
+                    // MSI raster):
+                    //   - Out-of-grid pixels (a === 0; common in sparse
+                    //     scans where rasterRowsToPngDataUrl skips cells the
+                    //     scanner didn't visit) become opaque black so HE
+                    //     can't leak through the gaps.
+                    //   - In-raster near-zero pixels (lum < 1) also become
+                    //     opaque black so the colormap floor (Plasma navy /
+                    //     Hot black / Viridis purple) doesn't show as a
+                    //     tinted backdrop.
+                    //   - Signal pixels get the active colormap.
+                    // ctx.globalAlpha = settings.opacity then handles the
+                    // blend with HE: 100 % covers HE completely inside the
+                    // raster, lower opacity proportionally reveals HE
+                    // through every in-raster pixel.
+                    if (a === 0 || lum < 1) {
                         d[i] = 0; d[i+1] = 0; d[i+2] = 0; d[i+3] = 255;
                     } else {
                         const c = lut[Math.round(n * 255)];
@@ -3978,6 +3988,37 @@ function openShareUnlockModal(slug) {
     return p;
 }
 
+// Admin-elevation modal shown from inside the public preview overlay.
+// Distinct from openShareUnlockModal so users on a public link don't see
+// "閲覧パスワード" copy that contradicts the no-password-needed flow.
+function openAdminLoginModal(slug) {
+    const safeSlug = String(slug || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const html = `
+        <h2>🔑 Admin login</h2>
+        <form>
+          <p style="font-size:11px;color:#475569;margin-bottom:6px;">
+            <code>${safeSlug}</code> の admin password を入力してください。<br>
+            管理者として認証されると Method (MRM) の Precursor / Product / CV / CE が見えるようになります。
+          </p>
+          <label>Admin password
+            <input type="password" name="pw" required autocomplete="current-password">
+          </label>
+          <p data-err style="color:#b91c1c;font-size:11px;min-height:14px;"></p>
+          <div class="modal-actions">
+            <button type="button" class="btn" data-modal-cancel>Cancel</button>
+            <button type="submit" class="btn primary" data-modal-ok>Login</button>
+          </div>
+        </form>`;
+    const p = openModal(html);
+    const card = openModal._card;
+    card._collect = () => {
+        const pw = (card.querySelector('[name="pw"]').value || '').trim();
+        if (!pw) { card.querySelector('[data-err]').textContent = 'パスワードが必要です'; return null; }
+        return pw;
+    };
+    return p;
+}
+
 const Wizards = {
     async newProject() {
         const html = `
@@ -5451,7 +5492,33 @@ async function publishProjectToShare() {
             _rois: roisPayload,
             _is_public: !!meta.isPublic,
         };
-        const result = await SupabaseClient.upsertProjectDoc(args);
+        // The 9-arg signature including `_is_public` was added in a later
+        // share_locks.sql revision. If the user's Supabase project still
+        // has the older 8-arg function, supabase-js raises PGRST202
+        // "Could not find the function" with the new arg list. Retry
+        // without `_is_public` so non-public publishes still succeed; if
+        // the user actually wanted a public link, error out with a
+        // clear instruction since the SQL update is mandatory.
+        let result;
+        try {
+            result = await SupabaseClient.upsertProjectDoc(args);
+        } catch (e) {
+            const errMsg = String((e && (e.message || e.details || e.hint)) || '');
+            const isMissingFn = (e && e.code === 'PGRST202')
+                || /Could not find the function/i.test(errMsg);
+            if (!isMissingFn) throw e;
+            if (args._is_public) {
+                throw new Error(
+                    'Public 共有を使うには Supabase の SQL を最新版に更新してください。' +
+                    'Supabase SQL Editor で supabase/share_locks.sql の最新版を実行 (再適用) してください。'
+                );
+            }
+            console.warn('upsert_project_doc(_is_public) not found — retrying with the 8-arg signature. ' +
+                'Apply supabase/share_locks.sql (the latest revision) in Supabase to enable public-link sharing.');
+            const fallbackArgs = Object.assign({}, args);
+            delete fallbackArgs._is_public;
+            result = await SupabaseClient.upsertProjectDoc(fallbackArgs);
+        }
         if (!result || result.ok !== true) {
             throw new Error(result && result.reason ? result.reason : 'upsert_failed');
         }
@@ -6248,6 +6315,7 @@ const SharePreview = {
                         <input type="checkbox" data-he-mono> HE モノクロ
                     </label>
                     <button type="button" class="preview-reset-zoom" data-reset-zoom>Reset zoom</button>
+                    <button type="button" class="preview-admin-login" data-admin-login title="Admin password でログイン">🔑 Admin</button>
                 </div>
                 <div class="preview-header-right">
                     <div class="preview-headerbar">
@@ -6346,9 +6414,68 @@ const SharePreview = {
             });
         }
 
+        // Admin login button — only useful in share-mode and only while the
+        // current session is a viewer. Hide entirely outside share-mode or
+        // when the visitor already has admin role (CSS also hides via
+        // body.share-admin, but a JS hide keeps tab order tidy).
+        const adminLoginBtn = overlay.querySelector('[data-admin-login]');
+        if (adminLoginBtn) {
+            const inShareMode = !!(App && App.shareMode);
+            const isAdmin = inShareMode && App.shareMode.role === 'admin';
+            if (!inShareMode || isAdmin) adminLoginBtn.style.display = 'none';
+            adminLoginBtn.addEventListener('click', () => this._promptAdminLogin());
+        }
+
         this._drawColorbar();
         this._renderMethodList(project);
         this.refresh(project);
+    },
+
+    // Elevate the current share-mode viewer session to admin. Reuses the
+    // existing unlock_project RPC (same one the password modal calls) but
+    // checks that the returned role is admin — typing a viewer password
+    // here would be confusing, so we reject anything that isn't admin.
+    // After success, the new session is cached and the page reloads so
+    // bootstrapShareMode picks up the admin token, body.share-admin
+    // class, and wider Method (MRM) columns.
+    async _promptAdminLogin() {
+        if (!App || !App.shareMode || !App.shareMode.slug) {
+            showToast('Share mode ではありません');
+            return;
+        }
+        const slug = App.shareMode.slug;
+        const pw = await openAdminLoginModal(slug);
+        if (!pw) return;
+        let raw;
+        try {
+            raw = await SupabaseClient.unlockProject(slug, pw);
+        } catch (e) {
+            console.warn('admin unlock_project failed', e);
+            showToast('パスワードが違います');
+            return;
+        }
+        const row = Array.isArray(raw) ? raw[0] : raw;
+        if (!row || !row.token) {
+            showToast('パスワードが違います');
+            return;
+        }
+        if (row.role !== 'admin') {
+            showToast('Admin password ではありません (viewer pass を入力したようです)');
+            return;
+        }
+        const session = {
+            slug,
+            token: row.token,
+            role: 'admin',
+            expiresAt: row.expires_at,
+            isPublic: !!App.shareMode.isPublic,
+        };
+        try { sessionStorage.setItem('desi:share:' + slug, JSON.stringify(session)); } catch (e) {}
+        showToast('Admin としてログインしました', 1800);
+        // Reload so bootstrap re-runs with the new admin token and the
+        // admin-only UI (share-admin body class + wider MRM columns)
+        // initialises cleanly.
+        setTimeout(() => location.reload(), 700);
     },
 
     refresh(project) {
@@ -6455,9 +6582,18 @@ const SharePreview = {
             if (!ent || !panel || !panel.dom || !panel.dom.cdisp || panel.dom.cdisp.width === 0) {
                 body = '<div class="cell-empty">No data for this compound</div>';
             } else {
+                // Bake the master-saved rotation into a fresh canvas so the
+                // resulting <img> has the correct natural width/height for
+                // `object-fit:contain` to letterbox cleanly into the cell.
+                // Doing the rotation via CSS transform on the stage caused
+                // the rotated bbox to overflow the cell wrap — leading to
+                // the "初期表示が見切れている" symptom for portrait MSI scans.
                 let dataUrl = '';
-                try { dataUrl = panel.dom.cdisp.toDataURL('image/png'); }
-                catch (e) { console.warn('preview toDataURL failed', e); }
+                try {
+                    const rotDeg = (this._sectionRotations[idx] || 0) - 90;
+                    const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
+                    dataUrl = baked.toDataURL('image/png');
+                } catch (e) { console.warn('preview bake failed', e); }
                 body = dataUrl
                     ? `<img src="${dataUrl}" alt="${safeName}" data-cell-img>`
                     : '<div class="cell-empty">Render failed</div>';
@@ -6465,8 +6601,8 @@ const SharePreview = {
             // Per-section scalebar — read μm/px from this section's own
             // world_coords so heterogeneous projects (different acquisition
             // resolution per slide) render correctly. The bar lives inside
-            // the same transformed stage as the <img> so it grows / rotates
-            // with the image when the user zooms or rotates the cell.
+            // the same transformed stage as the <img> so it grows with
+            // the image when the user zooms the cell.
             const wc = sec && sec.meta && sec.meta.world_coords;
             const umPerPx = wc && wc.msi_um_per_px && Number.isFinite(wc.msi_um_per_px.x)
                 ? wc.msi_um_per_px.x : null;
@@ -6488,10 +6624,8 @@ const SharePreview = {
         });
         grid.innerHTML = cells.join('');
 
-        // Attach pan/zoom handlers + apply initial rotation via CSS transform
-        // on the stage element (so the scalebar and image scale together).
-        // Cells without an image (e.g. compound missing in this section) get
-        // the rotation applied to the placeholder but no interaction wiring.
+        // Attach pan/zoom handlers. Rotation is already baked into the image
+        // pixels above so _applyCellTransform only handles translate + scale.
         const wraps = grid.querySelectorAll('.cell-img-wrap');
         wraps.forEach(wrap => {
             const idx = Number(wrap.getAttribute('data-cell-idx'));
@@ -6504,27 +6638,38 @@ const SharePreview = {
         });
     },
 
-    // Compose the cell stage's CSS transform from the per-cell pan/zoom
-    // state and the master-saved rotation. Order is translate → rotate →
-    // scale so rotation pivots around the visual center after pan,
-    // mirroring the detailed view's `viewer-rot` transform composition.
-    //
-    // The detailed view's CSS uses `rotate(calc(var(--vt-rot) - 90deg))` to
-    // offset the -90° baked into renderComposite when MSI is the canvas
-    // reference. shareDefaultRotation captures the raw `vt-rot` slider
-    // value, so we apply the same -90° here to land on master's exact
-    // visible orientation.
+    // Render `srcCanvas` into a new canvas rotated by `rotDeg`. Output
+    // canvas is sized to the rotated bounding box so the resulting <img>
+    // has the correct intrinsic dimensions for object-fit:contain to
+    // letterbox without clipping.
+    _bakeRotatedCanvas(srcCanvas, rotDeg) {
+        const rad = (Number(rotDeg) || 0) * Math.PI / 180;
+        const w = srcCanvas.width, h = srcCanvas.height;
+        if (rad === 0) return srcCanvas;
+        const cos = Math.abs(Math.cos(rad));
+        const sin = Math.abs(Math.sin(rad));
+        const newW = Math.max(1, Math.round(w * cos + h * sin));
+        const newH = Math.max(1, Math.round(w * sin + h * cos));
+        const out = document.createElement('canvas');
+        out.width = newW; out.height = newH;
+        const ctx = out.getContext('2d');
+        ctx.translate(newW / 2, newH / 2);
+        ctx.rotate(rad);
+        ctx.drawImage(srcCanvas, -w / 2, -h / 2);
+        return out;
+    },
+
+    // Per-cell pan/zoom transform. Rotation is baked into the <img> at
+    // _renderImageGrid time, so we only translate + scale here.
     _applyCellTransform(idx, reset) {
         if (reset) this._cellTransforms[idx] = { tx: 0, ty: 0, scale: 1 };
         const t = this._cellTransforms[idx] || (this._cellTransforms[idx] = { tx: 0, ty: 0, scale: 1 });
-        const rotRaw = this._sectionRotations[idx] || 0;
-        const rot = rotRaw - 90;
         const grid = this.overlay && this.overlay.querySelector('[data-image-grid]');
         const wrap = grid && grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
         const stage = wrap && wrap.querySelector('[data-cell-stage]');
         if (!stage) return;
         stage.style.transform =
-            `translate(${t.tx}px, ${t.ty}px) rotate(${rot}deg) scale(${t.scale})`;
+            `translate(${t.tx}px, ${t.ty}px) scale(${t.scale})`;
         stage.style.transformOrigin = '50% 50%';
     },
 
