@@ -771,10 +771,14 @@ function formatScientific(v) {
 // Used as the row-1 column header in the preview stats table so projects
 // such as "260415_Sho_Lung_Ctrl1" / "_KO1" surface the common prefix
 // "260415_Sho_Lung_" once instead of repeating it per column.
+//
+// Single-section projects and projects where every section has the same
+// name return "" — _renderStatsTable falls back to the project displayName
+// in those cases so the row-1 label still has useful content while the
+// per-column row stays the source of truth for section identity.
 function findCommonNamePrefix(names) {
     const arr = (names || []).map(s => String(s == null ? '' : s));
     if (arr.length === 0) return '';
-    if (arr.length === 1) return arr[0];
     let prefix = arr[0];
     for (let i = 1; i < arr.length; i++) {
         let j = 0;
@@ -782,6 +786,10 @@ function findCommonNamePrefix(names) {
         prefix = prefix.slice(0, j);
         if (!prefix) break;
     }
+    // If the "prefix" still equals every section name (single section, or
+    // all-identical names), there is no useful common-prefix grouping —
+    // signal that to the caller by returning "".
+    if (arr.every(n => n === prefix)) return '';
     return prefix;
 }
 
@@ -1936,16 +1944,15 @@ class SectionPanel {
                     const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
                     const lum = 0.299*r + 0.587*g + 0.114*b;
                     const n = Math.max(0, Math.min(1, (lum - settings.vmin) / range));
-                    // Out-of-raster pixels stay transparent; near-zero raster
-                    // pixels are forced to opaque black so MSI Opacity still
-                    // covers HE across the whole measured area but the dark
-                    // colormap floor doesn't show through. Matches the rule
-                    // used by renderMsiThumbnail() so the main canvas and
-                    // the thumbnails share the same near-zero appearance.
-                    if (a === 0) {
+                    // Out-of-raster pixels and in-raster near-zero pixels both
+                    // become transparent so the HE/IF backdrop drawn earlier
+                    // shows through. Without this, the colormap floor (Plasma
+                    // navy / Hot black / etc.) opaquely covers HE in low-signal
+                    // areas. The viewer-host CSS background is #000 so cells
+                    // without an HE layer still appear black — matching the
+                    // thumbnail row's near-zero look.
+                    if (a === 0 || lum < 1) {
                         d[i] = 0; d[i+1] = 0; d[i+2] = 0; d[i+3] = 0;
-                    } else if (lum < 1) {
-                        d[i] = 0; d[i+1] = 0; d[i+2] = 0; d[i+3] = 255;
                     } else {
                         const c = lut[Math.round(n * 255)];
                         d[i] = c[0]; d[i+1] = c[1]; d[i+2] = c[2]; d[i+3] = 255;
@@ -6190,12 +6197,18 @@ const SharePreview = {
         const commonPrefix = findCommonNamePrefix(names);
         const colCount = sections.length;
         const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
-        const groupHead = commonPrefix
-            ? `<tr><th class="row-label-head" rowspan="2">File Name</th><th colspan="${colCount}">${safe(commonPrefix)}</th></tr>`
-            : `<tr><th class="row-label-head" rowspan="2">File Name</th><th colspan="${colCount}">&nbsp;</th></tr>`;
+        // Row 1 (group header) shows the shared prefix when the sections form
+        // an obvious cohort; otherwise fall back to the project displayName so
+        // the cell never repeats a value that already appears below in row 2.
+        const groupLabel = commonPrefix || project.displayName || '';
+        const groupHead = `<tr><th class="row-label-head" rowspan="2">File Name</th><th colspan="${colCount}">${safe(groupLabel) || '&nbsp;'}</th></tr>`;
+        // Row 2 strips the common prefix from each section name; when there is
+        // no shared prefix (single-section projects, fully-distinct names),
+        // show the full section name unchanged.
         const colHead = '<tr>' + sections.map(s => {
-            const tail = (s.displayName || '').slice(commonPrefix.length) || (s.displayName || '');
-            return `<th>${safe(tail)}</th>`;
+            const fullName = s.displayName || '';
+            const tail = commonPrefix ? fullName.slice(commonPrefix.length) : fullName;
+            return `<th>${safe(tail || fullName)}</th>`;
         }).join('') + '</tr>';
         head.innerHTML = groupHead + colHead;
 
