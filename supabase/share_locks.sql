@@ -102,6 +102,7 @@ grant execute on function public.release_roi_lock(text)        to anon, authenti
 -- works end-to-end.
 alter table public.projects add column if not exists updated_at timestamptz not null default now();
 alter table public.projects add column if not exists meta jsonb not null default '{}'::jsonb;
+alter table public.projects add column if not exists is_public boolean not null default false;
 alter table public.rois     add column if not exists name        text;
 
 -- ---- 2b. Master credential (Phase 1) ------------------------
@@ -206,8 +207,10 @@ grant execute on function public.request_publish_session(text, text) to anon, au
 -- be called once per "Publish to share" click.
 -- Phase 1 added _master_pw as the first argument; the previous (7-arg)
 -- signature must be dropped explicitly because CREATE OR REPLACE doesn't
--- replace functions whose argument list changed.
+-- replace functions whose argument list changed. Phase 3 adds _is_public
+-- to allow public-link sharing.
 drop function if exists public.upsert_project_doc(text, text, jsonb, text, text, jsonb, jsonb);
+drop function if exists public.upsert_project_doc(text, text, text, jsonb, text, text, jsonb, jsonb);
 
 create or replace function public.upsert_project_doc(
     _master_pw     text,
@@ -217,7 +220,8 @@ create or replace function public.upsert_project_doc(
     _viewer_pw     text,
     _admin_pw      text default null,
     _sections      jsonb default '[]'::jsonb,
-    _rois          jsonb default '[]'::jsonb
+    _rois          jsonb default '[]'::jsonb,
+    _is_public     boolean default false
 )
 returns jsonb language plpgsql security definer set search_path = public as $$
 declare
@@ -229,8 +233,13 @@ begin
     if _slug is null or length(trim(_slug)) = 0 then
         return jsonb_build_object('ok', false, 'reason', 'slug_required');
     end if;
-    if _viewer_pw is null or length(_viewer_pw) < 4 then
-        return jsonb_build_object('ok', false, 'reason', 'viewer_password_required');
+    -- Public links don't carry a viewer password; the column-NOT-NULL
+    -- constraint on project_credentials is sidestepped by simply NOT
+    -- inserting a viewer row when _is_public is true.
+    if not coalesce(_is_public, false) then
+        if _viewer_pw is null or length(_viewer_pw) < 4 then
+            return jsonb_build_object('ok', false, 'reason', 'viewer_password_required');
+        end if;
     end if;
     -- Master credential check (Phase 1). Even if the anon key is leaked,
     -- this RPC will refuse to write without the master password.
@@ -238,12 +247,13 @@ begin
         raise exception 'unauthorized' using errcode = '28000';
     end if;
 
-    insert into public.projects(slug, display_name, anatomy_palette, meta)
+    insert into public.projects(slug, display_name, anatomy_palette, meta, is_public)
         values (
             _slug,
             coalesce(_display_name, _slug),
             coalesce(_meta->'anatomyPalette', '{}'::jsonb),
-            jsonb_strip_nulls(jsonb_build_object('memo', coalesce(_meta->'memo', '{}'::jsonb)))
+            jsonb_strip_nulls(jsonb_build_object('memo', coalesce(_meta->'memo', '{}'::jsonb))),
+            coalesce(_is_public, false)
         )
         on conflict (slug) do update
         set display_name    = excluded.display_name,
@@ -253,11 +263,25 @@ begin
                                   '{memo}',
                                   coalesce(_meta->'memo', '{}'::jsonb)
                               ),
+            is_public       = excluded.is_public,
             updated_at      = now()
         returning id into v_pid;
 
     -- (Re)set credentials. set_project_password is provided by schema.sql.
-    perform public.set_project_password(_slug, 'viewer', _viewer_pw);
+    if coalesce(_is_public, false) then
+        -- Switching a private project to public must clear any stored
+        -- viewer hash so the project can never accidentally accept the
+        -- old password again. Admin credential is unaffected.
+        delete from public.project_credentials
+            where project_id = v_pid and role = 'viewer';
+        -- Existing viewer-role tokens issued under the old password
+        -- become moot anyway, but proactively clearing them stops a
+        -- stale viewer session from outliving the privacy change.
+        delete from public.session_tokens
+            where project_id = v_pid and role = 'viewer';
+    else
+        perform public.set_project_password(_slug, 'viewer', _viewer_pw);
+    end if;
     if _admin_pw is not null and length(_admin_pw) >= 4 then
         perform public.set_project_password(_slug, 'admin', _admin_pw);
     end if;
@@ -309,7 +333,45 @@ begin
 end;
 $$;
 
-grant execute on function public.upsert_project_doc(text, text, text, jsonb, text, text, jsonb, jsonb) to anon, authenticated;
+grant execute on function public.upsert_project_doc(text, text, text, jsonb, text, text, jsonb, jsonb, boolean) to anon, authenticated;
+
+-- ---- 3b. unlock_public_project: anonymous-token mint for is_public projects ----
+-- Mirrors unlock_project's "issue a 12-hour viewer token" behavior, but
+-- gates only on the projects.is_public flag (no password compare). The
+-- frontend tries this RPC first; on `not_public` it falls back to the
+-- password modal + unlock_project pair so private projects keep their
+-- existing flow.
+create or replace function public.unlock_public_project(_slug text)
+returns table (token text, role text, expires_at timestamptz)
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid     uuid;
+    v_token   text;
+    v_expires timestamptz;
+begin
+    if _slug is null or length(trim(_slug)) = 0 then
+        raise exception 'slug_required' using errcode = '22023';
+    end if;
+    select id into v_pid from public.projects
+        where slug = _slug and is_public = true
+        limit 1;
+    if v_pid is null then
+        raise exception 'not_public' using errcode = '28P02';
+    end if;
+    -- GC expired tokens like unlock_project does.
+    delete from public.session_tokens where expires_at < now();
+    v_token   := encode(gen_random_bytes(24), 'hex');
+    v_expires := now() + interval '12 hour';
+    insert into public.session_tokens(token, project_id, role, expires_at)
+        values (v_token, v_pid, 'viewer', v_expires);
+    token       := v_token;
+    role        := 'viewer';
+    expires_at  := v_expires;
+    return next;
+end
+$$;
+grant execute on function public.unlock_public_project(text) to anon, authenticated;
 
 -- ---- 4. Storage policies for the `atlases` bucket -----------
 -- schema.sql creates the bucket with `public = true`, which only governs
