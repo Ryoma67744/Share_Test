@@ -4311,9 +4311,16 @@ const Wizards = {
         // ---- State -----------------------------------------------------------
         const layerKey = heKeys[0];
         // Helper: source file id of an MSI compound key, or null for
-        // synthetic TIC / unknown.
+        // synthetic TIC / unknown. Per-source TIC keys (`__TIC_SRC|<fid>`)
+        // resolve back to their fid so writeWorldCoords / overrideStateFromSource
+        // route the alignment to the correct source automatically when the
+        // user picks a per-source TIC for landmark calibration.
         const fidOf = (msiKey) => {
-            if (!msiKey || msiKey === '__TIC__') return null;
+            if (!msiKey) return null;
+            if (msiKey === '__TIC__') return null;
+            if (typeof msiKey === 'string' && msiKey.startsWith('__TIC_SRC|')) {
+                return msiKey.slice('__TIC_SRC|'.length) || null;
+            }
             const ent = sec.msiSeries && sec.msiSeries[msiKey];
             return (ent && ent.sourceFileId) || null;
         };
@@ -4368,9 +4375,17 @@ const Wizards = {
         // of all MSI series intensities — useful for landmark picking on
         // multi-MRM lipidomics data where TIC is never an explicit channel.
         const offerSyntheticTic = allMsiKeys.length >= 2 && !realTicKey;
+        // candidateMsiKeys lists every value the persisted alignmentMsiKey
+        // hint may legally take. Per-source TIC keys (`__TIC_SRC|<fid>`)
+        // are added below once sourceFids is known, but the global
+        // `__TIC__` is included up-front so the validation below still
+        // accepts it on legacy projects.
         const candidateMsiKeys = offerSyntheticTic ? ['__TIC__', ...allMsiKeys] : allMsiKeys;
         const persistedMsi = sec.meta && sec.meta.alignmentMsiKey;
-        state.msiKey = (persistedMsi && candidateMsiKeys.includes(persistedMsi)) ? persistedMsi
+        const isPersistedTicSrc = typeof persistedMsi === 'string'
+            && persistedMsi.startsWith('__TIC_SRC|');
+        state.msiKey = (persistedMsi && (candidateMsiKeys.includes(persistedMsi) || isPersistedTicSrc))
+                     ? persistedMsi
                      : (realTicKey
                         || (offerSyntheticTic ? '__TIC__' : null)
                         || allMsiKeys[0]
@@ -4433,16 +4448,65 @@ const Wizards = {
             overrideStateFromSource(state, state.layerKey, fidOf(state.msiKey));
         }
 
+        // Synthetic TIC infrastructure. The user can pick from:
+        //   - TIC_KEY_ALL ('__TIC__')   = sum every MSI compound (existing behaviour)
+        //   - ticKeyForFid(fid)         = sum only the compounds belonging to one source
+        //
+        // The per-source variants make sense when the section holds multiple
+        // physical scans (each source has 2+ compounds) and the user wants
+        // to align HE against just one scan's bulk signal — useful when the
+        // global TIC is dominated by an off-tissue source. Source-specific
+        // TIC is only listed in single-source mode of the Source dropdown;
+        // in 両方 mode the global TIC is the natural fit.
+        const TIC_KEY_ALL = '__TIC__';
+        const ticKeyForFid = (fid) => '__TIC_SRC|' + fid;
+        const ticKeysToCompounds = new Map();
+        if (offerSyntheticTic) {
+            ticKeysToCompounds.set(TIC_KEY_ALL, allMsiKeys.slice());
+            for (const fid of sourceFids) {
+                const compounds = allMsiKeys.filter(k => {
+                    const ent = sec.msiSeries[k];
+                    return ent && ent.sourceFileId === fid;
+                });
+                if (compounds.length >= 2) {
+                    ticKeysToCompounds.set(ticKeyForFid(fid), compounds);
+                }
+            }
+        }
+        const isTicKey = (k) => typeof k === 'string' && ticKeysToCompounds.has(k);
+        const ticKeyLabel = (k) => {
+            if (k === TIC_KEY_ALL) return hasMultipleSources ? 'TIC (合成: 全 source)' : 'TIC (合成)';
+            if (typeof k === 'string' && k.startsWith('__TIC_SRC|')) {
+                const fid = k.slice('__TIC_SRC|'.length);
+                const fname = sourceLabels.get(fid) || fid;
+                return 'TIC (合成: ' + fname + ')';
+            }
+            return 'TIC';
+        };
+
         // ---- Modal HTML ------------------------------------------------------
         const layerOpts = heKeys.map(k => `<option value="${safe(k)}"${k===state.layerKey?' selected':''}>${safe(k)}</option>`).join('');
         const buildMsiOpts = (mode) => {
             const filtered = compoundsForMode(mode);
             const realPart = filtered.map(k => `<option value="${safe(k)}"${k===state.msiKey?' selected':''}>${safe(formatDisplayName(k))}</option>`).join('');
-            // Synthetic TIC sums every MSI series — only meaningful in the
-            // "__all__" mode where the user is treating sources as one.
-            const ticPart = (offerSyntheticTic && (mode === '__all__' || !hasSources))
-                ? `<option value="__TIC__"${state.msiKey==='__TIC__'?' selected':''}>TIC (合成)</option>`
-                : '';
+            // Synthetic TIC. In '両方' (__all__) mode list the global TIC
+            // (sum across every source). In single-source mode list that
+            // source's per-source TIC when one is registered (≥2 compounds
+            // in that source). This lets the user calibrate HE against
+            // just one scan's bulk signal instead of the cross-source mix.
+            let ticPart = '';
+            if (offerSyntheticTic) {
+                if (mode === '__all__' || !mode || !hasSources) {
+                    if (ticKeysToCompounds.has(TIC_KEY_ALL)) {
+                        ticPart = `<option value="${safe(TIC_KEY_ALL)}"${state.msiKey===TIC_KEY_ALL?' selected':''}>${safe(ticKeyLabel(TIC_KEY_ALL))}</option>`;
+                    }
+                } else if (sourceFids.includes(mode)) {
+                    const tk = ticKeyForFid(mode);
+                    if (ticKeysToCompounds.has(tk)) {
+                        ticPart = `<option value="${safe(tk)}"${state.msiKey===tk?' selected':''}>${safe(ticKeyLabel(tk))}</option>`;
+                    }
+                }
+            }
             return (filtered.length || ticPart) ? (ticPart + realPart) : `<option value="">(MSI なし)</option>`;
         };
         const msiOpts = buildMsiOpts(state.sourceMode);
@@ -4700,15 +4764,16 @@ const Wizards = {
         // ---- MSI dropdown ---------------------------------------------------
         if (msiSel) msiSel.addEventListener('change', () => {
             const next = msiSel.value;
-            // Accept either a real MSI series key or the synthetic '__TIC__'.
-            const isValid = next === '__TIC__'
+            // Accept either a real MSI series key, the global synthetic
+            // '__TIC__', or a per-source synthetic '__TIC_SRC|<fid>'.
+            const isValid = isTicKey(next)
                 ? offerSyntheticTic
                 : !!(sec.msiSeries && sec.msiSeries[next]);
             if (!next || !isValid) return;
             // Resolve a representative <img> for either real or synthetic keys
             // so the dimension-mismatch warning still fires correctly.
             const refForDims = (k) => {
-                if (k === '__TIC__') return computeSyntheticTic();
+                if (isTicKey(k)) return computeSyntheticTicForKey(k);
                 return panel.imageSources && panel.imageSources[k];
             };
             const oldImg = refForDims(state.msiKey);
@@ -4738,7 +4803,7 @@ const Wizards = {
             // tagged for the dropdown's source but visually tuned to a
             // different source. Compound mode only (Free draws every visible
             // MSI), and skip the synthetic TIC since it isn't a real layerKey.
-            if (next !== '__TIC__' && App && App.viewMode === 'compound') {
+            if (!isTicKey(next) && App && App.viewMode === 'compound') {
                 try { App.setFocusCompoundKey(next); } catch (er) { console.warn('setFocusCompoundKey from align modal failed', er); }
             }
             writeWorldCoords();
@@ -4811,13 +4876,34 @@ const Wizards = {
             // 2. Rebuild the MSI dropdown for the new source.
             msiSel.innerHTML = buildMsiOpts(next);
             const filtered = compoundsForMode(next);
-            const canKeepCurrent = state.msiKey === '__TIC__'
-                ? (next === '__all__' && offerSyntheticTic)
-                : filtered.includes(state.msiKey);
+            // Decide whether the current MSI selection survives the source
+            // switch. Compound keys are valid only when in the new source's
+            // filtered list; synthetic TIC keys are valid only in their
+            // matching mode (global TIC ↔ '__all__', per-source TIC ↔ that
+            // specific source).
+            const canKeepCurrent = (() => {
+                if (state.msiKey === TIC_KEY_ALL) return next === '__all__';
+                if (typeof state.msiKey === 'string' && state.msiKey.startsWith('__TIC_SRC|')) {
+                    return state.msiKey === ticKeyForFid(next);
+                }
+                return filtered.includes(state.msiKey);
+            })();
             if (!canKeepCurrent) {
-                state.msiKey = (next === '__all__' && offerSyntheticTic && !filtered.length)
-                    ? '__TIC__'
-                    : (filtered[0] || (offerSyntheticTic ? '__TIC__' : null));
+                if (next === '__all__') {
+                    state.msiKey = (offerSyntheticTic && ticKeysToCompounds.has(TIC_KEY_ALL))
+                        ? TIC_KEY_ALL
+                        : (filtered[0] || null);
+                } else {
+                    const tk = ticKeyForFid(next);
+                    if (offerSyntheticTic && ticKeysToCompounds.has(tk)) {
+                        // Prefer the per-source TIC as the default landmark
+                        // target — it's the cleanest visual for picking
+                        // anatomical landmarks against one scan.
+                        state.msiKey = tk;
+                    } else {
+                        state.msiKey = filtered[0] || null;
+                    }
+                }
             }
             msiSel.value = state.msiKey || '';
 
@@ -4840,8 +4926,11 @@ const Wizards = {
 
             syncUiFromState();
             // Sync background panel focus so the live preview paints the
-            // correct compound for the new source.
-            if (state.msiKey && state.msiKey !== '__TIC__'
+            // correct compound for the new source. Skip when the user
+            // picked a synthetic TIC (global or per-source) — TIC keys
+            // aren't real layerKeys, so leaving focus on whatever real
+            // compound was previously visible keeps the panel sensible.
+            if (state.msiKey && !isTicKey(state.msiKey)
                 && App && App.viewMode === 'compound') {
                 try { App.setFocusCompoundKey(state.msiKey); }
                 catch (er) { console.warn('setFocusCompoundKey from align modal (source change) failed', er); }
@@ -4886,12 +4975,19 @@ const Wizards = {
         // an <img> backed by a fresh dataURL; downstream paintMsiToColored
         // re-applies Plasma like for any other MSI thumbnail. Skips any series
         // whose dimensions don't match the modal's chosen reference size.
-        let syntheticTicImg = null;
-        const computeSyntheticTic = () => {
-            if (syntheticTicImg) return syntheticTicImg;
+        // Cache one synthetic TIC <img> per ticKey (global '__TIC__' or
+        // per-source '__TIC_SRC|<fid>'). The grayscale TIC is built by
+        // averaging the luminance of each contributing compound's
+        // already-rendered raster, so this only re-runs the first time a
+        // given ticKey is requested.
+        const syntheticTicCache = new Map();
+        const computeSyntheticTicForKey = (ticKey) => {
+            if (syntheticTicCache.has(ticKey)) return syntheticTicCache.get(ticKey);
+            const compounds = ticKeysToCompounds.get(ticKey);
+            if (!compounds || !compounds.length) return null;
             const dims = new Map();
             const usable = [];
-            for (const k of allMsiKeys) {
+            for (const k of compounds) {
                 const img = panel.imageSources && panel.imageSources[k];
                 if (!img || !img.complete || !img.naturalWidth) continue;
                 const dk = img.naturalWidth + 'x' + img.naturalHeight;
@@ -4939,9 +5035,10 @@ const Wizards = {
             const grayUrl = tmp.toDataURL('image/png');
             const im = new Image();
             im.src = grayUrl;
-            syntheticTicImg = im;
+            syntheticTicCache.set(ticKey, im);
             return im;
         };
+        const computeSyntheticTic = () => computeSyntheticTicForKey(TIC_KEY_ALL);
 
         // Cache colored dataURLs per MSI key so flipping the dropdown back to a
         // previously-shown compound is instant (no recompute).
@@ -4965,8 +5062,9 @@ const Wizards = {
                 }
             }
             // MSI: render whichever compound the user (or persisted state)
-            // picked, painted with Plasma. The synthetic '__TIC__' option sums
-            // all MSI series and goes through the same paint pipeline.
+            // picked, painted with Plasma. Both the global '__TIC__' and
+            // per-source '__TIC_SRC|<fid>' options go through the same paint
+            // pipeline via computeSyntheticTicForKey.
             const msiKey = state.msiKey;
             if (!msiKey) { msiImg.removeAttribute('src'); return; }
             if (coloredCache.has(msiKey)) {
@@ -4974,8 +5072,8 @@ const Wizards = {
                 return;
             }
             let srcImg = null, vmin = 0, vmax = 255;
-            if (msiKey === '__TIC__') {
-                srcImg = computeSyntheticTic();
+            if (isTicKey(msiKey)) {
+                srcImg = computeSyntheticTicForKey(msiKey);
                 // synthetic TIC is already self-normalised to [0,255]
             } else if (sec.msiSeries[msiKey]) {
                 srcImg = panel.imageSources && panel.imageSources[msiKey];
@@ -9190,6 +9288,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-07-r4</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-07-r5</div>
 </body>
 </html>
