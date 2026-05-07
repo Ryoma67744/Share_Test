@@ -4305,6 +4305,7 @@ const Wizards = {
             // preview paints the right raster, and Cancel needs to put the
             // user back where they were.
             focusKey: (App && App.focusCompoundKey) ? String(App.focusCompoundKey) : null,
+            sourceMode: (sec.meta && sec.meta.alignmentSourceMode) || null,
         };
 
         // ---- State -----------------------------------------------------------
@@ -4379,15 +4380,84 @@ const Wizards = {
         // session.
         overrideStateFromSource(state, state.layerKey, fidOf(state.msiKey));
 
+        // Build the list of distinct source files used by this section's
+        // MSI compounds. The Source dropdown lets the user pick one source
+        // (T saves only into that source's bySource entry) or the special
+        // "__all__" mode (T applies to every source — useful when two
+        // imports actually represent the same physical scan and a shared
+        // T is appropriate).
+        const sourceFids = [];
+        const sourceLabels = new Map();
+        for (const k of allMsiKeys) {
+            const ent = sec.msiSeries[k];
+            const fid = (ent && ent.sourceFileId) || null;
+            if (!fid || sourceLabels.has(fid)) continue;
+            sourceFids.push(fid);
+            const fileInfo = (sec.msiFiles && sec.msiFiles[fid]) || null;
+            sourceLabels.set(fid, (fileInfo && fileInfo.filename) || fid);
+        }
+        const hasSources = sourceFids.length > 0;
+        const hasMultipleSources = sourceFids.length > 1;
+        // Default mode: when only one source exists, lock to it. Otherwise
+        // prefer the saved alignmentSourceMode hint, then the source of the
+        // currently picked MSI, then "両方" (write a single T everywhere).
+        const persistedSourceMode = sec.meta && sec.meta.alignmentSourceMode;
+        const initialFidFromMsi = fidOf(state.msiKey);
+        state.sourceMode = (() => {
+            if (!hasSources) return null;
+            if (!hasMultipleSources) return sourceFids[0];
+            if (persistedSourceMode === '__all__') return '__all__';
+            if (persistedSourceMode && sourceFids.includes(persistedSourceMode)) return persistedSourceMode;
+            if (initialFidFromMsi && sourceFids.includes(initialFidFromMsi)) return initialFidFromMsi;
+            return '__all__';
+        })();
+        // Compounds belonging to the current source mode. "__all__" returns
+        // every MSI key so the dropdown stays full when the user wants a
+        // shared T.
+        const compoundsForMode = (mode) => {
+            if (mode === '__all__' || !mode) return allMsiKeys.slice();
+            return allMsiKeys.filter(k => {
+                const ent = sec.msiSeries[k];
+                return ent && ent.sourceFileId === mode;
+            });
+        };
+        // If the persisted MSI key isn't in the current source's compound
+        // list, fall back to the first compound that is (otherwise the
+        // dropdown would show a phantom "selected" option that doesn't
+        // exist in its options).
+        const filteredInit = compoundsForMode(state.sourceMode);
+        if (state.sourceMode && state.sourceMode !== '__all__'
+            && state.msiKey && state.msiKey !== '__TIC__'
+            && !filteredInit.includes(state.msiKey)) {
+            state.msiKey = filteredInit[0] || null;
+            overrideStateFromSource(state, state.layerKey, fidOf(state.msiKey));
+        }
+
         // ---- Modal HTML ------------------------------------------------------
         const layerOpts = heKeys.map(k => `<option value="${safe(k)}"${k===state.layerKey?' selected':''}>${safe(k)}</option>`).join('');
-        const realMsiOpts = allMsiKeys.map(k => `<option value="${safe(k)}"${k===state.msiKey?' selected':''}>${safe(formatDisplayName(k))}</option>`).join('');
-        const ticMsiOpt = offerSyntheticTic
-            ? `<option value="__TIC__"${state.msiKey==='__TIC__'?' selected':''}>TIC (合成)</option>`
+        const buildMsiOpts = (mode) => {
+            const filtered = compoundsForMode(mode);
+            const realPart = filtered.map(k => `<option value="${safe(k)}"${k===state.msiKey?' selected':''}>${safe(formatDisplayName(k))}</option>`).join('');
+            // Synthetic TIC sums every MSI series — only meaningful in the
+            // "__all__" mode where the user is treating sources as one.
+            const ticPart = (offerSyntheticTic && (mode === '__all__' || !hasSources))
+                ? `<option value="__TIC__"${state.msiKey==='__TIC__'?' selected':''}>TIC (合成)</option>`
+                : '';
+            return (filtered.length || ticPart) ? (ticPart + realPart) : `<option value="">(MSI なし)</option>`;
+        };
+        const msiOpts = buildMsiOpts(state.sourceMode);
+        // Source dropdown options. Hidden entirely when no compound has a
+        // sourceFileId (legacy projects).
+        const sourceOpts = hasSources
+            ? sourceFids.map((fid, idx) => {
+                const lbl = sourceLabels.get(fid) || fid;
+                const sel = state.sourceMode === fid ? ' selected' : '';
+                return `<option value="${safe(fid)}"${sel}>Source ${idx + 1}: ${safe(lbl)}</option>`;
+              }).join('')
+              + (hasMultipleSources
+                  ? `<option value="__all__"${state.sourceMode==='__all__'?' selected':''}>両方 (共通の T)</option>`
+                  : '')
             : '';
-        const msiOpts = (allMsiKeys.length || offerSyntheticTic)
-            ? (ticMsiOpt + realMsiOpts)
-            : `<option value="">(MSI なし)</option>`;
         const html = `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
               <h2 style="margin:0;">HE/IF ⇔ MSI Alignment</h2>
@@ -4395,6 +4465,9 @@ const Wizards = {
                 <label style="font-size:11px;color:#475569;">
                   Layer: <select data-align-layer style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;">${layerOpts}</select>
                 </label>
+                ${hasSources ? `<label style="font-size:11px;color:#475569;">
+                  Source: <select data-align-source style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;">${sourceOpts}</select>
+                </label>` : ''}
                 <label style="font-size:11px;color:#475569;">
                   MSI: <select data-align-msi ${(allMsiKeys.length || offerSyntheticTic) ? '' : 'disabled'} style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;">${msiOpts}</select>
                 </label>
@@ -4484,8 +4557,9 @@ const Wizards = {
 
         // ---- Wire DOM refs ---------------------------------------------------
         const $ = (sel) => card.querySelector(sel);
-        const layerSel = $('[data-align-layer]');
-        const msiSel   = $('[data-align-msi]');
+        const layerSel  = $('[data-align-layer]');
+        const sourceSel = $('[data-align-source]');
+        const msiSel    = $('[data-align-msi]');
         const flipLrEl = $('[data-flip-lr]');
         const flipUdEl = $('[data-flip-ud]');
         const scaleEl  = $('[data-scale]');
@@ -4522,19 +4596,30 @@ const Wizards = {
             // (and the fallback path in _resolveTHeToMsi) still see something
             // sensible.
             sec.meta.world_coords.T_he_to_msi = T;
-            // New: also stamp the per-source override for the MSI compound
-            // currently selected in the modal. Synthetic TIC has no
-            // sourceFileId — it's a cross-source visual aid only — so we
-            // skip writing per-source there and let the legacy field carry
-            // the user's intent.
-            const fid = fidOf(state.msiKey);
-            if (fid) {
-                sec.meta.world_coords.T_he_to_msi_by_source =
-                    sec.meta.world_coords.T_he_to_msi_by_source || {};
-                sec.meta.world_coords.T_he_to_msi_by_source[fid] = T;
+            // Per-source: route the T based on the Source dropdown.
+            //   - '__all__' → broadcast to every known source, so a single
+            //     align session calibrates them all (used when multiple
+            //     sources represent the same physical scan).
+            //   - single fid → only that source's bySource entry gets T.
+            //   - falsy (legacy section with no sourceFileId) → leave
+            //     T_he_to_msi_by_source untouched and rely on the legacy
+            //     field above.
+            sec.meta.world_coords.T_he_to_msi_by_source =
+                sec.meta.world_coords.T_he_to_msi_by_source || {};
+            const bySrc = sec.meta.world_coords.T_he_to_msi_by_source;
+            if (state.sourceMode === '__all__') {
+                for (const fid of sourceFids) bySrc[fid] = T;
+            } else if (state.sourceMode) {
+                bySrc[state.sourceMode] = T;
+            } else {
+                // Last-resort fallback for legacy sections — derive from the
+                // currently picked MSI compound's sourceFileId if any.
+                const fid = fidOf(state.msiKey);
+                if (fid) bySrc[fid] = T;
             }
             sec.meta.world_coords.msi_um_per_px = { x: state.msi_um_x, y: state.msi_um_y };
             if (state.msiKey) sec.meta.alignmentMsiKey = state.msiKey;
+            if (state.sourceMode) sec.meta.alignmentSourceMode = state.sourceMode;
         };
         const updatePreview = () => {
             writeWorldCoords();
@@ -4656,6 +4741,56 @@ const Wizards = {
             if (next !== '__TIC__' && App && App.viewMode === 'compound') {
                 try { App.setFocusCompoundKey(next); } catch (er) { console.warn('setFocusCompoundKey from align modal failed', er); }
             }
+            writeWorldCoords();
+            populateThumbs();
+            renderLandmarks();
+            updatePreview();
+        });
+
+        // ---- Source dropdown ------------------------------------------------
+        // Switching the source rebuilds the MSI dropdown so it only lists
+        // compounds belonging to the chosen source, swaps slider state to
+        // that source's bySource entry, and (in __all__ mode) makes the
+        // next Save broadcast T to every source.
+        if (sourceSel) sourceSel.addEventListener('change', () => {
+            const next = sourceSel.value;
+            if (!next) return;
+            state.sourceMode = next;
+            // Rebuild the MSI dropdown for the new source.
+            const newOpts = buildMsiOpts(next);
+            msiSel.innerHTML = newOpts;
+            // Pick a representative MSI: keep the current pick if it still
+            // belongs to the new source, otherwise default to the first
+            // compound now visible (or synthetic TIC in __all__ mode).
+            const filtered = compoundsForMode(next);
+            const canKeepCurrent = state.msiKey === '__TIC__'
+                ? (next === '__all__' && offerSyntheticTic)
+                : filtered.includes(state.msiKey);
+            if (!canKeepCurrent) {
+                state.msiKey = (next === '__all__' && offerSyntheticTic && (!filtered.length || !state.msiKey))
+                    ? '__TIC__'
+                    : (filtered[0] || (offerSyntheticTic ? '__TIC__' : null));
+                msiSel.value = state.msiKey || '';
+                overrideStateFromSource(state, state.layerKey, fidOf(state.msiKey));
+                syncUiFromState();
+                if (state.msiKey && state.msiKey !== '__TIC__'
+                    && App && App.viewMode === 'compound') {
+                    try { App.setFocusCompoundKey(state.msiKey); }
+                    catch (er) { console.warn('setFocusCompoundKey from align modal (source change) failed', er); }
+                }
+            } else {
+                msiSel.value = state.msiKey || '';
+                // Reload slider state from the matching bySource entry — when
+                // single-source mode is selected, we want the saved alignment
+                // for that specific source even if the MSI key didn't change.
+                if (next !== '__all__') {
+                    overrideStateFromSource(state, state.layerKey, next);
+                    syncUiFromState();
+                }
+            }
+            // Persist the source-mode choice so reopening the modal lands on
+            // the same context.
+            sec.meta.alignmentSourceMode = state.sourceMode;
             writeWorldCoords();
             populateThumbs();
             renderLandmarks();
@@ -4928,6 +5063,10 @@ const Wizards = {
             if (App && initial.focusKey != null && App.focusCompoundKey !== initial.focusKey) {
                 try { App.setFocusCompoundKey(initial.focusKey); } catch (e) {}
             }
+            // Source-mode hint persists in section meta; revert it too so
+            // the next modal open lands on the user's previous selection.
+            if (initial.sourceMode != null) sec.meta.alignmentSourceMode = initial.sourceMode;
+            else delete sec.meta.alignmentSourceMode;
             try { panel.renderComposite(); } catch (e) {}
         };
         // The default Cancel button (data-modal-cancel) is wired by openModal
@@ -4954,16 +5093,27 @@ const Wizards = {
             aRef.landmarks = { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() };
             // New: also persist the per-source slider record so the next
             // modal open repopulates correctly when the user re-picks the
-            // same MSI source.
-            const fid = fidOf(state.msiKey);
-            if (fid) {
+            // same MSI source. In '__all__' mode broadcast to every source
+            // so any of them re-opens with the saved state, matching the
+            // bySource T broadcast in writeWorldCoords.
+            const buildBySrcEntry = () => ({
+                flip_lr: state.flip_lr, flip_ud: state.flip_ud,
+                scale_pct: state.scale_pct, rotate_deg: state.rotate_deg,
+                offx: state.offx, offy: state.offy,
+                landmarks: { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() },
+            });
+            if (state.sourceMode === '__all__') {
                 aRef.bySource = aRef.bySource || {};
-                aRef.bySource[fid] = {
-                    flip_lr: state.flip_lr, flip_ud: state.flip_ud,
-                    scale_pct: state.scale_pct, rotate_deg: state.rotate_deg,
-                    offx: state.offx, offy: state.offy,
-                    landmarks: { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() },
-                };
+                for (const fid of sourceFids) aRef.bySource[fid] = buildBySrcEntry();
+            } else if (state.sourceMode) {
+                aRef.bySource = aRef.bySource || {};
+                aRef.bySource[state.sourceMode] = buildBySrcEntry();
+            } else {
+                const fid = fidOf(state.msiKey);
+                if (fid) {
+                    aRef.bySource = aRef.bySource || {};
+                    aRef.bySource[fid] = buildBySrcEntry();
+                }
             }
             sec.meta.alignment[state.layerKey] = aRef;
             // T and msi_um_per_px are already up to date thanks to writeWorldCoords()
@@ -8984,6 +9134,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-07-r2</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-07-r3</div>
 </body>
 </html>
