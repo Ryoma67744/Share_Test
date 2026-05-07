@@ -825,7 +825,7 @@ function buildCompoundTitle(focusKey, project, role) {
         // Product columns of the Method (MRM) table. Skip when either
         // value is missing so partial datasets stay clean.
         if (meta && meta.precursor != null && meta.product != null) {
-            return base + ' ' + meta.precursor + ' > ' + meta.product;
+            return base + '_' + meta.precursor + ' > ' + meta.product;
         }
         return base;
     }
