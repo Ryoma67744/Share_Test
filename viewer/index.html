@@ -819,7 +819,16 @@ function buildCompoundTitle(focusKey, project, role) {
         if (meta && pixelSize) break;
     }
     const base = (meta && meta.base) || formatDisplayName(focusKey);
-    if (role !== 'admin') return base;
+    if (role !== 'admin') {
+        // Non-admin viewers / public-link recipients now see the MRM
+        // transition next to the compound name to match the Precursor /
+        // Product columns of the Method (MRM) table. Skip when either
+        // value is missing so partial datasets stay clean.
+        if (meta && meta.precursor != null && meta.product != null) {
+            return base + ' ' + meta.precursor + ' > ' + meta.product;
+        }
+        return base;
+    }
     const parts = [];
     if (meta && (meta.precursor != null || meta.product != null)) {
         const prec = meta.precursor != null ? meta.precursor : '?';
@@ -6603,25 +6612,22 @@ const SharePreview = {
             }
             // Per-section scalebar — read μm/px from this section's own
             // world_coords so heterogeneous projects (different acquisition
-            // resolution per slide) render correctly. The bar lives inside
-            // the same transformed stage as the <img> so it grows with
-            // the image when the user zooms the cell.
+            // resolution per slide) render correctly. The bar is a sibling
+            // of the transformed stage so its CSS px stays constant on
+            // screen as the user zooms; _updateCellScalebar re-picks a
+            // NICE round length on every zoom change so the label tracks.
             const wc = sec && sec.meta && sec.meta.world_coords;
-            const umPerPx = wc && wc.msi_um_per_px && Number.isFinite(wc.msi_um_per_px.x)
+            const baseUmPerPx = wc && wc.msi_um_per_px && Number.isFinite(wc.msi_um_per_px.x)
                 ? wc.msi_um_per_px.x : null;
-            const chosen = pickPreviewScalebarLength(umPerPx, 100);
-            let scalebarHtml = '';
-            if (chosen) {
-                const px = Math.max(40, Math.min(200, chosen / umPerPx));
-                const labelText = chosen >= 1000 ? (chosen / 1000) + ' mm' : chosen + ' μm';
-                const safeLabel = String(labelText).replace(/&/g, '&amp;').replace(/</g, '&lt;');
-                scalebarHtml = `<div class="cell-scalebar"><span class="bar" style="width:${px.toFixed(1)}px"></span><span class="label">${safeLabel}</span></div>`;
-            }
+            const scalebarHtml = baseUmPerPx
+                ? `<div class="cell-scalebar" data-cell-scalebar data-base-um-per-px="${baseUmPerPx}"><span class="bar"></span><span class="label"></span></div>`
+                : '';
             return `
                 <div class="preview-image-cell">
                     <div class="cell-title">${caption}</div>
                     <div class="cell-img-wrap" data-cell-idx="${idx}">
-                        <div class="cell-img-stage" data-cell-stage>${body}${scalebarHtml}</div>
+                        <div class="cell-img-stage" data-cell-stage>${body}</div>
+                        ${scalebarHtml}
                     </div>
                 </div>`;
         });
@@ -6674,6 +6680,32 @@ const SharePreview = {
         stage.style.transform =
             `translate(${t.tx}px, ${t.ty}px) scale(${t.scale})`;
         stage.style.transformOrigin = '50% 50%';
+        this._updateCellScalebar(idx, t.scale);
+    },
+
+    // Re-pick a NICE round physical length for the per-cell scalebar so the
+    // bar reads ~100 CSS px on screen regardless of the current zoom.
+    // Mirrors SectionPanel.updateScaleBar's NICE-table pattern but uses the
+    // stage's transform `scale` directly because the bar lives in the
+    // un-transformed wrap (a sibling of the transformed stage).
+    _updateCellScalebar(idx, scale) {
+        const grid = this.overlay && this.overlay.querySelector('[data-image-grid]');
+        const wrap = grid && grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
+        const bar = wrap && wrap.querySelector('[data-cell-scalebar]');
+        if (!bar) return;
+        const baseUmPerPx = parseFloat(bar.dataset.baseUmPerPx);
+        if (!Number.isFinite(baseUmPerPx) || baseUmPerPx <= 0) {
+            bar.style.display = 'none';
+            return;
+        }
+        const eff = baseUmPerPx / Math.max(scale, 1e-6);
+        const chosen = pickPreviewScalebarLength(eff, 100);
+        if (!chosen) { bar.style.display = 'none'; return; }
+        const px = Math.max(40, Math.min(200, chosen / eff));
+        const labelText = chosen >= 1000 ? (chosen / 1000) + ' mm' : chosen + ' μm';
+        bar.querySelector('.bar').style.width = px.toFixed(1) + 'px';
+        bar.querySelector('.label').textContent = labelText;
+        bar.style.display = '';
     },
 
     // Pan (pointer drag) + zoom (wheel) on a single cell. Each cell owns its
