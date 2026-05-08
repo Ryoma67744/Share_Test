@@ -53,7 +53,7 @@ body.share-mode .picker-row .picker-row-dot,
 body.share-mode .picker-row .picker-row-rename { display:none !important; }
 body.share-mode #method-rows td[data-compound-cell] { cursor:default; }
 body:not(.share-mode) #method-rows td[data-compound-cell] { cursor:text; }
-body:not(.share-mode) .canvas-label { cursor:text; }
+body:not(.share-mode) .canvas-label { cursor:text; pointer-events:auto; }
 body.share-mode .canvas-label { cursor:default; }
 /* Admin login button — only visible to share-mode viewers who haven't
    yet elevated. Mirrors the gating used by the preview-overlay button
@@ -10027,6 +10027,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-08-r11</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-08-r12</div>
 </body>
 </html>
