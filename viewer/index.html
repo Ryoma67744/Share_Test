@@ -240,6 +240,21 @@ body.splitting-v { cursor:row-resize !important; }
    blue background (per user request). Hover feedback above is preserved. */
 #method-rows tr.method-row.active,
 #method-rows tr.method-row.focus { background:transparent; outline:none; }
+/* Column-click sort affordance for the main Method <thead>. Re-clicking
+   the same column flips direction; a third click clears the sort. */
+#method-table thead th[data-sort-key] { cursor:pointer; user-select:none; position:relative; }
+#method-table thead th[data-sort-key]:hover { background:#e2e8f0; }
+#method-table thead th[aria-sort]::after {
+    content:''; display:inline-block; width:0; height:0; margin-left:4px; vertical-align:middle;
+}
+#method-table thead th[aria-sort="ascending"]::after  { border:4px solid transparent; border-bottom-color:#475569; margin-bottom:4px; }
+#method-table thead th[aria-sort="descending"]::after { border:4px solid transparent; border-top-color:#475569; margin-top:4px; }
+/* SharePreview overlay — same sort affordance, plain ▲ / ▼ glyphs to
+   stay legible against the dark overlay background. */
+.preview-method-panel thead th[data-sort-key] { cursor:pointer; user-select:none; }
+.preview-method-panel thead th[data-sort-key]:hover { background:rgba(255,255,255,0.08); }
+.preview-method-panel thead th[aria-sort="ascending"]::after  { content:' ▲'; }
+.preview-method-panel thead th[aria-sort="descending"]::after { content:' ▼'; }
 #view-mode-toggle button { line-height:1; }
 #view-mode-toggle button:not(:last-child) { border-right:1px solid #e5e7eb; }
 #method-rows tr.method-row .range-input { width:64px; padding:1px 3px; border:1px solid #cbd5e1; border-radius:3px; font-size:10px; text-align:right; background:#fff; }
@@ -531,13 +546,13 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                         <thead class="bg-gray-50" style="position:sticky;top:0;z-index:1;">
                             <tr>
                                 <th class="px-1 py-1 border-b border-gray-200 font-medium text-gray-500" title="Click to set marker colour"></th>
-                                <th class="text-left px-2 py-1 border-b border-gray-200 font-medium text-gray-500">Compound</th>
-                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">Precursor</th>
-                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">Fragment</th>
-                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">CE</th>
-                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">CV</th>
-                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">Mean</th>
-                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500">Max</th>
+                                <th class="text-left  px-2 py-1 border-b border-gray-200 font-medium text-gray-500" data-sort-key="compound"  title="Click to sort A↔Z (3rd click clears)">Compound</th>
+                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500" data-sort-key="precursor" title="Click to sort High↔Low (3rd click clears)">Precursor</th>
+                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500" data-sort-key="product"   title="Click to sort High↔Low (3rd click clears)">Fragment</th>
+                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500" data-sort-key="ce"        title="Click to sort High↔Low (3rd click clears)">CE</th>
+                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500" data-sort-key="cv"        title="Click to sort High↔Low (3rd click clears)">CV</th>
+                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500" data-sort-key="mean"      title="Click to sort High↔Low (3rd click clears)">Mean</th>
+                                <th class="text-right px-2 py-1 border-b border-gray-200 font-medium text-gray-500" data-sort-key="max"       title="Click to sort High↔Low (3rd click clears)">Max</th>
                             </tr>
                         </thead>
                         <tbody id="method-rows">
@@ -908,6 +923,74 @@ function formatPixelPitchLabel(sec) {
     if (!Number.isFinite(x) || !Number.isFinite(y) || x <= 0 || y <= 0) return '';
     const fmt = v => Number.isInteger(v) ? String(v) : v.toFixed(1);
     return fmt(x) + '×' + fmt(y) + ' μm/px';
+}
+
+// Shared comparator for the Method (MRM) table — used by both the main
+// view (renderMethodTable + the App keydown handler) and SharePreview
+// so column-click sort, ↑/↓ navigation, and the displayed row order all
+// agree. Sort happens in two passes: first the legacy sourceFileId →
+// layerKey order (which is also the fallback when sortKey is null),
+// then a stable re-sort by the user-chosen column. Array.sort is
+// stable in modern JS so equal primary values keep the legacy order.
+// `null` / NaN values always sink to the bottom regardless of dir.
+function sortMethodKeys(layerKeys, getEntry, getMeta, sortKey, sortDir) {
+    const base = layerKeys.slice().sort((a, b) => {
+        const ea = getEntry(a) || {}, eb = getEntry(b) || {};
+        const fa = ea.sourceFileId || '', fb = eb.sourceFileId || '';
+        if (fa !== fb) return fa.localeCompare(fb);
+        return a.localeCompare(b);
+    });
+    if (!sortKey) return base;
+
+    const num = v => (v == null || v === '') ? null : Number(v);
+    const valueOf = (k) => {
+        const ent = getEntry(k) || {};
+        const meta = getMeta(k, ent) || {};
+        switch (sortKey) {
+            case 'compound':  return String(meta.base || formatDisplayName(k)).toLowerCase();
+            case 'precursor': return num(meta.precursor);
+            case 'product':   return num(meta.product);
+            case 'ce':        return num(meta.ce);
+            case 'cv':        return num(meta.cv);
+            case 'mean':      return Number.isFinite(ent.rawMean) ? ent.rawMean : null;
+            case 'max':       return (ent.rawRange && Number.isFinite(ent.rawRange[1])) ? ent.rawRange[1] : null;
+        }
+        return null;
+    };
+
+    return base.sort((a, b) => {
+        const va = valueOf(a), vb = valueOf(b);
+        const aN = (va == null) || (typeof va === 'number' && !Number.isFinite(va));
+        const bN = (vb == null) || (typeof vb === 'number' && !Number.isFinite(vb));
+        if (aN && bN) return 0;
+        if (aN) return 1;
+        if (bN) return -1;
+        const cmp = (typeof va === 'string') ? va.localeCompare(vb) : (va - vb);
+        return sortDir === 'asc' ? cmp : -cmp;
+    });
+}
+
+// Toggle aria-sort on the matching column header so the CSS arrow updates.
+// Cleared on every other th so only the active column has the indicator.
+function _updateMethodHeaderArrows(theadSel, sort) {
+    document.querySelectorAll(theadSel + ' th[data-sort-key]').forEach(th => {
+        if (sort && sort.key && th.getAttribute('data-sort-key') === sort.key) {
+            th.setAttribute('aria-sort', sort.dir === 'asc' ? 'ascending' : 'descending');
+        } else {
+            th.removeAttribute('aria-sort');
+        }
+    });
+}
+
+// Tri-state cycle used by both Method header click handlers: first
+// click on a column sets the column-specific default direction
+// (Compound = asc, numeric columns = desc), second click flips it,
+// third click clears the sort and falls back to sourceFile → name.
+function _advanceMethodSort(curSort, k) {
+    const defaultDir = (k === 'compound') ? 'asc' : 'desc';
+    if (!curSort || curSort.key !== k) return { key: k, dir: defaultDir };
+    if (curSort.dir === defaultDir)    return { key: k, dir: defaultDir === 'asc' ? 'desc' : 'asc' };
+    return { key: null, dir: 'asc' };
 }
 
 function pointInPolygon(x, y, vertices) {
@@ -3884,16 +3967,14 @@ function renderMethodTable() {
     const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
     if (!panel) { tbody.innerHTML = '<tr><td colspan="7" class="px-2 py-2 text-center text-gray-400">No active section</td></tr>'; return; }
 
-    const layerKeys = Object.keys(panel.section.msiSeries || {})
-        .filter(k => /^MSI_/i.test(k))
-        .sort((a, b) => {
-            const ma = panel.section.msiSeries[a];
-            const mb = panel.section.msiSeries[b];
-            const fa = (ma && ma.sourceFileId) || '';
-            const fb = (mb && mb.sourceFileId) || '';
-            if (fa !== fb) return fa.localeCompare(fb);
-            return a.localeCompare(b);
-        });
+    const layerKeys = sortMethodKeys(
+        Object.keys(panel.section.msiSeries || {}).filter(k => /^MSI_/i.test(k)),
+        k => panel.section.msiSeries[k],
+        (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(project, k),
+        App.methodSort && App.methodSort.key,
+        App.methodSort && App.methodSort.dir
+    );
+    _updateMethodHeaderArrows('#method-table thead', App.methodSort);
 
     if (!layerKeys.length) {
         tbody.innerHTML = '<tr><td colspan="8" class="px-2 py-2 text-center text-gray-400">No MSI layer in this section</td></tr>';
@@ -6902,7 +6983,23 @@ const SharePreview = {
             }
         }
         if (allKeys.size === 0) return;
-        this.compoundKeys = Array.from(allKeys);
+        // Apply the current App.methodSort so the very first render of the
+        // Preview Method panel agrees with the column-arrow indicator.
+        const findEnt = (k) => {
+            for (const sec of project.sections) {
+                const e = (sec.msiSeries || {})[k]; if (e) return e;
+            }
+            return null;
+        };
+        const findMeta = (k, ent) => {
+            if (ent && ent.compoundMeta) return ent.compoundMeta;
+            return findCompoundMeta(project, k);
+        };
+        this.compoundKeys = sortMethodKeys(
+            Array.from(allKeys), findEnt, findMeta,
+            App.methodSort && App.methodSort.key,
+            App.methodSort && App.methodSort.dir
+        );
 
         // Save state we'll need to restore on close. Snapshot must run before
         // any preview-only mutation so we capture the pre-preview values.
@@ -7294,10 +7391,46 @@ const SharePreview = {
         // Non-admin viewers see Compound + Precursor + Product (matches the
         // main Method panel, which now only hides CE/CV from share-mode
         // viewers). CV / CE remain admin-only.
-        const cols = isAdmin
-            ? ['Compound', 'Precursor', 'Product', 'CV', 'CE']
-            : ['Compound', 'Precursor', 'Product'];
-        head.innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
+        const colDefs = isAdmin
+            ? [['compound','Compound'], ['precursor','Precursor'], ['product','Product'],
+               ['cv','CV'], ['ce','CE']]
+            : [['compound','Compound'], ['precursor','Precursor'], ['product','Product']];
+        head.innerHTML = '<tr>' + colDefs.map(([k, label]) =>
+            `<th data-sort-key="${k}" title="Click to sort (3rd click clears)">${label}</th>`
+        ).join('') + '</tr>';
+        _updateMethodHeaderArrows('.preview-method-panel thead', App.methodSort);
+
+        // Re-sort compoundKeys per the current App.methodSort so the row
+        // order, the column-arrow indicator, and the SharePreview ↑/↓
+        // navigation (which uses this.compoundKeys.indexOf) all agree.
+        const findEnt = (k) => {
+            for (const sec of (project.sections || [])) {
+                const e = (sec.msiSeries || {})[k]; if (e) return e;
+            }
+            return null;
+        };
+        const findMeta = (k, ent) => {
+            if (ent && ent.compoundMeta) return ent.compoundMeta;
+            return findCompoundMeta(project, k);
+        };
+        this.compoundKeys = sortMethodKeys(
+            this.compoundKeys.slice(), findEnt, findMeta,
+            App.methodSort && App.methodSort.key,
+            App.methodSort && App.methodSort.dir
+        );
+
+        // Wire delegated click on the head — replace any prior listener so
+        // re-renders don't accumulate handlers. Tri-state cycle, identical
+        // to the main view's _bindMethodHeaderSort behavior.
+        const newHead = head;
+        newHead.onclick = (ev) => {
+            const th = ev.target && ev.target.closest && ev.target.closest('th[data-sort-key]');
+            if (!th) return;
+            const k = th.getAttribute('data-sort-key');
+            App.methodSort = _advanceMethodSort(App.methodSort, k);
+            this._renderMethodList(project);
+            this._renderMethodHighlight(App.focusCompoundKey);
+        };
 
         const rows = this.compoundKeys.map(key => {
             let meta = null;
@@ -8426,6 +8559,11 @@ const App = {
     shareMode: null,
     drawing: { mode: false, sectionId: null, vertices: [], targetRoiId: null },
     saveTimer: 0,
+    // Method (MRM) table column-click sort. Session-only — reload reverts to
+    // the legacy sourceFileId → layerKey order. Shared by both the main view
+    // (renderMethodTable + the App ↑↓ keydown handler) and SharePreview so
+    // visible row order, keyboard nav, and the column-arrow indicator agree.
+    methodSort: { key: null, dir: 'asc' },
     // Shared thumb-row height across every section panel (px). The
     // section-internal splitter writes this on drag and re-broadcasts
     // it to each panel via the --thumb-h CSS variable.
@@ -8442,6 +8580,23 @@ const App = {
             el.style.setProperty('--thumb-h', this.thumbHeight + 'px');
         });
         try { localStorage.setItem('desi:layout:sectionThumbH', String(this.thumbHeight)); } catch (e) {}
+    },
+
+    // Delegated click on the main Method <thead> — drives the tri-state
+    // cycle (col-default-dir → reversed → cleared) and re-renders the
+    // table. Bound once at init() so we don't accumulate listeners on
+    // every renderMethodTable call.
+    _bindMethodHeaderSort() {
+        const thead = document.querySelector('#method-table thead');
+        if (!thead || thead._sortBound) return;
+        thead._sortBound = true;
+        thead.addEventListener('click', (ev) => {
+            const th = ev.target && ev.target.closest && ev.target.closest('th[data-sort-key]');
+            if (!th) return;
+            const k = th.getAttribute('data-sort-key');
+            this.methodSort = _advanceMethodSort(this.methodSort, k);
+            try { renderMethodTable(); } catch (e) { console.warn('renderMethodTable after sort failed', e); }
+        });
     },
 
     setupGlobalSectionSplitter() {
@@ -8729,6 +8884,7 @@ const App = {
             });
         }
         this.refreshViewModeUI();
+        this._bindMethodHeaderSort();
         const persistedTh = parseInt(localStorage.getItem('desi:layout:sectionThumbH') || '', 10);
         if (Number.isFinite(persistedTh) && persistedTh > 0) this.thumbHeight = persistedTh;
         document.documentElement.style.setProperty('--thumb-h', this.thumbHeight + 'px');
@@ -10074,18 +10230,16 @@ const App = {
             if (this.viewMode !== 'compound') return;
             const panel = this.activeSectionId ? this.panels.get(this.activeSectionId) : null;
             if (!panel) return;
-            // Same sort the Method table uses (renderMethodTable at viewer/
-            // index.html:3717) so keyboard order matches the visible row order.
-            const layerKeys = Object.keys(panel.section.msiSeries || {})
-                .filter(k => /^MSI_/i.test(k))
-                .sort((a, b) => {
-                    const ma = panel.section.msiSeries[a];
-                    const mb = panel.section.msiSeries[b];
-                    const fa = (ma && ma.sourceFileId) || '';
-                    const fb = (mb && mb.sourceFileId) || '';
-                    if (fa !== fb) return fa.localeCompare(fb);
-                    return a.localeCompare(b);
-                });
+            // Same sort the Method table uses (sortMethodKeys helper) so
+            // keyboard order matches the visible row order — including any
+            // user-chosen column sort from clicking a Method <th>.
+            const layerKeys = sortMethodKeys(
+                Object.keys(panel.section.msiSeries || {}).filter(k => /^MSI_/i.test(k)),
+                k => panel.section.msiSeries[k],
+                (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(this.project, k),
+                this.methodSort && this.methodSort.key,
+                this.methodSort && this.methodSort.dir
+            );
             if (!layerKeys.length) return;
             const cur = this.focusCompoundKey;
             const idx = layerKeys.indexOf(cur);
@@ -10165,6 +10319,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-08-r16</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-08-r17</div>
 </body>
 </html>

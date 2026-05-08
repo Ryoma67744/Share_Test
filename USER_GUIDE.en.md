@@ -236,7 +236,13 @@ Clicking a row:
 - **Compound mode** focuses that compound across every section (handy for cross-section comparison)
 - **Free mode** simply toggles that single layer on/off
 
-> **Keyboard navigation**: With focus inside the Method table, **↑/↓** move focus to the previous / next compound (Compound mode applies it to every section instantly).
+> **Click a column header to sort**: Click any of the **Compound / Precursor / Fragment / CE / CV / Mean / Max** headers to reorder the table.
+> - 1st click: Compound = A→Z / numeric columns = High→Low (the column-specific default).
+> - 2nd click: reverse direction (Z→A / Low→High).
+> - 3rd click: clears the sort and falls back to the source-file → name order.
+> - The active header shows ▲ / ▼ for direction. Rows with empty values (`—`) always sink to the bottom regardless of direction. Sort state is session-only — reload reverts to the default order.
+
+> **Keyboard navigation**: With focus inside the Method table, **↑/↓** move focus to the previous / next compound (Compound mode applies it to every section instantly, following the current sort order).
 
 > **Compound title format**: Each row title reads `<compound>_<precursor> > <product>` (e.g. `DHA-NEG_327.4 > 283.4`). The same format appears at the top of the screen in Compound mode. Compounds without precursor / product fall back to the bare name.
 
