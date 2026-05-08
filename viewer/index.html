@@ -3389,7 +3389,20 @@ class SectionPanel {
         this.populateThumbnails();
         this.renderEmptyOverlay();
         this.setupCanvasSize();
+        const expectedMsi = Object.keys(this.section.msiSeries || {}).length;
+        // Quota probe before each MSI add — these are the largest single
+        // allocations in the app (xlsx / txt blobs can hit hundreds of MB).
+        try { await App._warnIfQuotaTight(); } catch (e) {}
         App.queueSave();
+        // Critical-op verify: flush the pending save and read back so a
+        // silent IDB failure surfaces as a toast immediately rather than
+        // letting the user discover it after a reload.
+        try {
+            await App._flushSave();
+            await App._verifyPersistence('addMsiLayer', {
+                msiAtSection: { sectionId: this.section.id, count: expectedMsi },
+            });
+        } catch (e) { console.warn('addMsiLayer verify threw', e); }
     }
 }
 
@@ -8427,6 +8440,19 @@ const App = {
 
     async init() {
         await ProjectStorage.open();
+        // Ask the browser to keep our IDB out of its automatic eviction
+        // pool. The Promise resolves to true / false depending on the
+        // origin's eligibility — both are fine, we just want to opt in
+        // when we can. Wrapping in try/catch because old browsers don't
+        // expose navigator.storage at all.
+        try {
+            if (navigator && navigator.storage && navigator.storage.persist) {
+                await navigator.storage.persist();
+            }
+        } catch (e) { /* non-fatal */ }
+        // Quota probe at startup so the user has visibility into how
+        // much room is left before any large MSI ingestion.
+        try { this._warnIfQuotaTight(); } catch (e) {}
         setupSplitters();
         Toolbar.init();
         this.loadSyncFlags();
@@ -9128,6 +9154,7 @@ const App = {
             msiSeries: {},
         };
         this.project.sections.push(sec);
+        const expectedCount = this.project.sections.length;
         const panel = new SectionPanel(sec, this.project);
         this.panels.set(sec.id, panel);
         document.getElementById('sections-grid').appendChild(panel.root);
@@ -9135,7 +9162,12 @@ const App = {
         document.getElementById('section-count').textContent = this.project.sections.length + ' sections';
         this.setActiveSection(sec.id);
         populateRoiList();
+        // Critical-op verify: schedule a save then flush + read-back so a
+        // silent IDB failure (the Section-2-disappeared regression) raises
+        // a toast instead of leaving memory and disk diverged.
         await this.queueSave(0);
+        await this._flushSave();
+        await this._verifyPersistence('addSection', { sectionCount: expectedCount });
     },
 
     async deleteSection(id) {
@@ -9155,7 +9187,10 @@ const App = {
         document.getElementById('sections-empty').classList.toggle('hidden', this.project.sections.length > 0);
         populateRoiList();
         this.renderAnalysis();
+        const expectedCount = this.project.sections.length;
         await this.queueSave(0);
+        await this._flushSave();
+        await this._verifyPersistence('deleteSection', { sectionCount: expectedCount });
     },
 
     async rebuildSectionPanels() {
@@ -9341,23 +9376,148 @@ const App = {
     },
 
     // ---- Persistence ----
+    // queueSave is the existing 400 ms debounce entry point used from every
+    // mutation site (ROI, align, layer toggle, etc.). The actual IDB write
+    // is delegated to _doSave so retries and "in-flight" tracking can live
+    // in one place — _flushSave callers from critical operations
+    // (addSection / addMsiLayer / deleteSection) need to await the same
+    // routine without scheduling another timer.
     queueSave(delay) {
         if (!this.project) return;
         if (this.saveTimer) clearTimeout(this.saveTimer);
-        this.saveTimer = setTimeout(async () => {
+        this.saveTimer = setTimeout(() => {
             this.saveTimer = 0;
-            try {
-                await ProjectStorage.putProject(this.project);
-                await this.refreshProjectPicker();
-                // Phase 8: every IDB save schedules a background auto-
-                // publish so Local IDB is effectively a cache and the
-                // server stays canonical. Skipped silently in share-
-                // mode (no master pw) and for projects that have never
-                // been published manually (no shareInfo yet).
-                this._setSyncStatus('local-saved');
-                this._scheduleAutoPublish();
-            } catch (e) { console.warn('save failed:', e); }
+            this._doSave().catch(e => console.warn('queueSave _doSave threw', e));
         }, (delay === undefined) ? 400 : delay);
+    },
+
+    // Real save with up-to-3 retry on transient failures. Quota errors do
+    // not retry — they require user action (delete project, free space).
+    // Sync indicator + showToast surface every failure so silent data
+    // loss like the Section-2 incident becomes impossible.
+    async _doSave() {
+        if (!this.project) return false;
+        // Coalesce concurrent saves: the in-flight save already captures
+        // the latest project state at call time, so a second invocation
+        // can just wait for it.
+        if (this._saveInflight) return this._saveInflight;
+        const work = (async () => {
+            let lastErr = null;
+            for (let attempt = 0; attempt < 3; attempt++) {
+                try {
+                    await ProjectStorage.putProject(this.project);
+                    await this.refreshProjectPicker();
+                    this._setSyncStatus('local-saved');
+                    this._scheduleAutoPublish();
+                    return true;
+                } catch (e) {
+                    lastErr = e;
+                    const isQuota = e && (e.name === 'QuotaExceededError'
+                        || /quota/i.test(String(e.message || e)));
+                    if (isQuota) break;
+                    if (attempt < 2) await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+                }
+            }
+            this._showSaveError((lastErr && lastErr.message) || String(lastErr || 'unknown'), 'queueSave');
+            return false;
+        })();
+        this._saveInflight = work;
+        try { return await work; }
+        finally { this._saveInflight = null; }
+    },
+
+    // Flush any pending debounced save and wait for any in-flight save to
+    // finish. Used by critical mutations to make sure the IDB write
+    // completes before verify-after-write reads back.
+    async _flushSave() {
+        if (this.saveTimer) {
+            clearTimeout(this.saveTimer);
+            this.saveTimer = 0;
+            await this._doSave();
+            return;
+        }
+        if (this._saveInflight) {
+            await this._saveInflight;
+        }
+    },
+
+    // Surface a save / verify failure to the user. Updates the sync
+    // indicator to error, raises a long-lived toast and logs to console
+    // for post-hoc forensics. Called from _doSave and _verifyPersistence.
+    _showSaveError(msg, reason) {
+        const tag = reason ? '[' + reason + ']' : '[save]';
+        console.error('[persistence]' + tag, msg);
+        if (typeof showToast === 'function') {
+            showToast('保存エラー (' + (reason || 'save') + '): ' + msg + ' — 上部の sync indicator をクリックで再試行', 12000);
+        }
+        try { this._setSyncStatus('error', msg); } catch (e) {}
+    },
+
+    // Read back from IDB after a critical mutation and assert that the
+    // expected invariant holds. Catches the failure mode where queueSave
+    // throws silently or the section / MSI count never reaches disk.
+    // expect: { sectionCount?, msiAtSection?: { sectionId, count } }
+    async _verifyPersistence(reason, expect) {
+        if (!this.project) return true;
+        try {
+            const idb = await ProjectStorage.getProject(this.project.id);
+            if (!idb) {
+                this._showSaveError('Project が IDB に保存されていません', reason);
+                return false;
+            }
+            if (typeof expect.sectionCount === 'number') {
+                const got = (idb.sections || []).length;
+                if (got !== expect.sectionCount) {
+                    this._showSaveError('IDB の section 数が想定 (' + expect.sectionCount + ') と違います: ' + got, reason);
+                    return false;
+                }
+            }
+            if (expect.msiAtSection) {
+                const sec = (idb.sections || []).find(s => s.id === expect.msiAtSection.sectionId);
+                const got = sec ? Object.keys(sec.msiSeries || {}).length : -1;
+                if (got !== expect.msiAtSection.count) {
+                    this._showSaveError('IDB の MSI 数が想定 (' + expect.msiAtSection.count + ') と違います: ' + got, reason);
+                    return false;
+                }
+            }
+            return true;
+        } catch (e) {
+            this._showSaveError('Verify 失敗: ' + ((e && e.message) || String(e)), reason);
+            return false;
+        }
+    },
+
+    // Browser quota probe. Used at startup and before MSI ingestion (the
+    // largest single allocation in the app). null when the browser
+    // doesn't expose navigator.storage (private mode in old Safari, etc.).
+    async _checkStorageQuota() {
+        if (!navigator || !navigator.storage || !navigator.storage.estimate) return null;
+        try {
+            const { usage, quota } = await navigator.storage.estimate();
+            const pct = quota ? (usage / quota) * 100 : 0;
+            return { usage: usage || 0, quota: quota || 0, pct };
+        } catch (e) { return null; }
+    },
+
+    // Surface a banner / toast when the IDB usage approaches the per-
+    // origin cap. Returns true when there's still room (or when we
+    // can't probe), false when we strongly suspect the next big write
+    // will fail. Callers can use the return value to short-circuit a
+    // big import.
+    async _warnIfQuotaTight(thresholdPct) {
+        thresholdPct = (typeof thresholdPct === 'number') ? thresholdPct : 90;
+        const q = await this._checkStorageQuota();
+        if (!q) return true;
+        if (q.pct >= thresholdPct) {
+            const usageMB = (q.usage / 1048576).toFixed(0);
+            const quotaMB = (q.quota / 1048576).toFixed(0);
+            if (typeof showToast === 'function') {
+                showToast('ストレージ使用量 ' + q.pct.toFixed(1) + '% (' + usageMB + ' / ' + quotaMB + ' MB) — 不要なプロジェクトを Delete してから新規追加してください。', 12000);
+            }
+            console.warn('[persistence] quota tight', q);
+            return false;
+        }
+        return true;
     },
 
     // ---- Auto-publish ----
@@ -9493,7 +9653,14 @@ const App = {
     // Click on sync indicator: state-aware recovery actions.
     async _handleSyncStatusClick() {
         const state = this._syncState;
-        if (state === 'synced' || state === 'local-saved' || state === 'error') {
+        if (state === 'error') {
+            // Save error: try the local IDB write again first. Only after
+            // it succeeds does the auto-publish make sense.
+            const ok = await this._doSave();
+            if (ok) this.autoPublishProject().catch(e => console.warn('manual sync (after error) failed', e));
+            return;
+        }
+        if (state === 'synced' || state === 'local-saved') {
             // Force an immediate auto-publish.
             if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
             this.autoPublishProject().catch(e => console.warn('manual sync failed', e));
@@ -9604,10 +9771,27 @@ const App = {
             else this.startDrawing(null);
         });
         // Best-effort lock cleanup on tab close so stale locks don't strand
-        // other viewers for the full 30 s heartbeat window.
-        window.addEventListener('beforeunload', () => {
+        // other viewers for the full 30 s heartbeat window. Also warn the
+        // user if we still have a pending IDB save or an unresolved save
+        // error — closing the tab now would discard those edits silently
+        // (this is what burned Section 2 in the Killifish project).
+        window.addEventListener('beforeunload', (e) => {
             if (this.shareMode && this._roiLockHeartbeat) {
-                try { SupabaseClient.releaseRoiLock(this.shareMode.token); } catch (e) {}
+                try { SupabaseClient.releaseRoiLock(this.shareMode.token); } catch (er) {}
+            }
+            const hasPending = !this.shareMode && (
+                this._saveInflight ||
+                this.saveTimer ||
+                this._syncState === 'error'
+            );
+            if (hasPending) {
+                e.preventDefault();
+                // Modern browsers ignore the custom string but still show
+                // their default "are you sure?" dialog when returnValue is
+                // truthy. preventDefault + truthy returnValue is the
+                // current cross-browser pattern.
+                e.returnValue = '保存中または保存失敗があります。このまま閉じるとデータが失われる可能性があります。';
+                return e.returnValue;
             }
         });
         document.getElementById('roi-toggle').addEventListener('change', () => this.redrawAllRois());
@@ -9721,6 +9905,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-07-r9</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-08-r10</div>
 </body>
 </html>
