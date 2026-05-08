@@ -59,6 +59,18 @@ body:not(.share-mode) #method-rows td[data-compound-cell] { cursor:text; }
 #btn-share-admin-login { display:none; }
 body.share-mode:not(.share-admin) #btn-share-admin-login { display:inline-flex; align-items:center; gap:4px; }
 #share-mode-banner { display:none; align-items:center; gap:6px; padding:2px 8px; background:#dbeafe; color:#1d4ed8; font-size:11px; border-radius:3px; margin-right:6px; }
+/* Auto-publish sync indicator. Lives next to "Publish to share" so the
+   user always sees whether their edits have been pushed to the server.
+   Hidden in share-mode (no master access) and when no project is open. */
+.sync-status { font-size:11px; padding:2px 8px; border-radius:3px; cursor:pointer; user-select:none; line-height:1; align-items:center; }
+.sync-status:hover { filter:brightness(0.95); }
+.sync-status.sync-local-saved     { background:#fef3c7; color:#92400e; }
+.sync-status.sync-uploading       { background:#dbeafe; color:#1d4ed8; }
+.sync-status.sync-synced          { background:#dcfce7; color:#166534; }
+.sync-status.sync-conflict        { background:#fee2e2; color:#b91c1c; }
+.sync-status.sync-needs-master-pw { background:#ede9fe; color:#6d28d9; }
+.sync-status.sync-error           { background:#fee2e2; color:#b91c1c; }
+body.share-mode .sync-status { display:none !important; }
 .modal-backdrop { position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:60; display:flex; align-items:center; justify-content:center; }
 .modal-card { background:#fff; border-radius:8px; box-shadow:0 12px 30px rgba(0,0,0,0.2); padding:18px; width:480px; max-width:92vw; max-height:88vh; overflow-y:auto; }
 .modal-card h2 { font-size:14px; font-weight:600; margin-bottom:10px; color:#0f172a; }
@@ -463,6 +475,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
             <button id="btn-new-project" class="btn">New</button>
             <button id="btn-import-zip" class="btn">Import ZIP</button>
             <button id="btn-export-zip" class="btn">Export ZIP</button>
+            <span id="sync-status" class="sync-status" style="display:none;" title="クリックで強制再同期"></span>
             <button id="btn-publish-share" class="btn" title="Upload this project to Supabase and get a shareable URL">Publish to share</button>
             <button id="btn-share-info" class="btn" title="View the share URL and passwords from the last publish" style="display:none;">Share info</button>
             <button id="btn-add-section" class="btn primary" title="Add a tissue section panel">+ Section</button>
@@ -5898,6 +5911,170 @@ function openPublishProgressModal(totalCount) {
     };
 }
 
+// Read the master-pw from the 12 h sessionStorage cache. Returns '' when
+// no fresh entry exists; callers decide whether to prompt or skip.
+function _readCachedMasterPw() {
+    try {
+        const raw = sessionStorage.getItem('desi:masterPw');
+        if (!raw) return '';
+        const p = JSON.parse(raw);
+        return (p && p.expiresAt > Date.now()) ? (p.pw || '') : '';
+    } catch (e) { return ''; }
+}
+function _saveCachedMasterPw(pw) {
+    try {
+        sessionStorage.setItem('desi:masterPw',
+            JSON.stringify({ pw, expiresAt: Date.now() + 12 * 3600 * 1000 }));
+    } catch (e) {}
+}
+
+// Core publish routine. Pure function — no modal, no alert, throws on error.
+// Used by both publishProjectToShare (modal-driven manual publish) and
+// App.autoPublishProject (silent background publish on save).
+//
+// shareInfo.uploadedBlobIds tracks blobs already on the server: subsequent
+// publishes skip those uploads and only push new blob references through
+// the upsert_project_doc args. Existing manual publishes also benefit from
+// this — re-publishing after editing meta no longer re-uploads every blob.
+async function _publishCore(project, meta, masterPw, opts) {
+    opts = opts || {};
+    const silent = !!opts.silent;
+    const onProgress = opts.onProgress || (() => {});
+
+    if (!SupabaseClient.configured()) throw new Error('supabase_not_configured');
+    const sess = await SupabaseClient.requestPublishSession(masterPw, meta.slug);
+    const publishToken = sess && sess.token;
+    if (!publishToken) throw new Error('publish session token failed');
+
+    // Set of blob IDs already on the server. New blobs encountered during
+    // this publish are added so the next call skips them.
+    const uploaded = new Set((project.shareInfo && project.shareInfo.uploadedBlobIds) || []);
+
+    const uploadTasks = [];
+    const sectionsPayload = [];
+    for (const sec of project.sections) {
+        const storage = { images: {}, msiSeries: {} };
+        const queue = (kindFolder, slot, k, ent) => {
+            if (!ent || !ent.blobId) return;
+            const filename = (ent.filename) || (k + '.bin');
+            const path = `${meta.slug}/${sec.id}/${kindFolder}/${ent.blobId}__${filename}`;
+            if (uploaded.has(ent.blobId)) {
+                // Already on the server: just record the path in the
+                // section payload, skip the network round-trip.
+                if (slot === 'msiSeries') storage[slot][k] = Object.assign({}, ent, { path, mime: ent.mime, filename });
+                else storage[slot][k] = { path, mime: ent.mime, filename };
+                return;
+            }
+            uploadTasks.push({ blobId: ent.blobId, kindFolder, slot, key: k, ent, sectionId: sec.id, storage, path, filename });
+        };
+        for (const [k, ent] of Object.entries(sec.images || {})) queue('images', 'images', k, ent);
+        for (const [k, ent] of Object.entries(sec.msiSeries || {})) queue('msi', 'msiSeries', k, ent);
+        sectionsPayload.push({
+            id: sec.id,
+            ordinal: sec.ordinal || 0,
+            displayName: sec.displayName || ('Section ' + (sec.ordinal || '')),
+            meta: sec.meta || {},
+            storagePaths: storage,
+        });
+    }
+
+    let progress = null;
+    if (!silent && uploadTasks.length) progress = openPublishProgressModal(uploadTasks.length);
+    let doneCount = 0;
+    let doneBytes = 0;
+    let totalBytes = 0;
+    const uploadOne = async (task) => {
+        const blob = await ProjectStorage.getBlob(task.blobId);
+        if (!blob || !blob.blob) return;
+        const size = (blob.blob && blob.blob.size) || 0;
+        totalBytes += size;
+        let lastErr = null;
+        for (let attempt = 0; attempt < 3; attempt++) {
+            try {
+                await SupabaseClient.uploadBlob('atlases', task.path, blob.blob, blob.mime || (task.ent && task.ent.mime), publishToken);
+                lastErr = null; break;
+            } catch (e) {
+                lastErr = e;
+                if (attempt < 2) await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
+            }
+        }
+        if (lastErr) throw lastErr;
+        const ref = { path: task.path, mime: blob.mime || (task.ent && task.ent.mime), filename: task.filename };
+        if (task.slot === 'msiSeries') task.storage[task.slot][task.key] = Object.assign({}, task.ent, ref);
+        else task.storage[task.slot][task.key] = ref;
+        uploaded.add(task.blobId);
+        doneCount++; doneBytes += size;
+        if (progress) progress.update(doneCount, uploadTasks.length, doneBytes, totalBytes);
+        onProgress(doneCount, uploadTasks.length);
+    };
+    try { await runWithConcurrency(uploadTasks, 4, uploadOne); }
+    finally { if (progress) progress.close(); }
+
+    const roisPayload = (project.rois || []).flatMap(r => {
+        const polys = r.polysBySection || {};
+        return Object.entries(polys).map(([sectionId, polyMsi]) => ({
+            sectionId,
+            colorKey: r.colorKey || 'default',
+            name: r.name || '',
+            polyMsi,
+            createdBy: 'master',
+            version: r.version || 1,
+        }));
+    });
+
+    const args = {
+        _master_pw: masterPw,
+        _slug: meta.slug,
+        _display_name: project.displayName || meta.slug,
+        _meta: { anatomyPalette: project.anatomyPalette || {}, memo: project.memo || {} },
+        _viewer_pw: meta.viewerPassword,
+        _admin_pw: meta.adminPassword || null,
+        _sections: sectionsPayload,
+        _rois: roisPayload,
+        _is_public: !!meta.isPublic,
+    };
+    let result;
+    try {
+        result = await SupabaseClient.upsertProjectDoc(args);
+    } catch (e) {
+        const errMsg = String((e && (e.message || e.details || e.hint)) || '');
+        const isMissingFn = (e && e.code === 'PGRST202')
+            || /Could not find the function/i.test(errMsg);
+        if (!isMissingFn) throw e;
+        if (args._is_public) {
+            throw new Error(
+                'Public 共有を使うには Supabase の SQL を最新版に更新してください。' +
+                'Supabase SQL Editor で supabase/share_locks.sql の最新版を実行 (再適用) してください。'
+            );
+        }
+        console.warn('upsert_project_doc(_is_public) not found — retrying with the 8-arg signature. ' +
+            'Apply supabase/share_locks.sql (the latest revision) in Supabase to enable public-link sharing.');
+        const fallbackArgs = Object.assign({}, args);
+        delete fallbackArgs._is_public;
+        result = await SupabaseClient.upsertProjectDoc(fallbackArgs);
+    }
+    if (!result || result.ok !== true) {
+        throw new Error(result && result.reason ? result.reason : 'upsert_failed');
+    }
+
+    const url = `${location.origin}${location.pathname}#share=${encodeURIComponent(meta.slug)}`;
+    // Merge into existing shareInfo so we keep publishedAt unless this is
+    // the first publish. uploadedBlobIds + lastSyncedAt drive the
+    // skip-already-uploaded path and the conflict detection respectively.
+    const prev = project.shareInfo || {};
+    project.shareInfo = Object.assign({}, prev, {
+        slug: meta.slug,
+        isPublic: !!meta.isPublic,
+        viewerPassword: meta.isPublic ? null : meta.viewerPassword,
+        adminPassword: meta.adminPassword || null,
+        url,
+        publishedAt: prev.publishedAt || nowIso(),
+        lastSyncedAt: nowIso(),
+        uploadedBlobIds: [...uploaded],
+    });
+    return result;
+}
+
 async function publishProjectToShare() {
     const project = App.project;
     if (!project) { showToast('プロジェクトを開いてから実行してください'); return; }
@@ -5908,163 +6085,29 @@ async function publishProjectToShare() {
     const meta = await openPublishMetaModal(project);
     if (!meta) return;
 
-    // Phase 1: master pw is required to mint a publish session token and
-    // to call upsert_project_doc. Reuse the cached pw from the master
-    // unlock gate when available; otherwise prompt explicitly.
-    let masterPw = (function () {
-        try {
-            const raw = sessionStorage.getItem('desi:masterPw');
-            if (!raw) return '';
-            const p = JSON.parse(raw);
-            return (p && p.expiresAt > Date.now()) ? (p.pw || '') : '';
-        } catch (e) { return ''; }
-    })();
+    // master pw: reuse the cached value when available; otherwise prompt.
+    let masterPw = _readCachedMasterPw();
     if (!masterPw) {
         masterPw = (prompt('Master password を入力してください', 'MSIadomine') || '').trim();
         if (!masterPw) return;
     }
-    let publishToken = null;
-    try {
-        const sess = await SupabaseClient.requestPublishSession(masterPw, meta.slug);
-        publishToken = sess && sess.token;
-    } catch (e) {
-        console.error('request_publish_session failed', e);
-        alert('Master password が違います、または通信エラー: ' + (e.message || e));
-        return;
-    }
-    if (!publishToken) { alert('publish session token を取得できませんでした'); return; }
 
     showToast('Supabase へアップロード中...', 1800);
     try {
-        // Collect every upload as a task first, then run them with a small
-        // concurrency cap so the bulk transfer doesn't sit on a single
-        // serial connection. Track byte totals so the progress modal can
-        // show "X / N files (Y MB)" while in flight.
-        const uploadTasks = [];
-        const sectionsPayload = [];
-        for (const sec of project.sections) {
-            const storage = { images: {}, msiSeries: {} };
-            const queue = (kindFolder, slot, k, ent) => {
-                if (!ent || !ent.blobId) return;
-                uploadTasks.push({ blobId: ent.blobId, kindFolder, slot, key: k, ent, sectionId: sec.id, storage });
-            };
-            for (const [k, ent] of Object.entries(sec.images || {})) queue('images', 'images', k, ent);
-            for (const [k, ent] of Object.entries(sec.msiSeries || {})) queue('msi', 'msiSeries', k, ent);
-            sectionsPayload.push({
-                id: sec.id,
-                ordinal: sec.ordinal || 0,
-                displayName: sec.displayName || ('Section ' + (sec.ordinal || '')),
-                meta: sec.meta || {},
-                storagePaths: storage,
-            });
-        }
-
-        const progress = openPublishProgressModal(uploadTasks.length);
-        let doneCount = 0;
-        let doneBytes = 0;
-        let totalBytes = 0;
-        const uploadOne = async (task) => {
-            const blob = await ProjectStorage.getBlob(task.blobId);
-            if (!blob || !blob.blob) return;
-            const filename = (task.ent && task.ent.filename) || blob.filename || (task.key + '.bin');
-            const path = `${meta.slug}/${task.sectionId}/${task.kindFolder}/${task.blobId}__${filename}`;
-            const size = (blob.blob && blob.blob.size) || 0;
-            totalBytes += size;
-            // Two retries with exponential backoff for transient network errors.
-            let lastErr = null;
-            for (let attempt = 0; attempt < 3; attempt++) {
-                try {
-                    await SupabaseClient.uploadBlob('atlases', path, blob.blob, blob.mime || (task.ent && task.ent.mime), publishToken);
-                    lastErr = null; break;
-                } catch (e) {
-                    lastErr = e;
-                    if (attempt < 2) await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
-                }
-            }
-            if (lastErr) throw lastErr;
-            const ref = { path, mime: blob.mime || (task.ent && task.ent.mime), filename };
-            if (task.slot === 'msiSeries') task.storage[task.slot][task.key] = Object.assign({}, task.ent, ref);
-            else task.storage[task.slot][task.key] = ref;
-            doneCount++; doneBytes += size;
-            progress.update(doneCount, uploadTasks.length, doneBytes, totalBytes);
-        };
-        try {
-            await runWithConcurrency(uploadTasks, 4, uploadOne);
-        } finally {
-            progress.close();
-        }
-
-        const roisPayload = (project.rois || []).flatMap(r => {
-            const polys = r.polysBySection || {};
-            return Object.entries(polys).map(([sectionId, polyMsi]) => ({
-                sectionId,
-                colorKey: r.colorKey || 'default',
-                name: r.name || '',
-                polyMsi,
-                createdBy: 'master',
-                version: r.version || 1,
-            }));
-        });
-
-        const args = {
-            _master_pw: masterPw,
-            _slug: meta.slug,
-            _display_name: project.displayName || meta.slug,
-            _meta: { anatomyPalette: project.anatomyPalette || {}, memo: project.memo || {} },
-            _viewer_pw: meta.viewerPassword,
-            _admin_pw: meta.adminPassword || null,
-            _sections: sectionsPayload,
-            _rois: roisPayload,
-            _is_public: !!meta.isPublic,
-        };
-        // The 9-arg signature including `_is_public` was added in a later
-        // share_locks.sql revision. If the user's Supabase project still
-        // has the older 8-arg function, supabase-js raises PGRST202
-        // "Could not find the function" with the new arg list. Retry
-        // without `_is_public` so non-public publishes still succeed; if
-        // the user actually wanted a public link, error out with a
-        // clear instruction since the SQL update is mandatory.
-        let result;
-        try {
-            result = await SupabaseClient.upsertProjectDoc(args);
-        } catch (e) {
-            const errMsg = String((e && (e.message || e.details || e.hint)) || '');
-            const isMissingFn = (e && e.code === 'PGRST202')
-                || /Could not find the function/i.test(errMsg);
-            if (!isMissingFn) throw e;
-            if (args._is_public) {
-                throw new Error(
-                    'Public 共有を使うには Supabase の SQL を最新版に更新してください。' +
-                    'Supabase SQL Editor で supabase/share_locks.sql の最新版を実行 (再適用) してください。'
-                );
-            }
-            console.warn('upsert_project_doc(_is_public) not found — retrying with the 8-arg signature. ' +
-                'Apply supabase/share_locks.sql (the latest revision) in Supabase to enable public-link sharing.');
-            const fallbackArgs = Object.assign({}, args);
-            delete fallbackArgs._is_public;
-            result = await SupabaseClient.upsertProjectDoc(fallbackArgs);
-        }
-        if (!result || result.ok !== true) {
-            throw new Error(result && result.reason ? result.reason : 'upsert_failed');
-        }
-        const url = `${location.origin}${location.pathname}#share=${encodeURIComponent(meta.slug)}`;
-        // Persist the share metadata locally so the master can re-open it
-        // any time via the "Share info" button. Stored only in the local
-        // IndexedDB project record — it never leaves this browser.
-        project.shareInfo = {
-            slug: meta.slug,
-            isPublic: !!meta.isPublic,
-            viewerPassword: meta.isPublic ? null : meta.viewerPassword,
-            adminPassword: meta.adminPassword || null,
-            url,
-            publishedAt: nowIso(),
-        };
+        await _publishCore(project, meta, masterPw, { silent: false });
+        _saveCachedMasterPw(masterPw);
         try { await ProjectStorage.putProject(project); } catch (e) { console.warn('persist shareInfo failed', e); }
         App.refreshShareInfoButton();
+        if (App._setSyncStatus) App._setSyncStatus('synced');
         await openShareInfoModal(project.shareInfo, { titleSuccess: true });
     } catch (e) {
         console.error('publish failed', e);
-        alert('Publish に失敗しました: ' + (e.message || e));
+        const msg = String((e && (e.message || e.details)) || e);
+        if (/unauthorized|28000/i.test(msg)) {
+            alert('Master password が違います');
+        } else {
+            alert('Publish に失敗しました: ' + msg);
+        }
     }
 }
 
@@ -8065,6 +8108,11 @@ const SupabaseClient = (() => {
     return {
         configured() { return !!_client(); },
         lastError() { return lastError; },
+        // Expose the raw supabase-js client so callers can use the
+        // table-level fluent API (.from(...).select(...)) for cases
+        // where a dedicated RPC would be overkill — eg. the auto-
+        // publish conflict check that just needs projects.updated_at.
+        _rawClient() { return _client(); },
         // Auth -------------------------------------------------
         unlockProject(slug, password) { return rpc('unlock_project', { p_slug: slug, p_password: password }); },
         // Public-link unlock: returns a token only when the project's
@@ -9017,6 +9065,16 @@ const App = {
         if (!btn) return;
         const has = !!(this.project && this.project.shareInfo && this.project.shareInfo.url);
         btn.style.display = has ? '' : 'none';
+        // Initialise the sync indicator alongside the share-info button.
+        // For a fresh-opened project we show "synced" when shareInfo
+        // exists with a lastSyncedAt (auto-publish will keep it fresh)
+        // or hide it for never-published projects.
+        if (!this.project || this.project.__share || this.shareMode) {
+            this._setSyncStatus('hidden');
+            return;
+        }
+        if (has) this._setSyncStatus('synced');
+        else this._setSyncStatus('hidden');
     },
 
     async createNewProject(meta) {
@@ -9291,8 +9349,193 @@ const App = {
             try {
                 await ProjectStorage.putProject(this.project);
                 await this.refreshProjectPicker();
+                // Phase 8: every IDB save schedules a background auto-
+                // publish so Local IDB is effectively a cache and the
+                // server stays canonical. Skipped silently in share-
+                // mode (no master pw) and for projects that have never
+                // been published manually (no shareInfo yet).
+                this._setSyncStatus('local-saved');
+                this._scheduleAutoPublish();
             } catch (e) { console.warn('save failed:', e); }
         }, (delay === undefined) ? 400 : delay);
+    },
+
+    // ---- Auto-publish ----
+    // Schedule a silent background publish 5 seconds after the last
+    // queueSave fires. The longer debounce (vs the IDB save's 400 ms)
+    // batches up ROI / slider edits so we only push to Supabase when
+    // the user actually pauses.
+    _scheduleAutoPublish() {
+        if (this.shareMode) return;                       // share recipient view: no master access
+        if (!this.project || this.project.__share) return;
+        if (!this.project.shareInfo || !this.project.shareInfo.slug) return;  // never published yet
+        if (this._autoPublishTimer) clearTimeout(this._autoPublishTimer);
+        this._autoPublishTimer = setTimeout(() => {
+            this._autoPublishTimer = 0;
+            this.autoPublishProject().catch(e => console.warn('autoPublish error', e));
+        }, 5000);
+    },
+
+    async autoPublishProject() {
+        const project = this.project;
+        if (!project || project.__share) return;
+        if (!project.shareInfo || !project.shareInfo.slug) return;
+        if (!SupabaseClient.configured()) return;
+
+        const masterPw = _readCachedMasterPw();
+        if (!masterPw) {
+            this._setSyncStatus('needs-master-pw');
+            return;
+        }
+
+        if (this._autoPublishInflight) return;
+        this._autoPublishInflight = true;
+        try {
+            // Conflict detection: server's projects.updated_at vs our
+            // local lastSyncedAt. If server is newer, another PC pushed
+            // changes we don't have — bail before overwriting them.
+            if (await this._serverIsNewerThanLocal(project)) {
+                this._setSyncStatus('conflict');
+                return;
+            }
+
+            this._setSyncStatus('uploading', 0, 0);
+            const meta = {
+                slug: project.shareInfo.slug,
+                isPublic: !!project.shareInfo.isPublic,
+                viewerPassword: project.shareInfo.viewerPassword,
+                adminPassword: project.shareInfo.adminPassword,
+            };
+            await _publishCore(project, meta, masterPw, {
+                silent: true,
+                onProgress: (done, total) => this._setSyncStatus('uploading', done, total),
+            });
+            try { await ProjectStorage.putProject(project); } catch (e) {}
+            this._setSyncStatus('synced');
+        } catch (e) {
+            console.warn('auto-publish failed', e);
+            const msg = String((e && (e.message || e.details)) || e);
+            if (/unauthorized|28000/i.test(msg)) {
+                // master pw rejected — drop the cache so the next attempt
+                // will re-prompt rather than silently failing again.
+                try { sessionStorage.removeItem('desi:masterPw'); } catch (_) {}
+                this._setSyncStatus('needs-master-pw');
+            } else {
+                this._setSyncStatus('error', msg);
+            }
+        } finally {
+            this._autoPublishInflight = false;
+        }
+    },
+
+    // Compare server projects.updated_at against the project's locally-
+    // remembered lastSyncedAt. Returns true when the server has a newer
+    // row, signalling that another PC pushed since this one last synced.
+    async _serverIsNewerThanLocal(project) {
+        const localIso = project.shareInfo && project.shareInfo.lastSyncedAt;
+        if (!localIso) return false;
+        try {
+            const c = SupabaseClient._rawClient();
+            if (!c) return false;
+            const { data, error } = await c.from('projects')
+                .select('updated_at')
+                .eq('slug', project.shareInfo.slug)
+                .maybeSingle();
+            if (error || !data || !data.updated_at) return false;
+            // 1.5 s slop so the row write our own publish triggered
+            // doesn't get classified as "newer than local".
+            return new Date(data.updated_at).getTime() > new Date(localIso).getTime() + 1500;
+        } catch (e) { return false; }
+    },
+
+    // Update the in-page sync indicator. State machine:
+    //   local-saved      → just wrote IDB, autoPublish pending (5 s)
+    //   uploading <a>/<b>→ blob upload progress
+    //   synced           → last successful auto-publish
+    //   conflict         → server has newer data; user must reconcile
+    //   needs-master-pw  → 12 h cache empty, manual publish required
+    //   error <msg>      → other failure (network, RPC error, etc.)
+    _setSyncStatus(state, a, b) {
+        this._syncState = state;
+        const el = document.getElementById('sync-status');
+        if (!el) return;
+        const hidden = state === 'hidden'
+            || this.shareMode
+            || !this.project
+            || this.project.__share
+            || !this.project.shareInfo
+            || !this.project.shareInfo.slug;
+        if (hidden) { el.style.display = 'none'; return; }
+        el.className = 'sync-status sync-' + state;
+        let text = '';
+        switch (state) {
+            case 'local-saved':     text = '💾 Local 保存中'; break;
+            case 'uploading':       text = '⬆ アップロード中' + (b ? ' (' + a + '/' + b + ')' : ''); break;
+            case 'synced': {
+                const t = new Date();
+                text = '✓ Synced (' + String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0') + ')';
+                break;
+            }
+            case 'conflict':        text = '⚠ サーバが新しい'; break;
+            case 'needs-master-pw': text = '🔑 Master pw 期限切れ'; break;
+            case 'error':           text = '⚠ Sync 失敗'; break;
+            default:                text = state;
+        }
+        el.textContent = text;
+        el.title = (state === 'error' && a) ? a
+                 : (state === 'conflict') ? '別 PC が新しいバージョンを publish しました。クリックで対応'
+                 : (state === 'needs-master-pw') ? 'クリックで Master pw 入力'
+                 : (state === 'synced') ? 'クリックで強制再同期'
+                 : '';
+        el.style.display = 'inline-flex';
+    },
+
+    // Click on sync indicator: state-aware recovery actions.
+    async _handleSyncStatusClick() {
+        const state = this._syncState;
+        if (state === 'synced' || state === 'local-saved' || state === 'error') {
+            // Force an immediate auto-publish.
+            if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
+            this.autoPublishProject().catch(e => console.warn('manual sync failed', e));
+            return;
+        }
+        if (state === 'needs-master-pw') {
+            const pw = (prompt('Master password を入力してください', 'MSIadomine') || '').trim();
+            if (!pw) return;
+            _saveCachedMasterPw(pw);
+            this.autoPublishProject().catch(e => console.warn('manual sync failed', e));
+            return;
+        }
+        if (state === 'conflict') {
+            const choice = prompt(
+                '別 PC が新しいバージョンを publish しています。\n' +
+                '1: サーバの最新を取り込む (推奨、ローカル未 publish 編集は失われます)\n' +
+                '2: ローカルでサーバを上書き (別 PC の編集が失われます)\n' +
+                'キャンセル: 何もしない\n\n' +
+                '番号を入力してください (1 / 2):',
+                ''
+            );
+            if (choice === '1') {
+                // Re-import the project from server, which deletes the
+                // local copy and downloads a fresh master record.
+                const slug = this.project && this.project.shareInfo && this.project.shareInfo.slug;
+                if (!slug) return;
+                const newId = await this._importProjectFromServer(slug);
+                if (newId) {
+                    history.replaceState({}, '', location.pathname + '?project=' + encodeURIComponent(newId));
+                    await this.openProject(newId);
+                }
+            } else if (choice === '2') {
+                // Force overwrite by zero-ing the lastSyncedAt baseline
+                // so the server-newer check passes on the next attempt.
+                if (this.project && this.project.shareInfo) {
+                    this.project.shareInfo.lastSyncedAt = nowIso();
+                    try { await ProjectStorage.putProject(this.project); } catch (e) {}
+                }
+                this.autoPublishProject().catch(e => console.warn('overwrite failed', e));
+            }
+            return;
+        }
     },
 
     // ---- UI wiring ----
@@ -9318,6 +9561,10 @@ const App = {
         document.getElementById('btn-export-zip').addEventListener('click', () => exportProjectAsZip());
         const publishBtn = document.getElementById('btn-publish-share');
         if (publishBtn) publishBtn.addEventListener('click', () => publishProjectToShare());
+        // Sync status indicator: clicking it offers the appropriate
+        // recovery action depending on the current state machine value.
+        const syncStatusEl = document.getElementById('sync-status');
+        if (syncStatusEl) syncStatusEl.addEventListener('click', () => this._handleSyncStatusClick());
         const shareInfoBtn = document.getElementById('btn-share-info');
         if (shareInfoBtn) shareInfoBtn.addEventListener('click', () => {
             if (!this.project || !this.project.shareInfo) return;
@@ -9474,6 +9721,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-07-r8</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-07-r9</div>
 </body>
 </html>

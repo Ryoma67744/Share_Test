@@ -383,12 +383,17 @@ grant execute on function public.unlock_public_project(text) to anon, authentica
 -- unlock_public_project doesn't exist yet) silently falls back to the
 -- password modal even for is_public=true rows.
 --
--- The grant below restricts anon to four non-sensitive columns, so the
+-- The grant below restricts anon to five non-sensitive columns, so the
 -- jsonb `meta` (memo, palette tweaks) and `anatomy_palette` stay private
 -- from anon. The accompanying RLS policy is required for PostgREST to
 -- return any rows once RLS is enabled (column GRANT alone is not enough).
+-- updated_at is exposed so the master-side auto-publish flow can compare
+-- its lastSyncedAt against the server's row mtime to detect that another
+-- PC pushed a newer version (Phase 8 conflict detection). Knowing the
+-- mtime of a slug you can already reach via share URL doesn't leak
+-- anything sensitive.
 revoke select on public.projects from anon;
-grant  select (id, slug, is_public, display_name) on public.projects to anon;
+grant  select (id, slug, is_public, display_name, updated_at) on public.projects to anon;
 
 drop policy if exists "projects anon select public meta" on public.projects;
 create policy "projects anon select public meta" on public.projects
