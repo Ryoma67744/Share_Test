@@ -592,12 +592,10 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                 <button class="tb-btn" id="tb-align-heif" title="HE/IF を MSI と重ね合わせる (manual / landmark)">Align</button>
                 <button class="tb-btn danger" id="tb-del-section" title="Delete the active section">×</button>
                 <span class="tb-divider"></span>
-                <span class="tb-group" title="MSI 強度の表示レンジ (Range)">
-                    <input type="number" id="tb-range-min" step="any" placeholder="min" title="Range 下限 (vmin)" aria-label="Range min" disabled>
-                    <button type="button" class="sync-toggle" data-sync="vmin" title="Sync Min across sections">🔗</button>
+                <span class="tb-group" title="MSI 強度の表示レンジ (Range) — 同じ MRM の全切片に自動で反映されます">
+                    <input type="number" id="tb-range-min" step="any" placeholder="min" title="Range 下限 (vmin) — 同じ MRM の全切片に反映" aria-label="Range min" disabled>
                     <span class="tb-sep">—</span>
-                    <input type="number" id="tb-range-max" step="any" placeholder="max" title="Range 上限 (vmax)" aria-label="Range max" disabled>
-                    <button type="button" class="sync-toggle" data-sync="vmax" title="Sync Max across sections">🔗</button>
+                    <input type="number" id="tb-range-max" step="any" placeholder="max" title="Range 上限 (vmax) — 同じ MRM の全切片に反映" aria-label="Range max" disabled>
                 </span>
                 <span class="tb-group" title="MSI レイヤーの不透明度 (Opacity)">
                     <input type="number" id="tb-opacity" step="1" min="0" max="100" title="MSI Opacity (%)" aria-label="Opacity" disabled>
@@ -2961,7 +2959,7 @@ class SectionPanel {
         if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
         if (App.activeSectionId === this.section.id) renderMethodTable();
         App.queueSave();
-        App.broadcastSync(edge === 'min' ? 'vmin' : 'vmax', parseFloat(rawValue), this);
+        App.broadcastRangeToSameMrm(key, edge === 'min' ? 'vmin' : 'vmax', parseFloat(rawValue), this);
         Toolbar.refreshRange();
     }
 
@@ -3144,6 +3142,37 @@ class SectionPanel {
         }, { passive: false });
     }
 
+    // Apply a Range edit pushed by App.broadcastRangeToSameMrm. Targets the
+    // exact MSI key (MRM) that the source panel edited — independent of this
+    // panel's currently active layer. Silently skips when this section
+    // doesn't carry that MRM.
+    applyRangeForKey(msiKey, field, rawValue) {
+        if (!msiKey || (field !== 'vmin' && field !== 'vmax')) return;
+        const settings = this.imageSettings && this.imageSettings[msiKey];
+        if (!settings) return;
+        const ent = (this.section.msiSeries || {})[msiKey] || {};
+        const rawRange = ent.rawRange || null;
+        let lum = rawToLum(Number(rawValue), rawRange);
+        if (!Number.isFinite(lum)) return;
+        lum = Math.max(0, Math.min(255, Math.round(lum)));
+        if (field === 'vmin') {
+            if (lum >= settings.vmax) lum = settings.vmax - 1;
+            settings.vmin = lum;
+        } else {
+            if (lum <= settings.vmin) lum = settings.vmin + 1;
+            settings.vmax = lum;
+        }
+        if (this.imageSources && this.imageSources[msiKey]) {
+            this.renderComposite();
+        }
+        if (this.msiThumbRefs && this.msiThumbRefs.has(msiKey)) this.renderMsiThumbnail(msiKey);
+        if (App.activeSectionId === this.section.id && this.effectiveActiveMsiKey() === msiKey) {
+            Toolbar.refreshRange();
+            renderMethodTable();
+        }
+        App.queueSave();
+    }
+
     // Apply a value pushed in by App.broadcastSync from another section.
     applySyncedField(field, value) {
         if (field === 'rot') {
@@ -3170,25 +3199,8 @@ class SectionPanel {
             if (App.activeSectionId === this.section.id) Toolbar.refreshOpacity();
             return;
         }
-        if (field === 'vmin' || field === 'vmax') {
-            const ent = (this.section.msiSeries || {})[key] || {};
-            const rawRange = ent.rawRange || null;
-            let lum = rawToLum(Number(value), rawRange);
-            if (!Number.isFinite(lum)) return;
-            lum = Math.max(0, Math.min(255, Math.round(lum)));
-            if (field === 'vmin') {
-                if (lum >= settings.vmax) lum = settings.vmax - 1;
-                settings.vmin = lum;
-            } else {
-                if (lum <= settings.vmin) lum = settings.vmin + 1;
-                settings.vmax = lum;
-            }
-            this.renderComposite();
-            if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
-            this.refreshRangeEditor();
-            App.queueSave();
-            return;
-        }
+        // vmin/vmax は applyRangeForKey 経由で MRM キー単位に伝播するため、
+        // ここでは扱わない。
     }
 
     // Wire the thumb-row resize splitter. Drag updates a shared height value
@@ -9038,7 +9050,9 @@ const App = {
     // one section is broadcast to every other section via broadcastSync. Stored
     // per-control because Range min vs Range max vs Rot vs Opacity all have
     // independent comparison workflows.
-    syncFlags: { vmin: false, vmax: false, rot: false, opacity: false },
+    // Range (vmin/vmax) はトグル不能で常に「同じ MRM の全切片」に反映するため
+    // syncFlags 管理対象から外す (broadcastRangeToSameMrm を参照)。
+    syncFlags: { rot: false, opacity: false },
 
     // 'compound' = focus on one MSI layer across every section side-by-side
     // (default; tuned for WT/HET comparisons). 'free' = the previous behaviour
@@ -9249,6 +9263,20 @@ const App = {
         for (const panel of this.panels.values()) {
             if (panel === originPanel) continue;
             try { panel.applySyncedField(field, value); } catch (e) { console.warn('sync apply failed', e); }
+        }
+    },
+
+    // Range (vmin/vmax) is unconditionally propagated to every section that
+    // carries the same MRM (same MSI key, e.g. "MSI_Glucose"), regardless of
+    // which compound the receiving section currently displays. This makes
+    // the toolbar Range edit a per-compound operation rather than a
+    // per-section one.
+    broadcastRangeToSameMrm(msiKey, field, rawValue, originPanel) {
+        if (!msiKey || (field !== 'vmin' && field !== 'vmax')) return;
+        for (const panel of this.panels.values()) {
+            if (panel === originPanel) continue;
+            try { panel.applyRangeForKey(msiKey, field, rawValue); }
+            catch (e) { console.warn('range broadcast failed', e); }
         }
     },
 
