@@ -3756,6 +3756,60 @@ function pickUnusedColorKey(project) {
     return { key: 'Auto_' + (project.rois || []).length, rgba: [200, 200, 200, 255], name: '' };
 }
 
+// Server-side `rois` rows are flat (one per section + colorKey). The
+// in-memory model keeps a single ROI per colorKey with polysBySection
+// spanning every section. Group rows here so reload/poll rebuilds match
+// the locally-authored shape, and so `populateRoiList()` and the export
+// helper find their data where they expect it.
+function groupRoiRowsByColor(rows, palette) {
+    palette = palette || {};
+    const byColor = new Map();
+    (rows || []).forEach(r => {
+        const ck = r.color_key || 'default';
+        let entry = byColor.get(ck);
+        if (!entry) {
+            const pal = palette[ck];
+            entry = {
+                id: r.id,
+                colorKey: ck,
+                name: r.name || (pal && pal.name) || ck,
+                rgba: (pal && pal.rgba) || [255, 0, 0, 200],
+                polysBySection: {},
+                serverIdsBySection: {},
+            };
+            byColor.set(ck, entry);
+        } else if (r.name && !entry.name) {
+            entry.name = r.name;
+        }
+        if (r.section_id) {
+            entry.polysBySection[r.section_id] = r.poly_msi || [];
+            entry.serverIdsBySection[r.section_id] = { id: r.id, version: r.version };
+        }
+    });
+    return Array.from(byColor.values());
+}
+
+// list_rois requires a section uuid, so a project-wide ROI fetch fans out
+// to one RPC per section. Per-section failures are logged and skipped so
+// a single missing section does not blank out the whole list.
+async function fetchAllShareRois(token, sections) {
+    if (!token || !Array.isArray(sections) || !sections.length) return [];
+    const tasks = sections.map(async (sec) => {
+        if (!sec || !sec.id) return [];
+        try {
+            const rows = await SupabaseClient.listRois(token, sec.id);
+            return rows || [];
+        } catch (e) {
+            console.warn('list_rois failed for section', sec.id, e);
+            return [];
+        }
+    });
+    const groups = await Promise.all(tasks);
+    const out = [];
+    for (const g of groups) if (g && g.length) for (const r of g) out.push(r);
+    return out;
+}
+
 function populateRoiList() {
     const host = document.getElementById('roi-list');
     host.innerHTML = '';
@@ -8978,10 +9032,13 @@ const SupabaseClient = (() => {
         listRois(token, sectionId) { return rpc('list_rois', { p_token: token, p_section_id: sectionId || null }); },
         // ROI write paths --------------------------------------
         createRoi(token, payload) { return rpc('create_roi', { p_token: token, ...payload }); },
+        // SQL signatures use `p_id` for the ROI uuid; the earlier wrapper
+        // passed `p_roi_id`, which PostgREST silently rejected as "function
+        // not found", so updates / deletes never reached the server.
         updateRoi(token, roiId, expectedVersion, payload) {
-            return rpc('update_roi', { p_token: token, p_roi_id: roiId, p_expected_version: expectedVersion, ...payload });
+            return rpc('update_roi', { p_token: token, p_id: roiId, p_expected_version: expectedVersion, ...payload });
         },
-        deleteRoi(token, roiId) { return rpc('delete_roi', { p_token: token, p_roi_id: roiId }); },
+        deleteRoi(token, roiId) { return rpc('delete_roi', { p_token: token, p_id: roiId }); },
         // Lock -------------------------------------------------
         acquireRoiLock(token, label) { return rpc('acquire_roi_lock', { _token: token, _label: label || null }); },
         heartbeatRoiLock(token) { return rpc('heartbeat_roi_lock', { _token: token }); },
@@ -9823,17 +9880,12 @@ const App = {
             showToast(summary, 6000);
         }
 
+        // Same per-section fan-out + colorKey grouping as the share-mode
+        // hydration path; without it the imported project drops every ROI
+        // that the master previously published.
         try {
-            const rois = await SupabaseClient.listRois(session.token);
-            project.rois = (rois || []).map(r => ({
-                id: r.id,
-                colorKey: r.color_key,
-                name: r.name,
-                rgba: r.rgba || [255, 0, 0, 200],
-                polysBySection: r.polys_by_section || {},
-                version: r.version,
-                serverId: r.id,
-            }));
+            const rows = await fetchAllShareRois(session.token, project.sections);
+            project.rois = groupRoiRowsByColor(rows, project.anatomyPalette);
         } catch (e) { console.warn('import ROI fetch failed', e); }
 
         return project;
@@ -9950,18 +10002,16 @@ const App = {
             showToast(summary, 6000);
         }
 
-        // Hydrate ROIs.
+        // Hydrate ROIs. list_rois is per-section in SQL, so fan out across
+        // every section and rebuild the in-memory shape (one ROI per
+        // colorKey, with polysBySection spanning every section that holds
+        // a polygon for it). The previous code called list_rois with no
+        // section id, which silently returned the empty set — that is the
+        // reason analyst A's ROIs vanished on reload and were never
+        // visible to analyst B or the master-published baseline.
         try {
-            const rois = await SupabaseClient.listRois(session.token);
-            project.rois = (rois || []).map(r => ({
-                id: r.id,
-                colorKey: r.color_key,
-                name: r.name,
-                rgba: r.rgba || [255, 0, 0, 200],
-                polysBySection: r.polys_by_section || {},
-                version: r.version,
-                serverId: r.id,
-            }));
+            const rows = await fetchAllShareRois(session.token, project.sections);
+            project.rois = groupRoiRowsByColor(rows, project.anatomyPalette);
         } catch (e) { console.warn('share ROI fetch failed', e); }
 
         this.project = project;
@@ -9989,6 +10039,10 @@ const App = {
         renderMemoForm();
         this.renderAnalysis();
         Toolbar.refreshAll();
+        // Start polling for ROI changes from other analysts / the master's
+        // republished baseline. Cheap (~one RPC per section every 12 s)
+        // and pauses automatically while the local user is drawing.
+        this._startShareRoiPoll();
         // Show the simplified compound-comparison preview on top of the
         // freshly-hydrated detailed view. The overlay is only auto-shown for
         // share-mode visitors (recipients and admins); the master / local
@@ -10296,6 +10350,64 @@ const App = {
         SupabaseClient.releaseRoiLock(this.shareMode.token).catch(() => {});
     },
 
+    // Periodic refresh so analyst B sees analyst A's writes (and the
+    // master-published baseline) without a manual reload. The exclusive
+    // ROI lock prevents simultaneous edits, but it doesn't push updates,
+    // so a polling loop is the simplest way to converge the two views.
+    _startShareRoiPoll() {
+        if (!this.shareMode || !this.shareMode.token) return;
+        if (this._roiPollTimer) return;
+        this._roiPollTimer = setInterval(() => {
+            // Pause while the local user is actively drawing — replacing
+            // project.rois mid-polygon would look like the in-progress
+            // ROI vanished and would also clobber serverIdsBySection
+            // entries the finalize step is about to write into.
+            if (this.drawing && this.drawing.mode) return;
+            this._refreshShareRois().catch(e => console.warn('share ROI poll failed', e));
+        }, 12000);
+    },
+
+    _stopShareRoiPoll() {
+        if (this._roiPollTimer) { clearInterval(this._roiPollTimer); this._roiPollTimer = null; }
+    },
+
+    async _refreshShareRois() {
+        if (!this.shareMode || !this.shareMode.token || !this.project) return;
+        const rows = await fetchAllShareRois(this.shareMode.token, this.project.sections);
+        const remote = groupRoiRowsByColor(rows, this.project.anatomyPalette);
+        // Reconcile: keep the local ROI id stable across polls so
+        // activeRoiId / roiHidden / list-row dataset.roiId all still
+        // match after the refresh. Identity is keyed by colorKey, which
+        // pickUnusedColorKey already guarantees to be unique per project.
+        const localByColor = new Map((this.project.rois || []).map(r => [r.colorKey, r]));
+        for (const rem of remote) {
+            const loc = localByColor.get(rem.colorKey);
+            if (loc) {
+                rem.id = loc.id;
+                // Preserve a user-edited name if it differs from the
+                // palette default we'd otherwise reconstruct.
+                if (loc.name && loc.name !== loc.colorKey) rem.name = loc.name;
+            }
+        }
+        // Drop the active selection if the ROI was deleted on the server.
+        if (this.activeRoiId && !remote.find(r => r.id === this.activeRoiId)) {
+            this.activeRoiId = null;
+        }
+        // Cheap deep-compare via JSON to avoid re-rendering when nothing
+        // changed. populateRoiList rebuilds the entire list DOM, so
+        // unconditional re-renders every 12 s would flicker and lose
+        // the checkbox focus state.
+        const sig = (list) => JSON.stringify((list || []).map(r => ({
+            ck: r.colorKey, nm: r.name, p: r.polysBySection,
+        })));
+        if (sig(this.project.rois) === sig(remote)) return;
+        this.project.rois = remote;
+        populateRoiList();
+        this.redrawAllRois();
+        this.refreshAnalysisScope();
+        this.renderAnalysis();
+    },
+
     async finalizeDrawing() {
         const verts = (this.drawing.vertices || []).slice();
         const sectionId = this.drawing.sectionId;
@@ -10326,19 +10438,39 @@ const App = {
         this.redrawAllRois();
         this.renderAnalysis();
         // In Share mode the local IndexedDB is just an ephemeral cache;
-        // persistence happens server-side through the create_roi RPC.
-        // Master mode keeps using queueSave to write IDB.
+        // persistence happens server-side through the create_roi / update_roi
+        // RPCs. Master mode keeps using queueSave to write IDB.
         if (this.shareMode) {
             try {
-                const payload = {
-                    p_section_id: sectionId,
-                    p_color_key: roi.colorKey,
-                    p_name: roi.name,
-                    p_poly_msi: verts,
-                    p_created_by: 'viewer',
-                };
-                const rec = await SupabaseClient.createRoi(this.shareMode.token, payload);
-                if (rec && rec.id) { roi.serverId = rec.id; roi.version = rec.version; }
+                roi.serverIdsBySection = roi.serverIdsBySection || {};
+                const existing = roi.serverIdsBySection[sectionId];
+                let rec;
+                if (existing && existing.id) {
+                    // Re-drawing on a section that already has a row —
+                    // update in place so polling / reload don't see two
+                    // rows for the same (colorKey, section_id) pair.
+                    rec = await SupabaseClient.updateRoi(
+                        this.shareMode.token,
+                        existing.id,
+                        existing.version || 1,
+                        { p_color_key: roi.colorKey, p_poly_msi: verts }
+                    );
+                } else {
+                    rec = await SupabaseClient.createRoi(this.shareMode.token, {
+                        p_section_id: sectionId,
+                        p_color_key: roi.colorKey,
+                        p_name: roi.name,
+                        p_poly_msi: verts,
+                        p_created_by: 'viewer',
+                    });
+                }
+                if (rec && rec.id) {
+                    roi.serverIdsBySection[sectionId] = { id: rec.id, version: rec.version };
+                    // Keep the legacy single-id field populated to the
+                    // latest write so any leftover read site still works.
+                    roi.serverId = rec.id;
+                    roi.version = rec.version;
+                }
             } catch (e) {
                 console.warn('Share: create_roi failed', e);
                 showToast('ROI のサーバ保存に失敗しました');
@@ -10355,8 +10487,19 @@ const App = {
             const ok = await this._tryAcquireRoiLock();
             if (!ok) return;
             try {
-                if (target && target.serverId) {
-                    await SupabaseClient.deleteRoi(this.shareMode.token, target.serverId);
+                // The server stores one row per (section, colorKey) tuple,
+                // so deleting a cross-section ROI requires nuking every
+                // per-section row. Fall back to the legacy single serverId
+                // for ROIs created before serverIdsBySection existed.
+                const ids = new Set();
+                if (target && target.serverIdsBySection) {
+                    for (const ent of Object.values(target.serverIdsBySection)) {
+                        if (ent && ent.id) ids.add(ent.id);
+                    }
+                }
+                if (!ids.size && target && target.serverId) ids.add(target.serverId);
+                for (const sid of ids) {
+                    await SupabaseClient.deleteRoi(this.shareMode.token, sid);
                 }
             } catch (e) {
                 console.warn('Share: delete_roi failed', e);
