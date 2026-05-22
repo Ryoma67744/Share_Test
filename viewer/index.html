@@ -6339,22 +6339,26 @@ async function tryAppendUserRoiColumns(srcBlob, section, msiEnt, project) {
         if (xCol < 0 || yCol < 0) return null;
         const rois = (project.rois || []).filter(r => r.polysBySection && r.polysBySection[section.id]);
         if (!rois.length) return null;
-        const firstNew = lastHeaderCol + 1;
+        // Single trailing column labelled "ROI" — each data row gets the
+        // first-matching ROI's name (or empty) so downstream tools read one
+        // categorical column rather than N membership flags.
+        const roiCol = lastHeaderCol + 1;
         const dataStart0 = headerRow0 + 1;
-        rois.forEach((roi, idx) => {
-            const col = firstNew + idx;
-            sheet[XLSX.utils.encode_cell({ r: headerRow0, c: col })] = { t: 's', v: roi.name || roi.colorKey };
-            const poly = roi.polysBySection[section.id];
-            for (let r = dataStart0; r <= range.e.r; r++) {
-                const xCell = sheet[XLSX.utils.encode_cell({ r, c: xCol })];
-                const yCell = sheet[XLSX.utils.encode_cell({ r, c: yCol })];
-                if (!xCell || !yCell) continue;
-                const x = Number(xCell.v), y = Number(yCell.v);
-                if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-                sheet[XLSX.utils.encode_cell({ r, c: col })] = { t: 'n', v: pointInPolygon(x, y, poly) ? 1 : 0 };
+        const roiPairs = rois.map(r => ({ name: r.name || r.colorKey || '', poly: r.polysBySection[section.id] }));
+        sheet[XLSX.utils.encode_cell({ r: headerRow0, c: roiCol })] = { t: 's', v: 'ROI' };
+        for (let r = dataStart0; r <= range.e.r; r++) {
+            const xCell = sheet[XLSX.utils.encode_cell({ r, c: xCol })];
+            const yCell = sheet[XLSX.utils.encode_cell({ r, c: yCol })];
+            if (!xCell || !yCell) continue;
+            const x = Number(xCell.v), y = Number(yCell.v);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+            let matched = '';
+            for (const pair of roiPairs) {
+                if (pointInPolygon(x, y, pair.poly)) { matched = pair.name; break; }
             }
-        });
-        const newRange = { s: { r: range.s.r, c: range.s.c }, e: { r: range.e.r, c: firstNew + rois.length - 1 } };
+            if (matched) sheet[XLSX.utils.encode_cell({ r, c: roiCol })] = { t: 's', v: matched };
+        }
+        const newRange = { s: { r: range.s.r, c: range.s.c }, e: { r: range.e.r, c: roiCol } };
         sheet['!ref'] = XLSX.utils.encode_range(newRange);
         return XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
     } catch (e) {
@@ -6381,18 +6385,23 @@ async function tryAppendUserRoiColumnsToTxt(srcBlob, section, msiEnt, project) {
         const eol = /\r\n/.test(raw) ? '\r\n' : '\n';
         const endsWithNewline = /\r?\n$/.test(raw);
         const linesAll = raw.split(/\r?\n/);
-        const roiLabels = rois.map(r => String(r.name || r.colorKey || '').replace(/[\t\r\n]+/g, ' '));
-        const polys = rois.map(r => r.polysBySection[section.id]);
+        // Pair name + polygon so the per-row pointInPolygon scan can return
+        // the matched ROI's label directly. Order follows project.rois — the
+        // scan stops at the first hit, which is the documented overlap rule.
+        const roiPairs = rois.map(r => ({
+            name: String(r.name || r.colorKey || '').replace(/[\t\r\n]+/g, ' '),
+            poly: r.polysBySection[section.id],
+        }));
 
         let outLines = null;
         const isAnalyteMarker = /Analyte\s*\(converted from imzML\)/i.test(linesAll[0] || '');
         if (isAnalyteMarker) {
             let parsed = null;
             try { parsed = parseAnalyteHeader(buf); } catch (e) { parsed = null; }
-            if (parsed && parsed.nameIdx >= 0) outLines = appendRoisToAnalyteLines(linesAll, parsed, polys, roiLabels);
+            if (parsed && parsed.nameIdx >= 0) outLines = appendRoisToAnalyteLines(linesAll, parsed, roiPairs);
         }
         if (!outLines) {
-            outLines = appendRoisToGenericLines(linesAll, polys, roiLabels);
+            outLines = appendRoisToGenericLines(linesAll, roiPairs);
         }
         if (!outLines) return null;
 
@@ -6405,25 +6414,20 @@ async function tryAppendUserRoiColumnsToTxt(srcBlob, section, msiEnt, project) {
     }
 }
 
-function appendRoisToAnalyteLines(linesAll, parsed, polys, roiLabels) {
+function appendRoisToAnalyteLines(linesAll, parsed, roiPairs) {
     const { dataStartLine, precIdx, prodIdx, nameIdx } = parsed;
     const out = linesAll.slice();
-    const zeros = roiLabels.map(() => '0').join('\t');
-    const blanks = roiLabels.map(() => '').join('\t');
-    const labels = roiLabels.join('\t');
-    // Place ROI names alongside compound names so the rightmost columns of
-    // the name row read "Histamine ... TDLN LN". precIdx / prodIdx get
-    // literal 0 so a future parseAnalyteHeader pass treats the ROI columns
-    // as non-compound padding (pre <= 0 → break the compound scan).
-    out[nameIdx] = (out[nameIdx] || '') + '\t' + labels;
-    out[precIdx] = (out[precIdx] || '') + '\t' + zeros;
-    if (prodIdx !== precIdx) out[prodIdx] = (out[prodIdx] || '') + '\t' + zeros;
-    // Pad the remaining metadata rows so every row above dataStartLine has
-    // the same column count — keeps spreadsheet viewers from looking ragged.
+    // Single trailing column labelled "ROI" — downstream Excel / R / Python
+    // sees a single string column with the ROI name per pixel.
+    out[nameIdx] = (out[nameIdx] || '') + '\tROI';
+    out[precIdx] = (out[precIdx] || '') + '\t0';
+    if (prodIdx !== precIdx) out[prodIdx] = (out[prodIdx] || '') + '\t0';
+    // Pad the remaining metadata rows with one empty cell so column counts
+    // stay aligned for spreadsheet viewers.
     for (let i = 0; i < dataStartLine; i++) {
         if (i === nameIdx || i === precIdx || i === prodIdx) continue;
         if (out[i] == null) continue;
-        out[i] = out[i] + '\t' + blanks;
+        out[i] = out[i] + '\t';
     }
     for (let i = dataStartLine; i < out.length; i++) {
         const line = out[i];
@@ -6433,13 +6437,16 @@ function appendRoisToAnalyteLines(linesAll, parsed, polys, roiLabels) {
         const x = Number(tok[1]);
         const y = Number(tok[2]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        const cells = polys.map(p => pointInPolygon(x, y, p) ? '1' : '0');
-        out[i] = line + '\t' + cells.join('\t');
+        let matched = '';
+        for (const pair of roiPairs) {
+            if (pointInPolygon(x, y, pair.poly)) { matched = pair.name; break; }
+        }
+        out[i] = line + '\t' + matched;
     }
     return out;
 }
 
-function appendRoisToGenericLines(linesAll, polys, roiLabels) {
+function appendRoisToGenericLines(linesAll, roiPairs) {
     const headerIdx = linesAll.findIndex(s => s != null && s.trim().length > 0);
     if (headerIdx < 0) return null;
     const rawHeader = linesAll[headerIdx];
@@ -6458,9 +6465,8 @@ function appendRoisToGenericLines(linesAll, polys, roiLabels) {
     const yi = findCol('Image_Y', 'y', 'Y');
     if (xi < 0 || yi < 0) return null;
     const escape = sep === ',' ? csvEscape : (s) => s;
-    const labels = roiLabels.map(escape).join(sep);
     const out = linesAll.slice();
-    out[headerIdx] = rawHeader + sep + labels;
+    out[headerIdx] = rawHeader + sep + 'ROI';
     for (let i = headerIdx + 1; i < out.length; i++) {
         const line = out[i];
         if (!line || !line.trim()) continue;
@@ -6469,8 +6475,11 @@ function appendRoisToGenericLines(linesAll, polys, roiLabels) {
         const x = Number(cols[xi]);
         const y = Number(cols[yi]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        const cells = polys.map(p => pointInPolygon(x, y, p) ? '1' : '0');
-        out[i] = line + sep + cells.join(sep);
+        let matched = '';
+        for (const pair of roiPairs) {
+            if (pointInPolygon(x, y, pair.poly)) { matched = pair.name; break; }
+        }
+        out[i] = line + sep + escape(matched);
     }
     return out;
 }
@@ -11164,6 +11173,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-22-r26</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-22-r27</div>
 </body>
 </html>
