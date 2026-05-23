@@ -2175,6 +2175,13 @@ class SectionPanel {
             this.imageSources = this.imageSources || {};
             this.imageSettings = this.imageSettings || {};
             this.imageSources[TIC_KEY] = ticImg;
+            // populateThumbnails reads imageDataUrls[key] for the <img src>;
+            // without this the thumbnail cell renders an empty (black) box
+            // even though the main canvas and the chip work fine. ticImg.src
+            // is the same `data:image/png;base64,...` we just generated so
+            // there's no extra encode.
+            this.imageDataUrls = this.imageDataUrls || {};
+            this.imageDataUrls[TIC_KEY] = ticImg.src;
             this.imageSettings[TIC_KEY] = {
                 opacity: 1.0,
                 vmin: 0, vmax: 255,
