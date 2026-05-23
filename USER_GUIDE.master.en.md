@@ -219,6 +219,31 @@ Click the **gear ⚙** at the right edge of any layer chip to open a per-layer p
 
 The main canvas always paints **HE/IF first, then anything else, then MSI on top with additive (`lighter`) blending**. The order does NOT depend on the order in which layers were toggled — HE never covers MSI.
 
+### 6-4. Automatic TIC backdrop (sections without HE)
+
+When a section has **no HE (`HE_STAIN`) registered** and 2+ MSI series exist, the Viewer (master included) automatically injects a synthetic TIC image (`HE_STAIN_TIC` key) as the backdrop.
+
+| Case | Behaviour |
+| --- | --- |
+| HE registered | HE acts as backdrop, no TIC injection |
+| No HE, IF/IHC only | **TIC at the bottom, IF/IHC in the middle, MSI on top** |
+| No HE, no IF/IHC, 2+ MSI | TIC becomes the backdrop |
+| No HE, only 1 MSI | No TIC (a single-series TIC would equal that series) |
+
+- The TIC is built by averaging luminance across every MSI layer, then normalising to 0–255 grayscale. Pixels with no MSI data stay transparent so grid-edge gaps remain visible.
+- The Layer panel exposes a **`TIC backdrop (auto)`** chip; clicking it toggles visibility. The on/off state persists in `sec.meta.visibleLayers`.
+- For projects created before this feature shipped, the TIC chip appears in the Layer panel but isn't visible by default. As the master, toggle it on once and save — the chosen state then ships to viewers on the next publish.
+- **Detection key is HE only**: IF/IHC registrations don't suppress TIC creation (IF/IHC are molecular overlays, not anatomical references).
+
+### 6-5. Viewer inherits the master's MSI Range
+
+The master's Range slider (Toolbar Range or the gear ⚙ "Intensity range") writes its value into **`sec.meta.layerDisplay[key].vmin/vmax`**. The Viewer reads that field on load and uses it as the **initial Range** for the corresponding MSI.
+
+- Whatever intensity window the master pinned for each MSI is what the viewer sees on first paint.
+- Viewers can re-tune Range freely, but the change is local — reloading restores the master's value.
+- The master needs to re-publish after tuning Range; saved-but-unpublished changes don't reach viewers.
+- `actualMin` / `actualMax` (slider endpoints) are re-derived from the viewer's local raster, so the slider stays consistent even if the data differs slightly.
+
 ---
 
 ## 7. Drawing ROIs

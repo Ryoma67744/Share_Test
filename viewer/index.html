@@ -752,6 +752,7 @@ function getMsiColor(key) {
 function formatDisplayName(key) {
     if (!key) return '';
     if (/^MSI_/i.test(key)) return key.substring(4);
+    if (key === 'HE_STAIN_TIC') return 'TIC backdrop (auto)';
     if (/HE_STAIN/i.test(key)) return 'HE Stain';
     if (/IF_STAIN/i.test(key)) return 'IF Stain';
     return String(key).replace(/_/g, ' ');
@@ -1993,6 +1994,7 @@ class SectionPanel {
         for (const [key, ent] of Object.entries(this.section.msiSeries || {})) tasks.push(this.loadMsiLayer(key, ent));
         await Promise.all(tasks);
         await this.analyzeAndInitSettings();
+        await this.ensureTicBackdrop();
         this.renderEmptyOverlay();
         this.rebuildLayerBar();
         this.populateThumbnails();
@@ -2014,6 +2016,12 @@ class SectionPanel {
                                   .filter(k => /HE_STAIN|IF_STAIN/i.test(k));
             if (msiKeys.length) this.toggleLayer(msiKeys[0], true);
             for (const k of heKeys) this.toggleLayer(k, true);
+            // Auto-enable the synthetic TIC backdrop on first load. It only
+            // exists in imageSources (ensureTicBackdrop never touches
+            // section.images), so the heKeys filter above can't see it.
+            if (this.imageSources && this.imageSources['HE_STAIN_TIC']) {
+                this.toggleLayer('HE_STAIN_TIC', true);
+            }
             if (!msiKeys.length && !heKeys.length) {
                 const first = this.firstLayerKey();
                 if (first) this.toggleLayer(first, true);
@@ -2130,6 +2138,132 @@ class SectionPanel {
             if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn > mx) { mn = 0; mx = 255; }
             this.imageSettings[key] = { opacity: 1.0, vmin: mn, vmax, actualMin: mn, actualMax: mx, grayscale: persistedGray, applyOpacity: persistedApply };
         }
+        // Master Range inheritance: when section.meta.layerDisplay[key] has a
+        // saved vmin/vmax (written by Master through applyRangeRaw and shipped
+        // via _publishCore), use it as the Viewer's initial Range. actualMin /
+        // actualMax stay tied to the local raster so the Range slider's
+        // endpoints reflect the data the Viewer actually has on screen.
+        for (const key of Object.keys(this.imageSettings)) {
+            const pd = this.section && this.section.meta && this.section.meta.layerDisplay && this.section.meta.layerDisplay[key];
+            if (!pd) continue;
+            if (typeof pd.vmin === 'number') this.imageSettings[key].vmin = pd.vmin;
+            if (typeof pd.vmax === 'number') this.imageSettings[key].vmax = pd.vmax;
+        }
+    }
+
+    // Synthesise a Total Ion Current image from this panel's MSI rasters and
+    // inject it as a synthetic HE_STAIN_TIC layer. Mirrors SharePreview's
+    // _generateTicForPanel / _injectTicBackdrops so the main Viewer also
+    // gets an anatomical reference when the section has no HE backing it.
+    // Skipped when HE is registered or fewer than 2 MSI series exist
+    // (1-series TIC = the series itself, no point in duplicating).
+    async ensureTicBackdrop() {
+        try {
+            const TIC_KEY = 'HE_STAIN_TIC';
+            // Skip when this panel already has a real HE layer (HE_STAIN_TIC
+            // is excluded so a previously injected backdrop doesn't lock the
+            // panel out of regeneration).
+            const hasHE = Object.keys(this.section.images || {})
+                .some(k => /HE_STAIN/i.test(k) && k !== TIC_KEY);
+            if (hasHE) return;
+            const msiKeys = Object.keys(this.section.msiSeries || {})
+                .filter(k => /^MSI_/i.test(k));
+            if (msiKeys.length < 2) return;
+            if (this.imageSources && this.imageSources[TIC_KEY]) return;   // already injected
+            const ticImg = await this._generateSyntheticTic(msiKeys);
+            if (!ticImg) return;
+            this.imageSources = this.imageSources || {};
+            this.imageSettings = this.imageSettings || {};
+            this.imageSources[TIC_KEY] = ticImg;
+            this.imageSettings[TIC_KEY] = {
+                opacity: 1.0,
+                vmin: 0, vmax: 255,
+                actualMin: 0, actualMax: 255,
+                grayscale: false,
+                applyOpacity: false,
+                synthetic: true,
+            };
+            // TIC_KEY is deliberately NOT written to section.images — that
+            // dict is part of the saved project and a {virtual:true} stub
+            // would persist into IDB and the published payload. The render
+            // path keys on imageSources / imageSettings instead, so the
+            // backdrop works without polluting section state.
+            //
+            // Visibility is also NOT set here. The "no persistedVis → defaults"
+            // branch in loadAllLayers explicitly toggles TIC on for fresh
+            // sections (so first-time loads still get the backdrop), and
+            // persistedVis acts as the source of truth on subsequent loads —
+            // so toggling the TIC chip off survives reload instead of being
+            // clobbered by an unconditional add here.
+        } catch (e) {
+            console.warn('TIC backdrop injection failed', e);
+        }
+    }
+
+    _generateSyntheticTic(msiKeys) {
+        return new Promise((resolve) => {
+            try {
+                let refImg = null;
+                for (const k of msiKeys) {
+                    const im = this.imageSources && this.imageSources[k];
+                    if (im && im.complete && im.naturalWidth > 0) { refImg = im; break; }
+                }
+                if (!refImg) { resolve(null); return; }
+                const w = refImg.naturalWidth, h = refImg.naturalHeight;
+                const accum = new Float32Array(w * h);
+                const count = new Uint32Array(w * h);
+                const tc = document.createElement('canvas');
+                tc.width = w; tc.height = h;
+                const tctx = get2dContext(tc, { willReadFrequently: true });
+                let summed = 0;
+                for (const key of msiKeys) {
+                    const img = this.imageSources[key];
+                    if (!img || !img.complete || img.naturalWidth !== w || img.naturalHeight !== h) continue;
+                    tctx.clearRect(0, 0, w, h);
+                    tctx.drawImage(img, 0, 0);
+                    const d = tctx.getImageData(0, 0, w, h).data;
+                    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+                        if (d[i+3] === 0) continue;
+                        const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+                        accum[p] += lum;
+                        count[p]++;
+                    }
+                    summed++;
+                }
+                if (summed === 0) { resolve(null); return; }
+                let maxAvg = 0;
+                for (let p = 0; p < w * h; p++) {
+                    if (count[p] === 0) continue;
+                    const v = accum[p] / count[p];
+                    if (v > maxAvg) maxAvg = v;
+                }
+                const norm = maxAvg > 0 ? 255 / maxAvg : 0;
+                const out = document.createElement('canvas');
+                out.width = w; out.height = h;
+                const octx = get2dContext(out);
+                const outData = octx.createImageData(w, h);
+                for (let p = 0, j = 0; p < w * h; p++, j += 4) {
+                    if (count[p] === 0) {
+                        outData.data[j+3] = 0;
+                    } else {
+                        const g = Math.max(0, Math.min(255, Math.round(accum[p] / count[p] * norm)));
+                        outData.data[j] = g;
+                        outData.data[j+1] = g;
+                        outData.data[j+2] = g;
+                        outData.data[j+3] = 255;
+                    }
+                }
+                octx.putImageData(outData, 0, 0);
+                const dataUrl = out.toDataURL('image/png');
+                const im = new Image();
+                im.onload = () => resolve(im);
+                im.onerror = () => resolve(null);
+                im.src = dataUrl;
+            } catch (e) {
+                console.warn('TIC generation failed', e);
+                resolve(null);
+            }
+        });
     }
 
     // One-time per-panel warning for genuinely anomalous MSI rasters.
@@ -2323,6 +2457,11 @@ class SectionPanel {
             else if (/^MSI_/i.test(key))           msiKeys.push(key);
             else                                   others.push(key);
         }
+        // Synthetic TIC backdrop sits below IHC so when both coexist (HE
+        // absent, IF_STAIN registered) the anatomical reference reads
+        // bottom→top as TIC → IHC → MSI. heLikeKeys regex picks up both
+        // HE_STAIN_TIC and IF_STAIN; explicit sort keeps the order stable.
+        heLikeKeys.sort((a, b) => (a === 'HE_STAIN_TIC' ? -1 : 0) - (b === 'HE_STAIN_TIC' ? -1 : 0));
         const layersToDraw = [...heLikeKeys, ...others, ...msiKeys];
         if (compoundFocus && this.imageSources[compoundFocus] && !layersToDraw.includes(compoundFocus)) {
             layersToDraw.push(compoundFocus);
@@ -2332,8 +2471,13 @@ class SectionPanel {
             const settings = this.imageSettings[key];
             if (!img || !img.complete || img.naturalWidth === 0 || !settings) continue;
 
+            const isTicBackdrop = (key === 'HE_STAIN_TIC');
             const isMsiLayer = /^MSI_/i.test(key);
-            const isHeLike = /HE_STAIN|IF_STAIN/i.test(key);
+            // Synthetic TIC lives in MSI native space (we built it from MSI
+            // rasters), so it must NOT go through the HE→MSI affine. Excluding
+            // it from isHeLike steers the drawing branch to the MSI-space
+            // rotate-90 path below.
+            const isHeLike = /HE_STAIN|IF_STAIN/i.test(key) && !isTicBackdrop;
 
             // For MSI: build a tone-mapped + LUT-applied temp canvas. For HE/IF:
             // draw the decoded image as-is so the on-screen colours match the
@@ -2415,7 +2559,12 @@ class SectionPanel {
                 ctx.transform(T[0][0], T[1][0], T[0][1], T[1][1], T[0][2], T[1][2]);
                 ctx.drawImage(drawSource, 0, 0);
                 ctx.restore();
-            } else if (isMsiLayer) {
+            } else if (isMsiLayer || isTicBackdrop) {
+                // TIC backdrop shares the MSI-space orientation (built from
+                // the MSI rasters, so width/height match the raw MSI), so
+                // we route it through the same rotate-90 + scale-to-cdisp
+                // path that MSI uses. No LUT was applied above for TIC, so
+                // it stays grayscale as intended.
                 ctx.save();
                 ctx.imageSmoothingEnabled = false;
                 ctx.translate(0, this.dom.cdisp.height);
@@ -2994,12 +3143,27 @@ class SectionPanel {
             if (lum <= settings.vmin) lum = settings.vmin + 1;
             settings.vmax = lum;
         }
+        this._persistRangeToMeta(key, settings.vmin, settings.vmax);
         this.renderComposite();
         if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
         if (App.activeSectionId === this.section.id) renderMethodTable();
         App.queueSave();
         App.broadcastRangeToSameMrm(key, edge === 'min' ? 'vmin' : 'vmax', parseFloat(rawValue), this);
         Toolbar.refreshRange();
+    }
+
+    // Mirror the active Range into section.meta.layerDisplay[key] so the
+    // Master's vmin/vmax travel with the published project (sectionsPayload
+    // ships sec.meta) and become the Viewer's initial Range on load. Skips
+    // non-MSI keys so the synthetic HE_STAIN_TIC stays out of the persisted
+    // state.
+    _persistRangeToMeta(key, vmin, vmax) {
+        if (!key || !/^MSI_/i.test(key)) return;
+        this.section.meta = this.section.meta || {};
+        this.section.meta.layerDisplay = this.section.meta.layerDisplay || {};
+        this.section.meta.layerDisplay[key] = this.section.meta.layerDisplay[key] || {};
+        if (typeof vmin === 'number') this.section.meta.layerDisplay[key].vmin = vmin;
+        if (typeof vmax === 'number') this.section.meta.layerDisplay[key].vmax = vmax;
     }
 
     getOpacity() {
@@ -3201,6 +3365,7 @@ class SectionPanel {
             if (lum <= settings.vmin) lum = settings.vmin + 1;
             settings.vmax = lum;
         }
+        this._persistRangeToMeta(msiKey, settings.vmin, settings.vmax);
         if (this.imageSources && this.imageSources[msiKey]) {
             this.renderComposite();
         }
@@ -11301,6 +11466,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-22-r32</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-22-r33</div>
 </body>
 </html>

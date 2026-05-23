@@ -268,6 +268,8 @@ The **🔗** icon on each field syncs that value across every section. The **`�
 
 > These tweaks are **temporary** — they revert to the server state on reload, and other viewers don't see them.
 
+> **Range initial values are inherited from the master**: the per-MSI Range slider (vmin/vmax) loads with the value the master set at publish time. Viewers can still adjust freely, but the change is local — reloading restores the master's value. If the master later re-tunes Range and re-publishes, the new value becomes the next-load initial.
+
 > Pan: drag without modifier. Zoom: mouse wheel. Rotation: the input field, optionally synced with 🔗.
 
 > **Colormap dropdown**: The toolbar's **Colormap** lets you swap the MSI heatmap palette (Plasma / Viridis / Inferno / Hot / Jet / Grayscale). The choice is **kept inside this tab** (sessionStorage). Closing the tab reverts to the master's default. The same dropdown lives inside the Preview overlay and stays in sync, so you can keep adjusting colour after closing Preview.
@@ -321,6 +323,22 @@ When an MSI layer is visible AND the publisher has set **MSI pixel size (μm/px)
 - Pan (drag) and Rotation never move the bar — it stays anchored to the bottom-left of the panel.
 - The bar is hidden on sections with no MSI layer or where the publisher hasn't set a pixel size.
 - The same pitch is also rendered into each section's top-left label (e.g. `Section 1 · 20×20 μm/px`).
+
+---
+
+## 7-quart. TIC backdrop (auto)
+
+When a section has **no HE staining registered** and 2+ MSI series are loaded, the Viewer automatically renders a **synthetic TIC** (a grayscale image built by averaging luminance across every MSI layer) as the section's backdrop. The TIC takes the place of the missing HE image, giving you an anatomical reference even without histology.
+
+| Case | TIC backdrop |
+| --- | --- |
+| HE present (with or without IF/IHC) | **Not created** — HE serves as the backdrop |
+| No HE & 2+ MSI (with or without IF/IHC) | **Auto-created** |
+| No HE & only 1 MSI series | **Not created** — TIC would equal that single layer |
+
+- Draw order: **TIC (bottom) → IF/IHC (middle) → MSI (top)**. Lowering the MSI Opacity reveals TIC (and IF/IHC) underneath.
+- The Layer panel shows a **`TIC backdrop (auto)`** chip. Click to toggle visibility; the on/off state is preserved across reloads via `sec.meta.visibleLayers`.
+- The TIC image is the per-pixel mean luminance, normalised to 0–255 and rendered grayscale. Pixels with no MSI data stay transparent so grid-edge gaps remain visible.
 
 ---
 
