@@ -67,6 +67,35 @@ revoke all on public.mrm_compounds   from anon, authenticated;
 revoke all on public.mrm_transitions from anon, authenticated;
 revoke all on public.mrm_usages      from anon, authenticated;
 
+-- ---- 1b. Phase-2 columns (idempotent; tables may pre-date this) ----
+-- (1) serial_no: a user-facing running number used to recognise the SAME
+--     compound under name drift (e.g. GABA vs POS_GABA). Same number = same
+--     compound (consolidated in the management UI). Auto-assigned on create,
+--     editable so two name variants can be set to the same number.
+alter table public.mrm_compounds add column if not exists serial_no integer;
+-- Backfill rows with a null serial_no, continuing past any existing max so we
+-- never collide. No-op once every row has a number (idempotent).
+update public.mrm_compounds c
+   set serial_no = s.rn
+  from (
+      select id,
+             coalesce((select max(serial_no) from public.mrm_compounds), 0)
+               + row_number() over (order by created_at, id) as rn
+        from public.mrm_compounds
+       where serial_no is null
+  ) s
+ where c.id = s.id and c.serial_no is null;
+
+-- (2) sample_types: structured multi-select sample categories (脳/肝臓/腎臓/
+--     胎児 …) of the project that used a transition, for the MRM-management
+--     sample-type filter. Replaces the single free-text sample_name (kept for
+--     back-compat).
+alter table public.mrm_usages add column if not exists sample_types text[] not null default '{}';
+-- Migrate any legacy single sample_name into the array (idempotent).
+update public.mrm_usages
+   set sample_types = array[sample_name]
+ where sample_name is not null and sample_name <> '' and sample_types = '{}';
+
 -- ---- 2. Read RPC (master-pw gated) -------------------------
 -- Returns the whole library as one nested jsonb document:
 -- [ { ...compound, transitions:[ { ...transition, usages:[...] } ] } ].
@@ -87,6 +116,7 @@ begin
         select co.name as nm,
                jsonb_build_object(
                    'id', co.id,
+                   'serial_no', co.serial_no,
                    'name', co.name,
                    'tags', to_jsonb(co.tags),
                    'polarity', co.polarity,
@@ -111,6 +141,7 @@ begin
                                                  'project_slug', us.project_slug,
                                                  'project_name', us.project_name,
                                                  'sample_name', us.sample_name,
+                                                 'sample_types', to_jsonb(us.sample_types),
                                                  'source', us.source,
                                                  'created_at', us.created_at
                                              ) order by us.created_at desc)
@@ -131,12 +162,16 @@ $$;
 -- ---- 3. Compound write RPCs --------------------------------
 -- Create (or update fields of an existing same-name) compound. Returns
 -- the id so the viewer's "register from result" can auto-create by name.
+-- Phase 2 added _serial_no (auto-assigned next integer when null); drop the
+-- old 5-arg signature so CREATE OR REPLACE doesn't leave an overload behind.
+drop function if exists public.upsert_compound(text, text, text[], text, text);
 create or replace function public.upsert_compound(
     _master_pw text,
     _name      text,
     _tags      text[] default '{}',
     _polarity  text default null,
-    _note      text default null
+    _note      text default null,
+    _serial_no integer default null
 ) returns uuid
 language plpgsql security definer set search_path = public, extensions
 as $$
@@ -148,8 +183,9 @@ begin
     if _name is null or length(trim(_name)) = 0 then
         raise exception 'name required';
     end if;
-    insert into public.mrm_compounds(name, tags, polarity, note)
-         values (trim(_name), coalesce(_tags, '{}'), _polarity, _note)
+    insert into public.mrm_compounds(name, tags, polarity, note, serial_no)
+         values (trim(_name), coalesce(_tags, '{}'), _polarity, _note,
+                 coalesce(_serial_no, (select coalesce(max(serial_no), 0) + 1 from public.mrm_compounds)))
     on conflict (name) do update
          set tags       = excluded.tags,
              polarity   = excluded.polarity,
@@ -160,14 +196,17 @@ begin
 end
 $$;
 
--- Update an existing compound by id (allows rename).
+-- Update an existing compound by id (allows rename + serial_no change so two
+-- name variants can be grouped under one number). Drop old 6-arg signature.
+drop function if exists public.update_compound(text, uuid, text, text[], text, text);
 create or replace function public.update_compound(
     _master_pw text,
     _id        uuid,
     _name      text,
     _tags      text[] default '{}',
     _polarity  text default null,
-    _note      text default null
+    _note      text default null,
+    _serial_no integer default null
 ) returns void
 language plpgsql security definer set search_path = public, extensions
 as $$
@@ -180,6 +219,7 @@ begin
            tags       = coalesce(_tags, '{}'),
            polarity   = _polarity,
            note       = _note,
+           serial_no  = coalesce(_serial_no, serial_no),
            updated_at = now()
      where id = _id;
 end
@@ -280,13 +320,17 @@ end
 $$;
 
 -- ---- 5. Usage write RPC ------------------------------------
+-- Phase 2 added _sample_types (structured sample categories); drop old 6-arg
+-- signature so CREATE OR REPLACE doesn't leave an overload behind.
+drop function if exists public.record_usage(text, uuid, text, text, text, text);
 create or replace function public.record_usage(
     _master_pw     text,
     _transition_id uuid,
     _project_slug  text default null,
     _project_name  text default null,
     _sample_name   text default null,
-    _source        text default 'manual'
+    _source        text default 'manual',
+    _sample_types  text[] default '{}'
 ) returns uuid
 language plpgsql security definer set search_path = public, extensions
 as $$
@@ -295,9 +339,9 @@ begin
     if not public._verify_master_pw(_master_pw) then
         raise exception 'unauthorized' using errcode = '28000';
     end if;
-    insert into public.mrm_usages(transition_id, project_slug, project_name, sample_name, source)
+    insert into public.mrm_usages(transition_id, project_slug, project_name, sample_name, sample_types, source)
          values (
-            _transition_id, _project_slug, _project_name, _sample_name,
+            _transition_id, _project_slug, _project_name, _sample_name, coalesce(_sample_types, '{}'),
             case when _source in ('manual','from-result') then _source else 'manual' end)
     returning id into v_id;
     return v_id;
@@ -322,6 +366,9 @@ revoke all on function public._mrm_array_union(text[], text[]) from public, anon
 -- (no clobber of role/recommended on re-register), then append a usage
 -- row tagged 'from-result'. Mirrors upsert_project_doc's single-call
 -- multi-table style.
+-- Phase 2 added _sample_types + serial_no auto-assign; drop the old 12-arg
+-- signature so CREATE OR REPLACE doesn't leave an overload behind.
+drop function if exists public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text);
 create or replace function public.register_from_result(
     _master_pw     text,
     _name          text,
@@ -334,7 +381,8 @@ create or replace function public.register_from_result(
     _role          text default null,
     _project_slug  text default null,
     _project_name  text default null,
-    _sample_name   text default null
+    _sample_name   text default null,
+    _sample_types  text[] default '{}'
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions
 as $$
@@ -349,10 +397,11 @@ begin
     if _name is null or length(trim(_name)) = 0 then
         raise exception 'name required';
     end if;
-    -- 1. compound: create if missing; merge tags (union); keep existing
-    --    polarity unless it was empty.
-    insert into public.mrm_compounds(name, tags, polarity)
-         values (trim(_name), coalesce(_tags, '{}'), _polarity)
+    -- 1. compound: create if missing (auto-assign next serial_no); merge tags
+    --    (union); keep existing polarity unless it was empty.
+    insert into public.mrm_compounds(name, tags, polarity, serial_no)
+         values (trim(_name), coalesce(_tags, '{}'), _polarity,
+                 (select coalesce(max(serial_no), 0) + 1 from public.mrm_compounds))
     on conflict (name) do update
          set tags       = public._mrm_array_union(mrm_compounds.tags, excluded.tags),
              polarity   = coalesce(mrm_compounds.polarity, excluded.polarity),
@@ -365,9 +414,9 @@ begin
     on conflict (compound_id, precursor, product, ce, cv) do update
          set role = coalesce(mrm_transitions.role, excluded.role)
     returning id into v_tid;
-    -- 3. usage: always append.
-    insert into public.mrm_usages(transition_id, project_slug, project_name, sample_name, source)
-         values (v_tid, _project_slug, _project_name, _sample_name, 'from-result')
+    -- 3. usage: always append (with structured sample types).
+    insert into public.mrm_usages(transition_id, project_slug, project_name, sample_name, sample_types, source)
+         values (v_tid, _project_slug, _project_name, _sample_name, coalesce(_sample_types, '{}'), 'from-result')
     returning id into v_uid;
     return jsonb_build_object('ok', true,
                               'compound_id', v_cid,
@@ -378,26 +427,26 @@ $$;
 
 -- ---- 7. Grants ---------------------------------------------
 grant execute on function public.list_mrm_library(text)                                                          to anon, authenticated;
-grant execute on function public.upsert_compound(text, text, text[], text, text)                                 to anon, authenticated;
-grant execute on function public.update_compound(text, uuid, text, text[], text, text)                           to anon, authenticated;
+grant execute on function public.upsert_compound(text, text, text[], text, text, integer)                        to anon, authenticated;
+grant execute on function public.update_compound(text, uuid, text, text[], text, text, integer)                  to anon, authenticated;
 grant execute on function public.delete_compound(text, uuid)                                                     to anon, authenticated;
 grant execute on function public.upsert_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text) to anon, authenticated;
 grant execute on function public.update_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text) to anon, authenticated;
 grant execute on function public.delete_transition(text, uuid)                                                   to anon, authenticated;
-grant execute on function public.record_usage(text, uuid, text, text, text, text)                                to anon, authenticated;
-grant execute on function public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text) to anon, authenticated;
+grant execute on function public.record_usage(text, uuid, text, text, text, text, text[])                        to anon, authenticated;
+grant execute on function public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text, text[]) to anon, authenticated;
 
 -- ===========================================================================
 -- Optional teardown (commented out by default)
 -- ===========================================================================
--- drop function if exists public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text);
--- drop function if exists public.record_usage(text, uuid, text, text, text, text);
+-- drop function if exists public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text, text[]);
+-- drop function if exists public.record_usage(text, uuid, text, text, text, text, text[]);
 -- drop function if exists public.delete_transition(text, uuid);
 -- drop function if exists public.update_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text);
 -- drop function if exists public.upsert_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text);
 -- drop function if exists public.delete_compound(text, uuid);
--- drop function if exists public.update_compound(text, uuid, text, text[], text, text);
--- drop function if exists public.upsert_compound(text, text, text[], text, text);
+-- drop function if exists public.update_compound(text, uuid, text, text[], text, text, integer);
+-- drop function if exists public.upsert_compound(text, text, text[], text, text, integer);
 -- drop function if exists public.list_mrm_library(text);
 -- drop table if exists public.mrm_usages;
 -- drop table if exists public.mrm_transitions;

@@ -688,6 +688,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     <summary class="text-[11px] font-semibold text-gray-600 px-2 py-1 cursor-pointer select-none bg-gray-50 rounded-t">Memo</summary>
                     <div class="p-2 space-y-1.5 text-[11px]">
                         <div class="flex items-center gap-2"><span class="w-24 shrink-0 text-gray-500">Sample</span><input id="memo-sample" type="text" class="flex-1 border border-gray-200 rounded px-1.5 py-0.5 text-[11px]"></div>
+                        <div class="flex items-center gap-2"><span class="w-24 shrink-0 text-gray-500">Sample types</span><input id="memo-sample-types" type="text" placeholder="脳, 肝臓 (複数可・MRM管理のサンプル種フィルタ用)" class="flex-1 border border-gray-200 rounded px-1.5 py-0.5 text-[11px]"></div>
                         <div class="flex items-center gap-2"><span class="w-24 shrink-0 text-gray-500">Experiment date</span><input id="memo-experiment-date" type="date" class="flex-1 border border-gray-200 rounded px-1.5 py-0.5 text-[11px]"></div>
                         <div class="flex items-center gap-2"><span class="w-24 shrink-0 text-gray-500">Machine</span><select id="memo-machine" class="flex-1 border border-gray-200 rounded px-1.5 py-0.5 text-[11px] bg-white"><option value="DESI">DESI</option><option value="TIMS">TIMS</option><option value="LTQ">LTQ</option><option value="Other">Other</option></select></div>
                         <div class="flex items-center gap-2 memo-row-matrix"><span class="w-24 shrink-0 text-gray-500">Matrix</span><input id="memo-matrix" type="text" class="flex-1 border border-gray-200 rounded px-1.5 py-0.5 text-[11px]"></div>
@@ -4259,6 +4260,7 @@ function ensureMemoShape(memo) {
     const m = memo && typeof memo === 'object' ? memo : {};
     return {
         sample: m.sample || '',
+        sampleTypes: Array.isArray(m.sampleTypes) ? m.sampleTypes : [],
         experimentDate: m.experimentDate || '',
         machine: m.machine || 'DESI',
         googleKeep: m.googleKeep || '',
@@ -4286,6 +4288,12 @@ function renderMemoForm() {
         el.value = memo[key] || '';
         // Share-Only viewers can read the memo but not edit it.
         el.disabled = !project || !!App.shareMode;
+    }
+    // sampleTypes is an array — render as a comma-joined string in its own input.
+    const stEl = document.getElementById('memo-sample-types');
+    if (stEl) {
+        stEl.value = (memo.sampleTypes || []).join(', ');
+        stEl.disabled = !project || !!App.shareMode;
     }
     // Matrix is only meaningful for non-DESI machines (TIMS / LTQ / Other).
     refreshMatrixVisibility(memo.machine);
@@ -4622,7 +4630,7 @@ async function registerSelectedToMrmLibrary() {
     if (opts == null) return;  // cancelled
 
     const projName = project.displayName || '';
-    const sample = ensureMemoShape(project.memo).sample || '';
+    const sampleTypes = ensureMemoShape(project.memo).sampleTypes || [];
     const slug = (project.shareInfo && project.shareInfo.slug) || null;
     const num = (v) => (v == null || v === '') ? null : Number(v);
 
@@ -4651,7 +4659,7 @@ async function registerSelectedToMrmLibrary() {
                 _role: opts.role || null,
                 _project_slug: slug,
                 _project_name: projName,
-                _sample_name: sample,
+                _sample_types: sampleTypes,
             });
             ok++;
         } catch (e) {
@@ -8807,13 +8815,16 @@ async function openNewProjectFormModal(initial) {
     const html = `
         <h2>新規プロジェクト</h2>
         <form>
-          <label>プロジェクト名
+          <label>プロジェクト名 <span style="color:#b91c1c;">*</span>
             <input type="text" name="name" value="${safe(i.name || '')}" required>
           </label>
-          <label>実験日時
-            <input type="date" name="experiment_date" value="${safe(i.experimentDate || '')}">
+          <label>実験日時 <span style="color:#b91c1c;">*</span>
+            <input type="date" name="experiment_date" value="${safe(i.experimentDate || '')}" required>
           </label>
-          <label>装置
+          <label>サンプル種 <span style="color:#b91c1c;">*</span> (脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可)
+            <input type="text" name="sample_types" value="${safe((i.sampleTypes || []).join(', '))}" placeholder="例: 脳, 肝臓">
+          </label>
+          <label>装置 <span style="color:#b91c1c;">*</span>
             <select name="machine">
               <option value="DESI">DESI</option>
               <option value="TIMS">TIMS</option>
@@ -8845,12 +8856,20 @@ async function openNewProjectFormModal(initial) {
     machineSel.addEventListener('change', refresh);
     refresh();
     card._collect = () => {
+        const errEl = card.querySelector('[data-err]');
         const name = (card.querySelector('[name="name"]').value || '').trim();
-        if (!name) { card.querySelector('[data-err]').textContent = 'プロジェクト名は必須'; return null; }
+        const experimentDate = (card.querySelector('[name="experiment_date"]').value || '').trim();
+        const machine = machineSel.value || '';
+        const sampleTypes = _parseMrmTags(card.querySelector('[name="sample_types"]').value);
+        if (!name) { errEl.textContent = 'プロジェクト名は必須'; return null; }
+        if (!experimentDate) { errEl.textContent = '実験日時は必須'; return null; }
+        if (!machine) { errEl.textContent = '装置は必須'; return null; }
+        if (!sampleTypes.length) { errEl.textContent = 'サンプル種を1つ以上入力してください'; return null; }
         return {
             name,
-            experimentDate: (card.querySelector('[name="experiment_date"]').value || '').trim(),
-            machine: machineSel.value || 'DESI',
+            experimentDate,
+            machine,
+            sampleTypes,
             matrix: (card.querySelector('[name="matrix"]').value || '').trim(),
             googleKeep: (card.querySelector('[name="google_keep"]').value || '').trim(),
             freeNote: (card.querySelector('[name="free_note"]').value || '').trim(),
@@ -10752,6 +10771,7 @@ const App = {
             memo: ensureMemoShape({
                 experimentDate: m.experimentDate,
                 machine: m.machine,
+                sampleTypes: m.sampleTypes,
                 matrix: m.matrix,
                 googleKeep: m.googleKeep,
                 freeNote: m.freeNote,
@@ -11609,6 +11629,16 @@ const App = {
                 this.queueSave();
             });
         }
+        // sampleTypes is stored as an array; parse the free-text input on edit.
+        const stInput = document.getElementById('memo-sample-types');
+        if (stInput) {
+            stInput.addEventListener('input', () => {
+                if (!this.project) return;
+                this.project.memo = this.project.memo || {};
+                this.project.memo.sampleTypes = _parseMrmTags(stInput.value);
+                this.queueSave();
+            });
+        }
         window.addEventListener('beforeunload', () => {
             if (this.saveTimer) {
                 clearTimeout(this.saveTimer);
@@ -11626,6 +11656,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-r34</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-r35</div>
 </body>
 </html>

@@ -58,6 +58,15 @@
   .usage-list a { color:#2563eb; text-decoration:underline; cursor:pointer; }
   .src-badge { font-size:9px; padding:0 5px; border-radius:9999px; background:#f1f5f9; color:#64748b; margin-left:4px; }
   .muted { color:#94a3b8; }
+  .filter-bar { display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; margin-top:10px; padding-top:10px; border-top:1px solid #eef2f7; }
+  .filter-group { display:flex; align-items:center; gap:4px; flex-wrap:wrap; }
+  .filter-group > .flabel { font-size:10px; color:#64748b; font-weight:700; margin-right:2px; }
+  .fchip { display:inline-block; padding:2px 9px; border-radius:9999px; font-size:11px; cursor:pointer; border:1px solid #cbd5e1; background:#fff; color:#334155; user-select:none; }
+  .fchip:hover { border-color:#94a3b8; }
+  .fchip.on { background:#2563eb; border-color:#2563eb; color:#fff; }
+  .serial-badge { display:inline-block; padding:1px 7px; border-radius:4px; font-size:10px; font-weight:700; background:#fde68a; color:#92400e; }
+  .cpd-member { border-top:1px dashed #e5e7eb; padding-top:8px; margin-top:8px; }
+  .cpd-member:first-child { border-top:none; padding-top:0; margin-top:0; }
 </style>
 </head>
 <body class="min-h-screen">
@@ -83,6 +92,7 @@
                style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;">
       </div>
     </div>
+    <div id="filter-bar" class="filter-bar"></div>
   </div>
 
   <div id="lib" class="space-y-2">
@@ -119,11 +129,11 @@ const SupabaseClient = (() => {
         configured() { return !!_client(); },
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
         listMrmLibrary(pw) { return rpc('list_mrm_library', { _master_pw: pw }); },
-        upsertCompound(pw, name, tags, polarity, note) {
-            return rpc('upsert_compound', { _master_pw: pw, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null });
+        upsertCompound(pw, name, tags, polarity, note, serialNo) {
+            return rpc('upsert_compound', { _master_pw: pw, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo) });
         },
-        updateCompound(pw, id, name, tags, polarity, note) {
-            return rpc('update_compound', { _master_pw: pw, _id: id, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null });
+        updateCompound(pw, id, name, tags, polarity, note, serialNo) {
+            return rpc('update_compound', { _master_pw: pw, _id: id, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo) });
         },
         deleteCompound(pw, id) { return rpc('delete_compound', { _master_pw: pw, _id: id }); },
         upsertTransition(pw, t) {
@@ -148,6 +158,7 @@ const SupabaseClient = (() => {
                 _master_pw: pw, _transition_id: u.transition_id,
                 _project_slug: u.project_slug || null, _project_name: u.project_name || null,
                 _sample_name: u.sample_name || null, _source: u.source || 'manual',
+                _sample_types: u.sample_types || [],
             });
         },
     };
@@ -283,8 +294,11 @@ function openModal(html) {
 const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const UNTAGGED = '(未分類)';
 
-let library = [];        // [{id,name,tags[],polarity,note,transitions:[{...,usages:[...]}]}]
+let library = [];        // [{id,serial_no,name,tags[],polarity,note,transitions:[{...,usages:[...]}]}]
 let searchText = '';
+let filterPolarity = '';          // '', '+', '-'
+let selectedTags = new Set();     // 分類フィルタ (OR)
+let selectedSampleTypes = new Set(); // サンプル種フィルタ (OR)
 
 function parseTags(s) {
     const out = [];
@@ -329,7 +343,8 @@ function usagesHtml(tr) {
         const proj = u.project_slug
             ? '<a data-action="open-usage" data-slug="' + safe(u.project_slug) + '">' + safe(u.project_name || u.project_slug) + ' ↗</a>'
             : '<span>' + safe(u.project_name || '(プロジェクト名なし)') + '</span>';
-        const sample = u.sample_name ? ' / ' + safe(u.sample_name) : '';
+        const stxt = (u.sample_types && u.sample_types.length) ? u.sample_types.join(', ') : (u.sample_name || '');
+        const sample = stxt ? ' / ' + safe(stxt) : '';
         const date = u.created_at ? String(u.created_at).slice(0, 10) : '';
         return '<li>' + proj + sample + '<span class="src-badge">' + safe(u.source || '') + '</span>'
             + (date ? ' <span class="muted">' + safe(date) + '</span>' : '') + '</li>';
@@ -365,59 +380,165 @@ function transitionsHtml(c) {
         + '<tbody>' + rows + '</tbody></table>';
 }
 
-function compoundHtml(c) {
-    const tagChips = (c.tags || []).map(t => '<span class="chip">' + safe(t) + '</span>').join('') || '<span class="chip gray">未分類</span>';
-    const pol = c.polarity ? '<span class="chip pol">' + safe(c.polarity) + '</span>' : '';
-    const nTr = (c.transitions || []).length;
+// --- consolidation by serial_no -------------------------------------------
+// Compounds sharing a serial_no are ONE logical compound (handles name drift
+// like GABA / POS_GABA). Build "units" keyed by serial_no (null = own unit).
+function libraryUnits() {
+    const map = new Map(); const units = [];
+    for (const c of (library || [])) {
+        const key = (c.serial_no != null) ? ('S' + c.serial_no) : ('C' + c.id);
+        let u = map.get(key);
+        if (!u) { u = { key, serial_no: (c.serial_no != null ? c.serial_no : null), members: [] }; map.set(key, u); units.push(u); }
+        u.members.push(c);
+    }
+    for (const u of units) {
+        const tags = []; const pols = new Set(); let nTr = 0;
+        for (const c of u.members) {
+            for (const t of (c.tags || [])) if (!tags.includes(t)) tags.push(t);
+            if (c.polarity) pols.add(c.polarity);
+            nTr += (c.transitions || []).length;
+        }
+        u.tags = tags; u.polarities = pols; u.nTr = nTr;
+    }
+    units.sort((a, b) => {
+        if (a.serial_no != null && b.serial_no != null) return a.serial_no - b.serial_no;
+        if (a.serial_no != null) return -1;
+        if (b.serial_no != null) return 1;
+        return (a.members[0].name || '').localeCompare(b.members[0].name || '', 'ja');
+    });
+    return units;
+}
+
+function availableTags() {
+    const s = new Set();
+    for (const c of (library || [])) for (const t of (c.tags || [])) if (t) s.add(t);
+    return Array.from(s).sort((a, b) => a.localeCompare(b, 'ja'));
+}
+function availableSampleTypes() {
+    const s = new Set();
+    for (const c of (library || []))
+        for (const tr of (c.transitions || []))
+            for (const u of (tr.usages || []))
+                for (const st of (u.sample_types || [])) if (st) s.add(st);
+    return Array.from(s).sort((a, b) => a.localeCompare(b, 'ja'));
+}
+function unitSampleTypes(u) {
+    const s = new Set();
+    for (const c of u.members)
+        for (const tr of (c.transitions || []))
+            for (const us of (tr.usages || []))
+                for (const st of (us.sample_types || [])) if (st) s.add(st);
+    return s;
+}
+
+// Category-AND, within-category-OR. Unit matches if ANY member satisfies.
+function unitMatches(u) {
+    const q = (searchText || '').trim().toLowerCase();
+    if (q) {
+        let hit = false;
+        for (const c of u.members) {
+            if ((c.name || '').toLowerCase().includes(q)) { hit = true; break; }
+            if ((c.tags || []).some(t => (t || '').toLowerCase().includes(q))) { hit = true; break; }
+            for (const tr of (c.transitions || [])) {
+                for (const us of (tr.usages || [])) {
+                    if ((us.project_name || '').toLowerCase().includes(q)) { hit = true; break; }
+                    if ((us.sample_name || '').toLowerCase().includes(q)) { hit = true; break; }
+                    if ((us.sample_types || []).some(st => (st || '').toLowerCase().includes(q))) { hit = true; break; }
+                }
+                if (hit) break;
+            }
+            if (hit) break;
+        }
+        if (!hit) return false;
+    }
+    if (filterPolarity && !u.polarities.has(filterPolarity)) return false;
+    if (selectedTags.size) {
+        let any = false; for (const t of u.tags) if (selectedTags.has(t)) { any = true; break; }
+        if (!any) return false;
+    }
+    if (selectedSampleTypes.size) {
+        const sts = unitSampleTypes(u);
+        let any = false; for (const st of selectedSampleTypes) if (sts.has(st)) { any = true; break; }
+        if (!any) return false;
+    }
+    return true;
+}
+
+function renderFilterBar() {
+    const bar = document.getElementById('filter-bar');
+    if (!bar) return;
+    const tags = availableTags();
+    const stypes = availableSampleTypes();
+    const polBtn = (val, label) => '<span class="fchip' + (filterPolarity === val ? ' on' : '') + '" data-filter="pol" data-val="' + safe(val) + '">' + safe(label) + '</span>';
+    const tagBtn = (t) => '<span class="fchip' + (selectedTags.has(t) ? ' on' : '') + '" data-filter="tag" data-val="' + safe(t) + '">' + safe(t) + '</span>';
+    const stBtn = (t) => '<span class="fchip' + (selectedSampleTypes.has(t) ? ' on' : '') + '" data-filter="stype" data-val="' + safe(t) + '">' + safe(t) + '</span>';
+    let html = '<div class="filter-group"><span class="flabel">極性</span>' + polBtn('', 'All') + polBtn('+', '+') + polBtn('-', '−') + '</div>';
+    if (tags.length) html += '<div class="filter-group"><span class="flabel">分類</span>' + tags.map(tagBtn).join('') + '</div>';
+    if (stypes.length) html += '<div class="filter-group"><span class="flabel">サンプル種</span>' + stypes.map(stBtn).join('') + '</div>';
+    if (filterPolarity || selectedTags.size || selectedSampleTypes.size)
+        html += '<span class="fchip" data-filter="clear" style="border-style:dashed;">クリア</span>';
+    bar.innerHTML = html;
+}
+
+function memberHtml(c) {
     return ''
-        + '<details class="cpd" data-id="' + safe(c.id) + '">'
-        +   '<summary>'
-        +     '<span class="font-semibold">' + safe(c.name) + '</span>'
-        +     tagChips + pol
-        +     '<span class="text-xs muted">' + nTr + ' transition' + (nTr === 1 ? '' : 's') + '</span>'
+        + '<div class="cpd-member">'
+        +   '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:4px;">'
+        +     '<span class="font-semibold text-sm">' + safe(c.name) + '</span>'
+        +     ((c.serial_no != null) ? '<span class="serial-badge">#' + safe(c.serial_no) + '</span>' : '')
+        +     (c.polarity ? '<span class="chip pol">' + safe(c.polarity) + '</span>' : '')
+        +     (c.tags || []).map(t => '<span class="chip">' + safe(t) + '</span>').join('')
         +     '<span style="flex:1"></span>'
         +     '<button class="btn mini" data-action="add-transition" data-id="' + safe(c.id) + '">+ トランジション</button> '
         +     '<button class="btn mini" data-action="edit-compound" data-id="' + safe(c.id) + '">編集</button> '
         +     '<button class="btn mini danger" data-action="del-compound" data-id="' + safe(c.id) + '">削除</button>'
-        +   '</summary>'
-        +   '<div class="cpd-body">'
-        +     (c.note ? '<p class="text-xs text-gray-600 mb-1 whitespace-pre-line">' + safe(c.note) + '</p>' : '')
-        +     transitionsHtml(c)
         +   '</div>'
+        +   (c.note ? '<p class="text-xs text-gray-600 mb-1 whitespace-pre-line">' + safe(c.note) + '</p>' : '')
+        +   transitionsHtml(c)
+        + '</div>';
+}
+
+function unitHtml(u) {
+    const serialBadge = (u.serial_no != null) ? '<span class="serial-badge">#' + safe(u.serial_no) + '</span>' : '';
+    const names = u.members.map(m => safe(m.name)).join(' / ');
+    const tagChips = (u.tags || []).map(t => '<span class="chip">' + safe(t) + '</span>').join('') || '<span class="chip gray">未分類</span>';
+    const pol = Array.from(u.polarities).map(p => '<span class="chip pol">' + safe(p) + '</span>').join('');
+    const multi = u.members.length > 1;
+    return ''
+        + '<details class="cpd"' + (multi ? ' open' : '') + '>'
+        +   '<summary>'
+        +     serialBadge
+        +     '<span class="font-semibold">' + names + '</span>'
+        +     tagChips + pol
+        +     '<span class="text-xs muted">' + u.nTr + ' transition' + (u.nTr === 1 ? '' : 's')
+        +       (multi ? ' ・ ' + u.members.length + ' 名称' : '') + '</span>'
+        +   '</summary>'
+        +   '<div class="cpd-body">' + u.members.map(memberHtml).join('') + '</div>'
         + '</details>';
 }
 
 function renderLibrary() {
+    renderFilterBar();
     const host = document.getElementById('lib');
-    const q = (searchText || '').trim().toLowerCase();
-    const match = (c) => {
-        if (!q) return true;
-        if ((c.name || '').toLowerCase().includes(q)) return true;
-        if ((c.tags || []).some(t => (t || '').toLowerCase().includes(q))) return true;
-        for (const tr of (c.transitions || []))
-            for (const u of (tr.usages || []))
-                if ((u.project_name || '').toLowerCase().includes(q) || (u.sample_name || '').toLowerCase().includes(q)) return true;
-        return false;
-    };
-    const compounds = (library || []).filter(match);
-    if (!compounds.length) {
+    const units = libraryUnits().filter(unitMatches);
+    if (!units.length) {
         host.innerHTML = '<div class="card p-6 text-center text-sm text-gray-500">'
-            + (library.length ? '一致する化合物がありません。' : 'まだ登録がありません。「+ 化合物」で追加するか、結果画面の Method 表から登録してください。')
+            + (library.length ? '条件に一致する化合物がありません。' : 'まだ登録がありません。「+ 化合物」で追加するか、結果画面の Method 表から登録してください。')
             + '</div>';
         return;
     }
-    // Group by tag — a compound with multiple tags appears under each.
+    // Group by tag — a unit with multiple tags appears under each.
     const groups = new Map();
-    for (const c of compounds) {
-        const tags = (c.tags && c.tags.length) ? c.tags : [UNTAGGED];
-        for (const t of tags) { if (!groups.has(t)) groups.set(t, []); groups.get(t).push(c); }
+    for (const u of units) {
+        const tags = (u.tags && u.tags.length) ? u.tags : [UNTAGGED];
+        for (const t of tags) { if (!groups.has(t)) groups.set(t, []); groups.get(t).push(u); }
     }
     const tagNames = Array.from(groups.keys()).sort((a, b) => {
         if (a === UNTAGGED) return 1; if (b === UNTAGGED) return -1;
         return a.localeCompare(b, 'ja');
     });
     host.innerHTML = tagNames.map(t => {
-        const list = groups.get(t).map(compoundHtml).join('');
+        const list = groups.get(t).map(unitHtml).join('');
         return '<div class="tag-group"><h2>' + safe(t) + ' <span class="muted" style="font-weight:400;">(' + groups.get(t).length + ')</span></h2>' + list + '</div>';
     }).join('');
 }
@@ -439,6 +560,8 @@ async function openCompoundModal(existing) {
               <option value="+" ${c.polarity === '+' ? 'selected' : ''}>+ (positive)</option>
               <option value="-" ${c.polarity === '-' ? 'selected' : ''}>- (negative)</option>
             </select></label>
+          <label>通し番号 (同じ番号の化合物は1つに統合表示。空欄なら自動採番)
+            <input type="number" step="1" name="serial_no" value="${c.serial_no != null ? c.serial_no : ''}"></label>
           <label>メモ <textarea name="note">${safe(c.note || '')}</textarea></label>
           <p class="err" data-err></p>
           <div class="actions">
@@ -451,11 +574,13 @@ async function openCompoundModal(existing) {
     card._collect = () => {
         const name = (card.querySelector('[name="name"]').value || '').trim();
         if (!name) { card.querySelector('[data-err]').textContent = '化合物名は必須'; return null; }
+        const sv = (card.querySelector('[name="serial_no"]').value || '').trim();
         return {
             name,
             tags: parseTags(card.querySelector('[name="tags"]').value),
             polarity: card.querySelector('[name="polarity"]').value || null,
             note: (card.querySelector('[name="note"]').value || '').trim() || null,
+            serial_no: sv === '' ? null : parseInt(sv, 10),
         };
     };
     return p;
@@ -512,7 +637,7 @@ async function openUsageModal() {
         <h2>使用履歴を追加</h2>
         <form class="row">
           <label>プロジェクト名 <input type="text" name="project_name"></label>
-          <label>測定サンプル (脳/肝臓/腎臓/胎児 等) <input type="text" name="sample_name"></label>
+          <label>サンプル種 (脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可) <input type="text" name="sample_types"></label>
           <label>プロジェクト slug (任意。入力すると遡りリンクが有効になります)
             <input type="text" name="project_slug"></label>
           <p class="err" data-err></p>
@@ -525,7 +650,7 @@ async function openUsageModal() {
     const card = openModal._card;
     card._collect = () => ({
         project_name: (card.querySelector('[name="project_name"]').value || '').trim() || null,
-        sample_name: (card.querySelector('[name="sample_name"]').value || '').trim() || null,
+        sample_types: parseTags(card.querySelector('[name="sample_types"]').value),
         project_slug: (card.querySelector('[name="project_slug"]').value || '').trim() || null,
     });
     return p;
@@ -544,14 +669,14 @@ function reportError(e, fallback) {
 async function addCompound() {
     const data = await openCompoundModal(null);
     if (!data) return;
-    try { await SupabaseClient.upsertCompound(_readCachedMasterPw(), data.name, data.tags, data.polarity, data.note); await loadLibrary(); }
+    try { await SupabaseClient.upsertCompound(_readCachedMasterPw(), data.name, data.tags, data.polarity, data.note, data.serial_no); await loadLibrary(); }
     catch (e) { reportError(e, '化合物の保存'); }
 }
 async function editCompound(id) {
     const c = findCompound(id); if (!c) return;
     const data = await openCompoundModal(c);
     if (!data) return;
-    try { await SupabaseClient.updateCompound(_readCachedMasterPw(), id, data.name, data.tags, data.polarity, data.note); await loadLibrary(); }
+    try { await SupabaseClient.updateCompound(_readCachedMasterPw(), id, data.name, data.tags, data.polarity, data.note, data.serial_no); await loadLibrary(); }
     catch (e) { reportError(e, '化合物の更新'); }
 }
 async function delCompound(id) {
@@ -615,6 +740,21 @@ function bindLibraryEvents() {
     });
 }
 
+function bindFilterBar() {
+    const bar = document.getElementById('filter-bar');
+    bar.addEventListener('click', (ev) => {
+        const el = ev.target && ev.target.closest && ev.target.closest('[data-filter]');
+        if (!el) return;
+        const kind = el.getAttribute('data-filter');
+        const val = el.getAttribute('data-val');
+        if (kind === 'pol') filterPolarity = val;
+        else if (kind === 'tag') { if (selectedTags.has(val)) selectedTags.delete(val); else selectedTags.add(val); }
+        else if (kind === 'stype') { if (selectedSampleTypes.has(val)) selectedSampleTypes.delete(val); else selectedSampleTypes.add(val); }
+        else if (kind === 'clear') { filterPolarity = ''; selectedTags.clear(); selectedSampleTypes.clear(); }
+        renderLibrary();
+    });
+}
+
 async function init() {
     await requireMasterUnlock();
     document.getElementById('btn-back').addEventListener('click', () => { location.href = 'index.html'; });
@@ -623,6 +763,7 @@ async function init() {
     const search = document.getElementById('search');
     search.addEventListener('input', () => { searchText = search.value; renderLibrary(); });
     bindLibraryEvents();
+    bindFilterBar();
     await loadLibrary();
 }
 
@@ -630,6 +771,6 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(e => { consol
 </script>
 <!-- Build tag: bumped on every push so a maintainer / recipient can spot a
      stale cached copy. -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-mrm-r1</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-mrm-r2</div>
 </body>
 </html>

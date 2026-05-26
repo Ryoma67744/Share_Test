@@ -405,13 +405,16 @@ async function openNewProjectFormModal() {
     const html = `
         <h2>新規プロジェクト</h2>
         <form class="row">
-          <label>プロジェクト名
+          <label>プロジェクト名 <span style="color:#b91c1c;">*</span>
             <input type="text" name="name" required>
           </label>
-          <label>実験日時
-            <input type="date" name="experiment_date">
+          <label>実験日時 <span style="color:#b91c1c;">*</span>
+            <input type="date" name="experiment_date" required>
           </label>
-          <label>装置
+          <label>サンプル種 <span style="color:#b91c1c;">*</span> (脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可)
+            <input type="text" name="sample_types" placeholder="例: 脳, 肝臓">
+          </label>
+          <label>装置 <span style="color:#b91c1c;">*</span>
             <select name="machine">
               <option value="DESI">DESI</option>
               <option value="TIMS">TIMS</option>
@@ -442,12 +445,20 @@ async function openNewProjectFormModal() {
     machineSel.addEventListener('change', refresh);
     refresh();
     card._collect = () => {
+        const errEl = card.querySelector('[data-err]');
         const name = (card.querySelector('[name="name"]').value || '').trim();
-        if (!name) { card.querySelector('[data-err]').textContent = 'プロジェクト名は必須'; return null; }
+        const experimentDate = card.querySelector('[name="experiment_date"]').value || '';
+        const machine = machineSel.value || '';
+        const sampleTypes = parseList(card.querySelector('[name="sample_types"]').value);
+        if (!name) { errEl.textContent = 'プロジェクト名は必須'; return null; }
+        if (!experimentDate) { errEl.textContent = '実験日時は必須'; return null; }
+        if (!machine) { errEl.textContent = '装置は必須'; return null; }
+        if (!sampleTypes.length) { errEl.textContent = 'サンプル種を1つ以上入力してください'; return null; }
         return {
             name,
-            experimentDate: card.querySelector('[name="experiment_date"]').value || '',
-            machine: machineSel.value || 'DESI',
+            experimentDate,
+            machine,
+            sampleTypes,
             matrix: (card.querySelector('[name="matrix"]').value || '').trim(),
             googleKeep: (card.querySelector('[name="google_keep"]').value || '').trim(),
             freeNote: (card.querySelector('[name="free_note"]').value || '').trim(),
@@ -469,6 +480,7 @@ function ensureMemoShape(m) {
     m = m || {};
     return {
         sample: m.sample || '',
+        sampleTypes: Array.isArray(m.sampleTypes) ? m.sampleTypes : [],
         experimentDate: m.experimentDate || '',
         machine: m.machine || 'DESI',
         googleKeep: m.googleKeep || '',
@@ -476,6 +488,17 @@ function ensureMemoShape(m) {
         matrix: m.matrix || '',
         derivatization: m.derivatization || '',
     };
+}
+
+// Parse a free-text multi-value field (sample types / tags): split on comma,
+// Japanese comma, or whitespace; trim; dedupe; drop empties.
+function parseList(s) {
+    const out = [];
+    for (const raw of String(s || '').split(/[,、\s]+/)) {
+        const t = raw.trim();
+        if (t && !out.includes(t)) out.push(t);
+    }
+    return out;
 }
 
 async function fetchServerProjectList(forcePrompt) {
@@ -535,6 +558,7 @@ function rowHtml(r) {
     const matrix = (machine !== 'DESI' && memo.matrix) ? memo.matrix : '';
     const note = (memo.freeNote || '').slice(0, 120);
     const gk = memo.googleKeep || '';
+    const stypes = Array.isArray(memo.sampleTypes) ? memo.sampleTypes : [];
     const url = (r.local && r.local.shareInfo && r.local.shareInfo.url) || '';
     const badge = r.kind === 'server-only'
         ? '<span class="badge server">Server only</span>'
@@ -558,7 +582,7 @@ function rowHtml(r) {
             </div>
           </div>
           <div class="text-xs text-gray-600 mt-2">
-            実験日: ${safe(date)} ・ 装置: ${safe(machine)}${matrix ? ' / Matrix: ' + safe(matrix) : ''}
+            実験日: ${safe(date)} ・ 装置: ${safe(machine)}${matrix ? ' / Matrix: ' + safe(matrix) : ''}${stypes.length ? ' ・ サンプル種: ' + safe(stypes.join(', ')) : ''}
             ${gk ? ' ・ <a class="text-blue-600 hover:underline" href="' + safe(gk) + '" target="_blank" rel="noopener">Google Keep ↗</a>' : ''}
           </div>
           ${note ? '<div class="text-xs text-gray-500 mt-1 whitespace-pre-line">' + safe(note) + '</div>' : ''}
@@ -859,6 +883,7 @@ async function init() {
             memo: ensureMemoShape({
                 experimentDate: data.experimentDate,
                 machine: data.machine,
+                sampleTypes: data.sampleTypes,
                 matrix: data.matrix,
                 googleKeep: data.googleKeep,
                 freeNote: data.freeNote,
@@ -904,6 +929,6 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(e => { consol
 </script>
 <!-- Build tag: bumped on every push so a maintainer / recipient can spot a
      stale cached copy. Same value as viewer/index.html, kept in sync by hand. -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-r25</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-r26</div>
 </body>
 </html>
