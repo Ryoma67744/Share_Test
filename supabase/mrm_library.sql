@@ -425,6 +425,48 @@ begin
 end
 $$;
 
+-- ---- 6b. Instrument .exp template storage ------------------
+-- Single-row table holding the MassLynx ".exp" template text. The instrument
+-- is fixed lab-wide, so one template is reused for every export; only the
+-- MRM/SIR channel block is substituted client-side at export time. Master-pw
+-- gated like the rest of the library (it carries instrument settings).
+create table if not exists public.mrm_exp_template (
+    id         int primary key check (id = 1),
+    content    text not null,
+    updated_at timestamptz not null default now()
+);
+alter table public.mrm_exp_template enable row level security;
+revoke all on public.mrm_exp_template from anon, authenticated;
+
+create or replace function public.set_exp_template(_master_pw text, _content text)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    insert into public.mrm_exp_template(id, content)
+         values (1, coalesce(_content, ''))
+    on conflict (id) do update
+         set content = excluded.content, updated_at = now();
+end
+$$;
+
+create or replace function public.get_exp_template(_master_pw text)
+returns text
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare v_content text;
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    select content into v_content from public.mrm_exp_template where id = 1;
+    return v_content;  -- null when no template saved yet
+end
+$$;
+
 -- ---- 7. Grants ---------------------------------------------
 grant execute on function public.list_mrm_library(text)                                                          to anon, authenticated;
 grant execute on function public.upsert_compound(text, text, text[], text, text, integer)                        to anon, authenticated;
@@ -435,10 +477,15 @@ grant execute on function public.update_transition(text, uuid, numeric, numeric,
 grant execute on function public.delete_transition(text, uuid)                                                   to anon, authenticated;
 grant execute on function public.record_usage(text, uuid, text, text, text, text, text[])                        to anon, authenticated;
 grant execute on function public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text, text[]) to anon, authenticated;
+grant execute on function public.set_exp_template(text, text)                                                    to anon, authenticated;
+grant execute on function public.get_exp_template(text)                                                          to anon, authenticated;
 
 -- ===========================================================================
 -- Optional teardown (commented out by default)
 -- ===========================================================================
+-- drop function if exists public.get_exp_template(text);
+-- drop function if exists public.set_exp_template(text, text);
+-- drop table if exists public.mrm_exp_template;
 -- drop function if exists public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text, text[]);
 -- drop function if exists public.record_usage(text, uuid, text, text, text, text, text[]);
 -- drop function if exists public.delete_transition(text, uuid);

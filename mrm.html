@@ -83,9 +83,12 @@
 
   <div class="card p-4 mb-4">
     <div class="flex items-center justify-between gap-3 flex-wrap">
-      <div class="flex gap-2">
+      <div class="flex gap-2 flex-wrap">
         <button id="btn-add-compound" class="btn primary">+ 化合物</button>
         <button id="btn-reload" class="btn">再読込</button>
+        <button id="btn-exp-template" class="btn" title="出力用テンプレート .exp を設定/確認">テンプレ設定</button>
+        <button id="btn-exp-export" class="btn" title="チェックしたトランジションを .exp に出力" disabled>選択を.exp出力 (0)</button>
+        <button id="btn-exp-clear" class="btn" title="選択をすべて解除" style="display:none;">選択クリア</button>
       </div>
       <div class="flex-1 min-w-[200px] max-w-md">
         <input id="search" type="search" placeholder="検索: 化合物名 / タグ / プロジェクト / サンプル"
@@ -161,6 +164,8 @@ const SupabaseClient = (() => {
                 _sample_types: u.sample_types || [],
             });
         },
+        getExpTemplate(pw) { return rpc('get_exp_template', { _master_pw: pw }); },
+        setExpTemplate(pw, content) { return rpc('set_exp_template', { _master_pw: pw, _content: content }); },
     };
 })();
 
@@ -299,6 +304,7 @@ let searchText = '';
 let filterPolarity = '';          // '', '+', '-'
 let selectedTags = new Set();     // 分類フィルタ (OR)
 let selectedSampleTypes = new Set(); // サンプル種フィルタ (OR)
+let selectedTransitions = new Set(); // .exp 出力に含める transition id
 
 function parseTags(s) {
     const out = [];
@@ -309,6 +315,24 @@ function parseTags(s) {
     return out;
 }
 function fmtNum(n) { return (n == null || n === '') ? '—' : String(n); }
+
+// Trigger a browser download of generated text (copied from viewer/index.html).
+function downloadAsFile(blob, fname) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}
+function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = () => reject(r.error);
+        r.readAsText(file);
+    });
+}
 function findCompound(id) { return library.find(c => c.id === id) || null; }
 function findTransition(tid) {
     for (const c of library) { const t = (c.transitions || []).find(x => x.id === tid); if (t) return { compound: c, transition: t }; }
@@ -358,8 +382,10 @@ function transitionsHtml(c) {
     const rows = trs.map(tr => {
         const star = tr.is_recommended ? '<span class="star" title="推奨">★</span>' : '';
         const note = tr.intensity_note ? safe(tr.intensity_note) : '<span class="muted">—</span>';
+        const checked = selectedTransitions.has(tr.id) ? ' checked' : '';
         return ''
             + '<tr>'
+            + '<td><input type="checkbox" class="tr-select" data-tid="' + safe(tr.id) + '" title=".exp 出力に含める"' + checked + '></td>'
             + '<td>' + fmtNum(tr.precursor) + '</td>'
             + '<td>' + fmtNum(tr.product) + '</td>'
             + '<td>' + fmtNum(tr.ce) + '</td>'
@@ -372,11 +398,11 @@ function transitionsHtml(c) {
             +   '<button class="btn mini danger" data-action="del-transition" data-tid="' + safe(tr.id) + '">削除</button>'
             + '</td>'
             + '</tr>'
-            + '<tr><td colspan="7" class="l" style="padding-top:0;">' + usagesHtml(tr) + '</td></tr>';
+            + '<tr><td colspan="8" class="l" style="padding-top:0;">' + usagesHtml(tr) + '</td></tr>';
     }).join('');
     return ''
         + '<table class="tr-table">'
-        + '<thead><tr><th>Precursor</th><th>Fragment</th><th>CE</th><th>CV</th><th class="l">Role</th><th class="l">強度メモ</th><th class="l"></th></tr></thead>'
+        + '<thead><tr><th title=".exp 出力に含める">☑</th><th>Precursor</th><th>Fragment</th><th>CE</th><th>CV</th><th class="l">Role</th><th class="l">強度メモ</th><th class="l"></th></tr></thead>'
         + '<tbody>' + rows + '</tbody></table>';
 }
 
@@ -743,6 +769,204 @@ function openUsageLink(slug) {
     location.href = 'viewer/index.html#share=' + encodeURIComponent(slug);
 }
 
+// ===========================================================================
+// .exp export (Waters MassLynx). Substitute the selected transitions into the
+// saved template's MRM/SIR variable sections; keep everything else intact.
+// ===========================================================================
+function updateExportBar() {
+    const n = selectedTransitions.size;
+    const btn = document.getElementById('btn-exp-export');
+    const clr = document.getElementById('btn-exp-clear');
+    if (btn) { btn.textContent = '選択を.exp出力 (' + n + ')'; btn.disabled = n === 0; }
+    if (clr) clr.style.display = n ? '' : 'none';
+}
+function clearSelection() {
+    selectedTransitions.clear();
+    document.querySelectorAll('#lib .tr-select').forEach(cb => { cb.checked = false; });
+    updateExportBar();
+}
+// Selected transitions in display (library) order.
+function collectSelectedRows() {
+    const rows = [];
+    for (const c of (library || [])) {
+        for (const tr of (c.transitions || [])) {
+            if (selectedTransitions.has(tr.id)) {
+                rows.push({ name: c.name || '', precursor: tr.precursor, product: tr.product, cv: tr.cv, ce: tr.ce });
+            }
+        }
+    }
+    return rows;
+}
+
+function _expKey(line) { const i = line.indexOf(','); return i < 0 ? line : line.slice(0, i); }
+function _expFirstValue(lines, key, dflt) {
+    for (const ln of lines) { if (_expKey(ln) === key) { const i = ln.indexOf(','); return i < 0 ? '' : ln.slice(i + 1); } }
+    return dflt;
+}
+function _expReplaceScalar(lines, key, value) {
+    return lines.map(ln => (_expKey(ln) === key ? key + ',' + value : ln));
+}
+function _expFmt(x) {
+    if (x == null || x === '') return '';
+    const n = Number(x);
+    return Number.isFinite(n) ? String(n) : String(x);
+}
+// Per-entry key membership for THIS fixed instrument's .exp (suffix = index).
+function _isSirEntryKey(k) {
+    return /^SIRMass\d+$/.test(k) || /^SIRMass_2_\d+$/.test(k) || /^SIRAutoDwell\d+$/.test(k)
+        || /^SIRDwellTime\d+$/.test(k) || /^SIRDelay\d+$/.test(k) || /^UseAsLockMass\d+$/.test(k)
+        || /^UseSampleList\d+$/.test(k) || /^UseSampleList_2\d+$/.test(k);
+}
+function _isChannelEntryKey(k) {
+    return /^UseSLMassesP_\d+$/.test(k) || /^UseSLMassesD_\d+$/.test(k) || /^Mass\(amu\)_\d+$/.test(k)
+        || /^Mass2\(amu\)_\d+$/.test(k) || /^AutoDwell_\d+$/.test(k) || /^Dwell\(s\)_\d+$/.test(k)
+        || /^ConeVoltage\(V\)_\d+$/.test(k) || /^CollisionEnergy\(eV\)_\d+$/.test(k) || /^InterChannelDelay\(s\)_\d+$/.test(k)
+        || /^CompoundName_\d+$/.test(k) || /^CompoundFormula_\d+$/.test(k) || /^CompoundComment_\d+$/.test(k);
+}
+
+function buildExp(templateText, rows) {
+    if (!rows.length) throw new Error('トランジションが選択されていません');
+    const crlf = /\r\n/.test(templateText);
+    const lines = templateText.replace(/\r\n/g, '\n').split('\n');
+    const n = rows.length;
+    // Constant per-entry values are taken from the template's first entry.
+    const d = {
+        SIRAutoDwell: _expFirstValue(lines, 'SIRAutoDwell1', '0'),
+        SIRDwellTime: _expFirstValue(lines, 'SIRDwellTime1', '0.0100'),
+        SIRDelay: _expFirstValue(lines, 'SIRDelay1', '0.0037'),
+        UseAsLockMass: _expFirstValue(lines, 'UseAsLockMass1', '0'),
+        UseSampleList: _expFirstValue(lines, 'UseSampleList1', '0'),
+        UseSampleList_2: _expFirstValue(lines, 'UseSampleList_21', '0'),
+        UseSLMassesP: _expFirstValue(lines, 'UseSLMassesP_1', '0'),
+        UseSLMassesD: _expFirstValue(lines, 'UseSLMassesD_1', '0'),
+        AutoDwell: _expFirstValue(lines, 'AutoDwell_1', '0'),
+        Dwell: _expFirstValue(lines, 'Dwell(s)_1', '0.0100'),
+        InterChannelDelay: _expFirstValue(lines, 'InterChannelDelay(s)_1', '0.0037'),
+    };
+    const sirBlock = [];
+    rows.forEach((r, idx) => {
+        const i = idx + 1;
+        sirBlock.push('SIRMass' + i + ',' + _expFmt(r.precursor));
+        sirBlock.push('SIRMass_2_' + i + ',' + _expFmt(r.product));
+        sirBlock.push('SIRAutoDwell' + i + ',' + d.SIRAutoDwell);
+        sirBlock.push('SIRDwellTime' + i + ',' + d.SIRDwellTime);
+        sirBlock.push('SIRDelay' + i + ',' + d.SIRDelay);
+        sirBlock.push('UseAsLockMass' + i + ',' + d.UseAsLockMass);
+        sirBlock.push('UseSampleList' + i + ',' + d.UseSampleList);
+        sirBlock.push('UseSampleList_2' + i + ',' + d.UseSampleList_2);
+    });
+    const chBlock = [];
+    rows.forEach((r, idx) => {
+        const i = idx + 1;
+        chBlock.push('UseSLMassesP_' + i + ',' + d.UseSLMassesP);
+        chBlock.push('UseSLMassesD_' + i + ',' + d.UseSLMassesD);
+        chBlock.push('Mass(amu)_' + i + ',' + _expFmt(r.precursor));
+        chBlock.push('Mass2(amu)_' + i + ',' + _expFmt(r.product));
+        chBlock.push('AutoDwell_' + i + ',' + d.AutoDwell);
+        chBlock.push('Dwell(s)_' + i + ',' + d.Dwell);
+        chBlock.push('ConeVoltage(V)_' + i + ',' + _expFmt(r.cv));
+        chBlock.push('CollisionEnergy(eV)_' + i + ',' + _expFmt(r.ce));
+        chBlock.push('InterChannelDelay(s)_' + i + ',' + d.InterChannelDelay);
+        chBlock.push('CompoundName_' + i + ',' + (r.name || ('MRM_' + _expFmt(r.precursor) + '_' + _expFmt(r.product))));
+        chBlock.push('');  // preserve the blank line after CompoundName
+        chBlock.push('CompoundFormula_' + i + ',');
+        chBlock.push('CompoundComment_' + i + ',');
+    });
+    // Span-replace the SIR block (at NumSIRMasses) and the MRM channel block
+    // (at the first channel line), preserving file order + all other settings.
+    let out = [];
+    let i = 0, sirDone = false, chDone = false;
+    while (i < lines.length) {
+        const ln = lines[i];
+        const key = _expKey(ln);
+        if (!sirDone && key === 'NumSIRMasses') {
+            out.push('NumSIRMasses,' + n);
+            i++;
+            while (i < lines.length && (_isSirEntryKey(_expKey(lines[i])) || lines[i].trim() === '')) i++;
+            for (const b of sirBlock) out.push(b);
+            sirDone = true;
+            continue;
+        }
+        if (!chDone && _isChannelEntryKey(key)) {
+            while (i < lines.length && (_isChannelEntryKey(_expKey(lines[i])) || lines[i].trim() === '')) i++;
+            for (const b of chBlock) out.push(b);
+            chDone = true;
+            continue;
+        }
+        out.push(ln);
+        i++;
+    }
+    out = _expReplaceScalar(out, 'NoOfChannels', String(n));
+    const dwell = parseFloat(d.Dwell) || 0;
+    const delay = parseFloat(d.InterChannelDelay) || 0;
+    const tmplScan = _expFirstValue(out, 'FunctionScanTime(sec)', '0.1960');
+    const dec = (/\.\d+/.test(tmplScan)) ? tmplScan.split('.')[1].length : 4;
+    out = _expReplaceScalar(out, 'FunctionScanTime(sec)', (n * (dwell + delay)).toFixed(dec));
+
+    let text = out.join('\n');
+    if (!text.endsWith('\n')) text += '\n';
+    if (crlf) text = text.replace(/\n/g, '\r\n');
+    return text;
+}
+
+async function exportSelectedExp() {
+    const rows = collectSelectedRows();
+    if (!rows.length) { alert('出力するトランジションをチェックしてください'); return; }
+    const pw = _readCachedMasterPw();
+    if (!pw) { alert('認証が切れました。再読込してください。'); return; }
+    let template;
+    try { template = await SupabaseClient.getExpTemplate(pw); }
+    catch (e) { reportError(e, 'テンプレ取得'); return; }
+    if (!template || !template.trim()) {
+        alert('テンプレートが未設定です。「テンプレ設定」で .exp テンプレートを保存してください。');
+        return;
+    }
+    let text;
+    try { text = buildExp(template, rows); }
+    catch (e) { alert('.exp 生成に失敗しました: ' + (e.message || e)); console.warn(e); return; }
+    const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+    downloadAsFile(new Blob([text], { type: 'text/plain' }), 'DESI_MRM_' + stamp + '_' + rows.length + 'ch.exp');
+}
+
+async function openTemplateModal() {
+    const pw = _readCachedMasterPw();
+    if (!pw) { alert('認証が切れました。再読込してください。'); return; }
+    let current = '';
+    try { current = (await SupabaseClient.getExpTemplate(pw)) || ''; } catch (e) { /* ignore */ }
+    const html = `
+        <h2>出力テンプレート .exp</h2>
+        <p style="font-size:11px;color:#475569;margin-bottom:6px;">
+          機器固定のテンプレート .exp を1本保存します（出力時に MRM/SIR の可変部だけ差し替え）。
+          ファイル選択で読み込むか、本文に貼り付けて保存してください。${current ? '<br><b>保存済み（' + current.length + ' 文字）</b>。再保存で上書きします。' : '<br><b>未保存</b>。'}
+        </p>
+        <form class="row">
+          <label>テンプレ .exp を選択 <input type="file" name="file" accept=".exp,.txt,text/plain"></label>
+          <label>テンプレ本文 <textarea name="content" rows="8" style="font-family:ui-monospace,monospace;">${safe(current)}</textarea></label>
+          <p class="err" data-err></p>
+          <div class="actions">
+            <button type="button" class="btn" data-modal-cancel>Cancel</button>
+            <button type="submit" class="btn primary" data-modal-ok>保存</button>
+          </div>
+        </form>`;
+    const p = openModal(html);
+    const card = openModal._card;
+    const fileInp = card.querySelector('[name="file"]');
+    const ta = card.querySelector('[name="content"]');
+    fileInp.addEventListener('change', async () => {
+        const f = fileInp.files && fileInp.files[0];
+        if (f) { try { ta.value = await readFileAsText(f); } catch (e) { card.querySelector('[data-err]').textContent = '読込失敗: ' + (e.message || e); } }
+    });
+    card._collect = () => {
+        const content = ta.value || '';
+        if (!content.trim()) { card.querySelector('[data-err]').textContent = 'テンプレ本文が空です'; return null; }
+        return { content };
+    };
+    const res = await p;
+    if (!res) return;
+    try { await SupabaseClient.setExpTemplate(pw, res.content); alert('テンプレートを保存しました'); }
+    catch (e) { reportError(e, 'テンプレ保存'); }
+}
+
 function bindLibraryEvents() {
     const host = document.getElementById('lib');
     host.addEventListener('click', (ev) => {
@@ -764,6 +988,14 @@ function bindLibraryEvents() {
             case 'add-usage': addUsage(tid); break;
             case 'open-usage': openUsageLink(el.getAttribute('data-slug')); break;
         }
+    });
+    // Transition-selection checkboxes (for .exp export).
+    host.addEventListener('change', (ev) => {
+        const cb = ev.target;
+        if (!cb || !cb.classList || !cb.classList.contains('tr-select')) return;
+        const tid = cb.getAttribute('data-tid');
+        if (cb.checked) selectedTransitions.add(tid); else selectedTransitions.delete(tid);
+        updateExportBar();
     });
 }
 
@@ -787,10 +1019,14 @@ async function init() {
     document.getElementById('btn-back').addEventListener('click', () => { location.href = 'index.html'; });
     document.getElementById('btn-add-compound').addEventListener('click', () => addCompound());
     document.getElementById('btn-reload').addEventListener('click', () => loadLibrary());
+    document.getElementById('btn-exp-template').addEventListener('click', () => openTemplateModal());
+    document.getElementById('btn-exp-export').addEventListener('click', () => exportSelectedExp());
+    document.getElementById('btn-exp-clear').addEventListener('click', () => clearSelection());
     const search = document.getElementById('search');
     search.addEventListener('input', () => { searchText = search.value; renderLibrary(); });
     bindLibraryEvents();
     bindFilterBar();
+    updateExportBar();
     await loadLibrary();
 }
 
@@ -798,6 +1034,6 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(e => { consol
 </script>
 <!-- Build tag: bumped on every push so a maintainer / recipient can spot a
      stale cached copy. -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-mrm-r3</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-mrm-r4</div>
 </body>
 </html>
