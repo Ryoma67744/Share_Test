@@ -67,10 +67,32 @@
   .serial-badge { display:inline-block; padding:1px 7px; border-radius:4px; font-size:10px; font-weight:700; background:#fde68a; color:#92400e; }
   .cpd-member { border-top:1px dashed #e5e7eb; padding-top:8px; margin-top:8px; }
   .cpd-member:first-child { border-top:none; padding-top:0; margin-top:0; }
+  /* Two-column layout: compound list (left) + selected-MRM panel (right). */
+  .lib-layout { display:flex; gap:16px; align-items:flex-start; }
+  .lib-layout > #lib { flex:1 1 auto; min-width:0; }
+  #sel-panel { flex:0 0 300px; width:300px; position:sticky; top:12px; align-self:flex-start;
+      max-height:calc(100vh - 24px); overflow:auto; background:#fff; border:1px solid #e5e7eb;
+      border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.04); }
+  .sel-head { font-size:12px; font-weight:700; color:#0f172a; padding:8px 10px; border-bottom:1px solid #e5e7eb;
+      background:#f8fafc; border-radius:8px 8px 0 0; position:sticky; top:0; }
+  #sel-panel-body { padding:6px; }
+  .sel-item { display:flex; align-items:flex-start; gap:6px; padding:5px 4px; border-bottom:1px solid #f1f5f9; }
+  .sel-item:last-child { border-bottom:none; }
+  .sel-ch { flex:0 0 auto; min-width:18px; text-align:center; font-size:10px; font-weight:700; color:#92400e;
+      background:#fde68a; border-radius:4px; padding:1px 4px; margin-top:1px; }
+  .sel-main { flex:1 1 auto; min-width:0; }
+  .sel-name { font-size:12px; font-weight:600; color:#1e293b; word-break:break-all; }
+  .sel-mz { font-size:10px; }
+  .sel-x { flex:0 0 auto; border:none; background:transparent; color:#b91c1c; cursor:pointer; font-size:14px; line-height:1; padding:0 2px; }
+  .sel-x:hover { color:#7f1d1d; }
+  @media (max-width:900px) {
+      .lib-layout { flex-direction:column; }
+      #sel-panel { width:100%; flex-basis:auto; position:static; max-height:none; }
+  }
 </style>
 </head>
 <body class="min-h-screen">
-<div id="app" class="max-w-5xl mx-auto px-6 py-8">
+<div id="app" class="max-w-7xl mx-auto px-6 py-8">
   <header class="flex items-center justify-between gap-4 mb-4">
     <div>
       <h1 class="text-xl font-bold">MRM管理</h1>
@@ -98,8 +120,14 @@
     <div id="filter-bar" class="filter-bar"></div>
   </div>
 
-  <div id="lib" class="space-y-2">
-    <p class="text-sm text-gray-500 px-1">読み込み中…</p>
+  <div class="lib-layout">
+    <div id="lib" class="space-y-2">
+      <p class="text-sm text-gray-500 px-1">読み込み中…</p>
+    </div>
+    <aside id="sel-panel">
+      <div class="sel-head">選択中のMRM一覧 <span id="sel-count" class="muted" style="font-weight:400;">(0)</span></div>
+      <div id="sel-panel-body"></div>
+    </aside>
   </div>
 </div>
 
@@ -572,6 +600,7 @@ function unitHtml(u) {
 
 function renderLibrary() {
     renderFilterBar();
+    renderSelectedPanel();
     const host = document.getElementById('lib');
     const units = libraryUnits().filter(unitMatches);
     if (!units.length) {
@@ -784,6 +813,7 @@ function clearSelection() {
     selectedTransitions.clear();
     document.querySelectorAll('#lib .tr-select').forEach(cb => { cb.checked = false; });
     updateExportBar();
+    renderSelectedPanel();
 }
 // Selected transitions in display (library) order.
 function collectSelectedRows() {
@@ -796,6 +826,55 @@ function collectSelectedRows() {
         }
     }
     return rows;
+}
+
+// Right-side "選択中のMRM一覧" — live list of checked transitions in the same
+// order as the .exp channels; each row can be unselected.
+function renderSelectedPanel() {
+    const body = document.getElementById('sel-panel-body');
+    const cnt = document.getElementById('sel-count');
+    if (!body) return;
+    const items = [];
+    for (const c of (library || [])) {
+        for (const tr of (c.transitions || [])) {
+            if (selectedTransitions.has(tr.id)) items.push({ c, tr });
+        }
+    }
+    if (cnt) cnt.textContent = '(' + items.length + ')';
+    if (!items.length) {
+        body.innerHTML = '<p class="muted" style="font-size:11px;padding:6px 4px;">チェックしたMRMがここに一覧表示されます（.exp の出力順）。</p>';
+        return;
+    }
+    body.innerHTML = items.map((it, idx) => {
+        const pre = fmtNum(it.tr.precursor), pro = fmtNum(it.tr.product);
+        const ce = fmtNum(it.tr.ce), cv = fmtNum(it.tr.cv);
+        return '<div class="sel-item">'
+            + '<span class="sel-ch">' + (idx + 1) + '</span>'
+            + '<div class="sel-main">'
+            +   '<div class="sel-name">' + safe(it.c.name) + '</div>'
+            +   '<div class="sel-mz muted">' + pre + ' → ' + pro + '  CE' + ce + ' / CV' + cv + '</div>'
+            + '</div>'
+            + '<button class="sel-x" data-action="unselect" data-tid="' + safe(it.tr.id) + '" title="選択解除">×</button>'
+            + '</div>';
+    }).join('');
+}
+
+function unselectTransition(tid) {
+    selectedTransitions.delete(tid);
+    const cb = document.querySelector('#lib .tr-select[data-tid="' + tid + '"]');
+    if (cb) cb.checked = false;
+    updateExportBar();
+    renderSelectedPanel();
+}
+
+function bindSelectedPanel() {
+    const panel = document.getElementById('sel-panel');
+    if (!panel) return;
+    panel.addEventListener('click', (ev) => {
+        const el = ev.target && ev.target.closest && ev.target.closest('[data-action="unselect"]');
+        if (!el) return;
+        unselectTransition(el.getAttribute('data-tid'));
+    });
 }
 
 function _expKey(line) { const i = line.indexOf(','); return i < 0 ? line : line.slice(0, i); }
@@ -996,6 +1075,7 @@ function bindLibraryEvents() {
         const tid = cb.getAttribute('data-tid');
         if (cb.checked) selectedTransitions.add(tid); else selectedTransitions.delete(tid);
         updateExportBar();
+        renderSelectedPanel();
     });
 }
 
@@ -1026,7 +1106,9 @@ async function init() {
     search.addEventListener('input', () => { searchText = search.value; renderLibrary(); });
     bindLibraryEvents();
     bindFilterBar();
+    bindSelectedPanel();
     updateExportBar();
+    renderSelectedPanel();
     await loadLibrary();
 }
 
@@ -1034,6 +1116,6 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(e => { consol
 </script>
 <!-- Build tag: bumped on every push so a maintainer / recipient can spot a
      stale cached copy. -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-mrm-r4</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-mrm-r5</div>
 </body>
 </html>
