@@ -56,7 +56,8 @@ body.share-mode #tb-flip-group,
 body.share-mode #tb-del-section { display:none !important; }
 body.share-mode #share-mode-banner { display:flex !important; }
 body.share-mode .picker-row .picker-row-dot,
-body.share-mode .picker-row .picker-row-rename { display:none !important; }
+body.share-mode .picker-row .picker-row-rename,
+body.share-mode .picker-row .picker-row-group { display:none !important; }
 body.share-mode #method-rows td[data-compound-cell] { cursor:default; }
 body:not(.share-mode) #method-rows td[data-compound-cell] { cursor:text; }
 body:not(.share-mode) .canvas-label { cursor:text; pointer-events:auto; }
@@ -168,6 +169,10 @@ body.share-mode .sync-status { display:none !important; }
 .picker-row.active { background:#dbeafe; }
 .picker-row canvas { width:32px; height:32px; background:#1f2937; border-radius:2px; flex-shrink:0; }
 .picker-row .picker-row-name { font-size:11px; color:#0f172a; }
+.picker-group-header { font-size:10px; font-weight:700; color:#64748b; padding:4px 6px 2px; margin-top:2px; border-top:1px solid #e5e7eb; }
+.picker-menu > .picker-group-header:first-child { border-top:none; margin-top:0; }
+.picker-row .picker-row-group { margin-left:auto; flex-shrink:0; font-size:10px; padding:1px 6px; border:1px solid #cbd5e1; border-radius:3px; background:#fff; color:#475569; cursor:pointer; }
+.picker-row .picker-row-group:hover { background:#eef2ff; color:#1d4ed8; }
 .canvas-label { position:absolute; top:4px; left:4px; background:rgba(0,0,0,0.55); color:#fff; font-size:11px; padding:2px 6px; border-radius:3px; z-index:4; pointer-events:none; }
 .sec-canvas-cell.active .canvas-label { background:rgba(37,99,235,0.85); }
 #method-rows .marker-swatch { width:14px; height:14px; border-radius:50%; border:1px solid #cbd5e1; cursor:pointer; padding:0; vertical-align:middle; }
@@ -896,6 +901,35 @@ function findCommonNamePrefix(names) {
     // signal that to the caller by returning "".
     if (arr.every(n => n === prefix)) return '';
     return prefix;
+}
+
+// Default section names look like "Section 3" (addSection seeds
+// 'Section ' + ordinal, and many fallbacks repeat it). They carry no
+// condition info, so they must not become a real group when we strip the
+// trailing number ("Section 3" → "Section").
+function isDefaultSectionName(name) {
+    return /^\s*Section\s*\d*\s*$/i.test(String(name == null ? '' : name));
+}
+
+// Sentinel header label for sections with no usable condition.
+const UNGROUPED_GROUP_LABEL = '(未分類)';
+
+// Condition / sample-group label for a section, used only to cluster
+// n-replicates under a header in the section picker. Display-only: the
+// return value is never written back to the section.
+//   1. explicit manual override  section.meta.group  wins
+//   2. else derive from displayName by stripping a trailing replicate index
+//      ("WT1" / "WT 2" / "KO_3" / "WT-10" / "WT #2" → WT/WT/KO/WT/WT)
+//   3. default-named / number-only / empty → "(未分類)"
+function sectionGroupKey(section) {
+    if (!section) return UNGROUPED_GROUP_LABEL;
+    const override = (section.meta && typeof section.meta.group === 'string')
+        ? section.meta.group.trim() : '';
+    if (override) return override;
+    const name = section.displayName || '';
+    if (isDefaultSectionName(name)) return UNGROUPED_GROUP_LABEL;
+    const stripped = String(name).replace(/[\s_\-#・.]*\d+\s*$/, '').trim();
+    return stripped || UNGROUPED_GROUP_LABEL;
 }
 
 // Produce the preview header title.
@@ -9645,7 +9679,22 @@ const Toolbar = {
 
         if (this.pickerMenu) {
             this.pickerMenu.innerHTML = '';
+
+            // Cluster sections by condition (display-only) so same-condition
+            // n-replicates sit under one header. First-appearance order for
+            // both the groups and the sections within each group;
+            // project.sections itself is never reordered or mutated.
+            const groups = new Map();
             for (const s of sections) {
+                const key = sectionGroupKey(s);
+                if (!groups.has(key)) groups.set(key, []);
+                groups.get(key).push(s);
+            }
+            // Only show headers when there is more than one distinct group —
+            // a single header over every section adds noise without grouping.
+            const showHeaders = groups.size >= 2;
+
+            const makeRow = (s) => {
                 const panel = App.panels.get(s.id);
                 const row = document.createElement('div');
                 row.className = 'picker-row' + (s.id === activeId ? ' active' : '');
@@ -9657,12 +9706,36 @@ const Toolbar = {
                 nm.className = 'picker-row-name';
                 nm.textContent = s.displayName || ('Section ' + (s.ordinal || ''));
                 row.appendChild(nm);
+                // master-only: edit this section's condition (group) override.
+                // Hidden from share recipients via the .picker-row-group rule.
+                const gBtn = document.createElement('button');
+                gBtn.type = 'button';
+                gBtn.className = 'picker-row-group';
+                gBtn.textContent = '条件';
+                gBtn.title = 'master のみ: この切片のサンプル条件(グループ)を設定。空欄で自動判定に戻す';
+                gBtn.addEventListener('click', (ev) => {
+                    ev.preventDefault(); ev.stopPropagation();
+                    if (document.body.classList.contains('share-mode')) return;
+                    App.editSectionGroup(s.id);
+                });
+                row.appendChild(gBtn);
                 row.addEventListener('click', () => {
                     App.setActiveSection(s.id);
                     this.closePickerMenu();
                 });
-                this.pickerMenu.appendChild(row);
+                return row;
+            };
+
+            for (const [key, arr] of groups) {
+                if (showHeaders) {
+                    const hd = document.createElement('div');
+                    hd.className = 'picker-group-header';
+                    hd.textContent = key + ' (n=' + arr.length + ')';
+                    this.pickerMenu.appendChild(hd);
+                }
+                for (const s of arr) this.pickerMenu.appendChild(makeRow(s));
             }
+
             if (!sections.length) {
                 const empty = document.createElement('div');
                 empty.style.cssText = 'padding:6px 8px;color:#94a3b8;font-size:11px;';
@@ -10211,6 +10284,59 @@ const App = {
             return;
         }
         showToast('Section 名を "' + cleaned + '" に変更しました', 2500);
+    },
+
+    // master-only: prompt to set/clear a section's condition (group) override.
+    // Empty input clears the override → the picker falls back to auto-detecting
+    // the group from the section name. Display-only; nothing about the
+    // measurement data changes.
+    editSectionGroup(sectionId) {
+        if (!this.project) return;
+        const sec = (this.project.sections || []).find(s => s.id === sectionId);
+        if (!sec) return;
+        // auto = what the grouping would be with no override, so the user can
+        // see whether they even need to override.
+        const auto = sectionGroupKey({ displayName: sec.displayName, meta: {} });
+        const curOverride = (sec.meta && typeof sec.meta.group === 'string') ? sec.meta.group.trim() : '';
+        const label = sec.displayName || ('Section ' + (sec.ordinal || ''));
+        const msg = '「' + label + '」のサンプル条件(グループ)を入力してください。\n'
+                  + '空欄にすると自動判定（現在の自動判定: ' + auto + '）に戻します。';
+        const input = prompt(msg, curOverride);
+        if (input === null) return; // cancelled
+        this.setSectionGroup(sectionId, input.trim());
+    },
+
+    async setSectionGroup(sectionId, group) {
+        if (!this.project) return;
+        const sec = (this.project.sections || []).find(s => s.id === sectionId);
+        if (!sec) return;
+        const cleaned = String(group || '').trim();
+        if (!sec.meta || typeof sec.meta !== 'object') sec.meta = {};
+        const prev = (typeof sec.meta.group === 'string') ? sec.meta.group : '';
+        if (cleaned === prev) return;
+        if (cleaned) sec.meta.group = cleaned;
+        else delete sec.meta.group;
+
+        if (typeof Toolbar !== 'undefined') {
+            try { Toolbar.refreshSectionPicker(); } catch (e) {}
+        }
+        await this.queueSave(0);
+        await this._flushSave();
+        // Verify the override actually persisted to IndexedDB (mirrors
+        // renameSection's read-back guard).
+        try {
+            const idb = await ProjectStorage.getProject(this.project.id);
+            const idbSec = idb && (idb.sections || []).find(s => s.id === sectionId);
+            const savedGroup = (idbSec && idbSec.meta && typeof idbSec.meta.group === 'string') ? idbSec.meta.group : '';
+            if (savedGroup !== cleaned) {
+                this._showSaveError('サンプル条件の永続化が確認できません', 'setSectionGroup');
+                return;
+            }
+        } catch (e) {
+            this._showSaveError('Verify 失敗: ' + ((e && e.message) || e), 'setSectionGroup');
+            return;
+        }
+        showToast(cleaned ? ('サンプル条件を "' + cleaned + '" に設定しました') : 'サンプル条件を自動判定に戻しました', 2500);
     },
 
     refreshViewModeUI() {
@@ -11907,6 +12033,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-r36</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-03-r37</div>
 </body>
 </html>
