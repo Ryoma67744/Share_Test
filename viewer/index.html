@@ -11437,20 +11437,32 @@ const App = {
                 }
             }
             for (const p of this.panels.values()) {
-                let img = fk && p.imageSources[fk];
-                // Self-heal: focus is loaded somewhere but not in this panel — try
-                // to load it on demand from its blob before rendering.
-                if (fk && !img) {
-                    const ent = p.section.msiSeries && p.section.msiSeries[fk];
-                    if (ent && ent.blobId) {
-                        try { await p.loadMsiLayer(fk, ent); img = p.imageSources[fk]; }
-                        catch (e) { console.warn('share focus self-heal failed', p.section && p.section.id, e); }
-                    }
-                }
                 try {
-                    if (fk && img && !p.visibleLayers.has(fk)) p.toggleLayer(fk, true);
-                    else p.renderComposite();   // re-render in compound mode even if already visible
+                    const ent = fk && p.section.msiSeries && p.section.msiSeries[fk];
+                    // 1) Ensure the focus raster is loaded for THIS panel.
+                    if (fk && ent && ent.blobId && !p.imageSources[fk]) {
+                        await p.loadMsiLayer(fk, ent);
+                    }
+                    // 2) Ensure imageSettings[fk] exists — loadMsiLayer does NOT
+                    //    init settings, and renderComposite SKIPS layers without
+                    //    settings (this was why self-healed panels stayed HE-only).
+                    if (fk && p.imageSources[fk] && !p.imageSettings[fk]) {
+                        await p.analyzeAndInitSettings();
+                    }
+                    // 3) Make the focus visible + the active MSI, then size the
+                    //    canvas to the focus source grid and render.
+                    if (fk && p.imageSources[fk]) { p.visibleLayers.add(fk); p.activeMsiKey = fk; }
+                    p.setupCanvasSize();
+                    p.renderComposite();
                 } catch (e) { console.warn('share focus apply failed', p.section && p.section.id, e); }
+                // Per-panel diagnostic (temporary): everything renderComposite needs.
+                const _img = fk && p.imageSources[fk];
+                console.info('[share panel]', (p.section && p.section.displayName) || '?',
+                    'hasKey=', !!(fk && p.section.msiSeries && p.section.msiSeries[fk]),
+                    'img=', !!_img, 'natW=', _img && _img.naturalWidth,
+                    'settings=', !!(fk && p.imageSettings[fk]),
+                    'vis=', !!(fk && p.visibleLayers.has(fk)),
+                    'cdispW=', p.dom && p.dom.cdisp && p.dom.cdisp.width);
             }
         } catch (e) { console.warn('share focus init failed', e); }
         populateRoiList();
@@ -12559,6 +12571,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r50</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r51</div>
 </body>
 </html>
