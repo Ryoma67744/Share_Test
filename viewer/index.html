@@ -113,6 +113,10 @@ body.share-mode .sync-status { display:none !important; }
 .sec-canvas-cell { background:#000; display:flex; flex-direction:column; min-width:280px; min-height:240px; overflow:hidden; outline:1px solid transparent; outline-offset:-1px; transition:outline-color 0.15s; position:relative; }
 .sec-canvas-cell.active { outline-color:#60a5fa; }
 .sec-thumbs-cell { background:#fff; display:flex; flex-direction:column; min-width:280px; overflow:auto; border-top:1px solid #e5e7eb; }
+/* Organ filter (④): hide non-matching sections in the central grid. The panel
+   root is display:contents, so hide its two grid cells directly. */
+.section-panel.section-filtered-out > .sec-canvas-cell,
+.section-panel.section-filtered-out > .sec-thumbs-cell { display:none !important; }
 .section-panel header { display:flex; align-items:center; gap:6px; padding:5px 8px; border-bottom:1px solid #e5e7eb; background:#f9fafb; }
 .section-panel header input.sec-name { flex:1 1 auto; min-width:0; font-size:12px; font-weight:600; padding:2px 4px; border:1px solid transparent; background:transparent; border-radius:3px; color:#111827; }
 .section-panel header input.sec-name:focus { border-color:#cbd5e1; background:#fff; outline:none; }
@@ -231,7 +235,7 @@ body.splitting-v { cursor:row-resize !important; }
 .section-panel .thumb-cell { display:flex; flex-direction:column; align-items:center; min-width:0; }
 .section-panel .thumb-rot-box { position:relative; width:100%; aspect-ratio:var(--rot-ar, 1/1); max-height:90px; overflow:hidden; background:#0b1220; border-radius:3px; cursor:pointer; }
 .section-panel .thumb-rot-box img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; transform-origin:50% 50%; }
-.section-panel .thumb-rot-box img.msi { transform:rotate(-180deg); image-rendering:pixelated; }
+.section-panel .thumb-rot-box img.msi { image-rendering:pixelated; }
 .section-panel .thumb-rot-box.active { box-shadow:0 0 0 2px #3b82f6 inset; }
 .section-panel .thumb-cap { font-size:10px; color:#475569; margin-top:2px; max-width:100%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .section-empty { display:flex; flex-direction:column; gap:8px; align-items:center; justify-content:center; color:#9ca3af; flex:1 1 auto; padding:20px; text-align:center; font-size:12px; }
@@ -553,6 +557,10 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     <h2 class="text-xs font-semibold text-gray-500 uppercase tracking-wide">ROI List</h2>
                     <div class="flex items-center gap-2">
                         <button id="roi-draw-toggle" class="text-xs px-2 py-0.5 rounded border border-gray-300 bg-white hover:bg-gray-50 text-gray-700" title="Draw new ROI on the active section">+ 新規</button>
+                        <label class="flex items-center cursor-pointer select-none" title="選択中の ROI の形に MSI を切り抜いて表示（HE 背景は全体表示）">
+                            <input type="checkbox" id="roi-clip-toggle" class="mr-1">
+                            <span class="text-xs text-gray-500">ROIのみ</span>
+                        </label>
                         <label class="flex items-center cursor-pointer select-none">
                             <span class="text-xs text-gray-500 mr-1">Show</span>
                             <div class="relative">
@@ -609,7 +617,12 @@ body.share-mode #btn-share-preview { display:inline-flex; }
         <main id="main-center" class="flex-1 min-w-0 overflow-hidden bg-white rounded shadow-sm flex flex-col">
             <div class="flex items-center justify-between px-2 py-1 border-b shrink-0">
                 <h2 class="text-sm font-semibold">Sections</h2>
-                <span class="text-[11px] text-gray-500" id="section-count">0 sections</span>
+                <div class="flex items-center gap-2">
+                    <label id="organ-filter-wrap" class="text-[11px] text-gray-500 flex items-center gap-1" hidden>臓器:
+                        <select id="organ-filter" class="text-[11px] border border-gray-300 rounded px-1 py-0.5" title="臓器ごとに中央の表示を絞り込み"></select>
+                    </label>
+                    <span class="text-[11px] text-gray-500" id="section-count">0 sections</span>
+                </div>
             </div>
             <div id="section-toolbar" class="flex flex-wrap items-center gap-1 px-2 py-1 border-b shrink-0 bg-white">
                 <div id="section-picker-wrap" class="relative">
@@ -930,6 +943,26 @@ function sectionGroupKey(section) {
     if (isDefaultSectionName(name)) return UNGROUPED_GROUP_LABEL;
     const stripped = String(name).replace(/[\s_\-#・.]*\d+\s*$/, '').trim();
     return stripped || UNGROUPED_GROUP_LABEL;
+}
+
+// Organ label for a section, used by the central-grid organ filter (④).
+// Display-only; never written back.
+//   1. explicit manual override  section.meta.organ  wins
+//   2. else infer from displayName: strip a trailing replicate index, then take
+//      the last alphabetic / kana / kanji token
+//      ("E15-2-1_Brain1" → "Brain", "Heart" → "Heart", "肝臓2" → "肝臓")
+//   3. default-named / none → "(未指定)"
+const UNGROUPED_ORGAN_LABEL = '(未指定)';
+function sectionOrganKey(section) {
+    if (!section) return UNGROUPED_ORGAN_LABEL;
+    const override = (section.meta && typeof section.meta.organ === 'string')
+        ? section.meta.organ.trim() : '';
+    if (override) return override;
+    const name = String(section.displayName || '');
+    if (isDefaultSectionName(name)) return UNGROUPED_ORGAN_LABEL;
+    const base = name.replace(/[\s_\-#・.]*\d+\s*$/, '').trim();
+    const m = base.match(/([A-Za-z぀-ヿ一-鿿]+)\s*$/);
+    return (m && m[1]) ? m[1] : (base || UNGROUPED_ORGAN_LABEL);
 }
 
 // Produce the preview header title.
@@ -2582,6 +2615,28 @@ class SectionPanel {
                 .filter(k => k && this.imageSources[k] && this.imageSettings[k]);
             layersToDraw = overlayBlack ? members : [...heLikeKeys, ...members];
         }
+        // ③ ROI-only display: when enabled, MSI layers are clipped to the
+        // active ROI's polygon for this section. Built in canvas coords with the
+        // same mapping drawAllRois uses (flip handled by the surrounding
+        // transform, identical to _withRoiFlip), so it lines up exactly with the
+        // on-screen ROI outline. An empty path (ROI absent on this section) hides
+        // the MSI here. null = feature off (no clipping).
+        let roiClipPath = null;
+        if (App.roiOnlyMode && App.activeRoiId) {
+            roiClipPath = new Path2D();
+            const roi = (this.project.rois || []).find(r => r.id === App.activeRoiId);
+            const poly = roi && roi.polysBySection && roi.polysBySection[this.section.id];
+            const refR = this.getMsiRefSize();
+            if (poly && poly.length && refR.w > 0 && refR.h > 0) {
+                const sxR = this.dom.cdisp.height / refR.w;
+                const syR = this.dom.cdisp.width / refR.h;
+                roiClipPath.moveTo(poly[0][1] * syR, this.dom.cdisp.height - poly[0][0] * sxR);
+                for (let i = 1; i < poly.length; i++) {
+                    roiClipPath.lineTo(poly[i][1] * syR, this.dom.cdisp.height - poly[i][0] * sxR);
+                }
+                roiClipPath.closePath();
+            }
+        }
         for (const key of layersToDraw) {
             const img = this.imageSources[key];
             const settings = this.imageSettings[key];
@@ -2683,6 +2738,10 @@ class SectionPanel {
                 // it stays grayscale as intended.
                 ctx.save();
                 ctx.imageSmoothingEnabled = false;
+                // ③ clip real MSI signal to the active ROI (not the TIC backdrop,
+                // which stays full as the anatomical reference). Clip is set in the
+                // current (flip-wrapped) canvas space before the rotate below.
+                if (roiClipPath && isMsiLayer) ctx.clip(roiClipPath);
                 ctx.translate(0, this.dom.cdisp.height);
                 ctx.rotate(-Math.PI / 2);
                 ctx.drawImage(drawSource, 0, 0, this.dom.cdisp.height, this.dom.cdisp.width);
@@ -3145,6 +3204,18 @@ class SectionPanel {
             this.toggleLayer(key);
             return;
         }
+        // In Compound mode, clicking an MSI thumbnail is a compound switch:
+        // promote it to the global focus compound so every section re-renders
+        // with that single MSI layer (mirrors the Method-table row click).
+        if (App.viewMode === 'compound' && /^MSI_/i.test(key)) {
+            App.setFocusCompoundKey(key);
+            for (const p of App.panels.values()) {
+                if (p.imageSources[key] && !p.visibleLayers.has(key)) {
+                    p.toggleLayer(key, true);
+                }
+            }
+            return;
+        }
         const isHeLikeClick = /HE_STAIN|IF_STAIN/i.test(key);
         const preservedHe = isHeLikeClick
             ? []
@@ -3328,6 +3399,7 @@ class SectionPanel {
         v = Math.max(-180, Math.min(180, v));
         t.rot = v;
         this.applyViewerTransform();
+        this._scheduleThumbRebake();
         App.queueSave();
         App.broadcastSync('rot', v, this);
         Toolbar.refreshRotation();
@@ -3337,6 +3409,7 @@ class SectionPanel {
         const t = this._ensureViewerTransform();
         t.tx = 0; t.ty = 0; t.rot = 0; t.scale = 1;
         this.applyViewerTransform();
+        this._scheduleThumbRebake();
         App.queueSave();
         Toolbar.refreshRotation();
     }
@@ -3502,6 +3575,7 @@ class SectionPanel {
             v = Math.max(-180, Math.min(180, v));
             t.rot = v;
             this.applyViewerTransform();
+            this._scheduleThumbRebake();
             App.queueSave();
             return;
         }
@@ -3961,7 +4035,29 @@ class SectionPanel {
             d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
         }
         ctx.putImageData(data, 0, 0);
-        im.src = c.toDataURL();
+        // ① Bake the section view-transform (rotation + flip) into the thumbnail
+        // so the bottom list matches the main canvas exactly. deg = vt.rot - 180
+        // mirrors renderComposite's fixed -90° + .viewer-rot CSS rotate(vt.rot-90°);
+        // flip from sec.meta.flip. Replaces the former static CSS rotate(-180deg)
+        // (so at rot=0 the orientation is unchanged from before).
+        const vtRot = (this.section.meta && this.section.meta.viewerTransform
+            && Number(this.section.meta.viewerTransform.rot)) || 0;
+        const flip = (this.section.meta && this.section.meta.flip) || {};
+        const baked = bakeImageWithSectionTransform(c, vtRot - 180, !!flip.lr, !!flip.ud);
+        im.src = (baked || c).toDataURL();
+    }
+
+    // ① Re-bake every MSI thumbnail through the current section transform.
+    // Debounced via rAF so rapid rotation/flip changes coalesce into one pass.
+    _scheduleThumbRebake() {
+        if (this._thumbRebakeRaf) return;
+        this._thumbRebakeRaf = requestAnimationFrame(() => {
+            this._thumbRebakeRaf = 0;
+            if (!this.msiThumbRefs) return;
+            for (const k of this.msiThumbRefs.keys()) {
+                try { this.renderMsiThumbnail(k); } catch (e) {}
+            }
+        });
     }
 
     // ---- Add new layer (HE/IF or MSI) ----
@@ -9633,6 +9729,7 @@ const Toolbar = {
                 sec.meta.flip[axis] = !sec.meta.flip[axis];
                 try { p.renderComposite(); } catch (e) {}
                 try { p.drawAllRois(); } catch (e) {}
+                try { p._scheduleThumbRebake(); } catch (e) {}
                 App.queueSave();
                 this.refreshFlipButtons();
             });
@@ -9834,6 +9931,7 @@ const Toolbar = {
         }
         if (this.delBtn) this.delBtn.disabled = !has;
         this.refreshFlipButtons();
+        try { App.refreshOrganFilter(); } catch (e) {}
     },
 
     // Sync the Flip H / V toggle buttons to the active section's
@@ -10177,6 +10275,8 @@ const App = {
     // (default; tuned for WT/HET comparisons). 'free' = the previous behaviour
     // where each section shows whichever layers it has visibility flags for.
     viewMode: 'compound',
+    activeOrganFilter: null,   // ④ organ filter: organ key, or null = show all
+    roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
     focusCompoundKey: null,
 
     setViewMode(mode) {
@@ -10506,6 +10606,13 @@ const App = {
             });
         }
         this.refreshViewModeUI();
+        const organSel = document.getElementById('organ-filter');
+        if (organSel) organSel.addEventListener('change', () => this.setActiveOrganFilter(organSel.value));
+        const roiClip = document.getElementById('roi-clip-toggle');
+        if (roiClip) roiClip.addEventListener('change', () => {
+            this.roiOnlyMode = roiClip.checked;
+            for (const p of this.panels.values()) { try { p.renderComposite(); } catch (e) {} }
+        });
         this._bindMethodHeaderSort();
         this._bindMrmRegister();
         try { bindOverlayUi(); } catch (e) {}
@@ -11329,6 +11436,53 @@ const App = {
         Toolbar.refreshAll();
     },
 
+    // ④ Organ filter ------------------------------------------------------
+    // Show only the sections whose inferred organ (sectionOrganKey) matches
+    // the chosen filter in the central grid. Display-only; never mutates data.
+    setActiveOrganFilter(key) {
+        this.activeOrganFilter = (key && key !== '__all__') ? key : null;
+        this.applyOrganFilter();
+    },
+    applyOrganFilter() {
+        const filt = this.activeOrganFilter;
+        for (const sec of (this.project && this.project.sections) || []) {
+            const p = this.panels.get(sec.id);
+            if (!p || !p.dom || !p.dom.root) continue;
+            const show = !filt || sectionOrganKey(sec) === filt;
+            p.dom.root.classList.toggle('section-filtered-out', !show);
+        }
+    },
+    refreshOrganFilter() {
+        const wrap = document.getElementById('organ-filter-wrap');
+        const sel = document.getElementById('organ-filter');
+        if (!wrap || !sel) return;
+        const keys = [];
+        for (const sec of (this.project && this.project.sections) || []) {
+            const k = sectionOrganKey(sec);
+            if (!keys.includes(k)) keys.push(k);
+        }
+        // Only surface the filter when there are 2+ distinct organs.
+        if (keys.length < 2) {
+            wrap.hidden = true;
+            if (this.activeOrganFilter) { this.activeOrganFilter = null; this.applyOrganFilter(); }
+            return;
+        }
+        if (this.activeOrganFilter && !keys.includes(this.activeOrganFilter)) this.activeOrganFilter = null;
+        wrap.hidden = false;
+        const cur = this.activeOrganFilter || '__all__';
+        sel.innerHTML = '';
+        const optAll = document.createElement('option');
+        optAll.value = '__all__'; optAll.textContent = 'すべて';
+        sel.appendChild(optAll);
+        for (const k of keys) {
+            const o = document.createElement('option');
+            o.value = k; o.textContent = k;
+            sel.appendChild(o);
+        }
+        sel.value = cur;
+        this.applyOrganFilter();
+    },
+
     refreshAnalysisScope() {
         const sectionsCount = (this.project && this.project.sections || []).length;
         const el = document.getElementById('analysis-scope');
@@ -11337,6 +11491,9 @@ const App = {
 
     redrawAllRois() {
         this.panels.forEach(p => p.drawAllRois(this.activeRoiId));
+        // ③ keep the ROI-only MSI clip in sync when the active ROI changes or
+        // ROI geometry is edited (both paths call here).
+        if (this.roiOnlyMode) this.panels.forEach(p => { try { p.renderComposite(); } catch (e) {} });
     },
 
     renderAnalysis() {
@@ -12111,6 +12268,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r42</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r43</div>
 </body>
 </html>
