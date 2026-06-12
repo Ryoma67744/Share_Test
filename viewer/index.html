@@ -1494,7 +1494,25 @@ const ProjectStorage = (() => {
         for (const k of all) if (!used.has(k)) await pr(t.objectStore('blobs').delete(k));
     }
 
-    return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, deleteBlob, pruneOrphanBlobs };
+    // Delete blobs not referenced by ANY persisted project. Share recipients
+    // never persist their project, so all their downloaded blobs are orphans —
+    // this reclaims IndexedDB filled by previous share sessions WITHOUT touching
+    // the user's own (persisted) master projects' blobs.
+    async function pruneShareOrphans() {
+        const used = new Set();
+        try {
+            const metas = await listProjects();
+            for (const m of (metas || [])) {
+                const proj = await getProject(m.id);
+                if (proj) for (const id of collectBlobIds(proj)) used.add(id);
+            }
+        } catch (e) { return; }   // on any error, do nothing (never risk data loss)
+        const t = await tx(['blobs'], 'readwrite');
+        const all = await pr(t.objectStore('blobs').getAllKeys());
+        for (const k of all) if (!used.has(k)) await pr(t.objectStore('blobs').delete(k));
+    }
+
+    return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, deleteBlob, pruneOrphanBlobs, pruneShareOrphans };
 })();
 
 // =============================================================
@@ -11322,17 +11340,28 @@ const App = {
             throw lastErr;
         };
         const failed = [];
-        // Per-compound fetch with a UNIQUE blobId. (The r47 deterministic
-        // share-cache `share:<slug>:<path>` was reverted: a shared/stale id could
-        // leave a msiSeries entry pointing at a blobId whose blob wasn't reliably
-        // in IndexedDB → silent `getBlob` null in loadMsiLayer → "phantom"
-        // imageless compound keys. A safe persistent cache can be re-added later.)
-        const ensureBlob = async (ref) => {
-            const blob = await fetchBlob(ref.path);
-            const mime = ref.mime || blob.type;
-            const id = uid('blob');
-            await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() });
-            return { id, mime };
+        // Reclaim IndexedDB filled by previous share sessions before downloading,
+        // so quota pressure can't silently evict the blobs we're about to store.
+        await ProjectStorage.pruneShareOrphans().catch(() => {});
+        // Dedup by storage path WITHIN this hydrate. Many compounds share ONE
+        // consolidated source file (same ref.path). Storing a separate blob copy
+        // per compound (no dedup) blew the IndexedDB quota, so later putBlob/
+        // getBlob silently failed and ZERO images loaded. One fetch + one putBlob
+        // per UNIQUE path; every compound of that source shares its blobId.
+        // (Session-only — no cross-session deterministic cache, which earlier
+        // risked dangling ids.)
+        const blobByPath = new Map();   // path -> Promise<{ id, mime }>
+        const ensureBlob = (ref) => {
+            if (blobByPath.has(ref.path)) return blobByPath.get(ref.path);
+            const job = (async () => {
+                const blob = await fetchBlob(ref.path);
+                const mime = ref.mime || blob.type;
+                const id = uid('blob');
+                await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() });
+                return { id, mime };
+            })();
+            blobByPath.set(ref.path, job);
+            return job;
         };
         // Flatten every layer into one task list, then download with a bounded
         // concurrency pool (kept from r47 — the pool itself is harmless).
@@ -12571,6 +12600,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r51</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r52</div>
 </body>
 </html>
