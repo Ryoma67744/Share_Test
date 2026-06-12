@@ -2435,6 +2435,27 @@ class SectionPanel {
         return wc.T_he_to_msi || null;
     }
 
+    // Dimensions of the MSI grid the *resolved* T was solved against. T holds
+    // absolute pixel coords of that grid, so when the focused compound comes
+    // from a different-pitch source (e.g. POS vs NEG) renderComposite rescales
+    // the HE warp from these dims to the focus grid. Mirrors _resolveTHeToMsi's
+    // resolution order so the dims always pair with the T it returns. Falls back
+    // to the focus grid (a no-op rescale) for older projects with no recorded
+    // dims, preserving the previous single-source behaviour.
+    _resolveTHeToMsiRefDims() {
+        const wc = (this.section.meta && this.section.meta.world_coords) || {};
+        const fid = this._refSourceFileId();
+        const bySource = wc.T_he_to_msi_by_source || {};
+        if (fid && bySource[fid]) {
+            const rd = (wc.T_he_to_msi_ref_dims_by_source || {})[fid];
+            if (rd && rd.w > 0 && rd.h > 0) return { w: rd.w, h: rd.h };
+            return this.getMsiRefSize();
+        }
+        const rd = wc.T_he_to_msi_ref_dims;
+        if (rd && rd.w > 0 && rd.h > 0) return { w: rd.w, h: rd.h };
+        return this.getMsiRefSize();
+    }
+
     // ---- Canvas sizing ----
     setupCanvasSize() {
         const msiKey = this._pickRefMsiKey();
@@ -2648,10 +2669,19 @@ class SectionPanel {
             const ref = this.getMsiRefSize();
 
             if (T && isHeLike && hasMsiRef && ref.w > 0 && ref.h > 0) {
+                // Scale the warped HE by the grid T was *solved against*, not the
+                // focused compound's grid. T's translation/scale are absolute px
+                // of the aligned grid; cdisp spans the shared field-of-view, so
+                // stretching HE by its own solve-grid dims re-aligns it onto the
+                // focus compound (which fills cdisp by its own dims). No-op when
+                // they match (single-source / same-pitch projects).
+                const heRef = this._resolveTHeToMsiRefDims();
+                const heRefW = (heRef && heRef.w > 0) ? heRef.w : ref.w;
+                const heRefH = (heRef && heRef.h > 0) ? heRef.h : ref.h;
                 ctx.save();
                 ctx.translate(0, this.dom.cdisp.height);
                 ctx.rotate(-Math.PI / 2);
-                ctx.scale(this.dom.cdisp.height / ref.w, this.dom.cdisp.width / ref.h);
+                ctx.scale(this.dom.cdisp.height / heRefW, this.dom.cdisp.width / heRefH);
                 ctx.transform(T[0][0], T[1][0], T[0][1], T[1][1], T[0][2], T[1][2]);
                 ctx.drawImage(drawSource, 0, 0);
                 ctx.restore();
@@ -5256,6 +5286,12 @@ const Wizards = {
             T_by_src: sec.meta.world_coords.T_he_to_msi_by_source
                           ? JSON.parse(JSON.stringify(sec.meta.world_coords.T_he_to_msi_by_source))
                           : null,
+            ref_dims: sec.meta.world_coords.T_he_to_msi_ref_dims
+                          ? JSON.parse(JSON.stringify(sec.meta.world_coords.T_he_to_msi_ref_dims))
+                          : null,
+            ref_dims_by_src: sec.meta.world_coords.T_he_to_msi_ref_dims_by_source
+                          ? JSON.parse(JSON.stringify(sec.meta.world_coords.T_he_to_msi_ref_dims_by_source))
+                          : null,
             msi_um:   sec.meta.world_coords.msi_um_per_px
                           ? JSON.parse(JSON.stringify(sec.meta.world_coords.msi_um_per_px))
                           : null,
@@ -5623,6 +5659,16 @@ const Wizards = {
             // (and the fallback path in _resolveTHeToMsi) still see something
             // sensible.
             sec.meta.world_coords.T_he_to_msi = T;
+            // Record the MSI grid these T values were solved against. T maps HE
+            // raw-pixels into this grid's *absolute* pixel units, so renderComposite
+            // must rescale the warp when a different-grid compound (e.g. a POS/NEG
+            // source at a different pixel pitch) is focused. We store the same dims
+            // the modal preview used (panel.getMsiRefSize, via rebakeHeThumb) so the
+            // central Sections view reproduces the alignment view exactly.
+            const _refDims = panel.getMsiRefSize();
+            const refDims = (_refDims && _refDims.w > 0 && _refDims.h > 0)
+                ? { w: _refDims.w, h: _refDims.h } : null;
+            if (refDims) sec.meta.world_coords.T_he_to_msi_ref_dims = refDims;
             // Per-source: route the T based on the Source dropdown.
             //   - '__all__' → broadcast to every known source, so a single
             //     align session calibrates them all (used when multiple
@@ -5634,15 +5680,28 @@ const Wizards = {
             sec.meta.world_coords.T_he_to_msi_by_source =
                 sec.meta.world_coords.T_he_to_msi_by_source || {};
             const bySrc = sec.meta.world_coords.T_he_to_msi_by_source;
+            // Parallel map: the solve-grid dims for each per-source T, so a T
+            // applied to a different-pitch grid can be rescaled at render time
+            // (mirrors the bySrc writes below).
+            sec.meta.world_coords.T_he_to_msi_ref_dims_by_source =
+                sec.meta.world_coords.T_he_to_msi_ref_dims_by_source || {};
+            const bySrcRef = sec.meta.world_coords.T_he_to_msi_ref_dims_by_source;
             if (state.sourceMode === '__all__') {
-                for (const fid of sourceFids) bySrc[fid] = T;
+                for (const fid of sourceFids) { bySrc[fid] = T; if (refDims) bySrcRef[fid] = refDims; }
             } else if (state.sourceMode) {
                 bySrc[state.sourceMode] = T;
+                if (refDims) bySrcRef[state.sourceMode] = refDims;
+            } else if (state.msiKey === '__TIC__') {
+                // Global synthetic TIC represents every source's scan — calibrate
+                // them all (like '__all__') so no stale per-source entry shadows
+                // the TIC alignment. Each entry shares the TIC solve-grid dims and
+                // is rescaled per focus grid at render time.
+                for (const fid of sourceFids) { bySrc[fid] = T; if (refDims) bySrcRef[fid] = refDims; }
             } else {
                 // Last-resort fallback for legacy sections — derive from the
                 // currently picked MSI compound's sourceFileId if any.
                 const fid = fidOf(state.msiKey);
-                if (fid) bySrc[fid] = T;
+                if (fid) { bySrc[fid] = T; if (refDims) bySrcRef[fid] = refDims; }
             }
             sec.meta.world_coords.msi_um_per_px = { x: state.msi_um_x, y: state.msi_um_y };
             if (state.msiKey) sec.meta.alignmentMsiKey = state.msiKey;
@@ -6299,6 +6358,10 @@ const Wizards = {
             else delete sec.meta.world_coords.T_he_to_msi;
             if (initial.T_by_src) sec.meta.world_coords.T_he_to_msi_by_source = initial.T_by_src;
             else delete sec.meta.world_coords.T_he_to_msi_by_source;
+            if (initial.ref_dims) sec.meta.world_coords.T_he_to_msi_ref_dims = initial.ref_dims;
+            else delete sec.meta.world_coords.T_he_to_msi_ref_dims;
+            if (initial.ref_dims_by_src) sec.meta.world_coords.T_he_to_msi_ref_dims_by_source = initial.ref_dims_by_src;
+            else delete sec.meta.world_coords.T_he_to_msi_ref_dims_by_source;
             if (initial.msi_um) sec.meta.world_coords.msi_um_per_px = initial.msi_um;
             else delete sec.meta.world_coords.msi_um_per_px;
             // Restore the alignment record wholesale so per-source bySource
