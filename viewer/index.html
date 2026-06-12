@@ -5412,9 +5412,27 @@ const Wizards = {
         }
         const hasSources = sourceFids.length > 0;
         const hasMultipleSources = sourceFids.length > 1;
+        // Raster grid (WxH) of each source, read from its loaded MSI rasters.
+        // When every source shares one grid (e.g. POS/NEG of the same scan at
+        // the same pixel pitch) a single shared T is correct for all of them.
+        const gridOfFid = (fid) => {
+            for (const k of allMsiKeys) {
+                const ent = sec.msiSeries[k];
+                if (ent && ent.sourceFileId === fid) {
+                    const img = panel.imageSources && panel.imageSources[k];
+                    if (img && img.naturalWidth) return img.naturalWidth + 'x' + img.naturalHeight;
+                }
+            }
+            return null;
+        };
+        const _srcGrids = sourceFids.map(gridOfFid);
+        const allSourcesSameGrid = hasMultipleSources && _srcGrids.every(g => g && g === _srcGrids[0]);
         // Default mode: when only one source exists, lock to it. Otherwise
-        // prefer the saved alignmentSourceMode hint, then the source of the
-        // currently picked MSI, then "両方" (write a single T everywhere).
+        // prefer the saved alignmentSourceMode hint; then, when all sources
+        // share one grid, default to a shared T so a single align calibrates
+        // every source (prevents one source keeping a stale/provisional entry
+        // that shadows the good one); otherwise the source of the currently
+        // picked MSI, then "両方".
         const persistedSourceMode = sec.meta && sec.meta.alignmentSourceMode;
         const initialFidFromMsi = fidOf(state.msiKey);
         state.sourceMode = (() => {
@@ -5422,9 +5440,26 @@ const Wizards = {
             if (!hasMultipleSources) return sourceFids[0];
             if (persistedSourceMode === '__all__') return '__all__';
             if (persistedSourceMode && sourceFids.includes(persistedSourceMode)) return persistedSourceMode;
+            if (allSourcesSameGrid) return '__all__';
             if (initialFidFromMsi && sourceFids.includes(initialFidFromMsi)) return initialFidFromMsi;
             return '__all__';
         })();
+        // In shared-T (__all__) mode the canonical state is the top-level
+        // (legacy) record, not any single source's per-source entry. The
+        // initial overrideStateFromSource above may have swapped in the focused
+        // source's values (possibly a provisional, landmark-less entry), so
+        // reload the top-level state here. This makes the modal open on the
+        // shared alignment and Save broadcast it to every source.
+        if (state.sourceMode === '__all__') {
+            const _top = loadStateFor(state.layerKey);
+            state.flip_lr = _top.flip_lr; state.flip_ud = _top.flip_ud;
+            state.scale_pct = _top.scale_pct; state.rotate_deg = _top.rotate_deg;
+            state.offx = _top.offx; state.offy = _top.offy;
+            if (state.landmarks) {
+                state.landmarks.he = _top.landmarks.he.slice();
+                state.landmarks.msi = _top.landmarks.msi.slice();
+            }
+        }
         // Compounds belonging to the current source mode. "__all__" returns
         // every MSI key so the dropdown stays full when the user wants a
         // shared T.
@@ -5511,14 +5546,26 @@ const Wizards = {
         const msiOpts = buildMsiOpts(state.sourceMode);
         // Source dropdown options. Hidden entirely when no compound has a
         // sourceFileId (legacy projects).
+        // Alignment status for a source, shown in the dropdown so the user can
+        // see at a glance which sources are aligned: ✓ = aligned with landmarks,
+        // △ = provisional (sliders only, no landmarks), − = not aligned yet.
+        const sourceAlignStatus = (fid) => {
+            const a = sec.meta.alignment[state.layerKey] || {};
+            const bs = (a.bySource && a.bySource[fid]) || null;
+            if (bs && bs.landmarks && bs.landmarks.he && bs.landmarks.he.length >= 2) return '✓';
+            const wc = sec.meta.world_coords || {};
+            const hasT = !!((wc.T_he_to_msi_by_source && wc.T_he_to_msi_by_source[fid])
+                || (bs && Number.isFinite(bs.scale_pct)));
+            return hasT ? '△' : '−';
+        };
         const sourceOpts = hasSources
             ? sourceFids.map((fid, idx) => {
                 const lbl = sourceLabels.get(fid) || fid;
                 const sel = state.sourceMode === fid ? ' selected' : '';
-                return `<option value="${safe(fid)}"${sel}>Source ${idx + 1}: ${safe(lbl)}</option>`;
+                return `<option value="${safe(fid)}"${sel}>${sourceAlignStatus(fid)} Source ${idx + 1}: ${safe(lbl)}</option>`;
               }).join('')
               + (hasMultipleSources
-                  ? `<option value="__all__"${state.sourceMode==='__all__'?' selected':''}>両方 (共通の T)</option>`
+                  ? `<option value="__all__"${state.sourceMode==='__all__'?' selected':''}>全ソース共通${allSourcesSameGrid ? ' (推奨)' : ''} — 共通の T</option>`
                   : '')
             : '';
         const html = `
@@ -5538,7 +5585,7 @@ const Wizards = {
             </div>
             <p style="font-size:11px;color:#475569;margin-top:0;">
               スライダーまたは対応点クリックで HE/IF を MSI に重ねます。背後の Section パネルでリアルタイムにプレビューされます。<br>
-              <span style="color:#64748b;">※ 位置合わせは選択した MSI のソースファイル (.xlsx / .txt) ごとに保存されます。同じソース由来の他 compound も自動で同じ T を使うので、ソースが複数あるときはそれぞれ 1 回ずつ位置合わせしてください。</span>
+              <span style="color:#64748b;">※ 位置合わせは「Source」で選んだ範囲に保存されます。<b>全ソース共通</b>（同一グリッドのときは既定）を選ぶと 1 回の位置合わせが全ソース(POS/NEG など)に適用されます。特定の Source のみを選べばそのソースだけに保存されます。Source 一覧の記号 ✓=対応点で整列済 / △=スライダーのみ / −=未整列。<br>合わせ済みのソースを表示した状態で「全ソースへ反映」を押すと、その T を全ソースへコピーできます。</span>
             </p>
 
             <fieldset style="margin-top:8px;border:1px solid #e2e8f0;border-radius:5px;padding:8px 10px;">
@@ -5609,6 +5656,7 @@ const Wizards = {
             <div style="display:flex;gap:6px;margin-top:10px;justify-content:space-between;flex-wrap:wrap;">
               <button type="button" class="btn" data-reset>Reset to identity</button>
               <div style="display:flex;gap:6px;">
+                ${allSourcesSameGrid ? `<button type="button" class="btn" data-apply-all title="いま表示している位置合わせを、同一グリッドの全ソース(POS/NEG など)へ同じ T で反映して保存します">全ソースへ反映</button>` : ''}
                 <button type="button" class="btn" data-modal-cancel>Cancel</button>
                 <button type="button" class="btn primary" data-save>Save</button>
               </div>
@@ -5649,6 +5697,16 @@ const Wizards = {
         const lmTable  = $('[data-lm-table]');
         const resetBtn = $('[data-reset]');
         const saveBtn  = $('[data-save]');
+        const applyAllBtn = $('[data-apply-all]');
+        if (applyAllBtn) applyAllBtn.addEventListener('click', () => {
+            if (!allSourcesSameGrid) return;
+            // Broadcast the alignment currently shown in the modal to every
+            // source: switch to shared-T mode and reuse the Save path, which
+            // writes T + slider records to all sourceFids and persists.
+            state.sourceMode = '__all__';
+            if (sourceSel) sourceSel.value = '__all__';
+            saveBtn.click();
+        });
 
         // ---- Render preview into the section panel --------------------------
         let rafId = 0;
@@ -12096,6 +12154,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-03-r38</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r40</div>
 </body>
 </html>
