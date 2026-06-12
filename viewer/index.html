@@ -11322,32 +11322,20 @@ const App = {
             throw lastErr;
         };
         const failed = [];
-        // Persistent, version-stamped blob cache: address blobs deterministically
-        // by slug+path so a reload (or revisit) reuses the IndexedDB copy and
-        // skips the network. cacheVersion = the project's publish timestamp, so a
-        // master re-publish (new updated_at) transparently invalidates stale copies.
-        const cacheVer = (doc && (doc.updated_at || doc.created_at)) || '';
-        const cacheSlug = (this.shareMode && this.shareMode.slug) || '';
-        const cacheable = !!(cacheVer && cacheSlug);
+        // Per-compound fetch with a UNIQUE blobId. (The r47 deterministic
+        // share-cache `share:<slug>:<path>` was reverted: a shared/stale id could
+        // leave a msiSeries entry pointing at a blobId whose blob wasn't reliably
+        // in IndexedDB → silent `getBlob` null in loadMsiLayer → "phantom"
+        // imageless compound keys. A safe persistent cache can be re-added later.)
         const ensureBlob = async (ref) => {
-            const fallbackName = ref.filename || ref.path.split('/').pop();
-            if (cacheable) {
-                const id = 'share:' + cacheSlug + ':' + ref.path;
-                const hit = await ProjectStorage.getBlob(id);
-                if (hit && hit.blob && hit.cacheVersion === cacheVer) return { id, mime: hit.mime };
-                const blob = await fetchBlob(ref.path);
-                const mime = ref.mime || blob.type;
-                await ProjectStorage.putBlob({ id, blob, mime, filename: fallbackName, cacheVersion: cacheVer });
-                return { id, mime };
-            }
             const blob = await fetchBlob(ref.path);
             const mime = ref.mime || blob.type;
             const id = uid('blob');
-            await ProjectStorage.putBlob({ id, blob, mime, filename: fallbackName });
+            await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() });
             return { id, mime };
         };
         // Flatten every layer into one task list, then download with a bounded
-        // concurrency pool instead of the old fully-serial nested loops.
+        // concurrency pool (kept from r47 — the pool itself is harmless).
         const dlTasks = [];
         for (let i = 0; i < project.sections.length; i++) {
             const sec = project.sections[i];
@@ -11435,16 +11423,30 @@ const App = {
             if (!this.focusCompoundKey || !loadedMsi.has(this.focusCompoundKey))
                 this.focusCompoundKey = loadedMsi.values().next().value || null;
             const fk = this.focusCompoundKey;
-            // Diagnostic (temporary): key sets for the first panel + chosen focus.
+            // Diagnostic (temporary): key sets + focus blob status for the first panel.
             const _p0 = this.panels.values().next().value;
             if (_p0) {
                 const _ms = Object.keys(_p0.section.msiSeries || {});
                 console.info('[share keys] msiSeries=', _ms.map(k => k + ((_p0.section.msiSeries[k] || {}).blobId ? '' : '(noblob)')));
                 console.info('[share keys] imageSources(MSI)=', Object.keys(_p0.imageSources || {}).filter(k => /^MSI_/i.test(k)));
                 console.info('[share keys] chosen focus=', fk, ' loadedCount=', loadedMsi.size);
+                if (fk) {
+                    const ent0 = _p0.section.msiSeries && _p0.section.msiSeries[fk];
+                    let blobOk; try { blobOk = (ent0 && ent0.blobId) ? !!(await ProjectStorage.getBlob(ent0.blobId)) : 'no-blobId'; } catch (e) { blobOk = 'err'; }
+                    console.info('[share keys] focus blobId=', ent0 && ent0.blobId, ' getBlob=', blobOk, ' hasImg=', !!_p0.imageSources[fk]);
+                }
             }
             for (const p of this.panels.values()) {
-                const img = fk && p.imageSources[fk];
+                let img = fk && p.imageSources[fk];
+                // Self-heal: focus is loaded somewhere but not in this panel — try
+                // to load it on demand from its blob before rendering.
+                if (fk && !img) {
+                    const ent = p.section.msiSeries && p.section.msiSeries[fk];
+                    if (ent && ent.blobId) {
+                        try { await p.loadMsiLayer(fk, ent); img = p.imageSources[fk]; }
+                        catch (e) { console.warn('share focus self-heal failed', p.section && p.section.id, e); }
+                    }
+                }
                 try {
                     if (fk && img && !p.visibleLayers.has(fk)) p.toggleLayer(fk, true);
                     else p.renderComposite();   // re-render in compound mode even if already visible
@@ -12557,6 +12559,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r49</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r50</div>
 </body>
 </html>
