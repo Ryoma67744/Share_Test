@@ -7735,9 +7735,16 @@ async function _publishCore(project, meta, masterPw, opts) {
     let doneCount = 0;
     let doneBytes = 0;
     let totalBytes = 0;
+    // Compounds whose local blob is gone (so they can't be uploaded and would
+    // silently be absent from the published doc → "No data" for recipients).
+    const skippedNoBlob = [];
     const uploadOne = async (task) => {
         const blob = await ProjectStorage.getBlob(task.blobId);
-        if (!blob || !blob.blob) return;
+        if (!blob || !blob.blob) {
+            const names = (pathTasks.get(task.path) || [task]).map(t => t.key).filter(Boolean);
+            skippedNoBlob.push(...(names.length ? names : [task.path]));
+            return;
+        }
         const size = (blob.blob && blob.blob.size) || 0;
         totalBytes += size;
         let lastErr = null;
@@ -7760,6 +7767,14 @@ async function _publishCore(project, meta, masterPw, opts) {
     };
     try { await runWithConcurrency(uploadTasks, 4, uploadOne); }
     finally { if (progress) progress.close(); }
+    if (skippedNoBlob.length) {
+        const uniq = [...new Set(skippedNoBlob)];
+        const head = uniq.slice(0, 5).map(k => String(k).replace(/^MSI_/, '')).join(', ');
+        const msg = uniq.length + ' 件の画像をアップロードできませんでした (ローカルに blob がありません): '
+            + head + (uniq.length > 5 ? ' …' : '') + '。該当化合物を再登録のうえ再公開してください。';
+        console.warn('publish: blob missing, not uploaded →', uniq);
+        if (!silent && typeof showToast === 'function') showToast(msg, 9000);
+    }
 
     const roisPayload = (project.rois || []).flatMap(r => {
         const polys = r.polysBySection || {};
@@ -11452,19 +11467,6 @@ const App = {
             if (!this.focusCompoundKey || !loadedMsi.has(this.focusCompoundKey))
                 this.focusCompoundKey = loadedMsi.values().next().value || null;
             const fk = this.focusCompoundKey;
-            // Diagnostic (temporary): key sets + focus blob status for the first panel.
-            const _p0 = this.panels.values().next().value;
-            if (_p0) {
-                const _ms = Object.keys(_p0.section.msiSeries || {});
-                console.info('[share keys] msiSeries=', _ms.map(k => k + ((_p0.section.msiSeries[k] || {}).blobId ? '' : '(noblob)')));
-                console.info('[share keys] imageSources(MSI)=', Object.keys(_p0.imageSources || {}).filter(k => /^MSI_/i.test(k)));
-                console.info('[share keys] chosen focus=', fk, ' loadedCount=', loadedMsi.size);
-                if (fk) {
-                    const ent0 = _p0.section.msiSeries && _p0.section.msiSeries[fk];
-                    let blobOk; try { blobOk = (ent0 && ent0.blobId) ? !!(await ProjectStorage.getBlob(ent0.blobId)) : 'no-blobId'; } catch (e) { blobOk = 'err'; }
-                    console.info('[share keys] focus blobId=', ent0 && ent0.blobId, ' getBlob=', blobOk, ' hasImg=', !!_p0.imageSources[fk]);
-                }
-            }
             for (const p of this.panels.values()) {
                 try {
                     const ent = fk && p.section.msiSeries && p.section.msiSeries[fk];
@@ -11484,14 +11486,6 @@ const App = {
                     p.setupCanvasSize();
                     p.renderComposite();
                 } catch (e) { console.warn('share focus apply failed', p.section && p.section.id, e); }
-                // Per-panel diagnostic (temporary): everything renderComposite needs.
-                const _img = fk && p.imageSources[fk];
-                console.info('[share panel]', (p.section && p.section.displayName) || '?',
-                    'hasKey=', !!(fk && p.section.msiSeries && p.section.msiSeries[fk]),
-                    'img=', !!_img, 'natW=', _img && _img.naturalWidth,
-                    'settings=', !!(fk && p.imageSettings[fk]),
-                    'vis=', !!(fk && p.visibleLayers.has(fk)),
-                    'cdispW=', p.dom && p.dom.cdisp && p.dom.cdisp.width);
             }
         } catch (e) { console.warn('share focus init failed', e); }
         populateRoiList();
@@ -12499,21 +12493,6 @@ const App = {
                 : Math.max(baseIdx - 1, 0);
             if (next === idx) return;
             e.preventDefault();
-            // Diagnostic log so a user reporting "skipping" can post the
-            // sequence and we can see whether each key advances by exactly
-            // one row or whether some keys are doubling up (eg. another
-            // listener still firing). sharePreviewOpen catches the case
-            // where the preview overlay is still mounted in the DOM and
-            // would have bubbled to here before the stopPropagation fix.
-            console.log('[keydown.compound]', e.key, {
-                cur: this.focusCompoundKey,
-                idx,
-                next,
-                layerKey: layerKeys[next],
-                activeSection: this.activeSectionId,
-                panelMissingImg: !panel.imageSources[layerKeys[next]],
-                sharePreviewOpen: !!(typeof SharePreview !== 'undefined' && SharePreview.overlay),
-            });
             this.setFocusCompoundKey(layerKeys[next]);
             // Mirror the click handler in renderMethodTable: ensure the new
             // focus compound is visible in every panel so the share view
@@ -12600,6 +12579,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r52</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r53</div>
 </body>
 </html>
