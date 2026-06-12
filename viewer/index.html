@@ -2423,16 +2423,36 @@ class SectionPanel {
         return (ent && ent.sourceFileId) || null;
     }
 
-    // Resolve T_he_to_msi for the current ref MSI source. Falls back to
-    // the legacy single T_he_to_msi when the per-source override isn't
-    // set yet (existing projects, or sources the user hasn't aligned
-    // yet).
+    // Resolve T_he_to_msi for the current ref MSI source. Prefers the
+    // per-source override, but only when that source has a *genuine* (landmark)
+    // alignment. A provisional, sliders-only per-source entry must not shadow a
+    // real alignment saved against another (same-grid) source — e.g. POS left
+    // with a stray scale while NEG was aligned with landmarks — so in that case
+    // fall back to the legacy/shared T. Also falls back to legacy for existing
+    // projects / sources never aligned.
     _resolveTHeToMsi() {
         const wc = (this.section.meta && this.section.meta.world_coords) || {};
         const fid = this._refSourceFileId();
         const bySource = wc.T_he_to_msi_by_source || {};
-        if (fid && bySource[fid]) return bySource[fid];
+        if (fid && bySource[fid]) {
+            if (!wc.T_he_to_msi || this._sourceHasGenuineAlignment(fid)) return bySource[fid];
+            return wc.T_he_to_msi;
+        }
         return wc.T_he_to_msi || null;
+    }
+
+    // True when this source file has a landmark-based ("genuine") alignment in
+    // any HE/IF layer's per-source slider record. Sliders-only entries (no
+    // landmarks) are treated as provisional and may be shadowed by a real
+    // alignment elsewhere (see _resolveTHeToMsi).
+    _sourceHasGenuineAlignment(fid) {
+        if (!fid) return false;
+        const al = (this.section.meta && this.section.meta.alignment) || {};
+        for (const k of Object.keys(al)) {
+            const bs = al[k] && al[k].bySource && al[k].bySource[fid];
+            if (bs && bs.landmarks && bs.landmarks.he && bs.landmarks.he.length >= 2) return true;
+        }
+        return false;
     }
 
     // ---- Canvas sizing ----
@@ -12091,6 +12111,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r40</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r41</div>
 </body>
 </html>
