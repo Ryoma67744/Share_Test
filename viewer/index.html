@@ -10511,7 +10511,7 @@ const App = {
                 // source T would be applied to a mismatched cdisp.
                 p.setupCanvasSize();
                 p.renderComposite();
-            } catch (e) {}
+            } catch (e) { console.warn('setFocusCompoundKey render failed', p.section && p.section.id, e); }
         }
         renderMethodTable();
         Toolbar.refreshAll();
@@ -11414,6 +11414,34 @@ const App = {
         document.getElementById('section-count').textContent = project.sections.length + ' sections';
         document.getElementById('sections-empty').classList.toggle('hidden', project.sections.length > 0);
         await this.rebuildSectionPanels();
+        // --- Share fix: only the first section showed the focus MSI ---
+        // The master/local open flow (_openProjectCore, ~:11600) initialises the
+        // compound focus and pushes it onto EVERY panel. The share hydrate
+        // skipped this, so each panel kept rendering only its *published*
+        // visibleLayers — sections published with a different active layer never
+        // showed the focus compound. Mirror that initialisation here so the
+        // detailed (and the Preview, which snapshots this state) match master.
+        try {
+            this.viewMode = 'compound';
+            if (this.refreshViewModeUI) this.refreshViewModeUI();
+            const allMsi = new Set();
+            for (const s of (this.project.sections || []))
+                for (const k of Object.keys(s.msiSeries || {})) if (/^MSI_/i.test(k)) allMsi.add(k);
+            if (!this.focusCompoundKey || !allMsi.has(this.focusCompoundKey))
+                this.focusCompoundKey = allMsi.values().next().value || null;
+            const fk = this.focusCompoundKey;
+            for (const p of this.panels.values()) {
+                const img = fk && p.imageSources[fk];
+                // Diagnostic (temporary): per-section focus-image state.
+                console.info('[share focus]', (p.section && p.section.displayName) || '?',
+                    'focus=', fk, 'hasImg=', !!img,
+                    'complete=', !!(img && img.complete), 'natW=', img && img.naturalWidth);
+                try {
+                    if (fk && img && !p.visibleLayers.has(fk)) p.toggleLayer(fk, true);
+                    else p.renderComposite();   // re-render in compound mode even if already visible
+                } catch (e) { console.warn('share focus apply failed', p.section && p.section.id, e); }
+            }
+        } catch (e) { console.warn('share focus init failed', e); }
         populateRoiList();
         setupGraphSelector();
         this.refreshAnalysisScope();
@@ -12520,6 +12548,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r47</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r48</div>
 </body>
 </html>
