@@ -8255,6 +8255,14 @@ const SharePreview = {
         try { this._removeTicBackdrop(); } catch (e) { console.warn('SharePreview remove TIC failed', e); }
         try { this._restoreOpacity(); } catch (e) { console.warn('SharePreview restore opacity failed', e); }
         try { this._restoreVisibility(); } catch (e) { console.warn('SharePreview restore visibility failed', e); }
+        // Restore the main view's ROI-only state (the preview drove it) and
+        // clear the preview-local organ filter.
+        if (this._roiSnapshot) {
+            App.roiOnlyMode = this._roiSnapshot.mode;
+            App.activeRoiId = this._roiSnapshot.id;
+            this._roiSnapshot = null;
+        }
+        this._previewOrgan = null;
         if (this._savedColormap) {
             setActiveColormap(this._savedColormap);
             this._savedColormap = null;
@@ -8694,6 +8702,13 @@ const SharePreview = {
                     <label>
                         <input type="checkbox" data-he-mono> HE モノクロ
                     </label>
+                    <label data-organ-wrap style="display:none;">臓器
+                        <select data-organ-select style="font-size:11px;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;"></select>
+                    </label>
+                    <label data-roi-only-wrap style="display:none;">
+                        <input type="checkbox" data-roi-only> ROIのみ
+                        <select data-roi-select style="font-size:11px;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;margin-left:2px;"></select>
+                    </label>
                     <button type="button" class="preview-reset-zoom" data-reset-zoom>Reset zoom</button>
                     <button type="button" class="preview-admin-login" data-admin-login title="Admin password でログイン">🔑 Admin</button>
                 </div>
@@ -8792,6 +8807,58 @@ const SharePreview = {
         if (heMonoCb) {
             heMonoCb.addEventListener('change', () => {
                 this._applyHeGrayscale(heMonoCb.checked);
+            });
+        }
+
+        // ② Organ filter — preview-local; filters which section cells render.
+        this._previewOrgan = null;
+        const organWrap = overlay.querySelector('[data-organ-wrap]');
+        const organSel = overlay.querySelector('[data-organ-select]');
+        if (organWrap && organSel) {
+            const organs = [];
+            for (const s of (project.sections || [])) {
+                const k = sectionOrganKey(s);
+                if (!organs.includes(k)) organs.push(k);
+            }
+            if (organs.length >= 2) {
+                const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+                organSel.innerHTML = '<option value="__all__">すべて</option>'
+                    + organs.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
+                organWrap.style.display = '';
+                organSel.addEventListener('change', () => {
+                    this._previewOrgan = (organSel.value === '__all__') ? null : organSel.value;
+                    this.refresh(App.project);
+                });
+            }
+        }
+
+        // ③ ROIのみ — preview-local toggle driving App.roiOnlyMode + activeRoiId
+        // (snapshot here, restored in close()). renderComposite clips MSI to the
+        // active ROI; sections lacking that ROI show no MSI (HE backdrop stays).
+        this._roiSnapshot = { mode: App.roiOnlyMode, id: App.activeRoiId };
+        const roiWrap = overlay.querySelector('[data-roi-only-wrap]');
+        const roiCb = overlay.querySelector('[data-roi-only]');
+        const roiSel = overlay.querySelector('[data-roi-select]');
+        const rois = (project.rois || []);
+        if (roiWrap && roiCb && roiSel && rois.length) {
+            const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+            roiSel.innerHTML = rois.map(r =>
+                `<option value="${esc(r.id)}">${esc(r.name || r.colorKey || r.id || 'ROI')}</option>`).join('');
+            roiSel.value = (App.activeRoiId && rois.some(r => r.id === App.activeRoiId)) ? App.activeRoiId : rois[0].id;
+            roiCb.checked = !!App.roiOnlyMode;
+            roiWrap.style.display = '';
+            const rerenderRebake = () => {
+                if (App && App.panels) for (const p of App.panels.values()) { try { p.renderComposite(); } catch (e) {} }
+                try { this._rebakeCellImages(App.project, App.focusCompoundKey); } catch (e) {}
+            };
+            roiCb.addEventListener('change', () => {
+                App.roiOnlyMode = roiCb.checked;
+                if (roiCb.checked) App.activeRoiId = roiSel.value;   // ensure an active ROI to clip to
+                rerenderRebake();
+            });
+            roiSel.addEventListener('change', () => {
+                App.activeRoiId = roiSel.value;
+                if (App.roiOnlyMode) rerenderRebake();
             });
         }
 
@@ -9135,10 +9202,19 @@ const SharePreview = {
         });
     },
 
+    // Sections shown in the grid/stats, honoring the preview-local organ filter.
+    // Used by _renderImageGrid / _renderStatsTable / _rebakeCellImages so the
+    // cell index (and _cellTransforms / _sectionRotations) stay aligned.
+    _sectionsForGrid(project) {
+        const all = (project && project.sections) || [];
+        if (!this._previewOrgan) return all;
+        return all.filter(s => sectionOrganKey(s) === this._previewOrgan);
+    },
+
     _renderImageGrid(project, focusKey) {
         const grid = this.overlay.querySelector('[data-image-grid]');
         if (!grid) return;
-        const sections = project.sections || [];
+        const sections = this._sectionsForGrid(project);
         grid.style.gridTemplateColumns = `repeat(${Math.max(sections.length, 1)}, minmax(0, 1fr))`;
         // Reset per-cell transform/rotation state for the new render.
         this._cellTransforms = sections.map(() => ({ tx: 0, ty: 0, scale: 1 }));
@@ -9363,7 +9439,7 @@ const SharePreview = {
     _rebakeCellImages(project, focusKey) {
         const grid = this.overlay && this.overlay.querySelector('[data-image-grid]');
         if (!grid || !project) return;
-        const sections = project.sections || [];
+        const sections = this._sectionsForGrid(project);
         sections.forEach((sec, idx) => {
             const wrap = grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
             if (!wrap) return;
@@ -9385,7 +9461,7 @@ const SharePreview = {
         const head = this.overlay.querySelector('[data-stats-head]');
         const body = this.overlay.querySelector('[data-stats-body]');
         if (!head || !body) return;
-        const sections = project.sections || [];
+        const sections = this._sectionsForGrid(project);
         const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
         // One-row header: each section's displayName is the column label
         // directly. The previous "File Name + commonPrefix" group row was
@@ -12579,6 +12655,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r53</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r54</div>
 </body>
 </html>
