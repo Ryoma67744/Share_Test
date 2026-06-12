@@ -28,9 +28,10 @@ Master-side operations (creating projects, registering layers, publishing, etc.)
 
 - Browse section images (HE / IF / MSI) layered per compound
 - Switch and compare compounds (Free / Compound mode)
-- Toggle existing ROIs on/off
+- Toggle existing ROIs on/off / **clip MSI to the selected ROI shape** (ROI-only)
 - Add new ROIs and delete existing ones — **only while holding the write lock** (one editor at a time)
 - Compare mean intensity across sections × compounds in the ANALYSIS bar chart
+- **Filter the view by organ** (auto-inferred from section names, when 2+ organs exist)
 - Make **temporary** display adjustments (Range / Opacity / Rotation / Pan / Zoom)
 - **Temporarily** edit the Memo
 - Download the entire project as a ZIP
@@ -114,6 +115,8 @@ The session expires after **12 hours**. Closing the tab is fine — re-opening t
 
 > Each section panel's top-left **section-name label** also shows the **Pixel pitch (μm/px)** when the publisher set it during Align (e.g. `Section 1 · 20×20 μm/px`). Both axes are always written out (`50×60 μm/px` for anisotropic, `20×20 μm/px` for isotropic) so the label is unambiguous.
 
+> **Organ filter**: when **2 or more** organs are inferred from the section names, an **"臓器:" (Organ)** selector appears at the right of the Sections header. Picking one shows only that organ's sections in the center ("すべて"/All shows everything). This only filters the view — it never changes the data or server state.
+
 ---
 
 ## 4. Showing and adding ROIs
@@ -153,6 +156,14 @@ In share mode, **acquiring the write lock is required** to add or modify ROIs (o
 - Deletion also requires the write lock
 
 > While drawing you cannot switch sections. Press **Escape** to cancel (in-flight vertices are dropped).
+
+### 4-5. ROI-only view (clip MSI to the ROI shape)
+
+Turning on the **"ROIのみ" (ROI only)** checkbox in the ROI LIST header clips **only the MSI layers** to the shape of the **currently selected ROI**. HE / background stay fully visible, so you can compare the signal inside the ROI against the surrounding histology.
+
+- Applies to the **currently selected ROI** (select a row in the ROI LIST).
+- Sections where that ROI is **not drawn show no MSI**.
+- Follows rotation / flip; turn it off to return to the full view.
 
 ---
 
@@ -212,6 +223,7 @@ The **Free / Compound** toggle in the top-right of the header switches between t
 
 - Click **Free / Compound** in the header
 - In Compound mode, **clicking a row in the Method table** sets the new focus compound and re-renders every section
+- In Compound mode, **clicking an MSI thumbnail in the bottom thumbnail list** does the same — it sets the focus compound and applies to every section
 - In Free mode, the same row click toggles a single layer on/off
 
 ---
@@ -272,13 +284,15 @@ The **🔗** icon on each field syncs that value across every section. The **`�
 
 > Pan: drag without modifier. Zoom: mouse wheel. Rotation: the input field, optionally synced with 🔗.
 
+> **Rotation is reflected in the bottom thumbnail list too**: changing Rotation re-renders the **MSI thumbnail list** at the bottom-center in the same orientation as the main canvas.
+
 > **Colormap dropdown**: The toolbar's **Colormap** lets you swap the MSI heatmap palette (Plasma / Viridis / Inferno / Hot / Jet / Grayscale). The choice is **kept inside this tab** (sessionStorage). Closing the tab reverts to the master's default. The same dropdown lives inside the Preview overlay and stays in sync, so you can keep adjusting colour after closing Preview.
 
 ---
 
 ## 7-bis. Per-layer display settings (gear ⚙)
 
-Click the **gear ⚙** at the right edge of any layer chip to open a per-layer popover. Clicking the layer thumbnail opens a similar smaller version.
+Click the **gear ⚙** at the right edge of any layer chip to open a per-layer popover. **Right-clicking** the layer thumbnail opens the same settings popover (in Compound mode, a **left-click** switches the focus compound instead).
 
 <div style="border:1px solid #cbd5e1;border-radius:6px;padding:10px;background:#fff;margin:10px 0;font-size:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
   <div style="border:1px solid #94a3b8;border-radius:4px;padding:8px;background:#f8fafc;">
