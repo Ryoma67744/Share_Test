@@ -10379,6 +10379,12 @@ const App = {
                 s.storagePaths.msiSeries[newKey] = s.storagePaths.msiSeries[oldKey];
                 delete s.storagePaths.msiSeries[oldKey];
             }
+            // Persisted per-layer display settings (Range / grayscale / opacity)
+            // are keyed by layer key too — migrate so a rename keeps them.
+            if (s.meta && s.meta.layerDisplay && s.meta.layerDisplay[oldKey]) {
+                s.meta.layerDisplay[newKey] = s.meta.layerDisplay[oldKey];
+                delete s.meta.layerDisplay[oldKey];
+            }
         }
 
         // Per-panel runtime caches (decoded image + tone-mapping settings)
@@ -10392,6 +10398,13 @@ const App = {
             if (panel.imageSettings && panel.imageSettings[oldKey]) {
                 panel.imageSettings[newKey] = panel.imageSettings[oldKey];
                 delete panel.imageSettings[oldKey];
+            }
+            // Thumbnail data URL (the <img> src populateThumbnails reads). Without
+            // this the renamed compound's <img> has no src, never fires 'load',
+            // so renderMsiThumbnail(newKey) is never triggered → "no image".
+            if (panel.imageDataUrls && panel.imageDataUrls[oldKey]) {
+                panel.imageDataUrls[newKey] = panel.imageDataUrls[oldKey];
+                delete panel.imageDataUrls[oldKey];
             }
             if (panel.visibleLayers && panel.visibleLayers.has(oldKey)) {
                 panel.visibleLayers.delete(oldKey);
@@ -12268,6 +12281,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r43</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r44</div>
 </body>
 </html>
