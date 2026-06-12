@@ -4443,6 +4443,24 @@ function renderAnalysisChart() {
         canvas.style.cssText = 'width:100%;height:100%;display:block;';
         host.appendChild(canvas);
     }
+    // Re-render on container resize so the canvas bitmap tracks its displayed
+    // size. Without this the CSS width/height:100% stretches a stale bitmap →
+    // distorted bars + overlapping text. Redraw cheaply from cached stats (no
+    // pixel re-scan); rAF-debounced so a drag-resize coalesces to one redraw.
+    host._lastChart = { sections: sectionsWithRoi, channels, stats, roi };
+    if (!host._chartResizeObserver && typeof ResizeObserver !== 'undefined') {
+        let raf = 0;
+        host._chartResizeObserver = new ResizeObserver(() => {
+            if (raf) cancelAnimationFrame(raf);
+            raf = requestAnimationFrame(() => {
+                raf = 0;
+                const last = host._lastChart;
+                const cv = host.querySelector('canvas');
+                if (last && cv) { try { drawSectionMultiBar(cv, last.sections, last.channels, last.stats, last.roi); } catch (e) {} }
+            });
+        });
+        host._chartResizeObserver.observe(host);
+    }
     drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi);
     document.getElementById('analysis-scope').textContent = sectionsWithRoi.length + ' section(s)';
     renderMethodTable();
@@ -5020,16 +5038,23 @@ function bindOverlayUi() {
 
 function drawSectionMultiBar(canvas, sections, channels, stats, roi) {
     const host = canvas.parentElement;
-    const cw = host.clientWidth, ch = host.clientHeight;
-    const W = Math.max(cw, sections.length * (channels.length * 18 + 30) + 80);
-    const H = Math.max(ch, 220);
-    canvas.width = W; canvas.height = H;
+    // Draw at the canvas's actual displayed size (in CSS px) so the CSS
+    // width/height:100% never stretches a stale or over-sized bitmap. The old
+    // Math.max(cw, content) made the bitmap larger than the box → CSS shrank it
+    // → distorted bars and overlapping/garbled text, worst after a resize.
+    // devicePixelRatio keeps it crisp on HiDPI displays.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const W = Math.max(1, host.clientWidth);
+    const H = Math.max(1, host.clientHeight);
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
     const ctx = get2dContext(canvas);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#fafafa'; ctx.fillRect(0, 0, W, H);
 
     const margin = { top: 50, right: 20, bottom: 80, left: 65 };
-    const pw = W - margin.left - margin.right;
-    const ph = H - margin.top - margin.bottom;
+    const pw = Math.max(1, W - margin.left - margin.right);
+    const ph = Math.max(1, H - margin.top - margin.bottom);
 
     let yMax = 0;
     for (const s of sections) for (const c of channels) yMax = Math.max(yMax, (stats[s.id] && stats[s.id][c] ? stats[s.id][c].mean : 0));
@@ -12281,6 +12306,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r44</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r45</div>
 </body>
 </html>
