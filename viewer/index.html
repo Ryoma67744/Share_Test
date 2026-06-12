@@ -509,6 +509,74 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
 }
 #btn-share-preview:hover { background:#1e40af; border-color:#1e40af; }
 body.share-mode #btn-share-preview { display:inline-flex; }
+
+/* ===== Mobile bottom tab bar + drawers (active only ≤900px) ===== */
+#m-tabbar, #m-drawer-backdrop { display:none; }
+
+@media (max-width: 900px) {
+  /* Shell: the center (image) owns the screen; sidebars become bottom sheets. */
+  #main-row { gap:0; padding:0 0 52px 0; position:relative; }
+  #splitter-left-main, #splitter-main-right { display:none !important; }
+  #main-center { border-radius:0; }
+
+  /* Sidebars -> bottom sheets (override the inline width:300/420px). */
+  #sidebar-left, #sidebar-right {
+    position:fixed; left:0; right:0; bottom:52px;
+    width:auto !important; min-width:0 !important; height:70vh; margin:0;
+    padding:6px; gap:6px; background:#f1f5f9;
+    transform:translateY(115%); transition:transform .25s ease;
+    z-index:60; box-shadow:0 -10px 28px rgba(0,0,0,.22);
+    border-top-left-radius:12px; border-top-right-radius:12px; overflow:hidden;
+  }
+  body[data-mpanel="roi"]      #sidebar-left,
+  body[data-mpanel="method"]   #sidebar-left  { transform:none; }
+  body[data-mpanel="analysis"] #sidebar-right,
+  body[data-mpanel="memo"]     #sidebar-right { transform:none; }
+
+  /* Inside each sheet, show only the panel that matches the active tab. */
+  #splitter-roi-method, #splitter-graph-memo { display:none !important; }
+  body[data-mpanel="roi"]      #method-panel,
+  body[data-mpanel="method"]   #panel-roi,
+  body[data-mpanel="analysis"] #memo-panel,
+  body[data-mpanel="memo"]     #panel-analysis { display:none !important; }
+  #method-panel, #memo-panel  { height:auto !important; flex:1 1 auto !important; }
+  #panel-roi, #panel-analysis { flex:1 1 auto !important; }
+
+  /* Bottom tab bar. */
+  #m-tabbar {
+    display:flex; position:fixed; left:0; right:0; bottom:0; height:52px;
+    z-index:70; background:#0f172a; border-top:1px solid #1e293b;
+  }
+  #m-tabbar button {
+    flex:1 1 0; min-height:44px; background:transparent; border:0;
+    color:#cbd5e1; font-size:12px; font-weight:600;
+  }
+  #m-tabbar button.active { color:#fff; background:#1e293b; box-shadow:inset 0 -3px 0 #3b82f6; }
+  body[data-mpanel] #m-drawer-backdrop {
+    display:block; position:fixed; inset:0 0 52px 0; z-index:55; background:rgba(15,23,42,.38);
+  }
+
+  /* Center sections: compact thumbnail row (still tappable for compound switch). */
+  #sections-grid { grid-template-rows:1fr 116px !important; }
+
+  /* Touch ergonomics. */
+  .btn, #view-mode-toggle button { min-height:40px; }
+  .tb-btn, .tb-icon, .section-picker-btn { min-height:36px; }
+  #method-rows td { padding-top:8px; padding-bottom:8px; }
+  #sidebar-left input, #sidebar-left select, #sidebar-left textarea,
+  #sidebar-right input, #sidebar-right select, #sidebar-right textarea { font-size:16px !important; } /* stop iOS focus auto-zoom */
+  .layer-popover { position:fixed !important; left:50% !important; top:auto !important;
+    bottom:64px !important; transform:translateX(-50%); max-width:92vw; z-index:80; }
+
+  /* View-only on phones: hide editing / admin / management affordances. */
+  header h1, #project-picker,
+  #btn-share-admin-login, #btn-projects, #btn-new-project, #btn-import-zip,
+  #btn-publish-share, #btn-share-info, #btn-add-section, #btn-delete-project,
+  #tb-add-heif, #tb-add-msi, #tb-align-heif, #tb-del-section,
+  #tb-flip-group, #tb-msi-um-group, #tb-rot-share-default,
+  #roi-draw-toggle, #method-actions { display:none !important; }
+  header { flex-wrap:wrap; }
+}
     </style>
 </head>
 <body class="text-gray-800">
@@ -729,6 +797,15 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                 </details>
         </aside>
     </div>
+
+    <!-- Mobile (≤900px) drawer backdrop + bottom tab bar. display:none on desktop. -->
+    <div id="m-drawer-backdrop"></div>
+    <nav id="m-tabbar" aria-label="パネル切替">
+        <button type="button" data-mpanel="roi">ROI</button>
+        <button type="button" data-mpanel="method">Method</button>
+        <button type="button" data-mpanel="analysis">解析</button>
+        <button type="button" data-mpanel="memo">Memo</button>
+    </nav>
 </div>
 
 <!-- Hidden file inputs -->
@@ -3491,37 +3568,78 @@ class SectionPanel {
         if (!host || host.dataset.transformWired === '1') return;
         host.dataset.transformWired = '1';
 
+        // One pointer = pan (drag); two pointers = pinch-zoom. host has
+        // touch-action:none, so touch arrives here as pointer events.
+        const ptrs = new Map();           // pointerId -> {x, y}
         let dragging = false;
         let startX = 0, startY = 0, baseTx = 0, baseTy = 0;
+        let pinch = null;                 // { d0, s0 } while two pointers are down
+        const beginPan = (px, py) => {
+            const t = this._ensureViewerTransform();
+            dragging = true;
+            startX = px; startY = py;
+            baseTx = t.tx; baseTy = t.ty;
+        };
         host.addEventListener('pointerdown', (ev) => {
-            if (ev.button !== 0) return;
+            if (ev.button !== 0 && ev.pointerType === 'mouse') return;
             // ROI drawing handlers live on the croi canvas; if drawing mode
             // is active, croi captures the click and this handler never sees
             // it. Still bail out defensively.
             if (App.drawing && App.drawing.mode) return;
-            const t = this._ensureViewerTransform();
-            dragging = true;
-            startX = ev.clientX; startY = ev.clientY;
-            baseTx = t.tx; baseTy = t.ty;
-            host.setPointerCapture(ev.pointerId);
-            host.style.cursor = 'grabbing';
+            ptrs.set(ev.pointerId, { x: ev.clientX, y: ev.clientY });
+            try { host.setPointerCapture(ev.pointerId); } catch (e) {}
+            if (ptrs.size === 1) {
+                beginPan(ev.clientX, ev.clientY);
+                host.style.cursor = 'grabbing';
+            } else if (ptrs.size === 2) {
+                dragging = false;            // two fingers down -> stop panning, start pinch
+                const p = [...ptrs.values()];
+                const d0 = Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y) || 1;
+                pinch = { d0, s0: this._ensureViewerTransform().scale };
+            }
         });
         host.addEventListener('pointermove', (ev) => {
-            if (!dragging) return;
+            const p = ptrs.get(ev.pointerId);
+            if (!p) return;
+            p.x = ev.clientX; p.y = ev.clientY;
             const t = this._ensureViewerTransform();
-            t.tx = baseTx + (ev.clientX - startX);
-            t.ty = baseTy + (ev.clientY - startY);
-            this.applyViewerTransform();
+            if (pinch && ptrs.size >= 2) {
+                const v = [...ptrs.values()];
+                const dist = Math.hypot(v[0].x - v[1].x, v[0].y - v[1].y) || 1;
+                const sNew = Math.max(0.2, Math.min(5, pinch.s0 * (dist / pinch.d0)));
+                // Keep the finger midpoint fixed under the zoom. Measured
+                // relative to host centre (= rotate/scale origin); translate is
+                // screen-space, so the rotation cancels for a uniform scale.
+                const r = host.getBoundingClientRect();
+                const Mx = (v[0].x + v[1].x) / 2 - (r.left + r.width / 2);
+                const My = (v[0].y + v[1].y) / 2 - (r.top + r.height / 2);
+                const kk = sNew / t.scale;
+                t.tx = Mx - kk * (Mx - t.tx);
+                t.ty = My - kk * (My - t.ty);
+                t.scale = sNew;
+                this.applyViewerTransform();
+            } else if (dragging) {
+                t.tx = baseTx + (ev.clientX - startX);
+                t.ty = baseTy + (ev.clientY - startY);
+                this.applyViewerTransform();
+            }
         });
-        const endDrag = (ev) => {
-            if (!dragging) return;
-            dragging = false;
+        const endPointer = (ev) => {
+            if (!ptrs.has(ev.pointerId)) return;
+            ptrs.delete(ev.pointerId);
             try { host.releasePointerCapture(ev.pointerId); } catch (e) {}
-            host.style.cursor = '';
-            App.queueSave();
+            if (ptrs.size < 2) pinch = null;
+            if (ptrs.size === 1) {
+                const [only] = [...ptrs.values()];   // resume panning with the remaining finger (no jump)
+                beginPan(only.x, only.y);
+            } else if (ptrs.size === 0) {
+                dragging = false;
+                host.style.cursor = '';
+                App.queueSave();
+            }
         };
-        host.addEventListener('pointerup', endDrag);
-        host.addEventListener('pointercancel', endDrag);
+        host.addEventListener('pointerup', endPointer);
+        host.addEventListener('pointercancel', endPointer);
 
         host.addEventListener('wheel', (ev) => {
             if (App.drawing && App.drawing.mode) return;
@@ -3872,6 +3990,23 @@ class SectionPanel {
                 ev.preventDefault();
                 this.openThumbPopover(key, cell);
             });
+            // Touch has no contextmenu: long-press (≥450ms) opens the popover,
+            // and the trailing click is swallowed so it doesn't also switch.
+            let lpTimer = 0, lpX = 0, lpY = 0, lpFired = false;
+            const lpClear = () => { if (lpTimer) { clearTimeout(lpTimer); lpTimer = 0; } };
+            box.addEventListener('pointerdown', (ev) => {
+                if (ev.pointerType === 'mouse') return;
+                lpFired = false; lpX = ev.clientX; lpY = ev.clientY; lpClear();
+                lpTimer = setTimeout(() => { lpFired = true; this.openThumbPopover(key, cell); }, 450);
+            });
+            box.addEventListener('pointermove', (ev) => {
+                if (lpTimer && Math.hypot(ev.clientX - lpX, ev.clientY - lpY) > 10) lpClear();
+            });
+            box.addEventListener('pointerup', lpClear);
+            box.addEventListener('pointercancel', lpClear);
+            box.addEventListener('click', (ev) => {
+                if (lpFired) { ev.stopPropagation(); ev.preventDefault(); lpFired = false; }
+            }, true);
             const im = document.createElement('img');
             im.alt = formatDisplayName(key);
             im.src = this.imageDataUrls[key];
@@ -12298,7 +12433,28 @@ const App = {
     },
 };
 
-document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { console.error(e); alert('Init failed: ' + (e.message || e)); }); });
+// Mobile (≤900px) bottom tab bar: each tab opens the matching panel as a
+// bottom sheet; tapping the active tab again (or the backdrop) closes it.
+function setupMobileUI() {
+    const tabbar = document.getElementById('m-tabbar');
+    const backdrop = document.getElementById('m-drawer-backdrop');
+    if (!tabbar) return;
+    const setPanel = (name) => {
+        const cur = document.body.dataset.mpanel;
+        if (name && cur !== name) document.body.dataset.mpanel = name;
+        else delete document.body.dataset.mpanel;     // same tab / backdrop -> close
+        const active = document.body.dataset.mpanel;
+        for (const b of tabbar.querySelectorAll('button'))
+            b.classList.toggle('active', b.dataset.mpanel === active);
+    };
+    tabbar.addEventListener('click', (ev) => {
+        const b = ev.target.closest('button[data-mpanel]');
+        if (b) setPanel(b.dataset.mpanel);
+    });
+    if (backdrop) backdrop.addEventListener('click', () => setPanel(null));
+}
+
+document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { console.error(e); alert('Init failed: ' + (e.message || e)); }); setupMobileUI(); });
 
 </script>
 
@@ -12306,6 +12462,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r45</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r46</div>
 </body>
 </html>
