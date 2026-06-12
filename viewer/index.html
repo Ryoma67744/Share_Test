@@ -11424,18 +11424,27 @@ const App = {
         try {
             this.viewMode = 'compound';
             if (this.refreshViewModeUI) this.refreshViewModeUI();
-            const allMsi = new Set();
-            for (const s of (this.project.sections || []))
-                for (const k of Object.keys(s.msiSeries || {})) if (/^MSI_/i.test(k)) allMsi.add(k);
-            if (!this.focusCompoundKey || !allMsi.has(this.focusCompoundKey))
-                this.focusCompoundKey = allMsi.values().next().value || null;
+            // Derive the focus from layers that ACTUALLY have a loaded raster
+            // (imageSources) — NOT from msiSeries keys. Published metadata can
+            // carry compound keys with no blob, so msiSeries.keys() may include
+            // entries that were never loadable. Choosing such a phantom key as
+            // focus makes renderComposite drop every MSI (this was the bug).
+            const loadedMsi = new Set();
+            for (const p of this.panels.values())
+                for (const k of Object.keys(p.imageSources || {})) if (/^MSI_/i.test(k)) loadedMsi.add(k);
+            if (!this.focusCompoundKey || !loadedMsi.has(this.focusCompoundKey))
+                this.focusCompoundKey = loadedMsi.values().next().value || null;
             const fk = this.focusCompoundKey;
+            // Diagnostic (temporary): key sets for the first panel + chosen focus.
+            const _p0 = this.panels.values().next().value;
+            if (_p0) {
+                const _ms = Object.keys(_p0.section.msiSeries || {});
+                console.info('[share keys] msiSeries=', _ms.map(k => k + ((_p0.section.msiSeries[k] || {}).blobId ? '' : '(noblob)')));
+                console.info('[share keys] imageSources(MSI)=', Object.keys(_p0.imageSources || {}).filter(k => /^MSI_/i.test(k)));
+                console.info('[share keys] chosen focus=', fk, ' loadedCount=', loadedMsi.size);
+            }
             for (const p of this.panels.values()) {
                 const img = fk && p.imageSources[fk];
-                // Diagnostic (temporary): per-section focus-image state.
-                console.info('[share focus]', (p.section && p.section.displayName) || '?',
-                    'focus=', fk, 'hasImg=', !!img,
-                    'complete=', !!(img && img.complete), 'natW=', img && img.naturalWidth);
                 try {
                     if (fk && img && !p.visibleLayers.has(fk)) p.toggleLayer(fk, true);
                     else p.renderComposite();   // re-render in compound mode even if already visible
@@ -12548,6 +12557,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r48</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r49</div>
 </body>
 </html>
