@@ -130,14 +130,20 @@ Click **`Align`** on a section panel to open a modal that aligns HE/IF layers to
 
 ### 5-1-bis. Source dropdown (per-source T_he_to_msi)
 
-The Align modal shows a **Source** dropdown at the top whenever a section has more than one MSI source.
+The Align modal shows a **Source** dropdown at the top whenever a section has more than one MSI source. Each source name is prefixed with an **alignment-status icon**:
+
+- **✓** = aligned with landmarks
+- **△** = provisional (sliders only, no landmarks)
+- **−** = not aligned yet
 
 | Value | Behaviour |
 | --- | --- |
-| `__all__` (default) | One T is broadcast to **every source** under the section. Use it when sources represent the same physical scan. |
+| **All sources** (`__all__`) | One T is broadcast to **every source** under the section. Use it when sources represent the same physical scan (e.g. POS / NEG). **Default when all sources share the same grid.** |
 | Specific fid (e.g. `Analyte 1.txt`) | T is stored per-source under `world_coords.T_he_to_msi_by_source[fid]`. Use it when sources have meaningfully different positions. |
 
-Save always also updates the legacy `T_he_to_msi`, so older viewers and the fallback path keep working. Compounds within the same source share the same T.
+- **"全ソースへ反映" (Apply to all sources) button** (shown only when sources share a grid): copies the alignment T currently shown to **every same-grid source**. When only one source is aligned, this reflects it to the others in one click (show the aligned source, then press it).
+- **Auto-fallback for un-aligned sources**: a provisional entry (△, no landmarks) never **shadows** a genuine alignment (✓) on another source. At render time the legacy / genuine T is used, so HE never blows up or drifts even if one source is left un-aligned.
+- Save always also updates the legacy `T_he_to_msi`, so older viewers and the fallback path keep working. Compounds within the same source share the same T.
 
 ### 5-2. MSI pixel size
 
@@ -171,6 +177,8 @@ Click ≥ 3 corresponding points on each thumbnail, then **`Solve`** runs a comp
 
 > **The modal's HE / MSI thumbnails render in the same orientation as the main canvas** — the section's Rotation, Flip H/V, and the implicit -90° MSI bake are all applied. Clicking a landmark stores the raw HE/MSI pixel coordinate (the orientation transform is reversed internally), so Solve and T computation behave identically regardless of the visible orientation.
 
+> **Reflected in the main screen's bottom thumbnail list too**: changing Rotation / Flip H·V on the main screen re-renders the **MSI thumbnail list** in the layer bar (bottom-center) in the same orientation — not just the Align-modal thumbnails, but the main-screen list as well.
+
 > After Save, the main canvas renders **HE underneath, MSI on top (additive blend)** with a **scale bar** at the bottom-left. The bar auto-picks a round value (10 / 20 / 50 / 100 / 200 / 500 μm; 1 / 2 / 5 / 10 mm) and **shrinks the unit when you zoom in**.
 
 > Save also updates the section's top-left **canvas-label** to include the **Pixel pitch** in `X×Y μm/px` form (e.g. `Section 1 · 20×20 μm/px` for isotropic, `50×60 μm/px` for anisotropic — both axes are always written so the label is unambiguous). The same label is rendered for share recipients and inside the Preview overlay's cell titles, so collaborators can verify the acquisition resolution without opening the Align modal.
@@ -179,7 +187,9 @@ Click ≥ 3 corresponding points on each thumbnail, then **`Solve`** runs a comp
 
 ## 6. Per-layer display settings (gear ⚙)
 
-Click the **gear ⚙** at the right edge of any layer chip to open a per-layer popover. Clicking the layer thumbnail opens a similar but slightly smaller version.
+Click the **gear ⚙** at the right edge of any layer chip to open a per-layer popover. **Right-clicking** the layer thumbnail opens the same settings popover.
+
+> **Left-clicking thumbnails in Compound mode**: in Compound mode, **left-clicking an MSI thumbnail** in the layer bar switches the focus compound and applies to every section (same as clicking a Method-table row). Use **right-click (or the gear ⚙)** to open the settings popover.
 
 <div style="border:1px solid #cbd5e1;border-radius:6px;padding:10px;background:#fff;margin:10px 0;font-size:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
   <div style="border:1px solid #94a3b8;border-radius:4px;padding:8px;background:#f8fafc;">
@@ -258,6 +268,8 @@ Click `+ draw` on an existing ROI row to extend it onto another section.
 
 > **Escape** during drawing cancels (in-flight vertices are dropped). Multi-section ROIs accumulate in `polysBySection`.
 
+> **ROI-only view**: turning on the **"ROIのみ" (ROI only)** checkbox in the ROI LIST header clips **only the MSI layers** to the shape of the selected ROI (HE / background stay full). Sections without that ROI show no MSI. It follows rotation / flip and turns off to restore the full view.
+
 ---
 
 ## 8. Filling in the Memo
@@ -313,6 +325,14 @@ The toolbar's **Flip** group has `⇄` (mirror left-right) and `⇅` (mirror up-
 - The state lives in `sec.meta.flip = { lr, ud }` and travels via IDB + publish, so recipients see the flipped orientation.
 - Click again to undo (toggle).
 - Share recipients have the buttons hidden — the master's choice is the final orientation.
+
+### 9-4. Organ display filter
+
+When several organs (e.g. Brain / Heart / Placenta) are stored in one project, the **"臓器:" (Organ)** selector at the right of the Sections header filters the center grid by organ ("すべて"/All shows everything).
+
+- The organ is **auto-inferred from the section name** (e.g. `E15-2-1_Brain1` → `Brain`). The selector appears only when **2 or more** organs are detected.
+- It only filters the view — no data is changed.
+- If the auto-inference is wrong, set **`section.meta.organ`** to override it (renaming sections so the organ token matches is another easy approach).
 
 ---
 
