@@ -71,6 +71,9 @@ body.share-mode #tb-rot-share-default,
 body.share-mode #tb-msi-um-group,
 body.share-mode #tb-flip-group,
 body.share-mode #tb-del-section { display:none !important; }
+/* Global HE/IF grayscale toggle: share-view only (master uses the per-layer gear). */
+#tb-he-mono-group { display:none; }
+body.share-mode #tb-he-mono-group { display:inline-flex; }
 body.share-mode #share-mode-banner { display:flex !important; }
 body.share-mode .picker-row .picker-row-dot,
 body.share-mode .picker-row .picker-row-rename,
@@ -755,6 +758,11 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                         <option value="jet">Jet</option>
                         <option value="grayscale">Grayscale</option>
                     </select>
+                </span>
+                <span class="tb-group" id="tb-he-mono-group" title="HE/IF をモノクロ表示">
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;font-size:11px;">
+                        <input type="checkbox" id="tb-he-mono"> HE モノクロ
+                    </label>
                 </span>
                 <span class="tb-group" id="tb-msi-um-group">
                     <span class="tb-label">μm/px:</span>
@@ -2734,19 +2742,26 @@ class SectionPanel {
         // on-screen ROI outline. An empty path (ROI absent on this section) hides
         // the MSI here. null = feature off (no clipping).
         let roiClipPath = null;
-        if (App.roiOnlyMode && App.activeRoiId) {
+        if (App.roiOnlyMode) {
+            // Clip MSI to the UNION of every ROI in the ROI LIST drawn on this
+            // section (each ROI = one subpath). A section with no ROI yields an
+            // empty path → clips everything → no MSI (HE backdrop stays).
             roiClipPath = new Path2D();
-            const roi = (this.project.rois || []).find(r => r.id === App.activeRoiId);
-            const poly = roi && roi.polysBySection && roi.polysBySection[this.section.id];
             const refR = this.getMsiRefSize();
-            if (poly && poly.length && refR.w > 0 && refR.h > 0) {
+            if (refR.w > 0 && refR.h > 0) {
                 const sxR = this.dom.cdisp.height / refR.w;
                 const syR = this.dom.cdisp.width / refR.h;
-                roiClipPath.moveTo(poly[0][1] * syR, this.dom.cdisp.height - poly[0][0] * sxR);
-                for (let i = 1; i < poly.length; i++) {
-                    roiClipPath.lineTo(poly[i][1] * syR, this.dom.cdisp.height - poly[i][0] * sxR);
+                const hidden = this.project.roiHidden || {};
+                for (const roi of (this.project.rois || [])) {
+                    if (hidden[roi.id]) continue;
+                    const poly = roi.polysBySection && roi.polysBySection[this.section.id];
+                    if (!poly || !poly.length) continue;
+                    roiClipPath.moveTo(poly[0][1] * syR, this.dom.cdisp.height - poly[0][0] * sxR);
+                    for (let i = 1; i < poly.length; i++) {
+                        roiClipPath.lineTo(poly[i][1] * syR, this.dom.cdisp.height - poly[i][0] * sxR);
+                    }
+                    roiClipPath.closePath();
                 }
-                roiClipPath.closePath();
             }
         }
         for (const key of layersToDraw) {
@@ -8259,7 +8274,6 @@ const SharePreview = {
         // clear the preview-local organ filter.
         if (this._roiSnapshot) {
             App.roiOnlyMode = this._roiSnapshot.mode;
-            App.activeRoiId = this._roiSnapshot.id;
             this._roiSnapshot = null;
         }
         this._previewOrgan = null;
@@ -8707,7 +8721,6 @@ const SharePreview = {
                     </label>
                     <label data-roi-only-wrap style="display:none;">
                         <input type="checkbox" data-roi-only> ROIのみ
-                        <select data-roi-select style="font-size:11px;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;margin-left:2px;"></select>
                     </label>
                     <button type="button" class="preview-reset-zoom" data-reset-zoom>Reset zoom</button>
                     <button type="button" class="preview-admin-login" data-admin-login title="Admin password でログイン">🔑 Admin</button>
@@ -8832,33 +8845,20 @@ const SharePreview = {
             }
         }
 
-        // ③ ROIのみ — preview-local toggle driving App.roiOnlyMode + activeRoiId
-        // (snapshot here, restored in close()). renderComposite clips MSI to the
-        // active ROI; sections lacking that ROI show no MSI (HE backdrop stays).
-        this._roiSnapshot = { mode: App.roiOnlyMode, id: App.activeRoiId };
+        // ③ ROIのみ — preview-local toggle of App.roiOnlyMode. renderComposite
+        // clips MSI to the UNION of all ROIs in the ROI LIST per section, so no
+        // per-ROI selection is needed. Snapshot/restore roiOnlyMode in open/close.
+        this._roiSnapshot = { mode: App.roiOnlyMode };
         const roiWrap = overlay.querySelector('[data-roi-only-wrap]');
         const roiCb = overlay.querySelector('[data-roi-only]');
-        const roiSel = overlay.querySelector('[data-roi-select]');
         const rois = (project.rois || []);
-        if (roiWrap && roiCb && roiSel && rois.length) {
-            const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-            roiSel.innerHTML = rois.map(r =>
-                `<option value="${esc(r.id)}">${esc(r.name || r.colorKey || r.id || 'ROI')}</option>`).join('');
-            roiSel.value = (App.activeRoiId && rois.some(r => r.id === App.activeRoiId)) ? App.activeRoiId : rois[0].id;
+        if (roiWrap && roiCb && rois.length) {
             roiCb.checked = !!App.roiOnlyMode;
             roiWrap.style.display = '';
-            const rerenderRebake = () => {
-                if (App && App.panels) for (const p of App.panels.values()) { try { p.renderComposite(); } catch (e) {} }
-                try { this._rebakeCellImages(App.project, App.focusCompoundKey); } catch (e) {}
-            };
             roiCb.addEventListener('change', () => {
                 App.roiOnlyMode = roiCb.checked;
-                if (roiCb.checked) App.activeRoiId = roiSel.value;   // ensure an active ROI to clip to
-                rerenderRebake();
-            });
-            roiSel.addEventListener('change', () => {
-                App.activeRoiId = roiSel.value;
-                if (App.roiOnlyMode) rerenderRebake();
+                if (App && App.panels) for (const p of App.panels.values()) { try { p.renderComposite(); } catch (e) {} }
+                try { this._rebakeCellImages(App.project, App.focusCompoundKey); } catch (e) {}
             });
         }
 
@@ -10917,6 +10917,8 @@ const App = {
             this.roiOnlyMode = roiClip.checked;
             for (const p of this.panels.values()) { try { p.renderComposite(); } catch (e) {} }
         });
+        const heMono = document.getElementById('tb-he-mono');
+        if (heMono) heMono.addEventListener('change', () => this.setHeGrayscaleAll(heMono.checked));
         this._bindMethodHeaderSort();
         this._bindMrmRegister();
         try { bindOverlayUi(); } catch (e) {}
@@ -11833,6 +11835,21 @@ const App = {
             p.dom.root.classList.toggle('section-filtered-out', !show);
         }
     },
+    // Global HE/IF grayscale toggle for the share view (transient — not saved;
+    // recipients never persist). Mirrors SharePreview._applyHeGrayscale.
+    setHeGrayscaleAll(on) {
+        const want = !!on;
+        for (const p of (this.panels ? this.panels.values() : [])) {
+            const settings = p && p.imageSettings;
+            if (!settings) continue;
+            let dirty = false;
+            for (const key of Object.keys(settings)) {
+                if (!/HE_STAIN|IF_STAIN/i.test(key) || /_TIC$/.test(key)) continue;
+                if (settings[key].grayscale !== want) { settings[key].grayscale = want; dirty = true; }
+            }
+            if (dirty) { try { p.renderComposite(); } catch (e) {} }
+        }
+    },
     refreshOrganFilter() {
         const wrap = document.getElementById('organ-filter-wrap');
         const sel = document.getElementById('organ-filter');
@@ -12655,6 +12672,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r54</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r55</div>
 </body>
 </html>
