@@ -9,18 +9,35 @@
     <meta http-equiv="Expires" content="0">
     <title>DESI Data Share</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+    <!-- Load-critical but only used from functions that run after
+         DOMContentLoaded, so `defer` lets them download in parallel without
+         blocking first paint (they finish executing before App.init runs). -->
+    <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <script>
   window.SUPABASE_URL     = "https://pxlrlhtcvwkqnlryencs.supabase.co";
   window.SUPABASE_ANON_KEY = "sb_publishable_2K4sqMmKk3g20Jmwho-awQ_Uu_hSKeU";
+  // Libraries not needed just to view are loaded on first use (jszip =
+  // Export/Import, marked + dompurify = Help), so a recipient who only views
+  // never downloads them. Injected via loadScript() and awaited at call sites.
+  window.LAZY_LIBS = {
+    jszip:     "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
+    marked:    "https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js",
+    dompurify: "https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"
+  };
+  window.loadScript = function (src) {
+    window.__scriptPromises = window.__scriptPromises || {};
+    if (window.__scriptPromises[src]) return window.__scriptPromises[src];
+    return (window.__scriptPromises[src] = new Promise(function (resolve, reject) {
+      var s = document.createElement('script');
+      s.src = src; s.async = true;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { delete window.__scriptPromises[src]; reject(new Error('Failed to load ' + src)); };
+      document.head.appendChild(s);
+    }));
+  };
 </script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
     <style>
 html, body { margin: 0; padding: 0; overflow: hidden; height: 100vh; }
 body { font-family: 'Inter', sans-serif; background-color: #f4f4f5; }
@@ -7104,6 +7121,7 @@ function sanitizeCompoundName(label) {
 // ZIP Import / Export
 // =============================================================
 async function exportProjectAsZip() {
+    try { await loadScript(LAZY_LIBS.jszip); } catch (e) { alert('JSZip の読み込みに失敗しました'); return; }
     if (typeof JSZip === 'undefined') { alert('JSZip not loaded'); return; }
     const project = App.project;
     if (!project) return;
@@ -7971,6 +7989,9 @@ async function openHelpModal(audience, lang) {
             return openModal(fallbackHtml);
         }
     }
+    // Help-only libs: fetch on demand (recipients who never open Help skip them).
+    try { await loadScript(LAZY_LIBS.marked); await loadScript(LAZY_LIBS.dompurify); }
+    catch (e) { console.warn('help libs lazy-load failed; showing raw markdown', e); }
     let bodyHtml;
     try {
         const raw = (typeof marked !== 'undefined') ? marked.parse(md) : md;
@@ -9652,6 +9673,7 @@ async function openProjectsManagerModal() {
 }
 
 async function importZipFile(file) {
+    await loadScript(LAZY_LIBS.jszip);
     const zip = await JSZip.loadAsync(file);
     // Find the project doc — root-level *.json with format=desi_data_share_v1.
     // The exporter now names the root JSON after the project, so we scan
@@ -11300,36 +11322,60 @@ const App = {
             throw lastErr;
         };
         const failed = [];
+        // Persistent, version-stamped blob cache: address blobs deterministically
+        // by slug+path so a reload (or revisit) reuses the IndexedDB copy and
+        // skips the network. cacheVersion = the project's publish timestamp, so a
+        // master re-publish (new updated_at) transparently invalidates stale copies.
+        const cacheVer = (doc && (doc.updated_at || doc.created_at)) || '';
+        const cacheSlug = (this.shareMode && this.shareMode.slug) || '';
+        const cacheable = !!(cacheVer && cacheSlug);
+        const ensureBlob = async (ref) => {
+            const fallbackName = ref.filename || ref.path.split('/').pop();
+            if (cacheable) {
+                const id = 'share:' + cacheSlug + ':' + ref.path;
+                const hit = await ProjectStorage.getBlob(id);
+                if (hit && hit.blob && hit.cacheVersion === cacheVer) return { id, mime: hit.mime };
+                const blob = await fetchBlob(ref.path);
+                const mime = ref.mime || blob.type;
+                await ProjectStorage.putBlob({ id, blob, mime, filename: fallbackName, cacheVersion: cacheVer });
+                return { id, mime };
+            }
+            const blob = await fetchBlob(ref.path);
+            const mime = ref.mime || blob.type;
+            const id = uid('blob');
+            await ProjectStorage.putBlob({ id, blob, mime, filename: fallbackName });
+            return { id, mime };
+        };
+        // Flatten every layer into one task list, then download with a bounded
+        // concurrency pool instead of the old fully-serial nested loops.
+        const dlTasks = [];
         for (let i = 0; i < project.sections.length; i++) {
             const sec = project.sections[i];
             const sp = (doc.sections[i] && doc.sections[i].storage_paths) || (doc.sections[i] && doc.sections[i].storagePaths) || {};
-            // images: { HE_Stain: { path, mime, filename }, ... }
-            for (const [key, ref] of Object.entries(sp.images || {})) {
-                try {
-                    const blob = await fetchBlob(ref.path);
-                    const blobId = uid('blob');
-                    await ProjectStorage.putBlob({ id: blobId, blob, mime: ref.mime || blob.type, filename: ref.filename || ref.path.split('/').pop() });
-                    sec.images[key] = { blobId, mime: ref.mime || blob.type, filename: ref.filename };
-                } catch (e) {
-                    console.warn('share blob fetch failed', key, e);
-                    failed.push({ kind: 'image', key, path: ref.path, error: e });
-                }
-            }
-            for (const [key, ref] of Object.entries(sp.msiSeries || {})) {
-                try {
-                    const blob = await fetchBlob(ref.path);
-                    const blobId = uid('blob');
-                    await ProjectStorage.putBlob({ id: blobId, blob, mime: ref.mime || blob.type, filename: ref.filename || ref.path.split('/').pop() });
-                    sec.msiSeries[key] = Object.assign({}, ref, { blobId });
-                    if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
-                        sec.msiFiles[ref.sourceFileId] = { id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, blobId };
-                    }
-                } catch (e) {
-                    console.warn('share msi fetch failed', key, e);
-                    failed.push({ kind: 'msi', key, path: ref.path, error: e });
-                }
-            }
+            for (const [key, ref] of Object.entries(sp.images || {}))    dlTasks.push({ kind: 'image', sec, key, ref });
+            for (const [key, ref] of Object.entries(sp.msiSeries || {})) dlTasks.push({ kind: 'msi', sec, key, ref });
         }
+        const runDlTask = async ({ kind, sec, key, ref }) => {
+            try {
+                const { id, mime } = await ensureBlob(ref);
+                if (kind === 'image') {
+                    sec.images[key] = { blobId: id, mime, filename: ref.filename };
+                } else {
+                    sec.msiSeries[key] = Object.assign({}, ref, { blobId: id });
+                    if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
+                        sec.msiFiles[ref.sourceFileId] = { id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, blobId: id };
+                    }
+                }
+            } catch (e) {
+                console.warn('share ' + kind + ' fetch failed', key, e);
+                failed.push({ kind, key, path: ref.path, error: e });
+            }
+        };
+        // Bounded-concurrency pool: keep up to 6 downloads in flight.
+        let dlIdx = 0;
+        await Promise.all(Array.from({ length: Math.min(6, dlTasks.length) }, async () => {
+            while (dlIdx < dlTasks.length) await runDlTask(dlTasks[dlIdx++]);
+        }));
         if (failed.length) {
             const summary = failed.length + ' 件のレイヤーをダウンロードできませんでした (' +
                 failed.slice(0, 3).map(f => f.kind + ':' + f.key).join(', ') +
@@ -11587,12 +11633,24 @@ const App = {
         grid.innerHTML = '';
         this.panels.forEach(p => p.destroy());
         this.panels.clear();
-        for (const sec of this.project.sections) {
+        // Create panels in order (preserves left-to-right DOM order), then load
+        // their layers with bounded concurrency so a later section no longer
+        // waits for an earlier one to finish decoding — without spiking memory
+        // when a project has many sections. Each panel paints as its layers ready.
+        const panelsToLoad = this.project.sections.map((sec) => {
             const panel = new SectionPanel(sec, this.project);
             this.panels.set(sec.id, panel);
             grid.appendChild(panel.root);
-            await panel.loadAllLayers();
-        }
+            return panel;
+        });
+        let liIdx = 0;
+        await Promise.all(Array.from({ length: Math.min(4, panelsToLoad.length) }, async () => {
+            while (liIdx < panelsToLoad.length) {
+                const p = panelsToLoad[liIdx++];
+                try { await p.loadAllLayers(); }
+                catch (e) { console.warn('loadAllLayers failed', p.section && p.section.id, e); }
+            }
+        }));
         document.getElementById('section-count').textContent = this.project.sections.length + ' sections';
         document.getElementById('sections-empty').classList.toggle('hidden', this.project.sections.length > 0);
         // The shared splitter is a child of #sections-grid; it gets wiped by
@@ -12462,6 +12520,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r46</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r47</div>
 </body>
 </html>
