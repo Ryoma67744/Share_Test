@@ -7153,108 +7153,377 @@ function sanitizeCompoundName(label) {
 // =============================================================
 // ZIP Import / Export
 // =============================================================
-async function exportProjectAsZip() {
-    try { await loadScript(LAZY_LIBS.jszip); } catch (e) { alert('JSZip の読み込みに失敗しました'); return; }
-    if (typeof JSZip === 'undefined') { alert('JSZip not loaded'); return; }
-    const project = App.project;
-    if (!project) return;
-    const zip = new JSZip();
-    const safeName = (project.displayName || 'project').replace(/[^A-Za-z0-9_\-]/g, '_');
+// ---- v2 export helpers (HE_IF/ + Data/ restructure) -------------------------
+// Project/sample filename sanitizer (shared; mirrors the old inline rule).
+function safeName(s) {
+    return String(s == null ? '' : s).replace(/[^A-Za-z0-9_\-]/g, '_') || 'X';
+}
 
-    const projDoc = {
-        format: 'desi_data_share_v1',
-        id: project.id,
-        displayName: project.displayName,
-        anatomyPalette: project.anatomyPalette || DEFAULT_ANATOMY_PALETTE,
-        sectionOrder: (project.sections || []).map(s => s.id),
-        rois: (project.rois || []).map(r => ({
-            id: r.id, colorKey: r.colorKey, name: r.name, rgba: r.rgba, polysBySection: r.polysBySection,
-        })),
-        roiHidden: project.roiHidden || {},
-        memo: ensureMemoShape(project.memo),
-    };
-    // Root JSON name follows the project's display name so the ZIP is
-    // self-identifying (the importer scans the ZIP root for a *.json with
-    // format=desi_data_share_v1 rather than expecting a fixed filename).
-    zip.file(safeName + '.json', JSON.stringify(projDoc, null, 2));
+// Cooperative yield so the heavy export loop never blocks the main thread long
+// enough to freeze the tab (the failure mode of the reverted combined-Excel).
+const _yieldUi = () => new Promise(r => setTimeout(r, 0));
 
-    for (const sec of (project.sections || [])) {
-        const dir = 'sections/' + sec.id + '/';
-        const atlas = {
-            id: sec.id,
-            ordinal: sec.ordinal,
-            displayName: sec.displayName,
-            meta: sec.meta || {},
-            images: {},
-            msiSeries: {},
-            msiFiles: sec.msiFiles ? JSON.parse(JSON.stringify(sec.msiFiles)) : {},
-        };
-        // image blobs
-        for (const [layerKey, ent] of Object.entries(sec.images || {})) {
-            const rec = await ProjectStorage.getBlob(ent.blobId);
-            if (!rec) continue;
-            const fname = ent.filename || (layerKey + '.tif');
-            const path = dir + 'data/img_' + layerKey + '__' + fname;
-            zip.file(path, rec.blob);
-            atlas.images[layerKey] = { mime: ent.mime, filename: fname, path: 'data/img_' + layerKey + '__' + fname };
-        }
-        // MSI blobs — group by sourceFileId (or blobId fallback) so the same
-        // source file is written exactly once even when many compounds share
-        // it. ROI columns are appended once per source.
-        const msiGroups = new Map();
-        for (const [layerKey, ent] of Object.entries(sec.msiSeries || {})) {
-            const groupKey = ent.sourceFileId || ent.blobId;
-            if (!groupKey) continue;
-            if (!msiGroups.has(groupKey)) {
-                msiGroups.set(groupKey, { entRepr: ent, blobId: ent.blobId, layerKeys: [] });
+function _loadImageFromUrl(url) {
+    return new Promise((res, rej) => {
+        const im = new Image();
+        im.onload = () => res(im);
+        im.onerror = () => rej(new Error('image load failed'));
+        im.src = url;
+    });
+}
+
+// Decoded HE/IF <img> for a section layer, decoding on demand (TIFF-aware) for
+// sections whose image was never rendered into a panel.
+async function _ensureHeImage(panel, sec, layerKey) {
+    let img = panel && panel.imageSources && panel.imageSources[layerKey];
+    if (img && img.complete && img.naturalWidth) return img;
+    const ent = (sec.images || {})[layerKey];
+    if (!ent || !ent.blobId) return null;
+    const rec = await ProjectStorage.getBlob(ent.blobId);
+    if (!rec) return null;
+    const url = await decodeImageBlobToDataUrl(rec.blob, ent.mime);
+    return await _loadImageFromUrl(url);
+}
+
+// Bake the HE/IF image into MSI-raster space using the alignment transform T
+// ONLY (no display rotate/flip) — the same step rebakeHeThumb uses, so the PNG
+// overlays the MSI raster (and the Data CSV's x/y) 1:1. Returns {blob,w,h} or
+// null when there is no alignment transform or no MSI reference frame.
+async function bakeAlignedHeToMsiPng(panel, sec, layerKey) {
+    if (!panel) return null;
+    const T = panel._resolveTHeToMsi && panel._resolveTHeToMsi();
+    if (!T) return null;
+    const ref = panel.getMsiRefSize && panel.getMsiRefSize();
+    if (!ref || !(ref.w > 0) || !(ref.h > 0)) return null;
+    const heImg = await _ensureHeImage(panel, sec, layerKey);
+    if (!heImg) return null;
+    const w = Math.max(1, Math.round(ref.w));
+    const h = Math.max(1, Math.round(ref.h));
+    const canvas = document.createElement('canvas');
+    canvas.width = w; canvas.height = h;
+    const ctx = get2dContext(canvas);
+    ctx.transform(T[0][0], T[1][0], T[0][1], T[1][1], T[0][2], T[1][2]);
+    ctx.drawImage(heImg, 0, 0);
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+    return blob ? { blob, w, h } : null;
+}
+
+// Parse one MSI source blob ONCE → { positions:[{x,y}], cols:[{layerKey,values[]}] }
+// index-aligned (one entry per data row with finite x & y; missing v = NaN).
+// Handles xlsx (col_x/col_y/col_v), Analyte txt (value col = 3+compound_index)
+// and generic TSV/CSV (header lookup), mirroring buildPngFrom*ArrayBuffer.
+function extractSourceMatrixForExport(buf, repr, compoundEntries) {
+    if (repr.kind === 'txt') {
+        const raw = new TextDecoder('utf-8').decode(buf);
+        const linesAll = raw.split(/\r?\n/);
+        const isAnalyte = /Analyte\s*\(converted from imzML\)/i.test(linesAll[0] || '')
+            || repr.kind === 'txt-analyte'
+            || compoundEntries.some(c => Number.isFinite(c.ent.compound_index) || Number.isFinite(c.ent.v_index));
+        const positions = [];
+        const cols = compoundEntries.map(c => ({ layerKey: c.layerKey, values: [] }));
+        if (isAnalyte) {
+            const dataStart = Number.isFinite(repr.dataStartLine) ? repr.dataStartLine : 4;
+            const valCols = compoundEntries.map(c => 3 + (Number.isFinite(c.ent.compound_index)
+                ? c.ent.compound_index : (Number.isFinite(c.ent.v_index) ? c.ent.v_index : 0)));
+            for (let i = dataStart; i < linesAll.length; i++) {
+                const line = linesAll[i];
+                if (!line || !line.trim()) continue;
+                const tok = line.split('\t');
+                if (tok.length < 4) continue;
+                const x = Number(tok[1]), y = Number(tok[2]);
+                if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                positions.push({ x, y });
+                for (let c = 0; c < valCols.length; c++) {
+                    const vc = valCols[c]; const v = vc < tok.length ? Number(tok[vc]) : NaN;
+                    cols[c].values.push(Number.isFinite(v) ? v : NaN);
+                }
             }
-            msiGroups.get(groupKey).layerKeys.push(layerKey);
-        }
-        const groupPath = new Map();
-        const usedPaths = new Set();
-        for (const [groupKey, group] of msiGroups) {
-            const ent = group.entRepr;
-            const rec = await ProjectStorage.getBlob(group.blobId);
-            if (!rec) continue;
-            const baseName = ent.filename || (groupKey + (ent.kind === 'txt' ? '.txt' : '.xlsx'));
-            let relPath = 'data/msi__' + baseName;
-            if (usedPaths.has(relPath)) {
-                const dot = baseName.lastIndexOf('.');
-                const stem = dot >= 0 ? baseName.slice(0, dot) : baseName;
-                const ext  = dot >= 0 ? baseName.slice(dot) : '';
-                relPath = 'data/msi__' + stem + '__' + groupKey + ext;
+        } else {
+            const lines = linesAll.filter(s => s.trim().length > 0);
+            if (!lines.length) return null;
+            const rawHeader = lines[0];
+            const sep = rawHeader.includes('\t') ? '\t' : (rawHeader.includes(',') ? ',' : 'ws');
+            const splitBy = (s) => sep === 'ws' ? s.trim().split(/\s+/) : s.split(sep);
+            const header = splitBy(rawHeader).map(s => s.trim());
+            const xi = repr.x ? header.indexOf(repr.x) : header.indexOf('x');
+            const yi = repr.y ? header.indexOf(repr.y) : header.indexOf('y');
+            if (xi < 0 || yi < 0) return null;
+            const viList = compoundEntries.map(c => c.ent.v ? header.indexOf(c.ent.v) : (header.length > 2 ? 2 : -1));
+            for (let i = 1; i < lines.length; i++) {
+                const cc = splitBy(lines[i]);
+                if (cc.length < header.length) continue;
+                const x = Number(cc[xi]), y = Number(cc[yi]);
+                if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                positions.push({ x, y });
+                for (let j = 0; j < viList.length; j++) {
+                    const vi = viList[j]; const v = vi >= 0 ? Number(cc[vi]) : NaN;
+                    cols[j].values.push(Number.isFinite(v) ? v : NaN);
+                }
             }
-            usedPaths.add(relPath);
-            groupPath.set(groupKey, relPath);
-            let augmented = null;
-            if (ent.kind === 'xlsx') {
-                augmented = await tryAppendUserRoiColumns(rec.blob, sec, ent, project);
-            } else if (ent.kind === 'txt') {
-                augmented = await tryAppendUserRoiColumnsToTxt(rec.blob, sec, ent, project);
+        }
+        return { positions, cols };
+    }
+    // xlsx
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    const sheet = wb.Sheets[repr.sheet || wb.SheetNames[0]];
+    if (!sheet) return null;
+    const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
+    const startIdx = Math.max(0, (repr.data_start_row || 1) - 1);
+    const xi = a1ColToIndex(repr.col_x), yi = a1ColToIndex(repr.col_y);
+    if (!Number.isFinite(xi) || !Number.isFinite(yi)) return null;
+    const viList = compoundEntries.map(c => a1ColToIndex(c.ent.col_v));
+    const positions = [];
+    const cols = compoundEntries.map(c => ({ layerKey: c.layerKey, values: [] }));
+    for (let i = startIdx; i < aoa.length; i++) {
+        const r = aoa[i]; if (!r) continue;
+        const x = Number(r[xi]), y = Number(r[yi]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        positions.push({ x, y });
+        for (let c = 0; c < viList.length; c++) {
+            const v = Number(r[viList[c]]);
+            cols[c].values.push(Number.isFinite(v) ? v : NaN);
+        }
+    }
+    return { positions, cols };
+}
+
+// Merge same-row-count sources of one sample into a single CSV table
+// (x, y, <compound...>, ROI). Rows align by (x,y) value, else by sorted index.
+// Headers are comma/quote-free so the generic-CSV re-import path round-trips.
+function buildOneCsvTable(group, roiPairs, project) {
+    const ref = group[0].matrix;
+    const order = ref.positions.map((p, i) => i).sort((a, b) => {
+        const pa = ref.positions[a], pb = ref.positions[b];
+        return (pa.y - pb.y) || (pa.x - pb.x);
+    });
+    const refPositions = order.map(i => ref.positions[i]);
+    const N = refPositions.length;
+
+    const headers = ['x', 'y'];
+    const columnArrays = [];
+    const compounds = [];
+    const usedHeaders = new Map();
+
+    for (const member of group) {
+        const m = member.matrix;
+        const keyToIdx = new Map(); let dup = false;
+        for (let i = 0; i < m.positions.length; i++) {
+            const p = m.positions[i]; const key = p.x + ' ' + p.y;
+            if (keyToIdx.has(key)) dup = true; else keyToIdx.set(key, i);
+        }
+        let useKey = !dup && m.positions.length > 0;
+        if (useKey) { for (const p of refPositions) { if (!keyToIdx.has(p.x + ' ' + p.y)) { useKey = false; break; } } }
+        let srcOrder = null;
+        if (!useKey) {
+            srcOrder = m.positions.map((p, i) => i).sort((a, b) => {
+                const pa = m.positions[a], pb = m.positions[b];
+                return (pa.y - pb.y) || (pa.x - pb.x);
+            });
+        }
+        for (let ci = 0; ci < m.cols.length; ci++) {
+            const col = m.cols[ci];
+            const ent = member.entries[ci].ent;
+            const layerKey = col.layerKey;
+            const meta = (ent && ent.compoundMeta) || findCompoundMeta(project, layerKey) || {};
+            let header = sanitizeCompoundName(meta.name || meta.base || formatDisplayName(layerKey) || layerKey).replace(/[",]/g, '_');
+            if (usedHeaders.has(header)) { const n = usedHeaders.get(header) + 1; usedHeaders.set(header, n); header = header + '__' + n; }
+            else usedHeaders.set(header, 1);
+            const arr = new Array(N).fill('');
+            if (useKey) {
+                for (let r = 0; r < N; r++) {
+                    const si = keyToIdx.get(refPositions[r].x + ' ' + refPositions[r].y);
+                    if (si != null) { const v = col.values[si]; if (Number.isFinite(v)) arr[r] = v; }
+                }
+            } else {
+                for (let r = 0; r < N && r < srcOrder.length; r++) { const v = col.values[srcOrder[r]]; if (Number.isFinite(v)) arr[r] = v; }
             }
-            zip.file(dir + relPath, augmented || rec.blob);
+            headers.push(header);
+            columnArrays.push(arr);
+            compounds.push({ layerKey, vHeader: header, sourceFileId: ent.sourceFileId || null, kind: ent.kind || 'xlsx', compoundMeta: ent.compoundMeta || meta || null });
         }
-        for (const [layerKey, ent] of Object.entries(sec.msiSeries || {})) {
-            const groupKey = ent.sourceFileId || ent.blobId;
-            const def = Object.assign({}, ent);
-            delete def.blobId;
-            def.path = groupPath.get(groupKey) || null;
-            atlas.msiSeries[layerKey] = def;
-        }
-        // msiFiles: strip blobIds and stamp the shared path so import can
-        // reattach the right blob even though multiple compounds share it.
-        for (const fid of Object.keys(atlas.msiFiles)) {
-            const rec = atlas.msiFiles[fid] || {};
-            delete rec.blobId;
-            rec.path = groupPath.get(fid) || null;
-        }
-        zip.file(dir + 'atlas.json', JSON.stringify(atlas, null, 2));
     }
 
-    const blob = await zip.generateAsync({ type: 'blob' });
-    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    downloadAsFile(blob, safeName + '_' + ts + '.zip');
-    showToast('Export ready');
+    const roiArr = new Array(N).fill('');
+    if (roiPairs.length) {
+        const { xIndex, yIndex } = buildPixelGridFromRows(refPositions);
+        for (let r = 0; r < N; r++) {
+            const px = xIndex.get(refPositions[r].x), py = yIndex.get(refPositions[r].y);
+            if (px == null || py == null) continue;
+            for (const pair of roiPairs) { if (pointInPolygon(px, py, pair.poly)) { roiArr[r] = pair.name; break; } }
+        }
+    }
+    headers.push('ROI');
+
+    const lines = [headers.map(h => csvEscape(String(h))).join(',')];
+    for (let r = 0; r < N; r++) {
+        const cells = [String(refPositions[r].x), String(refPositions[r].y)];
+        for (const arr of columnArrays) { const v = arr[r]; cells.push(v === '' ? '' : String(v)); }
+        cells.push(csvEscape(roiArr[r]));
+        lines.push(cells.join(','));
+    }
+    return { csvText: lines.join('\r\n') + '\r\n', rowCount: N, compounds };
+}
+
+// Build the per-sample combined CSV group(s) for a section (one per pixel-grid;
+// usually a single group). Parses each source once; memory stays bounded to one
+// sample. Returns [{ csvText, rowCount, compounds:[...] }].
+async function buildSampleCsvGroups(sec, project) {
+    const series = sec.msiSeries || {};
+    const layerKeys = sortMethodKeys(
+        Object.keys(series).filter(k => /^MSI_/i.test(k)),
+        k => series[k],
+        (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(project, k),
+        null, null
+    );
+    if (!layerKeys.length) return [];
+
+    const bySource = new Map();
+    for (const k of layerKeys) {
+        const ent = series[k]; if (!ent) continue;
+        const srcKey = ent.sourceFileId || ent.blobId;
+        if (srcKey == null) continue;
+        if (!bySource.has(srcKey)) bySource.set(srcKey, { repr: ent, blobId: ent.blobId, entries: [] });
+        bySource.get(srcKey).entries.push({ layerKey: k, ent });
+    }
+
+    const parsed = [];
+    for (const grp of bySource.values()) {
+        const rec = await ProjectStorage.getBlob(grp.blobId);
+        if (!rec) continue;
+        let m = null;
+        try { m = extractSourceMatrixForExport(await rec.blob.arrayBuffer(), grp.repr, grp.entries); }
+        catch (e) { console.warn('[buildSampleCsvGroups] source parse failed:', e); }
+        if (m && m.positions.length) parsed.push({ matrix: m, entries: grp.entries });
+        await _yieldUi();
+    }
+    if (!parsed.length) return [];
+
+    const byCount = new Map();
+    for (const p of parsed) {
+        const c = p.matrix.positions.length;
+        if (!byCount.has(c)) byCount.set(c, []);
+        byCount.get(c).push(p);
+    }
+    const rois = (project.rois || []).filter(r => r.polysBySection && r.polysBySection[sec.id]);
+    const roiPairs = rois.map(r => ({ name: String(r.name || r.colorKey || ''), poly: r.polysBySection[sec.id] }));
+
+    const groups = [...byCount.values()].sort((a, b) => b[0].matrix.positions.length - a[0].matrix.positions.length);
+    return groups.map(g => buildOneCsvTable(g, roiPairs, project));
+}
+
+let _exportInProgress = false;
+async function exportProjectAsZip() {
+    if (_exportInProgress) { showToast('Export already running'); return; }
+    _exportInProgress = true;
+    let progress = null;
+    try {
+        try { await loadScript(LAZY_LIBS.jszip); } catch (e) { alert('JSZip の読み込みに失敗しました'); return; }
+        if (typeof JSZip === 'undefined') { alert('JSZip not loaded'); return; }
+        const project = App.project;
+        if (!project) return;
+        const zip = new JSZip();
+        const projSafe = safeName(project.displayName || 'project');
+
+        // Pre-pass: unique sample (section) name + a progress-unit estimate.
+        const sampleNameById = new Map();
+        const usedSampleNames = new Set();
+        let unitTotal = 0;
+        for (const sec of (project.sections || [])) {
+            let base = safeName(sec.displayName || ('Section_' + (sec.ordinal || '')));
+            let uniq = base, k = 2;
+            while (usedSampleNames.has(uniq)) uniq = base + '__' + (k++);
+            usedSampleNames.add(uniq);
+            sampleNameById.set(sec.id, uniq);
+            const nImg = Object.keys(sec.images || {}).length;
+            unitTotal += nImg * 2 + 1; // full + aligned per image, + 1 for the data CSV
+        }
+        progress = openPublishProgressModal(Math.max(1, unitTotal), {
+            title: 'Export ZIP を作成中…',
+            subtitle: '大きなプロジェクトでは時間がかかることがあります。タブは閉じないでください。',
+            unit: 'items',
+        });
+        let done = 0;
+        const tick = () => { if (progress) progress.update(Math.min(++done, unitTotal), unitTotal); };
+
+        const manifest = {
+            format: 'desi_data_share_v2',
+            id: project.id,
+            displayName: project.displayName,
+            anatomyPalette: project.anatomyPalette || DEFAULT_ANATOMY_PALETTE,
+            sectionOrder: (project.sections || []).map(s => s.id),
+            rois: (project.rois || []).map(r => ({
+                id: r.id, colorKey: r.colorKey, name: r.name, rgba: r.rgba, polysBySection: r.polysBySection,
+            })),
+            roiHidden: project.roiHidden || {},
+            memo: ensureMemoShape(project.memo),
+            sections: [],
+        };
+
+        for (const sec of (project.sections || [])) {
+            const S = sampleNameById.get(sec.id);
+            const panel = App.panels && App.panels.get(sec.id);
+            const secEntry = {
+                id: sec.id, ordinal: sec.ordinal, displayName: sec.displayName,
+                meta: sec.meta || {}, images: {}, data: [], msiFilesMeta: {},
+            };
+
+            // HE/IF: full original (+ MSI-aligned PNG when a transform exists).
+            for (const [layerKey, ent] of Object.entries(sec.images || {})) {
+                const rec = await ProjectStorage.getBlob(ent.blobId);
+                if (!rec) { tick(); tick(); continue; }
+                const fname = ent.filename || (layerKey + '.tif');
+                const fullPath = 'HE_IF/' + S + '__' + layerKey + '__full__' + fname;
+                zip.file(fullPath, rec.blob);
+                const imgRec = { mime: ent.mime, filename: fname, fullPath };
+                tick(); await _yieldUi();
+                try {
+                    const baked = await bakeAlignedHeToMsiPng(panel, sec, layerKey);
+                    if (baked && baked.blob) {
+                        const alignedPath = 'HE_IF/' + S + '__' + layerKey + '__aligned.png';
+                        zip.file(alignedPath, baked.blob);
+                        imgRec.alignedPath = alignedPath;
+                        imgRec.alignedFrame = { w: baked.w, h: baked.h };
+                    }
+                } catch (e) { console.warn('[export] aligned bake failed', sec.id, layerKey, e); }
+                secEntry.images[layerKey] = imgRec;
+                tick(); await _yieldUi();
+            }
+
+            // msiFiles metadata (no blobs; import re-derives blobId from the CSV).
+            for (const [fid, frec] of Object.entries(sec.msiFiles || {})) {
+                secEntry.msiFilesMeta[fid] = { kind: frec.kind, filename: frec.filename, registeredAt: frec.registeredAt };
+            }
+
+            // Data/: per-sample combined CSV(s).
+            try {
+                const groups = await buildSampleCsvGroups(sec, project);
+                groups.forEach((g, idx) => {
+                    const suffix = idx > 0 ? ('__' + (idx + 1)) : '';
+                    const path = 'Data/' + S + suffix + '.csv';
+                    zip.file(path, g.csvText);
+                    secEntry.data.push({
+                        path, sep: ',', xHeader: 'x', yHeader: 'y', roiHeader: 'ROI',
+                        rowCount: g.rowCount, compounds: g.compounds,
+                    });
+                });
+            } catch (e) { console.warn('[export] sample CSV failed', sec.id, e); }
+            tick(); await _yieldUi();
+
+            manifest.sections.push(secEntry);
+        }
+
+        zip.file(projSafe + '.json', JSON.stringify(manifest, null, 2));
+        const blob = await zip.generateAsync({ type: 'blob' });
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        downloadAsFile(blob, projSafe + '_' + ts + '.zip');
+        showToast('Export ready');
+    } catch (e) {
+        console.error('[exportProjectAsZip] failed', e);
+        alert('Export に失敗しました: ' + (e && e.message ? e.message : e));
+    } finally {
+        if (progress) { try { progress.close(); } catch (_) {} }
+        _exportInProgress = false;
+    }
 }
 
 async function tryAppendUserRoiColumns(srcBlob, section, msiEnt, project) {
@@ -7581,13 +7850,17 @@ async function runWithConcurrency(items, limit, worker) {
 
 // Modal showing publish-time upload progress. Returns { update, close }
 // the caller drives. Stays sticky on top until close() is invoked.
-function openPublishProgressModal(totalCount) {
+function openPublishProgressModal(totalCount, opts) {
+    const o = opts || {};
+    const _title = o.title || 'Supabase へアップロード中…';
+    const _subtitle = o.subtitle || '大きなプロジェクトでは数分かかることがあります。タブは閉じないでください。';
+    const _unit = o.unit || 'files';
     const html = `
-        <h2>Supabase へアップロード中…</h2>
-        <p style="font-size:12px;color:#475569;">大きなプロジェクトでは数分かかることがあります。タブは閉じないでください。</p>
+        <h2>${_title}</h2>
+        <p style="font-size:12px;color:#475569;">${_subtitle}</p>
         <div style="margin-top:8px;">
           <div data-pct style="font-size:13px;font-weight:600;color:#0f172a;">0%</div>
-          <div data-stats style="font-size:11px;color:#64748b;margin-top:2px;">0 / ${totalCount} files</div>
+          <div data-stats style="font-size:11px;color:#64748b;margin-top:2px;">0 / ${totalCount} ${_unit}</div>
           <div style="margin-top:6px;height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;">
             <div data-bar style="height:100%;width:0%;background:#2563eb;transition:width 0.2s;"></div>
           </div>
@@ -7606,7 +7879,7 @@ function openPublishProgressModal(totalCount) {
             if (pctEl) pctEl.textContent = pct + '%';
             if (bar) bar.style.width = pct + '%';
             if (statsEl) {
-                let s = `${done} / ${total} files`;
+                let s = `${done} / ${total} ${_unit}`;
                 if (typeof doneBytes === 'number' && totalBytes > 0) {
                     s += ` ・ ${fmtMB(doneBytes)} / ${fmtMB(totalBytes)}`;
                 }
@@ -9793,14 +10066,14 @@ async function importZipFile(file) {
     for (const p of rootJsonPaths) {
         try {
             const candidate = JSON.parse(await zip.file(p).async('string'));
-            if (candidate && candidate.format === 'desi_data_share_v1') {
+            if (candidate && (candidate.format === 'desi_data_share_v1' || candidate.format === 'desi_data_share_v2')) {
                 projDocPath = p;
                 projDoc = candidate;
                 break;
             }
         } catch (e) {}
     }
-    if (!projDoc) throw new Error('Project JSON (format=desi_data_share_v1) not found in ZIP root');
+    if (!projDoc) throw new Error('Project JSON (format=desi_data_share_v1/v2) not found in ZIP root');
 
     // Detect old-style ZIPs (project.json + per-layer msi_<layerKey>__ paths)
     // and refuse with a clear message — the new format uses msi__<filename>.
@@ -9831,70 +10104,139 @@ async function importZipFile(file) {
         createdAt: nowIso(),
     };
 
-    const sectionDirs = Object.keys(zip.files).filter(p => /^sections\/[^/]+\/atlas\.json$/.test(p));
     const sectionsBySrcId = {};
-    for (const ap of sectionDirs) {
-        const atlas = JSON.parse(await zip.file(ap).async('string'));
-        const newSec = {
-            id: uid('sec'),
-            ordinal: atlas.ordinal || (newProject.sections.length + 1),
-            displayName: atlas.displayName || ('Section ' + (newProject.sections.length + 1)),
-            meta: atlas.meta || {},
-            images: {},
-            msiSeries: {},
-            msiFiles: {},
-        };
-        sectionsBySrcId[atlas.id] = newSec.id;
-        const dir = ap.replace(/atlas\.json$/, '');
-
-        // Path-keyed cache so any number of msiSeries entries (and the
-        // msiFiles parent record) sharing one ZIP file share a single
-        // IndexedDB blob — matching the exporter's source-file dedup.
+    if (projDoc.format === 'desi_data_share_v2') {
+        // ---- v2: flat HE_IF/ + Data/ with inline sections[] in the manifest.
+        // Paths are ROOT-relative, so ensureBlob resolves zip.file(relPath)
+        // directly (one cache shared across the project so each per-sample CSV
+        // blob is stored once and reused by all its compounds).
         const pathToBlobId = new Map();
-        const ensureBlob = async (relPath, mimeHint, fnameHint) => {
+        const ensureBlobRoot = async (relPath, mimeHint, fnameHint) => {
             if (!relPath) return null;
             if (pathToBlobId.has(relPath)) return pathToBlobId.get(relPath);
-            const f = zip.file(dir + relPath);
+            const f = zip.file(relPath);
             if (!f) return null;
             const blob = await f.async('blob');
             const blobId = uid('blob');
             await ProjectStorage.putBlob({
-                id: blobId,
-                blob,
+                id: blobId, blob,
                 mime: mimeHint || guessMimeFromPath(relPath),
                 filename: fnameHint || (relPath.split('/').pop() || ''),
             });
             pathToBlobId.set(relPath, blobId);
             return blobId;
         };
-
-        // image blobs (HE / IF) — usually unique per layerKey, but use
-        // ensureBlob in case a future export shares them too.
-        for (const [layerKey, ent] of Object.entries(atlas.images || {})) {
-            const blobId = await ensureBlob(ent.path, ent.mime || 'image/tiff', ent.filename || layerKey);
-            if (!blobId) continue;
-            newSec.images[layerKey] = { blobId, mime: ent.mime, filename: ent.filename || '' };
+        for (const sEnt of (projDoc.sections || [])) {
+            const newSec = {
+                id: uid('sec'),
+                ordinal: sEnt.ordinal || (newProject.sections.length + 1),
+                displayName: sEnt.displayName || ('Section ' + (newProject.sections.length + 1)),
+                meta: sEnt.meta || {},
+                images: {}, msiSeries: {}, msiFiles: {},
+            };
+            sectionsBySrcId[sEnt.id] = newSec.id;
+            // HE/IF full originals (aligned PNGs are derived artifacts; the app
+            // re-derives the overlay from the full image + meta.world_coords).
+            for (const [layerKey, img] of Object.entries(sEnt.images || {})) {
+                const blobId = await ensureBlobRoot(img.fullPath, img.mime || 'image/tiff', img.filename || layerKey);
+                if (!blobId) continue;
+                newSec.images[layerKey] = { blobId, mime: img.mime, filename: img.filename || '' };
+            }
+            // Per-sample CSV → MSI layers: each compound becomes a generic-CSV
+            // def sharing the one CSV blob, re-read by buildPngFromTxtArrayBuffer.
+            for (const grp of (sEnt.data || [])) {
+                const fname = (grp.path || '').split('/').pop() || 'data.csv';
+                const csvBlobId = await ensureBlobRoot(grp.path, 'text/csv', fname);
+                if (!csvBlobId) continue;
+                for (const cmp of (grp.compounds || [])) {
+                    newSec.msiSeries[cmp.layerKey] = {
+                        kind: 'txt',
+                        blobId: csvBlobId,
+                        x: grp.xHeader || 'x',
+                        y: grp.yHeader || 'y',
+                        v: cmp.vHeader,
+                        filename: fname,
+                        sourceFileId: cmp.sourceFileId || null,
+                        compoundMeta: cmp.compoundMeta || null,
+                    };
+                }
+            }
+            // msiFiles metadata, attaching the CSV blob that carries each fid.
+            for (const [fid, frec] of Object.entries(sEnt.msiFilesMeta || {})) {
+                let blobId = null;
+                for (const grp of (sEnt.data || [])) {
+                    if ((grp.compounds || []).some(c => c.sourceFileId === fid)) { blobId = pathToBlobId.get(grp.path) || null; break; }
+                }
+                newSec.msiFiles[fid] = Object.assign({}, frec, { id: fid }, blobId ? { blobId } : {});
+            }
+            newProject.sections.push(newSec);
         }
+    } else {
+        // ---- v1 (legacy): per-section sections/<id>/atlas.json layout ----
+        const sectionDirs = Object.keys(zip.files).filter(p => /^sections\/[^/]+\/atlas\.json$/.test(p));
+        for (const ap of sectionDirs) {
+            const atlas = JSON.parse(await zip.file(ap).async('string'));
+            const newSec = {
+                id: uid('sec'),
+                ordinal: atlas.ordinal || (newProject.sections.length + 1),
+                displayName: atlas.displayName || ('Section ' + (newProject.sections.length + 1)),
+                meta: atlas.meta || {},
+                images: {},
+                msiSeries: {},
+                msiFiles: {},
+            };
+            sectionsBySrcId[atlas.id] = newSec.id;
+            const dir = ap.replace(/atlas\.json$/, '');
 
-        // MSI series — multiple compounds can point at the same path.
-        for (const [layerKey, ent] of Object.entries(atlas.msiSeries || {})) {
-            const blobId = await ensureBlob(ent.path, null, ent.filename || layerKey);
-            if (!blobId) continue;
-            const def = Object.assign({}, ent, { blobId });
-            delete def.path;
-            newSec.msiSeries[layerKey] = def;
+            // Path-keyed cache so any number of msiSeries entries (and the
+            // msiFiles parent record) sharing one ZIP file share a single
+            // IndexedDB blob — matching the exporter's source-file dedup.
+            const pathToBlobId = new Map();
+            const ensureBlob = async (relPath, mimeHint, fnameHint) => {
+                if (!relPath) return null;
+                if (pathToBlobId.has(relPath)) return pathToBlobId.get(relPath);
+                const f = zip.file(dir + relPath);
+                if (!f) return null;
+                const blob = await f.async('blob');
+                const blobId = uid('blob');
+                await ProjectStorage.putBlob({
+                    id: blobId,
+                    blob,
+                    mime: mimeHint || guessMimeFromPath(relPath),
+                    filename: fnameHint || (relPath.split('/').pop() || ''),
+                });
+                pathToBlobId.set(relPath, blobId);
+                return blobId;
+            };
+
+            // image blobs (HE / IF) — usually unique per layerKey, but use
+            // ensureBlob in case a future export shares them too.
+            for (const [layerKey, ent] of Object.entries(atlas.images || {})) {
+                const blobId = await ensureBlob(ent.path, ent.mime || 'image/tiff', ent.filename || layerKey);
+                if (!blobId) continue;
+                newSec.images[layerKey] = { blobId, mime: ent.mime, filename: ent.filename || '' };
+            }
+
+            // MSI series — multiple compounds can point at the same path.
+            for (const [layerKey, ent] of Object.entries(atlas.msiSeries || {})) {
+                const blobId = await ensureBlob(ent.path, null, ent.filename || layerKey);
+                if (!blobId) continue;
+                const def = Object.assign({}, ent, { blobId });
+                delete def.path;
+                newSec.msiSeries[layerKey] = def;
+            }
+
+            // msiFiles — restore the file-level blobId via its own path entry.
+            for (const [fid, frec] of Object.entries(atlas.msiFiles || {})) {
+                const blobId = await ensureBlob(frec.path, frec.mime, frec.filename);
+                const newRec = Object.assign({}, frec, { id: fid });
+                delete newRec.path;
+                if (blobId) newRec.blobId = blobId;
+                newSec.msiFiles[fid] = newRec;
+            }
+
+            newProject.sections.push(newSec);
         }
-
-        // msiFiles — restore the file-level blobId via its own path entry.
-        for (const [fid, frec] of Object.entries(atlas.msiFiles || {})) {
-            const blobId = await ensureBlob(frec.path, frec.mime, frec.filename);
-            const newRec = Object.assign({}, frec, { id: fid });
-            delete newRec.path;
-            if (blobId) newRec.blobId = blobId;
-            newSec.msiFiles[fid] = newRec;
-        }
-
-        newProject.sections.push(newSec);
     }
     if (Array.isArray(projDoc.sectionOrder)) {
         const order = projDoc.sectionOrder.map(srcId => sectionsBySrcId[srcId]).filter(Boolean);
@@ -12672,6 +13014,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-13-r57</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-13-r58</div>
 </body>
 </html>
