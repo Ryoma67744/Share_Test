@@ -7151,6 +7151,263 @@ function sanitizeCompoundName(label) {
 }
 
 // =============================================================
+// Combined per-sample table (one section = one sample = one sheet)
+// =============================================================
+// Header label for a compound column in the combined sample table. Uses the
+// human compound name (base) the Method table shows, falling back to the
+// layerKey-derived name. Polarity is part of base names (e.g. "DHA-NEG") so
+// POS/NEG stay distinguishable as separate columns.
+function msiCompoundHeader(ent, key, project) {
+    const meta = (ent && ent.compoundMeta) || findCompoundMeta(project, key) || {};
+    return String(meta.base || meta.name || formatDisplayName(key) || key);
+}
+
+// Parse one xlsx MSI source ONCE and pull x, y, plus every compound column
+// that lives in it. Returns { positions:[{x,y}], cols:[{key,header,values}] }
+// with positions[] and every values[] index-aligned (one entry per data row
+// with finite x & y; missing intensities are NaN). Mirrors
+// buildPngFromXlsxArrayBuffer's column resolution but for many value columns.
+function extractXlsxSourceMatrix(buf, grp, series, project) {
+    const repr = grp.repr;
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    const sheet = wb.Sheets[repr.sheet || wb.SheetNames[0]];
+    if (!sheet) return null;
+    const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
+    const startIdx = Math.max(0, (repr.data_start_row || 1) - 1);
+    const xi = a1ColToIndex(repr.col_x), yi = a1ColToIndex(repr.col_y);
+    if (!Number.isFinite(xi) || !Number.isFinite(yi)) return null;
+    const colDefs = grp.keys.map(k => ({
+        key: k, header: msiCompoundHeader(series[k], k, project), vi: a1ColToIndex(series[k].col_v),
+    }));
+    const positions = [];
+    const cols = colDefs.map(cd => ({ key: cd.key, header: cd.header, values: [] }));
+    for (let i = startIdx; i < aoa.length; i++) {
+        const r = aoa[i]; if (!r) continue;
+        const x = Number(r[xi]), y = Number(r[yi]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        positions.push({ x, y });
+        for (let c = 0; c < colDefs.length; c++) {
+            const v = Number(r[colDefs[c].vi]);
+            cols[c].values.push(Number.isFinite(v) ? v : NaN);
+        }
+    }
+    return { positions, cols };
+}
+
+// TXT companion of extractXlsxSourceMatrix. Handles Analyte dumps (x = tok[1],
+// y = tok[2], value col = 3 + compound_index) and Generic TSV/CSV (Image_X /
+// Image_Y header lookup, per-compound value header). Same return shape.
+function extractTxtSourceMatrix(buf, grp, series, project) {
+    const raw = new TextDecoder('utf-8').decode(buf);
+    const linesAll = raw.split(/\r?\n/);
+    if (!linesAll.length) return null;
+    const repr = grp.repr;
+    const colDefs = grp.keys.map(k => ({ key: k, header: msiCompoundHeader(series[k], k, project), ent: series[k] }));
+    const isAnalyte = /Analyte\s*\(converted from imzML\)/i.test(linesAll[0] || '')
+        || repr.kind === 'txt-analyte'
+        || colDefs.some(cd => Number.isFinite(cd.ent.compound_index) || Number.isFinite(cd.ent.v_index));
+    const positions = [];
+    const cols = colDefs.map(cd => ({ key: cd.key, header: cd.header, values: [] }));
+    if (isAnalyte) {
+        const dataStart = Number.isFinite(repr.dataStartLine) ? repr.dataStartLine : 4;
+        const valCols = colDefs.map(cd => 3 + (Number.isFinite(cd.ent.compound_index)
+            ? cd.ent.compound_index
+            : (Number.isFinite(cd.ent.v_index) ? cd.ent.v_index : 0)));
+        for (let i = dataStart; i < linesAll.length; i++) {
+            const line = linesAll[i];
+            if (!line || !line.trim()) continue;
+            const tok = line.split('\t');
+            if (tok.length < 4) continue;
+            const x = Number(tok[1]), y = Number(tok[2]);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+            positions.push({ x, y });
+            for (let c = 0; c < valCols.length; c++) {
+                const vc = valCols[c];
+                const v = vc < tok.length ? Number(tok[vc]) : NaN;
+                cols[c].values.push(Number.isFinite(v) ? v : NaN);
+            }
+        }
+    } else {
+        const lines = linesAll.filter(s => s.trim().length > 0);
+        if (!lines.length) return null;
+        const rawHeader = lines[0];
+        const sep = rawHeader.includes('\t') ? '\t' : (rawHeader.includes(',') ? ',' : 'ws');
+        const splitBy = (s) => sep === 'ws' ? s.trim().split(/\s+/) : s.split(sep);
+        const header = splitBy(rawHeader).map(s => s.trim());
+        const xi = repr.x ? header.indexOf(repr.x) : header.indexOf('x');
+        const yi = repr.y ? header.indexOf(repr.y) : header.indexOf('y');
+        if (xi < 0 || yi < 0) return null;
+        const viList = colDefs.map(cd => cd.ent.v ? header.indexOf(cd.ent.v) : (header.length > 2 ? 2 : -1));
+        for (let i = 1; i < lines.length; i++) {
+            const c = splitBy(lines[i]);
+            if (c.length < header.length) continue;
+            const x = Number(c[xi]), y = Number(c[yi]);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+            positions.push({ x, y });
+            for (let j = 0; j < viList.length; j++) {
+                const vi = viList[j];
+                const v = vi >= 0 ? Number(c[vi]) : NaN;
+                cols[j].values.push(Number.isFinite(v) ? v : NaN);
+            }
+        }
+    }
+    return { positions, cols };
+}
+
+// Merge sources that share a pixel grid (same row count) into one table:
+// columns = x, y, <one column per compound>, ROI. Rows align by (x,y) value
+// when the reference grid covers a source exactly, else by sorted index
+// (the documented "same pixel count, different coordinate values" fallback).
+// Returns { headers, rows } where rows is an array-of-arrays for aoa_to_sheet.
+function mergeMsiSourceGroup(sources, roiPairs) {
+    const ref = sources[0];
+    // Stable raster scan order (y then x) for the merged table.
+    const refOrder = ref.positions.map((p, i) => i).sort((a, b) => {
+        const pa = ref.positions[a], pb = ref.positions[b];
+        return (pa.y - pb.y) || (pa.x - pb.x);
+    });
+    const refPositions = refOrder.map(i => ref.positions[i]);
+    const N = refPositions.length;
+    const { xIndex, yIndex } = buildPixelGridFromRows(refPositions);
+
+    const headers = ['x', 'y'];
+    const columnArrays = [];
+    for (const src of sources) {
+        // Map (x,y) -> source row index; flag duplicates so we don't trust keys.
+        const keyToIdx = new Map();
+        let dup = false;
+        for (let i = 0; i < src.positions.length; i++) {
+            const p = src.positions[i];
+            const key = p.x + ',' + p.y;
+            if (keyToIdx.has(key)) dup = true; else keyToIdx.set(key, i);
+        }
+        let useKey = !dup && src.positions.length > 0;
+        if (useKey) {
+            for (const p of refPositions) { if (!keyToIdx.has(p.x + ',' + p.y)) { useKey = false; break; } }
+        }
+        let srcOrder = null;
+        if (!useKey) {
+            srcOrder = src.positions.map((p, i) => i).sort((a, b) => {
+                const pa = src.positions[a], pb = src.positions[b];
+                return (pa.y - pb.y) || (pa.x - pb.x);
+            });
+        }
+        for (const col of src.cols) {
+            const arr = new Array(N).fill('');
+            if (useKey) {
+                for (let r = 0; r < N; r++) {
+                    const si = keyToIdx.get(refPositions[r].x + ',' + refPositions[r].y);
+                    if (si != null) { const v = col.values[si]; if (Number.isFinite(v)) arr[r] = v; }
+                }
+            } else {
+                for (let r = 0; r < N && r < srcOrder.length; r++) {
+                    const v = col.values[srcOrder[r]];
+                    if (Number.isFinite(v)) arr[r] = v;
+                }
+            }
+            headers.push(col.header);
+            columnArrays.push(arr);
+        }
+    }
+    // Disambiguate any colliding compound headers (keep x/y/ROI reserved).
+    const seen = new Map();
+    for (let i = 2; i < headers.length; i++) {
+        const h = headers[i] || ('col' + i);
+        if (seen.has(h)) { const n = seen.get(h) + 1; seen.set(h, n); headers[i] = h + '_' + n; }
+        else seen.set(h, 1);
+    }
+
+    const roiArr = new Array(N).fill('');
+    if (roiPairs.length) {
+        for (let r = 0; r < N; r++) {
+            const px = xIndex.get(refPositions[r].x), py = yIndex.get(refPositions[r].y);
+            if (px == null || py == null) continue;
+            for (const pair of roiPairs) { if (pointInPolygon(px, py, pair.poly)) { roiArr[r] = pair.name; break; } }
+        }
+    }
+    headers.push('ROI');
+
+    const rows = new Array(N);
+    for (let r = 0; r < N; r++) {
+        const row = [refPositions[r].x, refPositions[r].y];
+        for (const arr of columnArrays) row.push(arr[r]);
+        row.push(roiArr[r]);
+        rows[r] = row;
+    }
+    return { headers, rows };
+}
+
+// Build the combined per-sample tables for one section. POS/NEG and any other
+// compounds whose source files share a pixel grid (same row count) collapse
+// into a single table; genuinely different grids split into multiple tables.
+// Returns [{ headers, rows }] (usually length 1). Async: reads source blobs.
+async function buildSampleSheets(section, project) {
+    const series = section.msiSeries || {};
+    const layerKeys = sortMethodKeys(
+        Object.keys(series).filter(k => /^MSI_/i.test(k)),
+        k => series[k],
+        (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(project, k),
+        null, null
+    );
+    if (!layerKeys.length) return [];
+
+    // Group compounds by their source file (shared grid + x/y columns).
+    const bySource = new Map();
+    for (const k of layerKeys) {
+        const ent = series[k];
+        if (!ent) continue;
+        const srcKey = ent.sourceFileId || ent.blobId;
+        if (srcKey == null) continue;
+        if (!bySource.has(srcKey)) bySource.set(srcKey, { repr: ent, blobId: ent.blobId, keys: [] });
+        bySource.get(srcKey).keys.push(k);
+    }
+
+    const parsedSources = [];
+    for (const grp of bySource.values()) {
+        const rec = await ProjectStorage.getBlob(grp.blobId);
+        if (!rec) continue;
+        let parsed = null;
+        try {
+            const buf = await rec.blob.arrayBuffer();
+            parsed = (grp.repr.kind === 'txt')
+                ? extractTxtSourceMatrix(buf, grp, series, project)
+                : extractXlsxSourceMatrix(buf, grp, series, project);
+        } catch (e) { console.warn('[buildSampleSheets] source parse failed:', e); }
+        if (parsed && parsed.positions.length) parsedSources.push(parsed);
+    }
+    if (!parsedSources.length) return [];
+
+    // Group by row count — the user's "POS/NEG have identical pixel counts"
+    // invariant. Same count ⇒ one merged table; differing counts ⇒ split.
+    const byCount = new Map();
+    for (const ps of parsedSources) {
+        const c = ps.positions.length;
+        if (!byCount.has(c)) byCount.set(c, []);
+        byCount.get(c).push(ps);
+    }
+
+    const rois = (project.rois || []).filter(r => r.polysBySection && r.polysBySection[section.id]);
+    const roiPairs = rois.map(r => ({ name: String(r.name || r.colorKey || ''), poly: r.polysBySection[section.id] }));
+
+    // Largest grid first so the primary table keeps the bare sample name.
+    const groups = [...byCount.values()].sort((a, b) => b[0].positions.length - a[0].positions.length);
+    return groups.map(g => mergeMsiSourceGroup(g, roiPairs)).filter(Boolean);
+}
+
+// Excel sheet-name constraints: <=31 chars, none of : \ / ? * [ ], unique.
+function makeExcelSheetName(base, used) {
+    let s = String(base || 'Sample').replace(/[:\\\/?*\[\]]/g, '_').slice(0, 31).trim();
+    if (!s) s = 'Sample';
+    let name = s, i = 2;
+    while (used.has(name)) {
+        const suffix = '_' + (i++);
+        name = s.slice(0, 31 - suffix.length) + suffix;
+    }
+    used.add(name);
+    return name;
+}
+
+// =============================================================
 // ZIP Import / Export
 // =============================================================
 async function exportProjectAsZip() {
@@ -7160,6 +7417,13 @@ async function exportProjectAsZip() {
     if (!project) return;
     const zip = new JSZip();
     const safeName = (project.displayName || 'project').replace(/[^A-Za-z0-9_\-]/g, '_');
+
+    // Combined raw-data workbook: one sheet per sample (section). POS/NEG and
+    // other grid-matching compounds collapse into one table per sample. Built
+    // alongside the existing per-source files (kept for now so re-import is
+    // unaffected); the per-source .txt/.xlsx will be retired in a follow-up.
+    const sampleWb = (typeof XLSX !== 'undefined') ? XLSX.utils.book_new() : null;
+    const usedSheetNames = new Set();
 
     const projDoc = {
         format: 'desi_data_share_v1',
@@ -7249,6 +7513,30 @@ async function exportProjectAsZip() {
             rec.path = groupPath.get(fid) || null;
         }
         zip.file(dir + 'atlas.json', JSON.stringify(atlas, null, 2));
+
+        // Combined per-sample table → one (or more, on grid mismatch) sheet(s)
+        // in the project-level workbook. Sheet name = sample (section) name.
+        if (sampleWb) {
+            try {
+                const tables = await buildSampleSheets(sec, project);
+                tables.forEach((tbl, idx) => {
+                    if (!tbl || !tbl.headers || !tbl.rows) return;
+                    const baseName = (sec.displayName || 'Section_' + sec.ordinal) + (idx > 0 ? '_' + (idx + 1) : '');
+                    const sheetName = makeExcelSheetName(baseName, usedSheetNames);
+                    const ws = XLSX.utils.aoa_to_sheet([tbl.headers].concat(tbl.rows));
+                    XLSX.utils.book_append_sheet(sampleWb, ws, sheetName);
+                });
+            } catch (e) { console.warn('[exportProjectAsZip] sample sheet build failed for', sec.id, e); }
+        }
+    }
+
+    // Write the combined workbook once all samples are appended. Skipped when
+    // the project has no MSI data (an empty workbook can't be serialised).
+    if (sampleWb && sampleWb.SheetNames.length) {
+        try {
+            const wbArr = XLSX.write(sampleWb, { bookType: 'xlsx', type: 'array' });
+            zip.file('data/' + safeName + '_msi.xlsx', wbArr);
+        } catch (e) { console.warn('[exportProjectAsZip] combined workbook write failed:', e); }
     }
 
     const blob = await zip.generateAsync({ type: 'blob' });
@@ -12672,6 +12960,6 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
      copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
      the deploy branch. If the rN you see in the browser is older than what
      the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-12-r55</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-13-r56</div>
 </body>
 </html>
