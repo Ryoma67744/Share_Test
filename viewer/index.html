@@ -727,10 +727,10 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                 <button class="tb-btn" id="tb-align-heif" title="HE/IF を MSI と重ね合わせる (manual / landmark)">Align</button>
                 <button class="tb-btn danger" id="tb-del-section" title="Delete the active section">×</button>
                 <span class="tb-divider"></span>
-                <span class="tb-group" title="MSI 強度の表示レンジ (Range) — 同じ MRM の全切片に自動で反映されます">
-                    <input type="number" id="tb-range-min" step="any" placeholder="min" title="Range 下限 (vmin) — 同じ MRM の全切片に反映" aria-label="Range min" disabled>
+                <span class="tb-group" title="MSI 強度の表示レンジ (Range) — 同じ MRM の全切片で min/max(幅)を共通化します">
+                    <input type="number" id="tb-range-min" step="any" placeholder="min" title="Range 下限 (vmin) — 同じ MRM の全切片で min/max を共通化 (同じ幅)" aria-label="Range min" disabled>
                     <span class="tb-sep">—</span>
-                    <input type="number" id="tb-range-max" step="any" placeholder="max" title="Range 上限 (vmax) — 同じ MRM の全切片に反映" aria-label="Range max" disabled>
+                    <input type="number" id="tb-range-max" step="any" placeholder="max" title="Range 上限 (vmax) — 同じ MRM の全切片で min/max を共通化 (同じ幅)" aria-label="Range max" disabled>
                 </span>
                 <span class="tb-group" title="MSI レイヤーの不透明度 (Opacity)">
                     <input type="number" id="tb-opacity" step="1" min="0" max="100" title="MSI Opacity (%)" aria-label="Opacity" disabled>
@@ -738,6 +738,11 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     <button type="button" class="sync-toggle" data-sync="opacity" title="Sync Opacity across sections">🔗</button>
                 </span>
                 <span class="tb-group" title="切片を回転 (Rotation)">
+                    <select id="tb-rot-target" title="回転対象 — 両方 / HE のみ / MSI のみ。HE と MSI が別向きのときは片方だけ回して重ね合わせを揃えます" aria-label="Rotation target" disabled>
+                        <option value="both">両方</option>
+                        <option value="he">HEのみ</option>
+                        <option value="msi">MSIのみ</option>
+                    </select>
                     <input type="number" id="tb-rotation" step="1" min="-180" max="180" value="0" title="Rotation (°)" aria-label="Rotation" disabled>
                     <span class="tb-deg">°</span>
                     <button type="button" id="tb-rot-reset" class="tb-icon" title="Reset translate/rotate/zoom">↻</button>
@@ -2376,6 +2381,16 @@ class SectionPanel {
             if (typeof pd.vmin === 'number') this.imageSettings[key].vmin = pd.vmin;
             if (typeof pd.vmax === 'number') this.imageSettings[key].vmax = pd.vmax;
         }
+        // ② When a section has no persisted Range for an MRM but another
+        // already-loaded section does, adopt that common window (raw units) so
+        // every section starts out with an identical [min,max] → same width.
+        for (const key of Object.keys(this.imageSettings)) {
+            if (!/^MSI_/i.test(key)) continue;
+            const pd = this.section && this.section.meta && this.section.meta.layerDisplay && this.section.meta.layerDisplay[key];
+            if (pd && (typeof pd.vmin === 'number' || typeof pd.vmax === 'number')) continue;
+            const w = App.commonWindowRawForKey && App.commonWindowRawForKey(key, this);
+            if (w) this.applyWindowForKey(key, w.rawMin, w.rawMax);
+        }
     }
 
     // Synthesise a Total Ion Current image from this panel's MSI rasters and
@@ -2673,6 +2688,14 @@ class SectionPanel {
         // site) is the only path that turns interpolation back on.
         ctx.imageSmoothingEnabled = false;
 
+        // ① Per-layer (HE-only / MSI-only) rotation offsets. Applied per layer
+        // in the draw loop below, rotating about the display centre so HE and
+        // MSI imported at different orientations can be aligned independently.
+        const _vt = this._ensureViewerTransform();
+        const rotHE = Number(_vt.rotHE) || 0;
+        const rotMSI = Number(_vt.rotMSI) || 0;
+        const _cx = this.dom.cdisp.width / 2, _cy = this.dom.cdisp.height / 2;
+
         // Molecule-overlay mode (App.setActiveOverlay): draw the registered
         // overlay's member MSI layers as additive single-color gradients.
         const overlay = (typeof App !== 'undefined' && App && App.activeOverlay) || null;
@@ -2849,6 +2872,18 @@ class SectionPanel {
 
             const ref = this.getMsiRefSize();
 
+            // ① Wrap this layer's draw in a centre rotation when HE-only or
+            // MSI-only rotation is set. Composes as (centre-rot ∘ branch
+            // transform), so the existing affine / rotate-90 paths stay valid.
+            const _layerRot = isHeLike ? rotHE : (isMsiLayer ? rotMSI : 0);
+            const _needLayerRot = Number.isFinite(_layerRot) && _layerRot !== 0;
+            if (_needLayerRot) {
+                ctx.save();
+                ctx.translate(_cx, _cy);
+                ctx.rotate(_layerRot * Math.PI / 180);
+                ctx.translate(-_cx, -_cy);
+            }
+
             if (T && isHeLike && hasMsiRef && ref.w > 0 && ref.h > 0) {
                 ctx.save();
                 ctx.translate(0, this.dom.cdisp.height);
@@ -2888,6 +2923,7 @@ class SectionPanel {
                     ctx.restore();
                 }
             }
+            if (_needLayerRot) ctx.restore();   // ① close per-layer rotation wrap
         }
         if (flipped) ctx.restore();
         ctx.globalCompositeOperation = 'source-over';
@@ -3462,7 +3498,12 @@ class SectionPanel {
         if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
         if (App.activeSectionId === this.section.id) renderMethodTable();
         App.queueSave();
-        App.broadcastRangeToSameMrm(key, edge === 'min' ? 'vmin' : 'vmax', parseFloat(rawValue), this);
+        // ② Broadcast the FULL window (both edges) so every section showing
+        // this MRM adopts an identical [min,max] — i.e. the same width — not
+        // just the edge that was edited.
+        const outMin = rawRange ? lumToRaw(settings.vmin, rawRange) : settings.vmin;
+        const outMax = rawRange ? lumToRaw(settings.vmax, rawRange) : settings.vmax;
+        App.broadcastRangeToSameMrm(key, outMin, outMax, this);
         Toolbar.refreshRange();
     }
 
@@ -3514,16 +3555,36 @@ class SectionPanel {
         Toolbar.refreshOpacity();
     }
 
-    getRotation() {
+    // ① Returns the angle for the requested rotation target ('both' | 'he' |
+    // 'msi'). Defaults to App.rotTarget so the toolbar shows the angle of
+    // whichever target is selected.
+    getRotation(target) {
         const t = this._ensureViewerTransform();
+        const tgt = target || (typeof App !== 'undefined' && App.rotTarget) || 'both';
+        if (tgt === 'he')  return Math.round(t.rotHE || 0);
+        if (tgt === 'msi') return Math.round(t.rotMSI || 0);
         return Math.round(t.rot || 0);
     }
 
-    applyRotation(deg) {
+    applyRotation(deg, target) {
         const t = this._ensureViewerTransform();
         let v = parseFloat(deg);
         if (!Number.isFinite(v)) v = 0;
         v = Math.max(-180, Math.min(180, v));
+        const tgt = target || (typeof App !== 'undefined' && App.rotTarget) || 'both';
+        // ① HE-only / MSI-only: rotate just one layer group so an overlay whose
+        // HE and MSI were imported at different orientations can be aligned.
+        // These are canvas-baked in renderComposite (not the .viewer-rot CSS
+        // transform), kept per-section, and intentionally NOT broadcast by the
+        // 🔗 rot sync — each section's alignment offset is its own.
+        if (tgt === 'he' || tgt === 'msi') {
+            if (tgt === 'he') t.rotHE = v; else t.rotMSI = v;
+            this.renderComposite();
+            this._scheduleThumbRebake();
+            App.queueSave();
+            Toolbar.refreshRotation();
+            return;
+        }
         t.rot = v;
         this.applyViewerTransform();
         this._scheduleThumbRebake();
@@ -3535,7 +3596,9 @@ class SectionPanel {
     resetTransform() {
         const t = this._ensureViewerTransform();
         t.tx = 0; t.ty = 0; t.rot = 0; t.scale = 1;
+        t.rotHE = 0; t.rotMSI = 0;   // ① clear per-side rotations too
         this.applyViewerTransform();
+        this.renderComposite();      // per-side rotations are canvas-baked
         this._scheduleThumbRebake();
         App.queueSave();
         Toolbar.refreshRotation();
@@ -3583,13 +3646,15 @@ class SectionPanel {
     _ensureViewerTransform() {
         if (!this.section.meta) this.section.meta = {};
         if (!this.section.meta.viewerTransform) {
-            this.section.meta.viewerTransform = { tx: 0, ty: 0, rot: 0, scale: 1 };
+            this.section.meta.viewerTransform = { tx: 0, ty: 0, rot: 0, scale: 1, rotHE: 0, rotMSI: 0 };
         } else {
             const t = this.section.meta.viewerTransform;
-            if (!Number.isFinite(t.tx))    t.tx = 0;
-            if (!Number.isFinite(t.ty))    t.ty = 0;
-            if (!Number.isFinite(t.rot))   t.rot = 0;
-            if (!Number.isFinite(t.scale)) t.scale = 1;
+            if (!Number.isFinite(t.tx))     t.tx = 0;
+            if (!Number.isFinite(t.ty))     t.ty = 0;
+            if (!Number.isFinite(t.rot))    t.rot = 0;
+            if (!Number.isFinite(t.scale))  t.scale = 1;
+            if (!Number.isFinite(t.rotHE))  t.rotHE = 0;   // ① HE-only rotation (deg)
+            if (!Number.isFinite(t.rotMSI)) t.rotMSI = 0;  // ① MSI-only rotation (deg)
         }
         return this.section.meta.viewerTransform;
     }
@@ -3702,26 +3767,26 @@ class SectionPanel {
         }, { passive: false });
     }
 
-    // Apply a Range edit pushed by App.broadcastRangeToSameMrm. Targets the
-    // exact MSI key (MRM) that the source panel edited — independent of this
-    // panel's currently active layer. Silently skips when this section
-    // doesn't carry that MRM.
-    applyRangeForKey(msiKey, field, rawValue) {
-        if (!msiKey || (field !== 'vmin' && field !== 'vmax')) return;
+    // ② Apply a full display window [rawMin,rawMax] pushed by
+    // App.broadcastRangeToSameMrm. Targets the exact MSI key (MRM) the source
+    // panel edited — independent of this panel's active layer — and sets BOTH
+    // edges so every section showing this MRM ends up with an identical window
+    // (hence the same width). Values arrive in raw units and are converted to
+    // this section's luminance scale via its own rawRange. Silently skips when
+    // this section doesn't carry that MRM.
+    applyWindowForKey(msiKey, rawMin, rawMax) {
+        if (!msiKey) return;
         const settings = this.imageSettings && this.imageSettings[msiKey];
         if (!settings) return;
         const ent = (this.section.msiSeries || {})[msiKey] || {};
         const rawRange = ent.rawRange || null;
-        let lum = rawToLum(Number(rawValue), rawRange);
-        if (!Number.isFinite(lum)) return;
-        lum = Math.max(0, Math.min(255, Math.round(lum)));
-        if (field === 'vmin') {
-            if (lum >= settings.vmax) lum = settings.vmax - 1;
-            settings.vmin = lum;
-        } else {
-            if (lum <= settings.vmin) lum = settings.vmin + 1;
-            settings.vmax = lum;
-        }
+        let lo = rawToLum(Number(rawMin), rawRange);
+        let hi = rawToLum(Number(rawMax), rawRange);
+        if (!Number.isFinite(lo) || !Number.isFinite(hi)) return;
+        lo = Math.max(0, Math.min(255, Math.round(lo)));
+        hi = Math.max(0, Math.min(255, Math.round(hi)));
+        if (lo >= hi) { lo = Math.max(0, hi - 1); if (lo >= hi) hi = Math.min(255, lo + 1); }
+        settings.vmin = lo; settings.vmax = hi;
         this._persistRangeToMeta(msiKey, settings.vmin, settings.vmax);
         if (this.imageSources && this.imageSources[msiKey]) {
             this.renderComposite();
@@ -3761,7 +3826,7 @@ class SectionPanel {
             if (App.activeSectionId === this.section.id) Toolbar.refreshOpacity();
             return;
         }
-        // vmin/vmax は applyRangeForKey 経由で MRM キー単位に伝播するため、
+        // vmin/vmax は applyWindowForKey 経由で MRM キー単位に伝播するため、
         // ここでは扱わない。
     }
 
@@ -3974,17 +4039,29 @@ class SectionPanel {
         } else {
             const vmin = pop.querySelector('.vmin');
             const vmax = pop.querySelector('.vmax');
+            const entR = (this.section.msiSeries || {})[key] || {};
+            const rawRangeR = entR.rawRange || null;
+            // ② Persist + broadcast the full window so a per-layer Range edit in
+            // the gear popover also keeps every same-MRM section identical.
+            const pushWindow = () => {
+                this._persistRangeToMeta(key, settings.vmin, settings.vmax);
+                this.renderComposite();
+                if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
+                if (App.activeSectionId === this.section.id) { Toolbar.refreshRange(); renderMethodTable(); }
+                App.queueSave();
+                const outMin = rawRangeR ? lumToRaw(settings.vmin, rawRangeR) : settings.vmin;
+                const outMax = rawRangeR ? lumToRaw(settings.vmax, rawRangeR) : settings.vmax;
+                App.broadcastRangeToSameMrm(key, outMin, outMax, this);
+            };
             vmin.addEventListener('change', () => {
                 let a = parseInt(vmin.value), b = parseInt(vmax.value);
                 if (a >= b) { a = b - 1; vmin.value = a; }
-                settings.vmin = a; this.renderComposite();
-                if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
+                settings.vmin = a; pushWindow();
             });
             vmax.addEventListener('change', () => {
                 let a = parseInt(vmin.value), b = parseInt(vmax.value);
                 if (b <= a) { b = a + 1; vmax.value = b; }
-                settings.vmax = b; this.renderComposite();
-                if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
+                settings.vmax = b; pushWindow();
             });
         }
     }
@@ -10299,6 +10376,7 @@ const Toolbar = {
         this.rangeMax = document.getElementById('tb-range-max');
         this.opacityInp = document.getElementById('tb-opacity');
         this.rotationInp = document.getElementById('tb-rotation');
+        this.rotTargetSel = document.getElementById('tb-rot-target');
         this.addHeIfBtn = document.getElementById('tb-add-heif');
         this.addMsiBtn = document.getElementById('tb-add-msi');
         this.alignHeIfBtn = document.getElementById('tb-align-heif');
@@ -10332,7 +10410,13 @@ const Toolbar = {
         this.rangeMin.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRangeRaw('min', this.rangeMin.value); });
         this.rangeMax.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRangeRaw('max', this.rangeMax.value); });
         this.opacityInp.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyOpacity(this.opacityInp.value); });
-        this.rotationInp.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRotation(this.rotationInp.value); });
+        this.rotationInp.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRotation(this.rotationInp.value, App.rotTarget); });
+        if (this.rotTargetSel) this.rotTargetSel.addEventListener('change', () => {
+            // ① Switch which layer group the rotation input drives. Just
+            // re-read the angle of the newly-selected target into the input.
+            App.rotTarget = this.rotTargetSel.value || 'both';
+            this.refreshRotation();
+        });
         this.rotResetBtn.addEventListener('click', () => { const p = this.activePanel(); if (p) p.resetTransform(); });
         if (this.rotShareDefaultBtn) {
             this.rotShareDefaultBtn.addEventListener('click', () => {
@@ -10340,7 +10424,7 @@ const Toolbar = {
                 if (!p || !p.section) return;
                 const sec = p.section;
                 sec.meta = sec.meta || {};
-                const liveRot = Number(p.getRotation());
+                const liveRot = Number(p.getRotation('both'));   // whole-view rotation, not HE/MSI-only
                 sec.meta.shareDefaultRotation = Number.isFinite(liveRot) ? liveRot : 0;
                 App.queueSave();
                 showToast('Share preview の初期角度を保存しました: ' + sec.meta.shareDefaultRotation + '°');
@@ -10625,11 +10709,17 @@ const Toolbar = {
         if (!p) {
             this.rotationInp.value = '0'; this.rotationInp.disabled = true;
             if (this.rotResetBtn) this.rotResetBtn.disabled = true;
+            if (this.rotTargetSel) this.rotTargetSel.disabled = true;
             return;
         }
         this.rotationInp.disabled = false;
         if (this.rotResetBtn) this.rotResetBtn.disabled = false;
-        if (document.activeElement !== this.rotationInp) this.rotationInp.value = String(p.getRotation());
+        if (this.rotTargetSel) {
+            this.rotTargetSel.disabled = false;
+            if (document.activeElement !== this.rotTargetSel) this.rotTargetSel.value = App.rotTarget || 'both';
+        }
+        // ① Show the angle of the currently-selected rotation target.
+        if (document.activeElement !== this.rotationInp) this.rotationInp.value = String(p.getRotation(App.rotTarget));
     },
 
     refreshAll() {
@@ -10911,6 +11001,11 @@ const App = {
     activeOrganFilter: null,   // ④ organ filter: organ key, or null = show all
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
     focusCompoundKey: null,
+    // ① Rotation target for the shared toolbar: 'both' (whole-view CSS rot),
+    // 'he' (HE-only) or 'msi' (MSI-only). Per-side rotations are canvas-baked
+    // per section (renderComposite) so HE/MSI imported at different
+    // orientations can be aligned independently.
+    rotTarget: 'both',
 
     setViewMode(mode) {
         const m = (mode === 'free') ? 'free' : 'compound';
@@ -11207,18 +11302,36 @@ const App = {
         }
     },
 
-    // Range (vmin/vmax) is unconditionally propagated to every section that
-    // carries the same MRM (same MSI key, e.g. "MSI_Glucose"), regardless of
-    // which compound the receiving section currently displays. This makes
-    // the toolbar Range edit a per-compound operation rather than a
-    // per-section one.
-    broadcastRangeToSameMrm(msiKey, field, rawValue, originPanel) {
-        if (!msiKey || (field !== 'vmin' && field !== 'vmax')) return;
+    // ② The FULL Range window [rawMin,rawMax] is unconditionally propagated to
+    // every section that carries the same MRM (same MSI key, e.g.
+    // "MSI_Glucose"), regardless of which compound the receiving section
+    // currently displays. Pushing both edges (not just the edited one) makes
+    // every same-MRM section share an identical window — hence the same width.
+    broadcastRangeToSameMrm(msiKey, rawMin, rawMax, originPanel) {
+        if (!msiKey) return;
         for (const panel of this.panels.values()) {
             if (panel === originPanel) continue;
-            try { panel.applyRangeForKey(msiKey, field, rawValue); }
+            try { panel.applyWindowForKey(msiKey, rawMin, rawMax); }
             catch (e) { console.warn('range broadcast failed', e); }
         }
+    },
+
+    // ② Find an existing display window (in raw units) for `msiKey` from any
+    // other loaded panel, so a freshly-loaded section can adopt the common
+    // window and start out matching the others (same [min,max] → same width).
+    commonWindowRawForKey(msiKey, exceptPanel) {
+        if (!msiKey) return null;
+        for (const panel of this.panels.values()) {
+            if (panel === exceptPanel) continue;
+            const s = panel.imageSettings && panel.imageSettings[msiKey];
+            if (!s || !Number.isFinite(s.vmin) || !Number.isFinite(s.vmax)) continue;
+            const ent = (panel.section.msiSeries || {})[msiKey] || {};
+            const rr = ent.rawRange || null;
+            const rawMin = rr ? lumToRaw(s.vmin, rr) : s.vmin;
+            const rawMax = rr ? lumToRaw(s.vmax, rr) : s.vmax;
+            if (Number.isFinite(rawMin) && Number.isFinite(rawMax)) return { rawMin, rawMax };
+        }
+        return null;
     },
 
     async init() {

@@ -7,6 +7,8 @@
 <title>DESI Data Share — MRM管理</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<!-- ③ SheetJS: parse Excel MRM lists for bulk import (same version as viewer/index.html). -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
   // Keep these in sync with index.html / viewer/index.html. Same Supabase
   // project, same anon key.
@@ -107,6 +109,8 @@
     <div class="flex items-center justify-between gap-3 flex-wrap">
       <div class="flex gap-2 flex-wrap">
         <button id="btn-add-compound" class="btn primary">+ 化合物</button>
+        <button id="btn-import-excel" class="btn" title="Excel (.xlsx/.xls) の MRM リストを一括取り込み">Excel取り込み</button>
+        <input id="excel-input" type="file" accept=".xlsx,.xls" style="display:none">
         <button id="btn-reload" class="btn">再読込</button>
         <button id="btn-exp-template" class="btn" title="出力用テンプレート .exp を設定/確認">テンプレ設定</button>
         <button id="btn-exp-export" class="btn" title="チェックしたトランジションを .exp に出力" disabled>選択を.exp出力 (0)</button>
@@ -799,6 +803,231 @@ function openUsageLink(slug) {
 }
 
 // ===========================================================================
+// ③ Excel (.xlsx/.xls) MRM list import. Parses sheets whose layout matches the
+// lab's method lists: one or more category blocks (e.g. "Amino acid",
+// "13C6-Glucose") each with a header row "CompoundName | Precursor | Product |
+// CV | CE" followed by compound rows. Multiple blocks may be stacked
+// vertically and laid out in several columns ("lanes") on the same sheet, so we
+// scan the whole sheet for every CompoundName header. Columns are matched by
+// HEADER NAME (so the CV-before-CE order is absorbed), the category title above
+// each block becomes a tag, and polarity is taken from a +/− marker near the
+// title or inferred from the compound name (NEG/POS).
+// ===========================================================================
+const _normHeader = (v) => String(v == null ? '' : v).trim().toLowerCase().replace(/\s+/g, '');
+const _isNum = (v) => { if (v == null || v === '') return false; return Number.isFinite(Number(v)); };
+const _toNum = (v) => { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
+
+// Map a header cell to one of our fields, or null when it is not a header.
+function _mrmField(h) {
+    const n = _normHeader(h);
+    if (!n) return null;
+    if (n === 'compoundname' || n === 'compound' || n === 'name' || n === '化合物名' || n === '化合物') return 'name';
+    if (n === 'precursor' || n === 'precursormz' || n === 'q1' || n === 'parent' || n.startsWith('precursor')) return 'precursor';
+    if (n === 'product' || n === 'productmz' || n === 'q3' || n === 'fragment' || n.startsWith('product') || n.startsWith('fragment')) return 'product';
+    if (n === 'cv' || n === 'conevoltage' || n === 'cone') return 'cv';
+    if (n === 'ce' || n === 'collisionenergy' || n === 'collision') return 'ce';
+    return null;
+}
+
+// Infer ion-mode polarity from tokens in a compound name (e.g. "Lactate-NEG",
+// "POS_Acetylcholine"). Returns '+', '-' or null.
+function inferPolarityFromName(name) {
+    const toks = String(name || '').toLowerCase().split(/[^a-z0-9]+/);
+    if (toks.includes('neg')) return '-';
+    if (toks.includes('pos')) return '+';
+    return null;
+}
+
+// Look for a lone +/− marker cell on the header row or the title row just above,
+// scanning a few columns left of the block (markers often sit in column A).
+function _detectBlockPolarity(aoa, headerRow, c0, lastCol) {
+    for (const rr of [headerRow, headerRow - 1]) {
+        if (rr < 0) continue;
+        const arow = aoa[rr] || [];
+        for (let cc = Math.max(0, c0 - 3); cc <= lastCol; cc++) {
+            const s = arow[cc] == null ? '' : String(arow[cc]).trim();
+            if (s === '+' || s === '＋') return '+';
+            if (s === '-' || s === '−' || s === '－' || s === 'ー') return '-';
+        }
+    }
+    return null;
+}
+
+// Parse one sheet (array-of-arrays) into category blocks.
+function _parseSheetBlocks(aoa, sheetName) {
+    const blocks = [];
+    for (let r = 0; r < aoa.length; r++) {
+        const row = aoa[r] || [];
+        for (let c = 0; c < row.length; c++) {
+            if (_mrmField(row[c]) !== 'name') continue;
+            // Map contiguous header columns from this CompoundName cell rightward.
+            const cols = {};
+            let lastCol = c;
+            for (let cc = c; cc < row.length; cc++) {
+                const f = _mrmField(row[cc]);
+                if (!f) break;
+                if (!(f in cols)) cols[f] = cc;
+                lastCol = cc;
+            }
+            if (!('name' in cols) || !('precursor' in cols)) continue;
+            // Category title: nearest non-empty text cell above the block (not a
+            // number, header or polarity marker).
+            let category = '';
+            for (let rr = r - 1; rr >= 0 && rr >= r - 3 && !category; rr--) {
+                const arow = aoa[rr] || [];
+                for (let cc = Math.max(0, c - 1); cc <= lastCol; cc++) {
+                    const s = arow[cc] == null ? '' : String(arow[cc]).trim();
+                    if (s === '' || _isNum(arow[cc]) || _mrmField(arow[cc]) !== null) continue;
+                    if (/^[+\-−＋－ー]$/.test(s)) continue;
+                    category = s; break;
+                }
+            }
+            const blockPolarity = _detectBlockPolarity(aoa, r, c, lastCol);
+            // Data rows below the header until the name cell is empty or a new
+            // header begins.
+            const compounds = [];
+            const byName = new Map();
+            for (let rr = r + 1; rr < aoa.length; rr++) {
+                const drow = aoa[rr] || [];
+                const nameVal = drow[cols.name];
+                if (_mrmField(nameVal) === 'name') break;        // next block's header
+                const nameStr = nameVal == null ? '' : String(nameVal).trim();
+                if (nameStr === '') break;                       // blank row ends the block
+                const prec = _toNum(drow[cols.precursor]);
+                const prod = ('product' in cols) ? _toNum(drow[cols.product]) : null;
+                const cv = ('cv' in cols) ? _toNum(drow[cols.cv]) : null;
+                const ce = ('ce' in cols) ? _toNum(drow[cols.ce]) : null;
+                if (prec == null && prod == null) continue;      // skip rows without m/z (e.g. stray titles)
+                const tr = { precursor: prec, product: prod, cv: cv, ce: ce };
+                if (byName.has(nameStr)) byName.get(nameStr).transitions.push(tr);
+                else { const obj = { name: nameStr, transitions: [tr] }; byName.set(nameStr, obj); compounds.push(obj); }
+            }
+            if (compounds.length) blocks.push({ sheet: sheetName, category: category, polarity: blockPolarity, compounds });
+        }
+    }
+    return blocks;
+}
+
+function parseMrmWorkbook(buf) {
+    if (typeof XLSX === 'undefined') throw new Error('SheetJS (XLSX) が読み込まれていません');
+    const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
+    const blocks = [];
+    for (const sheetName of wb.SheetNames) {
+        const sheet = wb.Sheets[sheetName];
+        if (!sheet || !sheet['!ref']) continue;
+        const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
+        for (const b of _parseSheetBlocks(aoa, sheetName)) blocks.push(b);
+    }
+    return blocks;
+}
+
+async function importMrmFromExcel(file) {
+    let blocks;
+    try {
+        const buf = await file.arrayBuffer();
+        blocks = parseMrmWorkbook(buf);
+    } catch (e) { reportError(e, 'Excel の解析'); return; }
+    if (!blocks.length) {
+        alert('「CompoundName」ヘッダを含むブロックが見つかりませんでした。ヘッダ行に CompoundName / Precursor / Product / CV / CE があるか確認してください。');
+        return;
+    }
+    const groups = await openImportPreviewModal(blocks);
+    if (!groups) return;     // cancelled
+    await runMrmImport(groups);
+}
+
+function openImportPreviewModal(blocks) {
+    const totalC = blocks.reduce((a, b) => a + b.compounds.length, 0);
+    const totalT = blocks.reduce((a, b) => a + b.compounds.reduce((x, c) => x + c.transitions.length, 0), 0);
+    const rows = blocks.map((b, i) => {
+        const tcount = b.compounds.reduce((x, c) => x + c.transitions.length, 0);
+        const pol = b.polarity || '';
+        const sample = b.compounds.slice(0, 3).map(c => safe(c.name)).join(', ') + (b.compounds.length > 3 ? ' …' : '');
+        return '<tr>'
+            + '<td style="text-align:center;"><input type="checkbox" data-imp-include data-i="' + i + '" checked></td>'
+            + '<td><input type="text" data-imp-tag data-i="' + i + '" value="' + safe(b.category) + '" style="width:100%;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;"></td>'
+            + '<td><select data-imp-pol data-i="' + i + '" style="padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;">'
+            +   '<option value=""' + (pol === '' ? ' selected' : '') + '>— (名前から推定)</option>'
+            +   '<option value="+"' + (pol === '+' ? ' selected' : '') + '>+</option>'
+            +   '<option value="-"' + (pol === '-' ? ' selected' : '') + '>−</option>'
+            + '</select></td>'
+            + '<td style="text-align:right;">' + b.compounds.length + '</td>'
+            + '<td style="text-align:right;">' + tcount + '</td>'
+            + '<td class="muted" style="font-size:11px;">' + sample + '</td>'
+            + '</tr>';
+    }).join('');
+    const html = `
+        <h2>Excel から MRM を取り込み</h2>
+        <p class="muted" style="font-size:12px;margin:0 0 8px;">${blocks.length} ブロック / ${totalC} 化合物 / ${totalT} トランジションを検出しました。カテゴリはタグとして登録されます。極性「—」は化合物名 (NEG/POS) から推定します。既存の同名化合物・同一トランジションは上書き/スキップされます。</p>
+        <div style="max-height:50vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">
+        <table style="width:100%;border-collapse:collapse;font-size:13px;">
+          <thead><tr style="text-align:left;background:#f8fafc;position:sticky;top:0;">
+            <th style="padding:4px 6px;">取込</th><th style="padding:4px 6px;">タグ(カテゴリ)</th><th style="padding:4px 6px;">極性</th>
+            <th style="padding:4px 6px;text-align:right;">化合物</th><th style="padding:4px 6px;text-align:right;">遷移</th><th style="padding:4px 6px;">例</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        </div>
+        <p class="err" data-err></p>
+        <div class="actions">
+          <button type="button" class="btn" data-modal-cancel>Cancel</button>
+          <button type="button" class="btn primary" data-modal-ok>取り込み実行</button>
+        </div>`;
+    const p = openModal(html);
+    const card = openModal._card;
+    card._collect = () => {
+        const out = [];
+        for (let i = 0; i < blocks.length; i++) {
+            const inc = card.querySelector('[data-imp-include][data-i="' + i + '"]');
+            if (!inc || !inc.checked) continue;
+            const tag = (card.querySelector('[data-imp-tag][data-i="' + i + '"]').value || '').trim();
+            const polDefault = card.querySelector('[data-imp-pol][data-i="' + i + '"]').value || '';
+            const compounds = blocks[i].compounds.map(c => ({
+                name: c.name,
+                polarity: polDefault !== '' ? polDefault : (inferPolarityFromName(c.name) || null),
+                transitions: c.transitions,
+            }));
+            out.push({ tag: tag, compounds: compounds });
+        }
+        if (!out.length) { card.querySelector('[data-err]').textContent = '取り込むブロックが選択されていません'; return null; }
+        return out;
+    };
+    return p;
+}
+
+async function runMrmImport(groups) {
+    const pw = _readCachedMasterPw();
+    const total = groups.reduce((a, g) => a + g.compounds.length, 0);
+    let done = 0, okC = 0, okT = 0, fail = 0;
+    openModal('<h2>取り込み中…</h2><p class="muted" data-prog>0 / ' + total + '</p>');
+    const progCard = openModal._card;
+    const progEl = progCard && progCard.querySelector('[data-prog]');
+    for (const g of groups) {
+        const tags = g.tag ? [g.tag] : [];
+        for (const c of g.compounds) {
+            try {
+                const id = await SupabaseClient.upsertCompound(pw, c.name, tags, c.polarity, null, null);
+                okC++;
+                for (const tr of c.transitions) {
+                    try {
+                        await SupabaseClient.upsertTransition(pw, {
+                            compound_id: id, precursor: tr.precursor, product: tr.product, ce: tr.ce, cv: tr.cv,
+                        });
+                        okT++;
+                    } catch (e) { fail++; console.warn('transition import failed', c.name, tr, e); }
+                }
+            } catch (e) { fail++; console.warn('compound import failed', c.name, e); }
+            done++;
+            if (progEl) progEl.textContent = done + ' / ' + total;
+        }
+    }
+    if (progCard && progCard._close) progCard._close(true);
+    await loadLibrary();
+    alert('取り込み完了: 化合物 ' + okC + ' 件 / トランジション ' + okT + ' 件'
+        + (fail ? '（失敗 ' + fail + ' 件、詳細はブラウザのコンソール）' : ''));
+}
+
+// ===========================================================================
 // .exp export (Waters MassLynx). Substitute the selected transitions into the
 // saved template's MRM/SIR variable sections; keep everything else intact.
 // ===========================================================================
@@ -1098,6 +1327,18 @@ async function init() {
     await requireMasterUnlock();
     document.getElementById('btn-back').addEventListener('click', () => { location.href = 'index.html'; });
     document.getElementById('btn-add-compound').addEventListener('click', () => addCompound());
+    (() => {
+        const fi = document.getElementById('excel-input');
+        const btn = document.getElementById('btn-import-excel');
+        if (fi && btn) {
+            btn.addEventListener('click', () => fi.click());
+            fi.addEventListener('change', async () => {
+                const f = fi.files && fi.files[0];
+                fi.value = '';   // allow re-selecting the same file later
+                if (f) await importMrmFromExcel(f);
+            });
+        }
+    })();
     document.getElementById('btn-reload').addEventListener('click', () => loadLibrary());
     document.getElementById('btn-exp-template').addEventListener('click', () => openTemplateModal());
     document.getElementById('btn-exp-export').addEventListener('click', () => exportSelectedExp());
