@@ -588,9 +588,17 @@ function unitHtml(u) {
     if (u.members.length === 1) {
         const c = u.members[0];
         const pol = c.polarity ? '<span class="chip pol">' + safe(c.polarity) + '</span>' : '';
+        // Quick-select: a compound with exactly one transition can be selected
+        // for .exp straight from the (always-visible) summary, without expanding
+        // the detail row. Shares data-tid with the level-2 .tr-select so the two
+        // stay in sync (see bindLibraryEvents).
+        const quickSel = (Array.isArray(c.transitions) && c.transitions.length === 1)
+            ? '<input type="checkbox" class="tr-quick-select" data-tid="' + safe(c.transitions[0].id) + '" title=".exp 出力に含める (1 transition)" style="margin-right:6px;vertical-align:middle;cursor:pointer;"' + (selectedTransitions.has(c.transitions[0].id) ? ' checked' : '') + '>'
+            : '';
         return ''
             + '<details class="cpd">'
             +   '<summary>'
+            +     quickSel
             +     serialBadge
             +     '<span class="font-semibold">' + safe(c.name) + '</span>'
             +     tagChips + pol + countLbl
@@ -1053,7 +1061,7 @@ function updateExportBar() {
 }
 function clearSelection() {
     selectedTransitions.clear();
-    document.querySelectorAll('#lib .tr-select').forEach(cb => { cb.checked = false; });
+    document.querySelectorAll('#lib .tr-select, #lib .tr-quick-select').forEach(cb => { cb.checked = false; });
     updateExportBar();
     renderSelectedPanel();
 }
@@ -1103,8 +1111,8 @@ function renderSelectedPanel() {
 
 function unselectTransition(tid) {
     selectedTransitions.delete(tid);
-    const cb = document.querySelector('#lib .tr-select[data-tid="' + tid + '"]');
-    if (cb) cb.checked = false;
+    document.querySelectorAll('#lib .tr-select[data-tid="' + tid + '"], #lib .tr-quick-select[data-tid="' + tid + '"]')
+        .forEach(cb => { cb.checked = false; });
     updateExportBar();
     renderSelectedPanel();
 }
@@ -1475,6 +1483,23 @@ async function openTemplateModal() {
 function bindLibraryEvents() {
     const host = document.getElementById('lib');
     host.addEventListener('click', (ev) => {
+        // Quick-select checkbox sits inside <summary>, so a click would also
+        // toggle the <details>. Cancel that (which also cancels the native
+        // check toggle), then drive selection manually and keep the level-1
+        // (summary) and level-2 (detail) checkboxes in sync by shared data-tid.
+        const qs = ev.target && ev.target.closest && ev.target.closest('.tr-quick-select');
+        if (qs) {
+            ev.preventDefault();
+            ev.stopPropagation();
+            const tid = qs.getAttribute('data-tid');
+            const want = !selectedTransitions.has(tid);
+            if (want) selectedTransitions.add(tid); else selectedTransitions.delete(tid);
+            document.querySelectorAll('#lib .tr-quick-select[data-tid="' + tid + '"], #lib .tr-select[data-tid="' + tid + '"]')
+                .forEach(x => { x.checked = want; });
+            updateExportBar();
+            renderSelectedPanel();
+            return;
+        }
         const el = ev.target && ev.target.closest && ev.target.closest('[data-action]');
         if (!el) return;
         const action = el.getAttribute('data-action');
@@ -1500,6 +1525,8 @@ function bindLibraryEvents() {
         if (!cb || !cb.classList || !cb.classList.contains('tr-select')) return;
         const tid = cb.getAttribute('data-tid');
         if (cb.checked) selectedTransitions.add(tid); else selectedTransitions.delete(tid);
+        const q = document.querySelector('#lib .tr-quick-select[data-tid="' + tid + '"]');
+        if (q) q.checked = cb.checked;   // keep the summary quick-select in sync
         updateExportBar();
         renderSelectedPanel();
     });
