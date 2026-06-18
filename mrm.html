@@ -113,6 +113,7 @@
         <input id="excel-input" type="file" accept=".xlsx,.xls" style="display:none">
         <button id="btn-reload" class="btn">再読込</button>
         <button id="btn-exp-template" class="btn" title="出力用テンプレート .exp を設定/確認">テンプレ設定</button>
+        <button id="btn-sets" class="btn" title="MRM メソッドセット (保存/読込・プロジェクト履歴から)">メソッドセット</button>
         <button id="btn-exp-export" class="btn" title="チェックしたトランジションを .exp に出力" disabled>選択を.exp出力 (0)</button>
         <button id="btn-exp-clear" class="btn" title="選択をすべて解除" style="display:none;">選択クリア</button>
       </div>
@@ -198,6 +199,16 @@ const SupabaseClient = (() => {
         },
         getExpTemplate(pw) { return rpc('get_exp_template', { _master_pw: pw }); },
         setExpTemplate(pw, content) { return rpc('set_exp_template', { _master_pw: pw, _content: content }); },
+        listMrmSets(pw) { return rpc('list_mrm_sets', { _master_pw: pw }); },
+        upsertMrmSet(pw, s) {
+            return rpc('upsert_mrm_set', {
+                _master_pw: pw, _id: s.id || null, _name: s.name,
+                _owner: s.owner || null, _description: s.description || null,
+                _source_project_slug: s.source_project_slug || null,
+                _items: s.items || [],
+            });
+        },
+        deleteMrmSet(pw, id) { return rpc('delete_mrm_set', { _master_pw: pw, _id: id }); },
     };
 })();
 
@@ -332,6 +343,7 @@ const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/<
 const UNTAGGED = '(未分類)';
 
 let library = [];        // [{id,serial_no,name,tags[],polarity,note,transitions:[{...,usages:[...]}]}]
+let mrmSets = [];        // ② [{id,name,owner,description,source_project_slug,items:[{transition_id,name,precursor,product,ce,cv,...}]}]
 let searchText = '';
 let filterPolarity = '';          // '', '+', '-'
 let selectedTags = new Set();     // 分類フィルタ (OR)
@@ -384,6 +396,7 @@ async function loadLibrary() {
         const rows = await SupabaseClient.listMrmLibrary(pw);
         library = Array.isArray(rows) ? rows : [];
         renderLibrary();
+        await loadSets();   // ② method sets (non-fatal if it fails)
     } catch (e) {
         console.warn('list_mrm_library failed', e);
         const msg = String((e && (e.message || e.details)) || '');
@@ -1217,9 +1230,9 @@ function buildExp(templateText, rows) {
     return text;
 }
 
-async function exportSelectedExp() {
-    const rows = collectSelectedRows();
-    if (!rows.length) { alert('出力するトランジションをチェックしてください'); return; }
+// Shared .exp build + download for a list of {name,precursor,product,cv,ce}.
+async function exportExpRows(rows, baseName) {
+    if (!rows || !rows.length) { alert('出力するトランジションがありません'); return; }
     const pw = _readCachedMasterPw();
     if (!pw) { alert('認証が切れました。再読込してください。'); return; }
     let template;
@@ -1233,7 +1246,191 @@ async function exportSelectedExp() {
     try { text = buildExp(template, rows); }
     catch (e) { alert('.exp 生成に失敗しました: ' + (e.message || e)); console.warn(e); return; }
     const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    downloadAsFile(new Blob([text], { type: 'text/plain' }), 'DESI_MRM_' + stamp + '_' + rows.length + 'ch.exp');
+    const base = (baseName || 'DESI_MRM').replace(/[^\w\-]+/g, '_') || 'DESI_MRM';
+    downloadAsFile(new Blob([text], { type: 'text/plain' }), base + '_' + stamp + '_' + rows.length + 'ch.exp');
+}
+
+async function exportSelectedExp() {
+    const rows = collectSelectedRows();
+    if (!rows.length) { alert('出力するトランジションをチェックしてください'); return; }
+    await exportExpRows(rows, 'DESI_MRM');
+}
+
+// ===========================================================================
+// ② MRM method sets ("A先生セット") — named, reusable measurement methods.
+// Each set stores BOTH a reference (transition_id) and a snapshot of the
+// channel values, so it survives library edits and always exports to .exp.
+// Primary flow: load a project's used transitions (or a saved set) into the
+// current selection, then export as-is or after editing; or save the current
+// selection as a named set.
+// ===========================================================================
+async function loadSets() {
+    const pw = _readCachedMasterPw();
+    if (!pw) return;
+    try { mrmSets = (await SupabaseClient.listMrmSets(pw)) || []; }
+    catch (e) { console.warn('list_mrm_sets failed', e); mrmSets = []; }
+}
+
+// Current checked transitions in library order, with id + snapshot values.
+function collectSelectedItems() {
+    const items = [];
+    for (const c of (library || [])) {
+        for (const tr of (c.transitions || [])) {
+            if (selectedTransitions.has(tr.id)) {
+                items.push({
+                    transition_id: tr.id, name: c.name || '',
+                    precursor: tr.precursor, product: tr.product, ce: tr.ce, cv: tr.cv,
+                });
+            }
+        }
+    }
+    return items;
+}
+
+// {slug,name} for every project referenced by any transition's usage history.
+function projectsFromUsages() {
+    const map = new Map();
+    for (const c of (library || [])) {
+        for (const tr of (c.transitions || [])) {
+            for (const u of (tr.usages || [])) {
+                if (u.project_slug && !map.has(u.project_slug)) map.set(u.project_slug, u.project_name || u.project_slug);
+            }
+        }
+    }
+    return [...map.entries()].map(([slug, name]) => ({ slug, name })).sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+}
+
+// Replace the current selection with every transition used in `slug`.
+function selectByProject(slug) {
+    selectedTransitions.clear();
+    let n = 0;
+    for (const c of (library || [])) {
+        for (const tr of (c.transitions || [])) {
+            if ((tr.usages || []).some(u => u.project_slug === slug)) { selectedTransitions.add(tr.id); n++; }
+        }
+    }
+    renderLibrary(); updateExportBar(); renderSelectedPanel();
+    return n;
+}
+
+// Load a saved set into the selection (matching by transition_id present in the
+// current library). Snapshot-only items (transition since deleted) can't be
+// checked in the list but stay exportable via the set's direct .exp output.
+function applySetToSelection(set) {
+    const byId = new Set();
+    for (const c of (library || [])) for (const tr of (c.transitions || [])) byId.add(tr.id);
+    selectedTransitions.clear();
+    let matched = 0, missing = 0;
+    for (const it of (set.items || [])) {
+        if (it.transition_id && byId.has(it.transition_id)) { selectedTransitions.add(it.transition_id); matched++; }
+        else missing++;
+    }
+    renderLibrary(); updateExportBar(); renderSelectedPanel();
+    return { matched, missing };
+}
+
+// Snapshot rows for direct .exp export from a set (independent of the library).
+function rowsFromSet(set) {
+    return (set.items || []).slice().sort((a, b) => (a.position || 0) - (b.position || 0))
+        .map(it => ({ name: it.name || '', precursor: it.precursor, product: it.product, cv: it.cv, ce: it.ce }));
+}
+
+async function openSetsModal() {
+    const pw = _readCachedMasterPw();
+    if (!pw) { alert('認証が切れました。再読込してください。'); return; }
+    await loadSets();
+    const projects = projectsFromUsages();
+    const setRows = (mrmSets || []).map(s => {
+        const owner = s.owner ? ' <span class="muted">(' + safe(s.owner) + ')</span>' : '';
+        const n = (s.items || []).length;
+        const sub = n + ' ch'
+            + (s.source_project_slug ? ' / from ' + safe(s.source_project_slug) : '')
+            + (s.description ? ' / ' + safe(s.description) : '');
+        return '<div style="display:flex;align-items:center;gap:6px;border:1px solid #e5e7eb;border-radius:6px;padding:6px 8px;margin-bottom:6px;">'
+            + '<div style="flex:1;min-width:0;"><div style="font-weight:600;">' + safe(s.name) + owner + '</div>'
+            +   '<div class="muted" style="font-size:11px;">' + sub + '</div></div>'
+            + '<button class="btn mini" data-set-load="' + safe(s.id) + '">選択に展開</button>'
+            + '<button class="btn mini" data-set-exp="' + safe(s.id) + '" title="このセットを直接 .exp 出力">.exp</button>'
+            + '<button class="btn mini danger" data-set-del="' + safe(s.id) + '">削除</button>'
+            + '</div>';
+    }).join('') || '<p class="muted" style="font-size:12px;">保存済みセットはありません。</p>';
+    const projectOpts = ['<option value="">— プロジェクトを選択 —</option>']
+        .concat(projects.map(p => '<option value="' + safe(p.slug) + '">' + safe(p.name) + '</option>')).join('');
+    const selCount = selectedTransitions.size;
+    const html = `
+        <h2>MRM メソッドセット</h2>
+        <div style="display:flex;flex-direction:column;gap:14px;">
+          <section>
+            <h3 style="font-size:13px;font-weight:700;margin:0 0 6px;">保存済みセット</h3>
+            <div style="max-height:32vh;overflow:auto;">${setRows}</div>
+          </section>
+          <section style="border-top:1px solid #e5e7eb;padding-top:10px;">
+            <h3 style="font-size:13px;font-weight:700;margin:0 0 6px;">プロジェクト履歴から選択</h3>
+            <p class="muted" style="font-size:11px;margin:0 0 6px;">選んだプロジェクトで使った全トランジションを「選択中のMRM一覧」に展開します。そのまま .exp 出力、または編集後に出力・セット保存できます。</p>
+            <div style="display:flex;gap:6px;">
+              <select data-from-project style="flex:1;padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;">${projectOpts}</select>
+              <button type="button" class="btn" data-apply-project>選択に展開</button>
+            </div>
+          </section>
+          <section style="border-top:1px solid #e5e7eb;padding-top:10px;">
+            <h3 style="font-size:13px;font-weight:700;margin:0 0 6px;">現在の選択をセットとして保存 <span class="muted" style="font-weight:400;">(${selCount} ch)</span></h3>
+            <div style="display:flex;flex-direction:column;gap:6px;">
+              <input type="text" data-set-name placeholder="セット名 (例: A先生セット)" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;">
+              <input type="text" data-set-owner placeholder="作成者/担当 (任意, 例: A先生)" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;">
+              <button type="button" class="btn primary" data-save-set ${selCount ? '' : 'disabled'}>選択 ${selCount} ch をセット保存</button>
+            </div>
+          </section>
+          <p class="err" data-err></p>
+          <div class="actions"><button type="button" class="btn" data-modal-cancel>閉じる</button></div>
+        </div>`;
+    const p = openModal(html);
+    const card = openModal._card;
+    const errEl = card.querySelector('[data-err]');
+    const findSet = (id) => (mrmSets || []).find(s => String(s.id) === String(id));
+
+    card.addEventListener('click', async (ev) => {
+        const t = ev.target;
+        if (!t || !t.getAttribute) return;
+        const loadId = t.getAttribute('data-set-load');
+        const expId = t.getAttribute('data-set-exp');
+        const delId = t.getAttribute('data-set-del');
+        if (loadId) {
+            const s = findSet(loadId); if (!s) return;
+            const r = applySetToSelection(s);
+            if (card._close) card._close(null);
+            let msg = '「' + s.name + '」を選択に展開しました: ' + r.matched + ' ch';
+            if (r.missing) msg += '（ライブラリに無い ' + r.missing + ' ch は除外。[.exp] ボタンで直接出力は可能）';
+            alert(msg);
+        } else if (expId) {
+            const s = findSet(expId); if (!s) return;
+            await exportExpRows(rowsFromSet(s), s.name);
+        } else if (delId) {
+            const s = findSet(delId); if (!s) return;
+            if (!confirm('「' + s.name + '」を削除しますか?')) return;
+            try { await SupabaseClient.deleteMrmSet(pw, delId); if (card._close) card._close(null); openSetsModal(); }
+            catch (e) { reportError(e, 'セット削除'); }
+        }
+    });
+    card.querySelector('[data-apply-project]').addEventListener('click', () => {
+        const slug = card.querySelector('[data-from-project]').value;
+        if (!slug) { errEl.textContent = 'プロジェクトを選択してください'; return; }
+        const n = selectByProject(slug);
+        if (card._close) card._close(null);
+        alert('プロジェクト「' + slug + '」で使った ' + n + ' ch を選択に展開しました。');
+    });
+    card.querySelector('[data-save-set]').addEventListener('click', async () => {
+        const name = (card.querySelector('[data-set-name]').value || '').trim();
+        if (!name) { errEl.textContent = 'セット名は必須です'; return; }
+        const owner = (card.querySelector('[data-set-owner]').value || '').trim() || null;
+        const items = collectSelectedItems();
+        if (!items.length) { errEl.textContent = '選択が空です'; return; }
+        try {
+            await SupabaseClient.upsertMrmSet(pw, { id: null, name, owner, items });
+            if (card._close) card._close(null);
+            alert('セット「' + name + '」を保存しました (' + items.length + ' ch)。');
+        } catch (e) { reportError(e, 'セット保存'); }
+    });
+    return p;
 }
 
 async function openTemplateModal() {
@@ -1341,6 +1538,7 @@ async function init() {
     })();
     document.getElementById('btn-reload').addEventListener('click', () => loadLibrary());
     document.getElementById('btn-exp-template').addEventListener('click', () => openTemplateModal());
+    document.getElementById('btn-sets').addEventListener('click', () => openSetsModal());
     document.getElementById('btn-exp-export').addEventListener('click', () => exportSelectedExp());
     document.getElementById('btn-exp-clear').addEventListener('click', () => clearSelection());
     const search = document.getElementById('search');
@@ -1357,6 +1555,6 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(e => { consol
 </script>
 <!-- Build tag: bumped on every push so a maintainer / recipient can spot a
      stale cached copy. -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-mrm-r5</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-18-mrm-r6</div>
 </body>
 </html>
