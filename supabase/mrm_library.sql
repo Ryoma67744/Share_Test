@@ -467,6 +467,163 @@ begin
 end
 $$;
 
+-- ---- 6c. MRM method sets ("A先生セット") -------------------
+-- A named, reusable measurement method = an ordered list of MRM channels.
+-- Each item keeps BOTH a soft reference to the source transition (for
+-- traceability; nulled if that transition is later deleted) AND a snapshot of
+-- the channel values (name / precursor / product / ce / cv), so a set stays
+-- self-contained and can always be exported to .exp even after the library
+-- changes. Master-pw gated like the rest of the library.
+create table if not exists public.mrm_sets (
+    id                  uuid primary key default gen_random_uuid(),
+    name                text not null unique,
+    owner               text,
+    description         text,
+    source_project_slug text,
+    created_at          timestamptz not null default now(),
+    updated_at          timestamptz not null default now()
+);
+alter table public.mrm_sets enable row level security;
+revoke all on public.mrm_sets from anon, authenticated;
+
+create table if not exists public.mrm_set_items (
+    id            uuid primary key default gen_random_uuid(),
+    set_id        uuid not null references public.mrm_sets(id) on delete cascade,
+    position      int  not null,
+    transition_id uuid references public.mrm_transitions(id) on delete set null,
+    name          text,
+    precursor     numeric,
+    product       numeric,
+    ce            numeric,
+    cv            numeric,
+    note          text,
+    unique (set_id, position)
+);
+alter table public.mrm_set_items enable row level security;
+revoke all on public.mrm_set_items from anon, authenticated;
+create index if not exists mrm_set_items_set_idx on public.mrm_set_items(set_id);
+
+-- Create or fully replace a set (and its ordered items). Pass _id to update an
+-- existing set (incl. rename); null _id = create new (or update same-name).
+-- _items: jsonb array of {transition_id?, name, precursor, product, ce, cv, note?}
+-- in display order. Items are replaced wholesale.
+create or replace function public.upsert_mrm_set(
+    _master_pw           text,
+    _id                  uuid,
+    _name                text,
+    _owner               text default null,
+    _description         text default null,
+    _source_project_slug text default null,
+    _items               jsonb default '[]'::jsonb
+) returns uuid
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_id uuid;
+    it   jsonb;
+    pos  int := 0;
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    if _name is null or length(trim(_name)) = 0 then
+        raise exception 'name required';
+    end if;
+
+    if _id is not null then
+        update public.mrm_sets
+           set name = trim(_name), owner = _owner, description = _description,
+               source_project_slug = _source_project_slug, updated_at = now()
+         where id = _id
+        returning id into v_id;
+    end if;
+    if v_id is null then
+        insert into public.mrm_sets(name, owner, description, source_project_slug)
+             values (trim(_name), _owner, _description, _source_project_slug)
+        on conflict (name) do update
+             set owner = excluded.owner,
+                 description = excluded.description,
+                 source_project_slug = excluded.source_project_slug,
+                 updated_at = now()
+        returning id into v_id;
+    end if;
+
+    delete from public.mrm_set_items where set_id = v_id;
+    for it in select * from jsonb_array_elements(coalesce(_items, '[]'::jsonb))
+    loop
+        insert into public.mrm_set_items(
+                set_id, position, transition_id, name, precursor, product, ce, cv, note)
+             values (
+                v_id, pos,
+                nullif(it->>'transition_id', '')::uuid,
+                it->>'name',
+                nullif(it->>'precursor', '')::numeric,
+                nullif(it->>'product', '')::numeric,
+                nullif(it->>'ce', '')::numeric,
+                nullif(it->>'cv', '')::numeric,
+                it->>'note');
+        pos := pos + 1;
+    end loop;
+    return v_id;
+end
+$$;
+
+-- Return all sets with their ordered items as one nested jsonb document:
+-- [ { ...set, items:[ { ...item } ] } ].
+create or replace function public.list_mrm_sets(_master_pw text)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare v_doc jsonb;
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    select coalesce(jsonb_agg(obj order by nm), '[]'::jsonb) into v_doc
+    from (
+        select s.name as nm,
+               jsonb_build_object(
+                   'id', s.id,
+                   'name', s.name,
+                   'owner', s.owner,
+                   'description', s.description,
+                   'source_project_slug', s.source_project_slug,
+                   'created_at', s.created_at,
+                   'updated_at', s.updated_at,
+                   'items', coalesce((
+                       select jsonb_agg(jsonb_build_object(
+                                  'id', i.id,
+                                  'position', i.position,
+                                  'transition_id', i.transition_id,
+                                  'name', i.name,
+                                  'precursor', i.precursor,
+                                  'product', i.product,
+                                  'ce', i.ce,
+                                  'cv', i.cv,
+                                  'note', i.note
+                              ) order by i.position)
+                         from public.mrm_set_items i
+                        where i.set_id = s.id
+                   ), '[]'::jsonb)
+               ) as obj
+          from public.mrm_sets s
+    ) q;
+    return v_doc;
+end
+$$;
+
+create or replace function public.delete_mrm_set(_master_pw text, _id uuid)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    delete from public.mrm_sets where id = _id;  -- cascades to mrm_set_items
+end
+$$;
+
 -- ---- 7. Grants ---------------------------------------------
 grant execute on function public.list_mrm_library(text)                                                          to anon, authenticated;
 grant execute on function public.upsert_compound(text, text, text[], text, text, integer)                        to anon, authenticated;
@@ -479,10 +636,18 @@ grant execute on function public.record_usage(text, uuid, text, text, text, text
 grant execute on function public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text, text[]) to anon, authenticated;
 grant execute on function public.set_exp_template(text, text)                                                    to anon, authenticated;
 grant execute on function public.get_exp_template(text)                                                          to anon, authenticated;
+grant execute on function public.upsert_mrm_set(text, uuid, text, text, text, text, jsonb)                       to anon, authenticated;
+grant execute on function public.list_mrm_sets(text)                                                             to anon, authenticated;
+grant execute on function public.delete_mrm_set(text, uuid)                                                      to anon, authenticated;
 
 -- ===========================================================================
 -- Optional teardown (commented out by default)
 -- ===========================================================================
+-- drop function if exists public.delete_mrm_set(text, uuid);
+-- drop function if exists public.list_mrm_sets(text);
+-- drop function if exists public.upsert_mrm_set(text, uuid, text, text, text, text, jsonb);
+-- drop table if exists public.mrm_set_items;
+-- drop table if exists public.mrm_sets;
 -- drop function if exists public.get_exp_template(text);
 -- drop function if exists public.set_exp_template(text, text);
 -- drop table if exists public.mrm_exp_template;

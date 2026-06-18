@@ -10871,6 +10871,9 @@ const SupabaseClient = (() => {
         // One transactional upsert per selected Method-table row: compound +
         // transition + usage. See supabase/mrm_library.sql:register_from_result.
         registerFromResult(args) { return rpc('register_from_result', args); },
+        // ① Phase 2: recipient-facing folder index (folder share). Not master
+        // gated — public folders need no password; private ones take one.
+        getFolderIndex(slug, password) { return rpc('get_folder_index', { _slug: slug, _password: password || null }); },
         // Storage ----------------------------------------------
         // Phase 1: uploads must carry an x-publish-token header obtained
         // from request_publish_session. supabase-js's storage.upload()
@@ -11432,6 +11435,11 @@ const App = {
         // project password, and hydrate from Supabase. Otherwise behave as a
         // normal Master client backed by IndexedDB.
         const shareSlug = this._readShareSlug();
+        // ① Phase 2: a folder-share link (#folder=<slug>) shows a read-only
+        // index of the folder's published child projects. No master gate and
+        // no project hydrate — render the index screen and stop.
+        const folderSlug = this._readFolderSlug();
+        if (folderSlug) { await renderFolderIndex(folderSlug); return; }
         // Master-mode gate. The standalone management page (root
         // index.html) is the canonical entry point and gates the user
         // there with a password. If someone bookmarks the viewer URL
@@ -11520,6 +11528,15 @@ const App = {
             if (!h) return null;
             const params = new URLSearchParams(h);
             const slug = params.get('share');
+            return slug ? slug.trim() : null;
+        } catch (e) { return null; }
+    },
+
+    // ① Phase 2: folder-share index route (viewer/index.html#folder=<slug>).
+    _readFolderSlug() {
+        try {
+            const params = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+            const slug = params.get('folder');
             return slug ? slug.trim() : null;
         } catch (e) { return null; }
     },
@@ -13162,14 +13179,86 @@ function setupMobileUI() {
     if (backdrop) backdrop.addEventListener('click', () => setPanel(null));
 }
 
+// ① Phase 2: recipient-facing folder-share index. Renders a standalone,
+// read-only screen listing the folder's published child projects (each links
+// to its own #share=<slug>). Public folders load directly; private ones prompt
+// for the folder password. No project data is hydrated here.
+async function renderFolderIndex(slug) {
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const host = document.createElement('div');
+    host.id = 'folder-index-screen';
+    host.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#f8fafc;color:#0f172a;overflow:auto;padding:24px 18px;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;';
+    document.body.appendChild(host);
+    const shell = (inner) => '<div style="max-width:760px;margin:0 auto;">' + inner + '</div>';
+    const linkBase = location.pathname.replace(/[^/]+$/, '') + 'index.html';
+    let password = null;
+
+    const renderDoc = (payload) => {
+        const doc = (payload && payload.index_doc) || {};
+        const title = (payload && payload.name) || doc.name || 'Shared folder';
+        const renderNodes = (nodes, depth) => {
+            if (!Array.isArray(nodes) || !nodes.length) return '<div style="color:#94a3b8;font-size:12px;padding:4px 0;">（空）</div>';
+            let html = '<ul style="list-style:none;margin:0;padding:0 0 0 ' + (depth ? 16 : 0) + 'px;">';
+            for (const n of nodes) {
+                if (n && n.type === 'folder') {
+                    html += '<li style="margin:8px 0 2px;"><div style="font-weight:700;">📁 ' + esc(n.name) + '</div>'
+                          + renderNodes(n.children || [], depth + 1) + '</li>';
+                } else if (n && n.type === 'project' && n.slug) {
+                    const url = linkBase + '#share=' + encodeURIComponent(n.slug);
+                    html += '<li style="margin:3px 0;">• <a href="' + esc(url) + '" style="color:#1d4ed8;text-decoration:none;">'
+                          + esc(n.displayName || n.slug) + '</a></li>';
+                }
+            }
+            return html + '</ul>';
+        };
+        host.innerHTML = shell(
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><span style="font-size:20px;">📁</span>'
+            + '<h1 style="font-size:20px;font-weight:800;margin:0;">' + esc(title) + '</h1></div>'
+            + '<p style="font-size:12px;color:#64748b;margin:0 0 16px;">共有フォルダ。各プロジェクトを開くにはリンクをクリックしてください（プロジェクトごとにパスワードが必要な場合があります）。</p>'
+            + '<div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px;">'
+            + renderNodes(doc.children || [], 0) + '</div>');
+    };
+
+    const renderPasswordPrompt = (errMsg) => {
+        host.innerHTML = shell(
+            '<h1 style="font-size:18px;font-weight:800;margin:0 0 8px;">🔒 共有フォルダ</h1>'
+            + '<p style="font-size:13px;color:#475569;margin:0 0 10px;">このフォルダはパスワードで保護されています。</p>'
+            + (errMsg ? '<p style="color:#b91c1c;font-size:12px;margin:0 0 8px;">' + esc(errMsg) + '</p>' : '')
+            + '<div style="display:flex;gap:6px;max-width:360px;">'
+            + '<input id="fi-pw" type="password" placeholder="パスワード" style="flex:1;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;">'
+            + '<button id="fi-go" style="padding:6px 14px;border:1px solid #2563eb;background:#2563eb;color:#fff;border-radius:4px;cursor:pointer;">開く</button></div>');
+        const inp = host.querySelector('#fi-pw'), go = host.querySelector('#fi-go');
+        const submit = () => { password = (inp.value || '').trim(); attempt(); };
+        go.addEventListener('click', submit);
+        inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') submit(); });
+        setTimeout(() => inp.focus(), 30);
+    };
+
+    const attempt = async () => {
+        host.innerHTML = shell('<p style="font-size:13px;color:#64748b;">読み込み中…</p>');
+        try {
+            const payload = await SupabaseClient.getFolderIndex(slug, password);
+            renderDoc(payload);
+        } catch (e) {
+            const msg = String((e && (e.message || e.details)) || '');
+            if (/28P01|invalid|credential|password/i.test(msg)) renderPasswordPrompt(password ? 'パスワードが違います' : null);
+            else if (/not_found|P0002|no rows|null value/i.test(msg)) host.innerHTML = shell('<h1 style="font-size:18px;font-weight:800;">フォルダが見つかりません</h1><p style="font-size:13px;color:#64748b;">この共有リンクは無効か、共有が解除されています。</p>');
+            else host.innerHTML = shell('<h1 style="font-size:18px;font-weight:800;">読み込みに失敗しました</h1><p style="font-size:12px;color:#b91c1c;">' + esc(msg) + '</p>');
+        }
+    };
+    await attempt();
+}
+
 document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { console.error(e); alert('Init failed: ' + (e.message || e)); }); setupMobileUI(); });
 
 </script>
 
-<!-- Build tag: bumped on every push so a recipient can spot a stale cached
-     copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
-     the deploy branch. If the rN you see in the browser is older than what
-     the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-14-r59</div>
+<!-- Build tag: single shared app version from /version.js (see version.js).
+     All pages (index / viewer / mrm) display the same value — bump version.js
+     only. If the version shown in the browser is older than expected, do a
+     hard reload (Ctrl/Cmd-Shift-R). -->
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;"></div>
+<script src="../version.js"></script>
+<script>(function(){var _b=document.getElementById('buildTag'); if(_b) _b.textContent=(window.APP_VERSION||'');})();</script>
 </body>
 </html>

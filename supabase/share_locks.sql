@@ -702,3 +702,141 @@ begin
         );
 end
 $$;
+
+-- ===========================================================================
+-- ① Workspace tree (sub-project hierarchy). A single jsonb document describing
+-- folders (containers with no data) that nest arbitrarily, with projects placed
+-- by slug (and/or local id). Organisational only — the projects/sections/rois
+-- themselves are unchanged. Master-pw gated like the other write RPCs.
+-- ===========================================================================
+create table if not exists public.workspace_tree (
+    id         int primary key check (id = 1),
+    tree       jsonb not null default '{"version":1,"children":[]}'::jsonb,
+    updated_at timestamptz not null default now()
+);
+alter table public.workspace_tree enable row level security;
+revoke all on public.workspace_tree from anon, authenticated;
+
+create or replace function public.get_workspace_tree(_master_pw text)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare v_tree jsonb;
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    select tree into v_tree from public.workspace_tree where id = 1;
+    return coalesce(v_tree, '{"version":1,"children":[]}'::jsonb);
+end
+$$;
+
+create or replace function public.set_workspace_tree(_master_pw text, _tree jsonb)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    insert into public.workspace_tree(id, tree)
+         values (1, coalesce(_tree, '{"version":1,"children":[]}'::jsonb))
+    on conflict (id) do update
+         set tree = excluded.tree, updated_at = now();
+end
+$$;
+
+grant execute on function public.get_workspace_tree(text)        to anon, authenticated;
+grant execute on function public.set_workspace_tree(text, jsonb) to anon, authenticated;
+
+-- ===========================================================================
+-- ① Phase 2: folder shares. A master can publish a folder so recipients open
+-- viewer/index.html#folder=<slug> and see a read-only index of the published
+-- child projects (each links to its own #share=<slug>). The index is a
+-- snapshot taken at publish time. Per-folder access is public OR password;
+-- child projects keep their own access — this is only a navigation layer.
+-- ===========================================================================
+create table if not exists public.folder_shares (
+    slug          text primary key,
+    name          text,
+    index_doc     jsonb not null default '{}'::jsonb,
+    is_public     boolean not null default false,
+    password_hash text,
+    updated_at    timestamptz not null default now()
+);
+alter table public.folder_shares enable row level security;
+revoke all on public.folder_shares from anon, authenticated;
+
+create or replace function public.publish_folder_share(
+    _master_pw text,
+    _slug      text,
+    _name      text,
+    _index_doc jsonb,
+    _is_public boolean default false,
+    _password  text default null
+) returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    if _slug is null or length(trim(_slug)) = 0 then
+        raise exception 'slug required';
+    end if;
+    if not coalesce(_is_public, false) and (_password is null or length(_password) < 4) then
+        raise exception 'password_required';
+    end if;
+    insert into public.folder_shares(slug, name, index_doc, is_public, password_hash, updated_at)
+         values (
+            trim(_slug), _name, coalesce(_index_doc, '{}'::jsonb), coalesce(_is_public, false),
+            case when coalesce(_is_public, false) then null else crypt(_password, gen_salt('bf')) end,
+            now())
+    on conflict (slug) do update
+         set name          = excluded.name,
+             index_doc     = excluded.index_doc,
+             is_public     = excluded.is_public,
+             password_hash = case when excluded.is_public then null
+                                  when _password is not null then crypt(_password, gen_salt('bf'))
+                                  else public.folder_shares.password_hash end,
+             updated_at    = now();
+end
+$$;
+
+-- Recipient-facing: NOT master gated. Returns {name, index_doc, is_public}
+-- when the folder is public or the password matches; raises otherwise.
+create or replace function public.get_folder_index(_slug text, _password text default null)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare r public.folder_shares;
+begin
+    select * into r from public.folder_shares where slug = _slug;
+    if r.slug is null then
+        raise exception 'not_found' using errcode = 'P0002';
+    end if;
+    if not r.is_public then
+        if _password is null or r.password_hash is null
+           or r.password_hash <> crypt(_password, r.password_hash) then
+            raise exception 'invalid credentials' using errcode = '28P01';
+        end if;
+    end if;
+    return jsonb_build_object('name', r.name, 'index_doc', r.index_doc, 'is_public', r.is_public);
+end
+$$;
+
+create or replace function public.delete_folder_share(_master_pw text, _slug text)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    delete from public.folder_shares where slug = _slug;
+end
+$$;
+
+grant execute on function public.publish_folder_share(text, text, text, jsonb, boolean, text) to anon, authenticated;
+grant execute on function public.get_folder_index(text, text)                                 to anon, authenticated;
+grant execute on function public.delete_folder_share(text, text)                              to anon, authenticated;
