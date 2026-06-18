@@ -7,7 +7,7 @@ DESI / MSI 切片ビューア + 共有プラットフォーム。Supabase をバ
 | **プロジェクト管理** | `/` | ローカル + サーバのプロジェクト一覧 / 新規作成 / Copy URL |
 | **ビューア** | `/viewer/` | データ表示 + ROI 編集 + Publish to share |
 
-詳細は Help モーダル内の 3 つのガイド (プロジェクト管理 / 共有 admin / 共有 受け手) と [`supabase/README.md`](./supabase/README.md) を参照してください。
+詳細は Help モーダル内のガイドと [`supabase/README.md`](./supabase/README.md) を参照してください。Help は閲覧モードに応じて出し分けられ、**共有 URL を開いた閲覧者 (共有モード) には「共有 受け手」ガイドのみ**を表示します (管理者 / 管理画面ガイドは master / admin 用)。
 
 ---
 
@@ -52,10 +52,11 @@ python3 -m http.server 8000
 ## 構成
 
 - `index.html` — プロジェクト管理画面 (ルート)
-- `viewer/index.html` — シングルファイルのビューア本体 (約 5500 行)
-- `USER_GUIDE.md`, `USER_GUIDE.en.md` — 共有受け手向けガイド
-- `USER_GUIDE.manage.md`, `USER_GUIDE.manage.en.md` — プロジェクト管理ガイド
-- `USER_GUIDE.master.md`, `USER_GUIDE.master.en.md` — 管理者 (admin) 向けガイド
+- `viewer/index.html` — シングルファイルのビューア本体
+- `mrm.html` — MRM 管理ライブラリ (admin 専用。化合物 / トランジション / Excel 取り込み)
+- `USER_GUIDE.md`, `USER_GUIDE.en.md` — 共有受け手向けガイド (**共有モードのアプリ内 Help はこれのみ表示**)
+- `USER_GUIDE.manage.md`, `USER_GUIDE.manage.en.md` — プロジェクト管理ガイド (master/admin 用)
+- `USER_GUIDE.master.md`, `USER_GUIDE.master.en.md` — 管理者 (admin) 向けガイド (master/admin 用)
 - `supabase/` — SQL スキーマと運用 README
 
 ---

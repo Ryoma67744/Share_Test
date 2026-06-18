@@ -24,6 +24,7 @@ This guide is for the **master / admin** publishing data with DESI Data Share. I
 16. [Upload progress / large files](#16-upload-progress--large-files)
 17. [Storage capacity](#17-storage-capacity)
 18. [Troubleshooting](#18-troubleshooting)
+19. [MRM library manager (mrm.html)](#19-mrm-library-manager-mrmhtml)
 
 ---
 
@@ -102,6 +103,8 @@ Click `+ HE/IF` on a section panel:
 ## 5. Align — overlaying HE/IF on MSI
 
 Click **`Align`** on a section panel to open a modal that aligns HE/IF layers to the MSI coordinate system. Use this when no transform JSON was supplied at registration time, or whenever you want to re-align manually.
+
+> **Note: the main-view "rotate one side"**: the main toolbar's **Rotation** has a target selector **(Both / HE only / MSI only)**. When HE and MSI were imported at different orientations and don't line up, rotate **just one of them** to match. The angle is stored in `section.meta.viewerTransform.rotHE / rotMSI` and is **shipped to viewers on publish**. This is a display-level overlay fix and is **separate from this Align modal's affine transform (μm/px, ROI coordinates, and other scientific alignment)** — keep using the Align modal for coordinate-accurate registration.
 
 <div style="border:1px solid #cbd5e1;border-radius:6px;padding:10px;background:#f8fafc;margin:10px 0;font-size:12px;">
   <div style="font-weight:600;color:#0f172a;margin-bottom:6px;">Align modal layout</div>
@@ -249,6 +252,7 @@ When a section has **no HE (`HE_STAIN`) registered** and 2+ MSI series exist, th
 
 The master's Range slider (Toolbar Range or the gear ⚙ "Intensity range") writes its value into **`sec.meta.layerDisplay[key].vmin/vmax`**. The Viewer reads that field on load and uses it as the **initial Range** for the corresponding MSI.
 
+- **Range is shared — same window, same width — across every section of one MRM**: changing the Range min/max on one section snaps the min/max of **every section showing the same MRM (same MSI key)** to the same values (identical width). Edits from the Toolbar or the gear ⚙ both propagate to all sections and are saved into each section's `layerDisplay`. Use it to compare and publish several sections on one identical scale.
 - Whatever intensity window the master pinned for each MSI is what the viewer sees on first paint.
 - Viewers can re-tune Range freely, but the change is local — reloading restores the master's value.
 - The master needs to re-publish after tuning Range; saved-but-unpublished changes don't reach viewers.
@@ -558,3 +562,30 @@ Per-file size cap defaults to 50 MB on both plans, raisable to 5 GB from the das
 | Accidentally published over an existing slug | No undo — be careful with names |
 | Forgot the password | In the Supabase SQL Editor, run `select set_project_password('<slug>', 'admin', '<new>');` |
 | `サーバから一覧取得` returns 0 rows | The admin pw matches no projects yet (none published, or a different admin pw was used) |
+
+---
+
+## 19. MRM library manager (mrm.html)
+
+An **admin-only page** for managing compounds, transitions and usage history in one place. Open it from the **"MRM管理"** button on the dashboard (`/`) — **an admin password is required**.
+
+### 19-1. What you can do
+- Add / edit / delete compounds (`+ 化合物`) and transitions (`+ トランジション`). Manage tags (categories), polarity, serial number, intensity notes, role (quantify/confirm) and the recommended ★ flag.
+- Select rows in the viewer's Method (MRM) table and click **"選択を管理へ登録"** to register them into this library straight from measurement results (with tags / role / sample types).
+- Export selected transitions to a **`.exp`** file (substituted into a Waters template).
+
+### 19-2. Bulk-import MRM from Excel
+You can import an existing MRM list (xlsx) as-is. Use the **`Excel取り込み`** button on the toolbar:
+
+1. Pick a `.xlsx` / `.xls` file.
+2. The whole sheet is parsed automatically, detecting **blocks that have a category title plus a `CompoundName / Precursor / Product / CV / CE` header row**.
+   - **Multiple blocks laid out vertically and horizontally** (e.g. several lanes side by side) are all detected.
+   - Columns are matched **by header name**, so a **swapped CV/CE order is read correctly**.
+   - Each title (e.g. `Amino acid`, `13C6-Glucose`) becomes a **tag (category)**.
+   - **Polarity** is taken from a `+ / −` marker next to the title, or inferred from `NEG` / `POS` in the compound name.
+3. In the **preview**, review/adjust which blocks to import, the tag names, and polarity (— = infer from name / + / −).
+4. Click **`取り込み実行`** to bulk-register.
+
+> **Idempotent (safe to re-run)**: existing compounds are updated and identical transitions (same precursor / product / CE / CV) are skipped, so repeating an import never creates duplicates.
+>
+> The import writes to the production Supabase. For the first run, verify the result with a **small test file** before importing the full list.

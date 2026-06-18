@@ -270,11 +270,11 @@ Three groups in each section's toolbar:
 
 | Field | Input | Meaning |
 | --- | --- | --- |
-| **Range** | min — max | Intensity window of the active MSI layer (display floor / ceiling) |
+| **Range** | min — max | Intensity window of the active MSI layer (display floor / ceiling). **Shared across every section showing the same MRM (compound)** — see the note below |
 | **Opacity** | 0–100 % | Transparency of the active MSI layer |
-| **Rotation** | -180°–180° | Whole-canvas rotation (combines with pan and zoom) |
+| **Rotation** | -180°–180° | Canvas rotation (combines with pan and zoom). The **target selector to its left (Both / HE only / MSI only)** chooses which layer is rotated |
 
-The **🔗** icon on each field syncs that value across every section. The **`↻`** button resets translate / rotate / zoom for the panel.
+**About syncing**: **Range is always shared across every section showing the same MRM** (no toggle needed). **Opacity** and **Rotation (Both)** sync across sections only while their **🔗** icon is ON. The **`↻`** button resets translate / rotate / zoom for the panel (HE/MSI-only rotation is reset too).
 
 > If the Opacity input is greyed out, the active MSI layer has **Apply opacity** disabled in its gear ⚙ popover. Re-enable the checkbox there and the toolbar input becomes editable again.
 
@@ -282,9 +282,13 @@ The **🔗** icon on each field syncs that value across every section. The **`�
 
 > **Range initial values are inherited from the master**: the per-MSI Range slider (vmin/vmax) loads with the value the master set at publish time. Viewers can still adjust freely, but the change is local — reloading restores the master's value. If the master later re-tunes Range and re-publishes, the new value becomes the next-load initial.
 
+> **Range stays the same window — same width — across sections of one compound**: changing the Range min or max on one section snaps the min/max of **every section showing the same MRM (compound)** to the same values (so the widths match too). Editing via the gear ⚙ Intensity range does the same. Other compounds are unaffected. This lets you compare several sections on one identical scale.
+
 > Pan: drag without modifier. Zoom: mouse wheel. Rotation: the input field, optionally synced with 🔗.
 
 > **Rotation is reflected in the bottom thumbnail list too**: changing Rotation re-renders the **MSI thumbnail list** at the bottom-center in the same orientation as the main canvas.
+
+> **Rotate HE only / MSI only**: pick "HE only" or "MSI only" in the **target selector** left of Rotation to rotate **just one layer** on that section. Use it when HE and MSI were imported at different orientations and don't line up — rotate one of them to match. "Both" rotates the whole canvas as before. HE/MSI-only rotation is per-section and is not affected by the 🔗 sync.
 
 > **Colormap dropdown**: The toolbar's **Colormap** lets you swap the MSI heatmap palette (Plasma / Viridis / Inferno / Hot / Jet / Grayscale). The choice is **kept inside this tab** (sessionStorage). Closing the tab reverts to the master's default. The same dropdown lives inside the Preview overlay and stays in sync, so you can keep adjusting colour after closing Preview.
 
@@ -317,7 +321,7 @@ Click the **gear ⚙** at the right edge of any layer chip to open a per-layer p
 | --- | --- |
 | **Apply opacity** | When unchecked, the Opacity slider is ignored and the layer always renders at 100 %. HE/IF defaults to OFF so the histology stays as a solid backdrop; MSI defaults to ON to match the previous behaviour. |
 | **Grayscale** (HE/IF only) | Render the histology as monochrome — useful when you want MSI's Plasma overlay to pop at maximum contrast. |
-| **Intensity range** (MSI only) | The MSI intensity window (vmin / vmax). Linked to the Range input on the toolbar. |
+| **Intensity range** (MSI only) | The MSI intensity window (vmin / vmax). Linked to the toolbar Range input; changes are **shared across every section showing the same MRM** (same width). |
 
 > The draw order is fixed: **HE/IF → others → MSI (additive blend)**. No matter the order layers were toggled, the MSI heatmap always sits on top of HE.
 
