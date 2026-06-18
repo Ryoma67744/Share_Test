@@ -189,6 +189,10 @@ const SupabaseClient = (() => {
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
         getWorkspaceTree(masterPw) { return rpc('get_workspace_tree', { _master_pw: masterPw }); },
         setWorkspaceTree(masterPw, tree) { return rpc('set_workspace_tree', { _master_pw: masterPw, _tree: tree }); },
+        publishFolderShare(masterPw, slug, name, indexDoc, isPublic, password) {
+            return rpc('publish_folder_share', { _master_pw: masterPw, _slug: slug, _name: name, _index_doc: indexDoc, _is_public: !!isPublic, _password: password || null });
+        },
+        deleteFolderShare(masterPw, slug) { return rpc('delete_folder_share', { _master_pw: masterPw, _slug: slug }); },
         deleteProjectDoc(masterPw, slug) { return rpc('delete_project_doc', { _master_pw: masterPw, _slug: slug }); },
         // Mints a short-lived publish-session token. The token is written
         // into publish_sessions and authorises the matching slug's storage
@@ -541,6 +545,97 @@ async function treeMoveProject(slug, localId) {
     await persistTreeAndRender();
 }
 
+// ① Phase 2: build the recipient-facing index snapshot for a folder subtree.
+// Only published projects (those with a slug, present in `slugToName`) are
+// included; sub-folders are preserved as nesting.
+function _buildFolderIndexDoc(folderNode, slugToName) {
+    const conv = (nodes) => {
+        const out = [];
+        for (const n of (nodes || [])) {
+            if (n.type === 'folder') out.push({ type: 'folder', name: n.name, children: conv(n.children || []) });
+            else if (n.type === 'project' && n.slug && slugToName.has(n.slug)) out.push({ type: 'project', slug: n.slug, displayName: slugToName.get(n.slug) });
+        }
+        return out;
+    };
+    return { name: folderNode.name, children: conv(folderNode.children || []) };
+}
+
+async function openFolderShareModal(folderId) {
+    _ensureTree();
+    const node = _treeFolderById(folderId);
+    if (!node) return;
+    const rows = await buildRows();
+    const slugToName = new Map();
+    for (const r of rows) {
+        const slug = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
+        if (slug) slugToName.set(slug, (r.local && r.local.displayName) || (r.server && r.server.display_name) || slug);
+    }
+    let total = 0, withSlug = 0;
+    (function walk(nodes) { for (const n of (nodes || [])) { if (n.type === 'folder') walk(n.children || []); else if (n.type === 'project') { total++; if (n.slug && slugToName.has(n.slug)) withSlug++; } } })(node.children || []);
+    const excluded = total - withSlug;
+    const cur = node.shareSlug || '';
+    const folderUrl = (s) => location.origin + location.pathname.replace(/[^/]+$/, '') + 'viewer/index.html#folder=' + encodeURIComponent(s);
+    const defaultSlug = cur || ('folder-' + (((node.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)) || 'x') + '-' + Math.random().toString(36).slice(2, 6));
+    const html = `
+        <h2>フォルダを共有: ${safe(node.name)}</h2>
+        ${cur ? '<div style="font-size:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;padding:8px;margin-bottom:8px;">共有中（' + (node.shareIsPublic ? 'public' : 'パスワード保護') + '）<br><span style="word-break:break-all;">' + safe(folderUrl(cur)) + '</span><div style="margin-top:6px;display:flex;gap:6px;"><button type="button" class="btn" data-copy>URLコピー</button><button type="button" class="btn danger" data-unshare>共有解除</button></div></div>' : ''}
+        <p style="font-size:12px;color:#475569;margin:0 0 8px;">配下の<b>公開済み</b>プロジェクト ${withSlug} 件を一覧にします。${excluded ? '<br><span style="color:#b45309;">未公開の ' + excluded + ' 件は含まれません（先に各プロジェクトを Publish してください）。</span>' : ''}</p>
+        <form class="row" style="display:flex;flex-direction:column;gap:8px;">
+          <label style="font-size:13px;">共有 slug<br><input type="text" name="slug" value="${safe(defaultSlug)}" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
+          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="pwprotect" ${cur && !node.shareIsPublic ? 'checked' : ''}> パスワードで保護する（オフ＝public）</label>
+          <label style="font-size:13px;" data-pw-row><input type="password" name="password" placeholder="フォルダ パスワード (4文字以上)" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
+          <p class="err" data-err style="color:#b91c1c;font-size:12px;"></p>
+          <div class="actions" style="display:flex;gap:6px;justify-content:flex-end;">
+            <button type="button" class="btn" data-modal-cancel>閉じる</button>
+            <button type="submit" class="btn primary" data-modal-ok>${cur ? '再共有 (更新)' : '共有する'}</button>
+          </div>
+        </form>`;
+    const p = openModal(html);
+    const card = openModal._card;
+    const errEl = card.querySelector('[data-err]');
+    const pwRow = card.querySelector('[data-pw-row]');
+    const pwProtect = card.querySelector('[name="pwprotect"]');
+    const syncPw = () => { pwRow.style.display = pwProtect.checked ? '' : 'none'; };
+    syncPw(); pwProtect.addEventListener('change', syncPw);
+    const copyBtn = card.querySelector('[data-copy]');
+    if (copyBtn) copyBtn.addEventListener('click', async () => { try { await navigator.clipboard.writeText(folderUrl(cur)); copyBtn.textContent = 'Copied ✓'; } catch (e) {} });
+    const unshareBtn = card.querySelector('[data-unshare]');
+    if (unshareBtn) unshareBtn.addEventListener('click', async () => {
+        if (!confirm('フォルダ「' + node.name + '」の共有を解除しますか?')) return;
+        const pw = await _ensureMasterPwForTree(); if (!pw) return;
+        try { await SupabaseClient.deleteFolderShare(pw, cur); } catch (e) { console.warn('delete_folder_share failed', e); }
+        delete node.shareSlug; delete node.shareIsPublic;
+        if (card._close) card._close(null);
+        await persistTreeAndRender();
+        alert('共有を解除しました。');
+    });
+    card._collect = () => {
+        const slug = (card.querySelector('[name="slug"]').value || '').trim();
+        if (!slug) { errEl.textContent = 'slug は必須です'; return null; }
+        const isPublic = !pwProtect.checked;
+        const password = (card.querySelector('[name="password"]').value || '').trim();
+        if (!isPublic && password.length < 4) { errEl.textContent = 'パスワードは4文字以上'; return null; }
+        return { slug, isPublic, password };
+    };
+    const res = await p;
+    if (!res) return;
+    const pw = await _ensureMasterPwForTree();
+    if (!pw) { alert('Master password が必要です'); return; }
+    const indexDoc = _buildFolderIndexDoc(node, slugToName);
+    try {
+        await SupabaseClient.publishFolderShare(pw, res.slug, node.name, indexDoc, res.isPublic, res.isPublic ? null : res.password);
+        node.shareSlug = res.slug; node.shareIsPublic = res.isPublic;
+        await persistTreeAndRender();
+        const url = folderUrl(res.slug);
+        try { await navigator.clipboard.writeText(url); } catch (e) {}
+        alert('共有しました（URL をコピーしました）:\n' + url);
+    } catch (e) {
+        const msg = String((e && (e.message || e.details)) || '');
+        if (/unauthorized|28000/i.test(msg)) alert('Master password が違います');
+        else alert('共有に失敗しました: ' + msg);
+    }
+}
+
 // Collapsed-folder UI state (local only).
 function _collapsedSet() { try { return new Set(JSON.parse(localStorage.getItem('desi:foldersCollapsed') || '[]')); } catch (e) { return new Set(); } }
 function _saveCollapsed(set) { try { localStorage.setItem('desi:foldersCollapsed', JSON.stringify([...set])); } catch (e) {} }
@@ -807,6 +902,7 @@ async function renderList() {
             + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-rename="' + safe(n.id) + '" title="名前変更">改名</button>'
             + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-move="' + safe(n.id) + '" title="このフォルダを移動">移動</button>'
             + '<button class="btn danger" style="font-size:11px;padding:2px 6px;" data-folder-del="' + safe(n.id) + '" title="削除">削除</button>'
+            + '<button class="btn" style="font-size:11px;padding:2px 6px;' + (n.shareSlug ? 'background:#ecfdf5;border-color:#a7f3d0;' : '') + '" data-folder-share="' + safe(n.id) + '" title="このフォルダを共有 (受け手向けインデックス)">' + (n.shareSlug ? '共有中' : '共有') + '</button>'
             + '</div>';
     };
     const renderNodes = (nodes, depth) => {
@@ -844,6 +940,7 @@ async function renderList() {
     list.querySelectorAll('[data-folder-rename]').forEach(b => b.addEventListener('click', () => treeRenameFolder(b.getAttribute('data-folder-rename'))));
     list.querySelectorAll('[data-folder-move]').forEach(b => b.addEventListener('click', () => treeMoveFolder(b.getAttribute('data-folder-move'))));
     list.querySelectorAll('[data-folder-del]').forEach(b => b.addEventListener('click', () => treeDeleteFolder(b.getAttribute('data-folder-del'))));
+    list.querySelectorAll('[data-folder-share]').forEach(b => b.addEventListener('click', () => openFolderShareModal(b.getAttribute('data-folder-share'))));
 
     // ---- per-row controls ----
     list.querySelectorAll('.proj-row').forEach(row => {
@@ -1180,6 +1277,6 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(e => { consol
 </script>
 <!-- Build tag: bumped on every push so a maintainer / recipient can spot a
      stale cached copy. Same value as viewer/index.html, kept in sync by hand. -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-18-r27</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-18-r28</div>
 </body>
 </html>
