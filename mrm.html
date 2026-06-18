@@ -1494,8 +1494,15 @@ function bindLibraryEvents() {
             const tid = qs.getAttribute('data-tid');
             const want = !selectedTransitions.has(tid);
             if (want) selectedTransitions.add(tid); else selectedTransitions.delete(tid);
-            document.querySelectorAll('#lib .tr-quick-select[data-tid="' + tid + '"], #lib .tr-select[data-tid="' + tid + '"]')
-                .forEach(x => { x.checked = want; });
+            // preventDefault above cancels the click, which makes the browser
+            // restore THIS checkbox to its pre-click (unchecked) state after the
+            // handler returns. Re-apply the desired state on the next frame
+            // (after that restore, before paint) so the summary checkbox — and
+            // the level-2 checkbox if expanded — reflect the selection.
+            requestAnimationFrame(() => {
+                document.querySelectorAll('#lib .tr-quick-select[data-tid="' + tid + '"], #lib .tr-select[data-tid="' + tid + '"]')
+                    .forEach(x => { x.checked = want; });
+            });
             updateExportBar();
             renderSelectedPanel();
             return;
