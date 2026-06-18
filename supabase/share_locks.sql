@@ -702,3 +702,49 @@ begin
         );
 end
 $$;
+
+-- ===========================================================================
+-- ① Workspace tree (sub-project hierarchy). A single jsonb document describing
+-- folders (containers with no data) that nest arbitrarily, with projects placed
+-- by slug (and/or local id). Organisational only — the projects/sections/rois
+-- themselves are unchanged. Master-pw gated like the other write RPCs.
+-- ===========================================================================
+create table if not exists public.workspace_tree (
+    id         int primary key check (id = 1),
+    tree       jsonb not null default '{"version":1,"children":[]}'::jsonb,
+    updated_at timestamptz not null default now()
+);
+alter table public.workspace_tree enable row level security;
+revoke all on public.workspace_tree from anon, authenticated;
+
+create or replace function public.get_workspace_tree(_master_pw text)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare v_tree jsonb;
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    select tree into v_tree from public.workspace_tree where id = 1;
+    return coalesce(v_tree, '{"version":1,"children":[]}'::jsonb);
+end
+$$;
+
+create or replace function public.set_workspace_tree(_master_pw text, _tree jsonb)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    insert into public.workspace_tree(id, tree)
+         values (1, coalesce(_tree, '{"version":1,"children":[]}'::jsonb))
+    on conflict (id) do update
+         set tree = excluded.tree, updated_at = now();
+end
+$$;
+
+grant execute on function public.get_workspace_tree(text)        to anon, authenticated;
+grant execute on function public.set_workspace_tree(text, jsonb) to anon, authenticated;

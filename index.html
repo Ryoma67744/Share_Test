@@ -76,6 +76,7 @@
     <div class="flex items-center justify-between gap-3 flex-wrap">
       <div class="flex gap-2">
         <button id="btn-new" class="btn primary">+ 新規プロジェクト</button>
+        <button id="btn-new-folder" class="btn" title="プロジェクトをまとめるフォルダ (サブプロジェクト階層) を作成">+ フォルダ</button>
         <button id="btn-refresh-server" class="btn">サーバから一覧取得</button>
       </div>
       <div class="text-xs text-gray-500">ローカル (このブラウザ) と、サーバ (Supabase) の両方から一覧表示します</div>
@@ -186,6 +187,8 @@ const SupabaseClient = (() => {
         configured() { return !!_client(); },
         listProjects(ownerPw) { return rpc('list_projects', { _owner_password: ownerPw }); },
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
+        getWorkspaceTree(masterPw) { return rpc('get_workspace_tree', { _master_pw: masterPw }); },
+        setWorkspaceTree(masterPw, tree) { return rpc('set_workspace_tree', { _master_pw: masterPw, _tree: tree }); },
         deleteProjectDoc(masterPw, slug) { return rpc('delete_project_doc', { _master_pw: masterPw, _slug: slug }); },
         // Mints a short-lived publish-session token. The token is written
         // into publish_sessions and authorises the matching slug's storage
@@ -367,6 +370,180 @@ function readCachedOwnerPw() {
 function saveCachedOwnerPw(pw) {
     try { sessionStorage.setItem(OWNER_PW_KEY, JSON.stringify({ pw, expiresAt: Date.now() + 12*60*60*1000 })); } catch (e) {}
 }
+
+// ===========================================================================
+// ① Workspace tree (folders / sub-project hierarchy). The tree is the master
+// password's view of how published (and local) projects are organised. It is
+// stored server-side (get/set_workspace_tree, master-pw gated) so every master
+// PC sees the same hierarchy; projects themselves are unchanged.
+// Tree shape: { version, children:[ node ] }
+//   folder  = { type:'folder', id, name, children:[node] }
+//   project = { type:'project', slug?, localId? }   (at least one of slug/localId)
+// ===========================================================================
+let workspaceTree = null;
+
+function _emptyTree() { return { version: 1, children: [] }; }
+function _ensureTree() { if (!workspaceTree || !Array.isArray(workspaceTree.children)) workspaceTree = _emptyTree(); }
+
+// The dashboard master gate caches the master pw here on unlock; reuse it for
+// the tree RPCs (which are gated by _verify_master_pw, not the per-project pw).
+function readCachedMasterPw() {
+    try {
+        const raw = sessionStorage.getItem('desi:masterPw');
+        if (!raw) return '';
+        const p = JSON.parse(raw);
+        if (p && p.expiresAt && Date.now() < p.expiresAt) return p.pw || '';
+    } catch (e) {}
+    return '';
+}
+async function _ensureMasterPwForTree() {
+    let pw = readCachedMasterPw();
+    if (pw) return pw;
+    pw = (prompt('Master password を入力してください', 'MSIadomine') || '').trim();
+    if (pw) { try { sessionStorage.setItem('desi:masterPw', JSON.stringify({ pw, expiresAt: Date.now() + 12*3600*1000 })); } catch (e) {} }
+    return pw;
+}
+
+async function loadWorkspaceTree() {
+    if (!SupabaseClient.configured()) { _ensureTree(); return; }
+    const pw = readCachedMasterPw();
+    if (!pw) { _ensureTree(); return; }   // no master pw yet → flat view
+    try {
+        const t = await SupabaseClient.getWorkspaceTree(pw);
+        workspaceTree = (t && Array.isArray(t.children)) ? t : _emptyTree();
+    } catch (e) { console.warn('get_workspace_tree failed', e); _ensureTree(); }
+}
+async function persistTreeAndRender() {
+    await renderList();   // optimistic
+    const pw = await _ensureMasterPwForTree();
+    if (!pw) { alert('Master password が無いためフォルダ構成を保存できませんでした'); return; }
+    try { await SupabaseClient.setWorkspaceTree(pw, workspaceTree); }
+    catch (e) { console.warn('set_workspace_tree failed', e); alert('フォルダ構成の保存に失敗しました: ' + ((e && (e.message || e.details)) || e)); }
+}
+
+// ---- tree mutation utilities (operate on workspaceTree) ----
+function _treeFolderById(id, nodes) {
+    nodes = nodes || workspaceTree.children;
+    for (const n of nodes) if (n.type === 'folder') {
+        if (n.id === id) return n;
+        const f = _treeFolderById(id, n.children || []);
+        if (f) return f;
+    }
+    return null;
+}
+function _treeChildrenOf(folderId) {
+    if (!folderId) return workspaceTree.children;
+    const f = _treeFolderById(folderId);
+    if (f) { f.children = f.children || []; return f.children; }
+    return workspaceTree.children;
+}
+function _treeParentArrayOf(folderId) {
+    let found = null;
+    const walk = (arr) => {
+        for (const n of arr) if (n.type === 'folder') {
+            if (n.id === folderId) { found = arr; return true; }
+            if (walk(n.children || [])) return true;
+        }
+        return false;
+    };
+    walk(workspaceTree.children);
+    return found || workspaceTree.children;
+}
+function _treeRemove(pred) {
+    let removed = null;
+    const walk = (arr) => {
+        for (let i = 0; i < arr.length; i++) {
+            if (pred(arr[i])) { removed = arr[i]; arr.splice(i, 1); return true; }
+            if (arr[i].type === 'folder' && Array.isArray(arr[i].children) && walk(arr[i].children)) return true;
+        }
+        return false;
+    };
+    walk(workspaceTree.children);
+    return removed;
+}
+function _folderDescendantIds(id) {
+    const ids = new Set([id]);
+    const f = _treeFolderById(id);
+    const walk = (nodes) => { for (const n of nodes) if (n.type === 'folder') { ids.add(n.id); walk(n.children || []); } };
+    if (f) walk(f.children || []);
+    return ids;
+}
+function _flattenFolders() {
+    const out = [{ id: null, label: '（ルート）' }];
+    const walk = (nodes, prefix) => {
+        for (const n of nodes) if (n.type === 'folder') {
+            out.push({ id: n.id, label: prefix + n.name });
+            walk(n.children || [], prefix + n.name + ' / ');
+        }
+    };
+    walk(workspaceTree.children, '');
+    return out;
+}
+// Modal folder picker. Resolves {id} (id=null = root) or undefined (cancelled).
+async function pickFolderModal(excludeIds) {
+    _ensureTree();
+    const folders = _flattenFolders().filter(f => !(excludeIds && excludeIds.has(f.id)));
+    const btns = folders.map(f =>
+        '<button type="button" class="btn" data-pick="' + safe(f.id || '') + '" style="display:block;width:100%;text-align:left;margin-bottom:4px;">'
+        + safe(f.label) + '</button>').join('');
+    const html = '<h2>移動先フォルダを選択</h2><div style="max-height:50vh;overflow:auto;">' + btns
+        + '</div><div class="actions" style="margin-top:8px;"><button type="button" class="btn" data-modal-cancel>キャンセル</button></div>';
+    const p = openModal(html);
+    const card = openModal._card;
+    card.querySelectorAll('[data-pick]').forEach(b => b.addEventListener('click', () => {
+        if (card._close) card._close({ id: b.getAttribute('data-pick') || null });
+    }));
+    const v = await p;
+    return v == null ? undefined : v;
+}
+
+async function treeCreateFolder(parentId) {
+    const name = (prompt('フォルダ名', '新しいフォルダ') || '').trim();
+    if (!name) return;
+    _ensureTree();
+    _treeChildrenOf(parentId).push({ type: 'folder', id: 'f_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36), name, children: [] });
+    await persistTreeAndRender();
+}
+async function treeRenameFolder(id) {
+    _ensureTree();
+    const f = _treeFolderById(id); if (!f) return;
+    const name = (prompt('フォルダ名を変更', f.name) || '').trim();
+    if (!name || name === f.name) return;
+    f.name = name; await persistTreeAndRender();
+}
+async function treeDeleteFolder(id) {
+    _ensureTree();
+    const f = _treeFolderById(id); if (!f) return;
+    if (!confirm('フォルダ「' + f.name + '」を削除しますか?\n中のプロジェクト/サブフォルダは1つ上の階層へ移動します（プロジェクト自体は削除されません）。')) return;
+    const parentArr = _treeParentArrayOf(id);
+    const idx = parentArr.indexOf(f);
+    if (idx >= 0) parentArr.splice(idx, 1, ...(f.children || []));
+    await persistTreeAndRender();
+}
+async function treeMoveFolder(id) {
+    _ensureTree();
+    const dest = await pickFolderModal(_folderDescendantIds(id));
+    if (dest === undefined) return;
+    const node = _treeRemove(n => n.type === 'folder' && n.id === id);
+    if (!node) return;
+    _treeChildrenOf(dest.id).push(node);
+    await persistTreeAndRender();
+}
+async function treeMoveProject(slug, localId) {
+    _ensureTree();
+    const dest = await pickFolderModal();
+    if (dest === undefined) return;
+    _treeRemove(n => n.type === 'project' && ((slug && n.slug === slug) || (localId && n.localId === localId)));
+    const node = { type: 'project' };
+    if (slug) node.slug = slug;
+    if (localId) node.localId = localId;
+    _treeChildrenOf(dest.id).push(node);
+    await persistTreeAndRender();
+}
+
+// Collapsed-folder UI state (local only).
+function _collapsedSet() { try { return new Set(JSON.parse(localStorage.getItem('desi:foldersCollapsed') || '[]')); } catch (e) { return new Set(); } }
+function _saveCollapsed(set) { try { localStorage.setItem('desi:foldersCollapsed', JSON.stringify([...set])); } catch (e) {} }
 
 // ===========================================================================
 // Modal helpers (similar to viewer/index.html's openModal but self-contained)
@@ -579,6 +756,7 @@ function rowHtml(r) {
               ${url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : '')}
               ${r.local ? '<button type="button" class="btn danger" data-action="delete-local">Delete</button>' : ''}
               ${(!r.local && slug) ? '<button type="button" class="btn danger" data-action="delete-server" title="サーバから完全に削除 (master password 要)">Delete</button>' : ''}
+              <button type="button" class="btn" data-action="move" title="フォルダへ移動 (サブプロジェクト階層)">📁 移動</button>
             </div>
           </div>
           <div class="text-xs text-gray-600 mt-2">
@@ -592,14 +770,82 @@ function rowHtml(r) {
 async function renderList() {
     const list = document.getElementById('list');
     const rows = await buildRows();
-    if (!rows.length) {
+    _ensureTree();
+    if (!rows.length && !(workspaceTree.children && workspaceTree.children.length)) {
         list.innerHTML = `
             <div class="card p-6 text-center text-sm text-gray-500">
               プロジェクトがまだありません。<br>「+ 新規プロジェクト」で作成するか、「サーバから一覧取得」で過去のプロジェクトを呼び出してください。
             </div>`;
         return;
     }
-    list.innerHTML = rows.map(rowHtml).join('');
+    // ① Index rows for placement, then render the folder tree with projects
+    // inside their folders and any unplaced project at the root.
+    const bySlug = new Map(), byLocal = new Map();
+    const rkey = (r) => {
+        const s = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
+        return s ? ('s:' + s) : ('l:' + (r.local ? r.local.id : ''));
+    };
+    for (const r of rows) {
+        const s = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
+        const lid = r.local ? r.local.id : '';
+        if (s) bySlug.set(s, r);
+        if (lid) byLocal.set(lid, r);
+    }
+    const collapsed = _collapsedSet();
+    const placed = new Set();
+    const rowForNode = (n) => {
+        if (n.slug && bySlug.has(n.slug)) return bySlug.get(n.slug);
+        if (n.localId && byLocal.has(n.localId)) return byLocal.get(n.localId);
+        return null;
+    };
+    const folderHead = (n, depth) => {
+        const isCol = collapsed.has(n.id);
+        return '<div class="folder-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:' + (depth ? '6px 0 2px' : '12px 0 2px') + ';">'
+            + '<button class="btn" style="padding:0 7px;" data-folder-toggle="' + safe(n.id) + '" title="開閉">' + (isCol ? '▶' : '▼') + '</button>'
+            + '<span style="font-weight:700;">📁 ' + safe(n.name) + '</span>'
+            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-add="' + safe(n.id) + '" title="サブフォルダ追加">＋サブ</button>'
+            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-rename="' + safe(n.id) + '" title="名前変更">改名</button>'
+            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-move="' + safe(n.id) + '" title="このフォルダを移動">移動</button>'
+            + '<button class="btn danger" style="font-size:11px;padding:2px 6px;" data-folder-del="' + safe(n.id) + '" title="削除">削除</button>'
+            + '</div>';
+    };
+    const renderNodes = (nodes, depth) => {
+        let html = '';
+        for (const n of (nodes || [])) {
+            if (n.type === 'folder') {
+                const isCol = collapsed.has(n.id);
+                const inner = renderNodes(n.children || [], depth + 1);
+                html += folderHead(n, depth)
+                    + '<div data-folder-body="' + safe(n.id) + '" class="space-y-2" style="margin-left:18px;border-left:2px solid #e5e7eb;padding-left:10px;' + (isCol ? 'display:none;' : '') + '">'
+                    +   (inner || '<div class="text-xs text-gray-400 px-1 py-1">（空のフォルダ）</div>')
+                    + '</div>';
+            } else if (n.type === 'project') {
+                const r = rowForNode(n);
+                if (r) { placed.add(rkey(r)); html += rowHtml(r); }
+            }
+        }
+        return html;
+    };
+    const treeHtml = renderNodes(workspaceTree.children, 0);
+    const unplacedHtml = rows.filter(r => !placed.has(rkey(r))).map(rowHtml).join('');
+    list.innerHTML = treeHtml + unplacedHtml;
+
+    // ---- folder controls ----
+    const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s;
+    list.querySelectorAll('[data-folder-toggle]').forEach(btn => btn.addEventListener('click', () => {
+        const id = btn.getAttribute('data-folder-toggle');
+        const set = _collapsedSet();
+        const body = list.querySelector('[data-folder-body="' + esc(id) + '"]');
+        if (set.has(id)) { set.delete(id); if (body) body.style.display = ''; btn.textContent = '▼'; }
+        else { set.add(id); if (body) body.style.display = 'none'; btn.textContent = '▶'; }
+        _saveCollapsed(set);
+    }));
+    list.querySelectorAll('[data-folder-add]').forEach(b => b.addEventListener('click', () => treeCreateFolder(b.getAttribute('data-folder-add'))));
+    list.querySelectorAll('[data-folder-rename]').forEach(b => b.addEventListener('click', () => treeRenameFolder(b.getAttribute('data-folder-rename'))));
+    list.querySelectorAll('[data-folder-move]').forEach(b => b.addEventListener('click', () => treeMoveFolder(b.getAttribute('data-folder-move'))));
+    list.querySelectorAll('[data-folder-del]').forEach(b => b.addEventListener('click', () => treeDeleteFolder(b.getAttribute('data-folder-del'))));
+
+    // ---- per-row controls ----
     list.querySelectorAll('.proj-row').forEach(row => {
         const localId = row.getAttribute('data-local-id');
         const slug = row.getAttribute('data-slug');
@@ -608,6 +854,7 @@ async function renderList() {
             const btn = row.querySelector(`[data-action="${action}"]`);
             if (btn) btn.addEventListener('click', fn);
         };
+        click('move', () => treeMoveProject(slug, localId));
         click('open-local', () => {
             if (!localId) return;
             location.href = 'viewer/index.html?project=' + encodeURIComponent(localId);
@@ -898,9 +1145,11 @@ async function init() {
         const rows = await fetchServerProjectList(true);
         if (rows) {
             serverRowsCache = rows;
+            await loadWorkspaceTree();
             await renderList();
         }
     });
+    document.getElementById('btn-new-folder').addEventListener('click', () => treeCreateFolder(null));
     document.getElementById('btn-help').addEventListener('click', () => {
         // Native modal so we don't bounce away from the manager. Default
         // audience is 'manage' since this page IS the management screen.
@@ -910,6 +1159,7 @@ async function init() {
         location.href = 'mrm.html';
     });
 
+    await loadWorkspaceTree();
     await renderList();
     // Try a silent server pull if we have a cached owner pw and the
     // bootstrap path didn't already give us rows.
@@ -919,6 +1169,7 @@ async function init() {
             const rows = await SupabaseClient.listProjects(cachedPw);
             if (Array.isArray(rows)) {
                 serverRowsCache = rows;
+                await loadWorkspaceTree();
                 await renderList();
             }
         } catch (e) { /* expired or wrong: silently ignore, user can hit refresh */ }
@@ -929,6 +1180,6 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(e => { consol
 </script>
 <!-- Build tag: bumped on every push so a maintainer / recipient can spot a
      stale cached copy. Same value as viewer/index.html, kept in sync by hand. -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-05-26-r26</div>
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-18-r27</div>
 </body>
 </html>
