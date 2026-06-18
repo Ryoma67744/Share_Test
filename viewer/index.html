@@ -7236,6 +7236,28 @@ function safeName(s) {
     return String(s == null ? '' : s).replace(/[^A-Za-z0-9_\-]/g, '_') || 'X';
 }
 
+// Content signature of a blob, used to deduplicate identical "full" HE/IF
+// images at export. Prefers SHA-256 (crypto.subtle; needs a secure context),
+// falling back to length + FNV-1a over the bytes when subtle crypto is absent.
+async function blobContentSig(blob) {
+    try {
+        const buf = await blob.arrayBuffer();
+        if (typeof crypto !== 'undefined' && crypto.subtle && crypto.subtle.digest) {
+            const d = await crypto.subtle.digest('SHA-256', buf);
+            const b = new Uint8Array(d);
+            let hex = '';
+            for (let i = 0; i < b.length; i++) hex += b[i].toString(16).padStart(2, '0');
+            return 'sha256:' + hex;
+        }
+        const bytes = new Uint8Array(buf);
+        let h = 0x811c9dc5;
+        for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = (h * 0x01000193) >>> 0; }
+        return 'fnv:' + bytes.length + ':' + (h >>> 0).toString(16);
+    } catch (e) {
+        return null;
+    }
+}
+
 // Cooperative yield so the heavy export loop never blocks the main thread long
 // enough to freeze the tab (the failure mode of the reverted combined-Excel).
 const _yieldUi = () => new Promise(r => setTimeout(r, 0));
@@ -7536,6 +7558,11 @@ async function exportProjectAsZip() {
             sections: [],
         };
 
+        // Dedup identical full HE/IF images by content so a whole-slide image
+        // reused across sections is written once ("one full + per-section crops").
+        const fullByHash = new Map();
+        const usedFullPaths = new Set();
+
         for (const sec of (project.sections || [])) {
             const S = sampleNameById.get(sec.id);
             const panel = App.panels && App.panels.get(sec.id);
@@ -7549,8 +7576,24 @@ async function exportProjectAsZip() {
                 const rec = await ProjectStorage.getBlob(ent.blobId);
                 if (!rec) { tick(); tick(); continue; }
                 const fname = ent.filename || (layerKey + '.tif');
-                const fullPath = 'HE_IF/' + S + '__' + layerKey + '__full__' + fname;
-                zip.file(fullPath, rec.blob);
+                // One copy per unique content: reuse the path for identical
+                // images (same whole slide on many sections) instead of
+                // re-writing the blob. Distinct images keep separate files.
+                let fullPath;
+                const sig = await blobContentSig(rec.blob);
+                if (sig && fullByHash.has(sig)) {
+                    fullPath = fullByHash.get(sig);
+                } else {
+                    const dot = fname.lastIndexOf('.');
+                    const stem = dot >= 0 ? fname.slice(0, dot) : fname;
+                    const ext  = dot >= 0 ? fname.slice(dot) : '';
+                    let cand = 'HE_IF/full__' + stem + ext, k = 2;
+                    while (usedFullPaths.has(cand)) cand = 'HE_IF/full__' + stem + '__' + (k++) + ext;
+                    fullPath = cand;
+                    usedFullPaths.add(fullPath);
+                    zip.file(fullPath, rec.blob);
+                    if (sig) fullByHash.set(sig, fullPath);
+                }
                 const imgRec = { mime: ent.mime, filename: fname, fullPath };
                 tick(); await _yieldUi();
                 try {
@@ -13210,10 +13253,12 @@ document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { co
 
 </script>
 
-<!-- Build tag: bumped on every push so a recipient can spot a stale cached
-     copy. Format: v:YYYY-MM-DD-rN where rN increments for each commit on
-     the deploy branch. If the rN you see in the browser is older than what
-     the maintainer told you, do a hard reload (Ctrl/Cmd-Shift-R). -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-18-r59</div>
+<!-- Build tag: single shared app version from /version.js (see version.js).
+     All pages (index / viewer / mrm) display the same value — bump version.js
+     only. If the version shown in the browser is older than expected, do a
+     hard reload (Ctrl/Cmd-Shift-R). -->
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;"></div>
+<script src="../version.js"></script>
+<script>(function(){var _b=document.getElementById('buildTag'); if(_b) _b.textContent=(window.APP_VERSION||'');})();</script>
 </body>
 </html>

@@ -1553,8 +1553,12 @@ async function init() {
 
 document.addEventListener('DOMContentLoaded', () => { init().catch(e => { console.error(e); alert('init failed: ' + (e.message || e)); }); });
 </script>
-<!-- Build tag: bumped on every push so a maintainer / recipient can spot a
-     stale cached copy. -->
-<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;">v:2026-06-18-mrm-r6</div>
+<!-- Build tag: single shared app version from version.js (see version.js).
+     All pages (index / viewer / mrm) display the same value — bump version.js
+     only. If the version shown in the browser is older than expected, do a
+     hard reload (Ctrl/Cmd-Shift-R). -->
+<div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;"></div>
+<script src="version.js"></script>
+<script>(function(){var _b=document.getElementById('buildTag'); if(_b) _b.textContent=(window.APP_VERSION||'');})();</script>
 </body>
 </html>
