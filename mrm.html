@@ -44,7 +44,10 @@
   .modal-card .actions { display:flex; gap:6px; justify-content:flex-end; margin-top:14px; }
   .modal-card .err { color:#b91c1c; font-size:11px; min-height:1em; margin-top:6px; }
   .tag-group { margin-bottom:18px; }
-  .tag-group > h2 { font-size:13px; font-weight:700; color:#0f172a; margin:0 0 6px; padding-bottom:4px; border-bottom:1px solid #e2e8f0; }
+  details.tag-group > summary { list-style:none; cursor:pointer; font-size:13px; font-weight:700; color:#0f172a; margin:0 0 6px; padding-bottom:4px; border-bottom:1px solid #e2e8f0; }
+  details.tag-group > summary::-webkit-details-marker { display:none; }
+  details.tag-group > summary::before { content:'▸ '; color:#64748b; font-size:11px; }
+  details.tag-group[open] > summary::before { content:'▾ '; }
   details.cpd { border:1px solid #e5e7eb; border-radius:6px; background:#fff; margin-bottom:6px; }
   details.cpd > summary { cursor:pointer; padding:7px 10px; list-style:none; display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
   details.cpd > summary::-webkit-details-marker { display:none; }
@@ -644,11 +647,32 @@ function renderLibrary() {
         if (a === UNTAGGED) return 1; if (b === UNTAGGED) return -1;
         return a.localeCompare(b, 'ja');
     });
+    // Collapsible tag groups. Honor the saved collapsed set, but force every
+    // group open while a search/filter is active so matches are never hidden.
+    const anyFilter = !!((searchText || '').trim() || filterPolarity || selectedTags.size || selectedSampleTypes.size);
+    const collapsed = _mrmCollapsedSet();
     host.innerHTML = tagNames.map(t => {
         const list = groups.get(t).map(unitHtml).join('');
-        return '<div class="tag-group"><h2>' + safe(t) + ' <span class="muted" style="font-weight:400;">(' + groups.get(t).length + ')</span></h2>' + list + '</div>';
+        const open = (anyFilter || !collapsed.has(t)) ? ' open' : '';
+        return '<details class="tag-group" data-tag="' + safe(t) + '"' + open + '>'
+            + '<summary>' + safe(t) + ' <span class="muted" style="font-weight:400;">(' + groups.get(t).length + ')</span></summary>'
+            + '<div class="tag-group-body">' + list + '</div>'
+            + '</details>';
     }).join('');
+    // `toggle` does not bubble → bind per <details>. Re-bound each render (old
+    // listeners are discarded with the replaced DOM).
+    host.querySelectorAll('details.tag-group').forEach(d => {
+        d.addEventListener('toggle', () => {
+            const name = d.getAttribute('data-tag');
+            const set = _mrmCollapsedSet();
+            if (d.open) set.delete(name); else set.add(name);
+            _saveMrmCollapsed(set);
+        });
+    });
 }
+// Collapsed tag-group names (UI state only, local).
+function _mrmCollapsedSet() { try { return new Set(JSON.parse(localStorage.getItem('desi:mrmGroupsCollapsed') || '[]')); } catch (e) { return new Set(); } }
+function _saveMrmCollapsed(set) { try { localStorage.setItem('desi:mrmGroupsCollapsed', JSON.stringify([...set])); } catch (e) {} }
 
 // ===========================================================================
 // Modals: compound / transition / usage
