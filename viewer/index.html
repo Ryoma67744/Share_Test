@@ -1200,7 +1200,7 @@ function sortMethodKeys(layerKeys, getEntry, getMeta, sortKey, sortDir) {
             case 'ce':        return num(meta.ce);
             case 'cv':        return num(meta.cv);
             case 'mean':      return Number.isFinite(ent.rawMean) ? ent.rawMean : null;
-            case 'max':       return (ent.rawRange && Number.isFinite(ent.rawRange[1])) ? ent.rawRange[1] : null;
+            case 'max':       return Number.isFinite(ent.rawTrueMax) ? ent.rawTrueMax : ((ent.rawRange && Number.isFinite(ent.rawRange[1])) ? ent.rawRange[1] : null);
         }
         return null;
     };
@@ -1876,6 +1876,17 @@ function monoLut(hex) {
     return lut;
 }
 
+// Display ceiling percentile for MSI rasters. Using the raw max as the absolute
+// ceiling lets a single hot pixel (or one high-signal section) crush all tissue
+// to the colormap floor; a high percentile clips those outliers so tissue stays
+// visible while the per-MRM absolute comparison is preserved. Tune here.
+const MSI_ROBUST_PERCENTILE = 0.995;
+function percentileSorted(vals, p) {
+    if (!vals || !vals.length) return NaN;
+    const a = Float64Array.from(vals).sort();
+    const idx = Math.min(a.length - 1, Math.max(0, Math.round(p * (a.length - 1))));
+    return a[idx];
+}
 function rasterRowsToPngDataUrl(rows, range) {
     const xs = [...new Set(rows.map(r => r.x))].sort((a, b) => a - b);
     const ys = [...new Set(rows.map(r => r.y))].sort((a, b) => a - b);
@@ -1893,6 +1904,7 @@ function rasterRowsToPngDataUrl(rows, range) {
     }
     let vmin = Infinity, vmax = -Infinity;
     let sum = 0, n = 0;
+    const vals = [];
     for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
         if (cnt[i][j] > 0) {
             grid[i][j] /= cnt[i][j];
@@ -1901,11 +1913,27 @@ function rasterRowsToPngDataUrl(rows, range) {
             if (v > vmax) vmax = v;
             sum += v;
             n++;
+            vals.push(v);
         }
     }
     const rawMean = n > 0 ? (sum / n) : null;
-    if (range && range.length === 2) { vmin = range[0]; vmax = range[1]; if (!(vmax > vmin)) vmax = vmin + 1e-9; }
-    else if (!(vmax > vmin)) { vmin = 0; vmax = 1; }
+    // Bake range. rawRange (= [bakeLo, bakeHi]) doubles as the display scale
+    // (renderComposite / msiAbsNorm reconstruct the raw value via this range and
+    // divide by the per-MRM max of bakeHi), so we clip the top outliers to a
+    // robust percentile instead of the raw max — otherwise a single hot pixel
+    // crushes tissue to the colormap floor. trueMax keeps the real maximum for
+    // the Method/Stats "Max intensity" readouts. An explicit def.range wins.
+    let bakeLo, bakeHi, trueMax = Number.isFinite(vmax) ? vmax : null;
+    if (range && range.length === 2) {
+        bakeLo = range[0]; bakeHi = range[1]; if (!(bakeHi > bakeLo)) bakeHi = bakeLo + 1e-9;
+        if (trueMax == null) trueMax = bakeHi;
+    } else if (!(vmax > vmin)) {
+        bakeLo = 0; bakeHi = 1; if (trueMax == null) trueMax = 1;
+    } else {
+        bakeLo = vmin;
+        const robust = percentileSorted(vals, MSI_ROBUST_PERCENTILE);
+        bakeHi = (Number.isFinite(robust) && robust > vmin) ? robust : vmax;
+    }
     const canvas = document.createElement('canvas');
     canvas.width = W; canvas.height = H;
     const ctx = get2dContext(canvas, { willReadFrequently: true });
@@ -1915,13 +1943,13 @@ function rasterRowsToPngDataUrl(rows, range) {
         const v = grid[i][j];
         if (!Number.isFinite(v)) { imgData.data[p++] = 0; imgData.data[p++] = 0; imgData.data[p++] = 0; imgData.data[p++] = 0; }
         else {
-            const n = Math.max(0, Math.min(1, (v - vmin) / (vmax - vmin)));
-            const g = Math.round(n * 255);
+            const nn = Math.max(0, Math.min(1, (v - bakeLo) / (bakeHi - bakeLo)));
+            const g = Math.round(nn * 255);
             imgData.data[p++] = g; imgData.data[p++] = g; imgData.data[p++] = g; imgData.data[p++] = 255;
         }
     }
     ctx.putImageData(imgData, 0, 0);
-    return { dataUrl: canvas.toDataURL('image/png'), rawRange: [vmin, vmax], rawMean };
+    return { dataUrl: canvas.toDataURL('image/png'), rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax };
 }
 
 async function buildPngFromXlsxArrayBuffer(buf, def) {
@@ -2331,6 +2359,7 @@ class SectionPanel {
         const dataUrl = (result && typeof result === 'object') ? result.dataUrl : result;
         const rawRange = (result && typeof result === 'object' && Array.isArray(result.rawRange)) ? result.rawRange : null;
         const rawMean = (result && typeof result === 'object' && Number.isFinite(result.rawMean)) ? result.rawMean : null;
+        const rawTrueMax = (result && typeof result === 'object' && Number.isFinite(result.rawTrueMax)) ? result.rawTrueMax : null;
         this.imageDataUrls[key] = dataUrl;
         // Persist the raw MSI value range so the Method (MRM) table can show
         // intensity Mean/Max in the original scale rather than 0-255 luminance.
@@ -2338,10 +2367,11 @@ class SectionPanel {
         // Mean/Max in the table; flag missing-on-disk so we IDB-save once.
         if (this.section.msiSeries && this.section.msiSeries[key]) {
             const entRef = this.section.msiSeries[key];
-            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean);
+            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean) || !Number.isFinite(entRef.rawTrueMax);
             if (rawRange) entRef.rawRange = rawRange;
             if (rawMean != null) entRef.rawMean = rawMean;
-            if (wasMissing && (rawRange || rawMean != null) && App && App.queueSave) App.queueSave();
+            if (rawTrueMax != null) entRef.rawTrueMax = rawTrueMax;
+            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null) && App && App.queueSave) App.queueSave();
         }
         await this.attachImage(key, dataUrl);
     }
@@ -4946,7 +4976,8 @@ function renderMethodTable() {
         const cv  = (meta.cv  != null) ? String(meta.cv) : '—';
         const rawMean = (ent.rawMean != null) ? formatRawValue(ent.rawMean) : '—';
         const rawRange = ent.rawRange || null;
-        const rawMax = (rawRange && Number.isFinite(rawRange[1])) ? formatRawValue(rawRange[1]) : '—';
+        const rawMax = Number.isFinite(ent.rawTrueMax) ? formatRawValue(ent.rawTrueMax)
+            : ((rawRange && Number.isFinite(rawRange[1])) ? formatRawValue(rawRange[1]) : '—');
         const isFocus = (App.viewMode === 'compound' && App.focusCompoundKey === layerKey);
         const isActive = isFocus || (panel.activeMsiKey === layerKey) || panel.visibleLayers.has(layerKey);
 
@@ -9862,7 +9893,7 @@ const SharePreview = {
             return `<td>${formatScientific(Number(v))}</td>`;
         }).join('');
         body.innerHTML =
-            `<tr><th>Max Intensity</th>${cellsFor(ent => Array.isArray(ent.rawRange) ? ent.rawRange[1] : NaN)}</tr>` +
+            `<tr><th>Max Intensity</th>${cellsFor(ent => Number.isFinite(ent.rawTrueMax) ? ent.rawTrueMax : (Array.isArray(ent.rawRange) ? ent.rawRange[1] : NaN))}</tr>` +
             `<tr><th>Avg Intensity</th>${cellsFor(ent => ent.rawMean)}</tr>`;
     },
 
