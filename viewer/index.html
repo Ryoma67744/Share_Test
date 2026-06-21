@@ -727,10 +727,10 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                 <button class="tb-btn" id="tb-align-heif" title="HE/IF を MSI と重ね合わせる (manual / landmark)">Align</button>
                 <button class="tb-btn danger" id="tb-del-section" title="Delete the active section">×</button>
                 <span class="tb-divider"></span>
-                <span class="tb-group" title="MSI 強度の表示レンジ (Range) — 同じ MRM の全切片で min/max(幅)を共通化します">
-                    <input type="number" id="tb-range-min" step="any" placeholder="min" title="Range 下限 (vmin) — 同じ MRM の全切片で min/max を共通化 (同じ幅)" aria-label="Range min" disabled>
+                <span class="tb-group" title="MSI 表示ウィンドウ (生単位) — 同じ MRM の全切片に適用。下限以下は黒で表示">
+                    <input type="number" id="tb-range-min" step="any" placeholder="min" title="表示ウィンドウ 下限 (生単位)" aria-label="Range min">
                     <span class="tb-sep">—</span>
-                    <input type="number" id="tb-range-max" step="any" placeholder="max" title="Range 上限 (vmax) — 同じ MRM の全切片で min/max を共通化 (同じ幅)" aria-label="Range max" disabled>
+                    <input type="number" id="tb-range-max" step="any" placeholder="max" title="表示ウィンドウ 上限 (生単位)" aria-label="Range max">
                 </span>
                 <span class="tb-group" title="MSI レイヤーの不透明度 (Opacity)">
                     <input type="number" id="tb-opacity" step="1" min="0" max="100" title="MSI Opacity (%)" aria-label="Opacity" disabled>
@@ -935,23 +935,24 @@ function rawToLum(raw, rawRange) {
     const lum = ((Number(raw) - r0) / span) * 255;
     return Math.max(0, Math.min(255, lum));
 }
-// MSI absolute-scale mapping (display-time normalisation disabled).
+// MSI display mapping (per-MRM display window, in raw-intensity units).
 // Each MSI raster PNG is grayscale-baked to its own per-layer [rawMin,rawMax]
-// (rasterRowsToPngDataUrl), which discards absolute magnitude. To show MSI
-// WITHOUT per-layer normalisation we invert that bake here — reconstruct the
-// raw value from the 0-255 luminance via the layer's rawRange — then map it on
-// a per-MRM ABSOLUTE scale [0, globalMax], where globalMax is the largest raw
-// value seen for this molecule (MSI key) across all loaded sections
-// (App.msiAbsMax). Identical raw intensity therefore yields an identical colour
-// in every section of the same molecule, and the per-layer black-point shift
-// (min subtraction) is gone. Falls back to lum/255 when rawRange / globalMax is
-// unavailable (legacy data, or the self-normalised synthetic TIC).
-function msiAbsNorm(lum, rawRange, globalMax) {
+// (rasterRowsToPngDataUrl). To display, invert that bake — reconstruct the raw
+// value from the 0-255 luminance via the layer's rawRange — then map it into the
+// per-MRM display window [win.min, win.max] (win from App.getMsiWindow: default
+// 0..in-scope-max, or the user's manual min/max). Returns the normalised
+// position n (0..1) plus belowMin (true when v<=win.min) so the renderer can
+// paint sub-window pixels black. Falls back to lum/255 when rawRange is missing
+// (legacy data, or the self-normalised synthetic TIC, passed with win=null).
+function msiWindowEval(lum, rawRange, win) {
     const rr = (Array.isArray(rawRange) && rawRange.length === 2
         && Number.isFinite(rawRange[0]) && Number.isFinite(rawRange[1])) ? rawRange : null;
     const v = rr ? (rr[0] + (lum / 255) * (rr[1] - rr[0])) : lum;
-    const denom = (rr && Number.isFinite(globalMax) && globalMax > 0) ? globalMax : 255;
-    return Math.max(0, Math.min(1, v / denom));
+    const winMin = (win && Number.isFinite(win.min)) ? win.min : 0;
+    let winMax = (win && Number.isFinite(win.max)) ? win.max : (rr ? rr[1] : 255);
+    if (!(winMax > winMin)) winMax = winMin + 1e-9;
+    const n = Math.max(0, Math.min(1, (v - winMin) / (winMax - winMin)));
+    return { n, belowMin: v <= winMin };
 }
 function formatRawValue(v) {
     if (!Number.isFinite(v)) return '—';
@@ -1917,9 +1918,9 @@ function rasterRowsToPngDataUrl(rows, range) {
         }
     }
     const rawMean = n > 0 ? (sum / n) : null;
-    // Bake range. rawRange (= [bakeLo, bakeHi]) doubles as the display scale
-    // (renderComposite / msiAbsNorm reconstruct the raw value via this range and
-    // divide by the per-MRM max of bakeHi), so we clip the top outliers to a
+    // Bake range. rawRange (= [bakeLo, bakeHi]) doubles as the basis for display
+    // (renderComposite / msiWindowEval reconstruct the raw value via this range
+    // and map it into the per-MRM window), so we clip the top outliers to a
     // robust percentile instead of the raw max — otherwise a single hot pixel
     // crushes tissue to the colormap floor. trueMax keeps the real maximum for
     // the Method/Stats "Max intensity" readouts. An explicit def.range wins.
@@ -2415,12 +2416,11 @@ class SectionPanel {
                 if (l < mn) mn = l;
                 if (l > mx) mx = l;
             }
-            // actualMin/actualMax capture the observed raster luminance range
-            // (kept for the read-only Intensity-range UI). MSI display itself no
-            // longer normalises per-layer: the renderer maps each pixel on a
-            // per-MRM ABSOLUTE scale (msiAbsNorm / App.msiAbsMax), so for MSI the
-            // display window is pinned to the full 0-255 range and the per-layer /
-            // Master / common-window stretch is skipped below.
+            // actualMin/actualMax capture the observed raster luminance range.
+            // MSI display is driven by App.getMsiWindow (per-MRM window over the
+            // in-scope sections, see msiWindowEval), NOT by these per-section
+            // vmin/vmax — so vmin/vmax are pinned to 0-255 (unused for MSI) and
+            // the Master / common-window stretch is skipped below.
             // Guard against degenerate cases (fully transparent MSI, decode
             // failure leaving mn=255/mx=0).
             if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn > mx) { mn = 0; mx = 255; }
@@ -2854,9 +2854,9 @@ class SectionPanel {
             // rotate-90 path below.
             const isHeLike = /HE_STAIN|IF_STAIN/i.test(key) && !isTicBackdrop;
 
-            // For MSI: build an absolute-scaled + LUT-applied temp canvas (each
-            // pixel mapped on the per-MRM absolute scale via msiAbsNorm, with no
-            // per-layer normalisation). For HE/IF: draw the decoded image as-is so
+            // For MSI: build a windowed + LUT-applied temp canvas (each pixel
+            // mapped into the per-MRM display window via msiWindowEval; sub-min
+            // pixels painted black). For HE/IF: draw the decoded image as-is so
             // the on-screen colours match the source TIFF (Photoshop / Image-J).
             let drawSource;
             if (isMsiLayer) {
@@ -2866,38 +2866,30 @@ class SectionPanel {
                 tctx.drawImage(img, 0, 0);
                 const data = tctx.getImageData(0, 0, tc.width, tc.height);
                 const d = data.data;
-                // Per-MRM absolute scale (no per-layer normalisation): rrC is
-                // this layer's raw value range, gMaxC the molecule's global max.
+                // Per-MRM display window (raw units): rrC is this layer's raw
+                // range; winC is the molecule's window (0..in-scope-max, or the
+                // user's manual min/max). msiWindowEval maps each pixel into it.
                 const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
-                const gMaxC = App.getMsiAbsMax(key);
+                const winC = App.getMsiWindow(key);
                 const lut = overlay ? monoLut(overlayColor[key] || '#ffffff') : getActiveColormap();
                 const bg = overlay ? [0, 0, 0] : getColormapBackground();
                 for (let i = 0; i < d.length; i += 4) {
                     const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
                     const lum = 0.299*r + 0.587*g + 0.114*b;
-                    const n = msiAbsNorm(lum, rrC, gMaxC);
+                    const ev = msiWindowEval(lum, rrC, winC);
                     // Compositing rule:
-                    //   - Out-of-grid pixels (a === 0; sparse scans where
-                    //     rasterRowsToPngDataUrl skipped cells the scanner
-                    //     never visited) become an opaque backdrop so HE
-                    //     can't leak through the gaps.
-                    //   - Every other in-raster pixel — including the very
-                    //     dim ones — goes through the colormap so weak
-                    //     signal stays visible at the LUT floor. Waters HDI
-                    //     parity: a previous `lum < 1` shortcut painted the
-                    //     bottom of the range as backdrop, which hid the
-                    //     fine speckle pattern present in the raw data.
-                    //   - Backdrop color = getColormapBackground(): black
-                    //     for most colormaps, white for Grayscale (low=white)
-                    //     so the gap fill stays continuous with the LUT floor.
-                    // ctx.globalAlpha = settings.opacity then handles the
-                    // blend with HE: 100 % covers HE completely inside the
-                    // raster, lower opacity proportionally reveals HE
-                    // through every in-raster pixel.
-                    if (a === 0) {
+                    //   - Out-of-grid pixels (a === 0) OR pixels at/below the
+                    //     window minimum (ev.belowMin) become an opaque black
+                    //     backdrop, so the background reads as black with the
+                    //     coloured tissue on top (Q: 最低値は黒).
+                    //   - In-raster pixels above win.min go through the colormap.
+                    //   - Backdrop color = getColormapBackground(): black for
+                    //     most colormaps, white for Grayscale (low=white).
+                    // ctx.globalAlpha = settings.opacity then blends with HE.
+                    if (a === 0 || ev.belowMin) {
                         d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; d[i+3] = 255;
                     } else {
-                        const c = lut[Math.round(n * 255)];
+                        const c = lut[Math.round(ev.n * 255)];
                         d[i] = c[0]; d[i+1] = c[1]; d[i+2] = c[2]; d[i+3] = 255;
                     }
                 }
@@ -3515,29 +3507,44 @@ class SectionPanel {
     // treat the result as read-only.
     getRangeState() {
         const key = this.effectiveActiveMsiKey();
-        const settings = key ? this.imageSettings[key] : null;
-        if (!key || !settings) return { available: false };
+        if (!key || !this.imageSettings[key]) return { available: false };
         const ent = (this.section.msiSeries || {})[key] || {};
-        const r = ent.rawRange;
-        const rawRange = (Array.isArray(r) && r.length === 2 && Number.isFinite(r[0]) && Number.isFinite(r[1])) ? [Number(r[0]), Number(r[1])] : null;
         const meta = ent.compoundMeta;
         const baseLabel = (meta && meta.base) || formatDisplayName(key);
-        let rawMin = rawRange ? lumToRaw(settings.vmin, rawRange) : Number(settings.vmin);
-        let rawMax = rawRange ? lumToRaw(settings.vmax, rawRange) : Number(settings.vmax);
-        if (!Number.isFinite(rawMin)) rawMin = rawRange ? rawRange[0] : Number(settings.actualMin);
-        if (!Number.isFinite(rawMax)) rawMax = rawRange ? rawRange[1] : Number(settings.actualMax);
-        if (!Number.isFinite(rawMin)) rawMin = 0;
-        if (!Number.isFinite(rawMax)) rawMax = Number.isFinite(rawMin) ? rawMin + 1 : 1;
-        return { available: true, key, baseLabel, rawMin, rawMax, rawRange };
+        // Display window in raw units (per-MRM): default 0..in-scope-max, or the
+        // user's manual override. Drives the toolbar Range min/max inputs.
+        const win = App.getMsiWindow(key);
+        return { available: true, key, baseLabel, rawMin: win.min, rawMax: win.max };
     }
 
     // Apply a raw-scale value coming from the toolbar Range input. Mirrors
     // the old onRangeChange flow but is invoked by the Toolbar instead of
     // the per-section header (which no longer exists).
     applyRangeRaw(edge, rawValue) {
-        // No-op: per-layer intensity windowing is disabled. MSI layers render on
-        // a per-MRM ABSOLUTE scale (msiAbsNorm / App.msiAbsMax), so manual Range
-        // edits from the toolbar / Share preview no longer change the display.
+        const key = this.effectiveActiveMsiKey();
+        if (!key) return;
+        const v = parseFloat(rawValue);
+        if (!Number.isFinite(v)) return;
+        // Per-MRM display window override (raw units). Only the edited edge is
+        // pinned; the other stays auto (0 / in-scope-max) so it keeps tracking
+        // the organ filter. Stored on App so every section showing this molecule
+        // uses the same window immediately.
+        App.msiUserWindow = App.msiUserWindow || {};
+        const cur = Object.assign({}, App.msiUserWindow[key] || {});
+        if (edge === 'min') cur.min = v; else cur.max = v;
+        if (Number.isFinite(cur.min) && Number.isFinite(cur.max) && !(cur.min < cur.max)) {
+            if (edge === 'min') cur.min = cur.max - Math.abs(cur.max || 1) * 1e-6 - 1e-9;
+            else cur.max = cur.min + Math.abs(cur.min || 1) * 1e-6 + 1e-9;
+        }
+        App.msiUserWindow[key] = cur;
+        for (const p of App.panels.values()) {
+            try {
+                p.renderComposite();
+                if (p.msiThumbRefs && p.msiThumbRefs.has(key)) p.renderMsiThumbnail(key);
+            } catch (e) {}
+        }
+        if (App.activeSectionId === this.section.id) renderMethodTable();
+        Toolbar.refreshRange();
     }
 
     // Mirror the active Range into section.meta.layerDisplay[key] so the
@@ -4026,8 +4033,9 @@ class SectionPanel {
             // vmin/vmax window no longer affects rendering. Keep the inputs (the
             // change handlers below query .vmin/.vmax) but disable them and show
             // the observed raster range for reference.
-            const rangeRow = mkRow('Intensity range (' + settings.actualMin + ' - ' + settings.actualMax + ', 絶対スケール表示)',
-                '<div style="display:flex;gap:4px;"><input type="number" value="' + settings.vmin + '" class="vmin" disabled title="正規化は無効です（MRM単位の絶対スケールで表示）" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"><input type="number" value="' + settings.vmax + '" class="vmax" disabled title="正規化は無効です（MRM単位の絶対スケールで表示）" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"></div>');
+            const _win = App.getMsiWindow(key);
+            const rangeRow = mkRow('表示ウィンドウ (生単位 — ツールバーの Range で調整)',
+                '<div style="display:flex;gap:4px;"><input type="number" value="' + formatRawForInput(_win.min) + '" class="vmin" disabled title="表示ウィンドウ下限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"><input type="number" value="' + formatRawForInput(_win.max) + '" class="vmax" disabled title="表示ウィンドウ上限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"></div>');
             pop.appendChild(rangeRow);
         }
         const close = document.createElement('div');
@@ -4324,16 +4332,16 @@ class SectionPanel {
         ctx.drawImage(src, 0, 0);
         const data = ctx.getImageData(0, 0, c.width, c.height);
         const d = data.data;
-        // Per-MRM absolute scale (no per-layer normalisation), matching renderComposite.
+        // Per-MRM display window (raw units), matching renderComposite.
         const rrT = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
-        const gMaxT = App.getMsiAbsMax(key);
+        const winT = App.getMsiWindow(key);
         const lut = getActiveColormap();
         const bg = getColormapBackground();
         for (let i = 0; i < d.length; i += 4) {
             if (d[i+3] === 0) continue;
             const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-            const n = msiAbsNorm(lum, rrT, gMaxT);
-            const cm = lut[Math.round(n * 255)];
+            const ev = msiWindowEval(lum, rrT, winT);
+            const cm = ev.belowMin ? bg : lut[Math.round(ev.n * 255)];
             d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
         }
         ctx.putImageData(data, 0, 0);
@@ -6414,13 +6422,13 @@ const Wizards = {
 
         // ---- MSI colour mapping (Plasma) + synthetic TIC --------------------
         // Apply the active colormap to a grayscale MSI <img>. Mirrors
-        // SectionPanel.renderMsiThumbnail. Display is un-normalised: instead of a
-        // vmin/vmax window, pass the layer's rawRange and the molecule's per-MRM
-        // globalMax and let msiAbsNorm map each pixel on the absolute scale
-        // [0, globalMax] (pass null/null for the self-normalised TIC).
+        // SectionPanel.renderMsiThumbnail. Pass the layer's rawRange and the
+        // molecule's per-MRM display window (App.getMsiWindow) and let
+        // msiWindowEval map each pixel into it; sub-min pixels are painted black
+        // (pass rawRange/win = null for the self-normalised TIC).
         // Returns a colored canvas (NOT a dataURL) so callers can apply the
         // section view-transform bake on top before encoding to PNG.
-        const paintMsiToColored = (srcImg, rawRange, globalMax) => {
+        const paintMsiToColored = (srcImg, rawRange, win) => {
             if (!srcImg || !srcImg.complete || !srcImg.naturalWidth) return null;
             const c = document.createElement('canvas');
             c.width = srcImg.naturalWidth; c.height = srcImg.naturalHeight;
@@ -6434,8 +6442,8 @@ const Wizards = {
             for (let i = 0; i < d.length; i += 4) {
                 if (d[i+3] === 0) continue;
                 const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-                const n = msiAbsNorm(lum, rawRange, globalMax);
-                const cm = lut[Math.round(n * 255)];
+                const ev = msiWindowEval(lum, rawRange, win);
+                const cm = ev.belowMin ? bg : lut[Math.round(ev.n * 255)];
                 d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
             }
             cctx.putImageData(data, 0, 0);
@@ -6614,22 +6622,22 @@ const Wizards = {
                 stampThumbDataset(msiImg, cached.rawW, cached.rawH, t);
                 return;
             }
-            let srcImg = null, msiRawRange = null, msiGlobalMax = null;
+            let srcImg = null, msiRawRange = null, msiWin = null;
             if (isTicKey(msiKey)) {
                 srcImg = computeSyntheticTicForKey(msiKey);
                 // synthetic TIC is already self-normalised to [0,255]; paint it
-                // straight through the LUT (msiAbsNorm falls back to lum/255).
+                // straight through the LUT (msiWindowEval falls back to lum/255).
             } else if (sec.msiSeries[msiKey]) {
                 srcImg = panel.imageSources && panel.imageSources[msiKey];
-                // Per-MRM absolute scale: invert the per-layer bake via rawRange
-                // and map against the molecule's global max so the preview
-                // matches the main viewer's un-normalised display.
+                // Per-MRM display window: invert the per-layer bake via rawRange
+                // and map into the molecule's window so the preview matches the
+                // main viewer's display.
                 msiRawRange = (sec.msiSeries[msiKey] || {}).rawRange || null;
-                msiGlobalMax = App.getMsiAbsMax(msiKey);
+                msiWin = App.getMsiWindow(msiKey);
             }
             if (!srcImg) { msiImg.removeAttribute('src'); return; }
             const paintAndSet = () => {
-                const colored = paintMsiToColored(srcImg, msiRawRange, msiGlobalMax);
+                const colored = paintMsiToColored(srcImg, msiRawRange, msiWin);
                 if (!colored) return;
                 const baked = bakeImageWithSectionTransform(colored, t.deg, t.flipLr, t.flipUd);
                 if (!baked) return;
@@ -10737,11 +10745,18 @@ const Toolbar = {
 
     refreshRange() {
         if (!this.rangeMin || !this.rangeMax) return;
-        // Range/window editing is disabled: MSI renders un-normalised on a
-        // per-MRM ABSOLUTE scale, so manual vmin/vmax no longer affect display.
-        this.rangeMin.value = ''; this.rangeMax.value = '';
-        this.rangeMin.disabled = true; this.rangeMax.disabled = true;
-        this.rangeMin.title = this.rangeMax.title = '正規化は無効です（MRM単位の絶対スケールで表示）';
+        const p = this.activePanel();
+        const st = p ? p.getRangeState() : null;
+        if (!p || !st || !st.available) {
+            this.rangeMin.value = ''; this.rangeMax.value = '';
+            this.rangeMin.disabled = true; this.rangeMax.disabled = true;
+            return;
+        }
+        this.rangeMin.disabled = false; this.rangeMax.disabled = false;
+        if (document.activeElement !== this.rangeMin) this.rangeMin.value = formatRawForInput(st.rawMin);
+        if (document.activeElement !== this.rangeMax) this.rangeMax.value = formatRawForInput(st.rawMax);
+        this.rangeMin.title = '表示ウィンドウ 下限 (生単位): ' + st.baseLabel;
+        this.rangeMax.title = '表示ウィンドウ 上限 (生単位): ' + st.baseLabel;
     },
 
     refreshOpacity() {
@@ -11397,21 +11412,33 @@ const App = {
         return null;
     },
 
-    // ---- Per-MRM absolute intensity scale ------------------------------
-    // MSI layers are shown un-normalised on a per-molecule absolute scale. For
-    // each MSI key we track the largest raw value seen across every loaded
-    // section (rawRange[1]); the renderer divides each reconstructed raw pixel
-    // by this global max (msiAbsNorm), so identical raw intensity yields an
-    // identical colour in every section showing that molecule.
+    // ---- Per-MRM display window (raw-intensity units) ------------------
+    // MSI is shown on a per-molecule window [0 .. max]. The auto max is the
+    // largest rawRange[1] among the IN-SCOPE sections (those passing the organ
+    // filter), so narrowing to one organ (e.g. Brain) rescales to that organ and
+    // a low-signal tissue stops being crushed by a high-signal one (e.g. lymph
+    // node). The user can override min/max via App.msiUserWindow (toolbar Range).
+    _organInScope(section) {
+        if (!this.activeOrganFilter) return true;
+        try { return sectionOrganKey(section) === this.activeOrganFilter; }
+        catch (e) { return true; }
+    },
+    // Effective display window for a molecule: user override wins, else 0..autoMax.
+    getMsiWindow(key) {
+        this.msiUserWindow = this.msiUserWindow || {};
+        const u = this.msiUserWindow[key] || null;
+        const autoMax = this.getMsiAbsMax(key);
+        const min = (u && Number.isFinite(u.min)) ? u.min : 0;
+        let max = (u && Number.isFinite(u.max)) ? u.max : autoMax;
+        if (!(max > min)) max = min + ((autoMax > 0) ? autoMax : 1);
+        return { min, max };
+    },
+    // Largest rawRange[1] over IN-SCOPE loaded panels (live; cheap, per-layer).
     getMsiAbsMax(key) {
         if (!key) return 0;
-        this.msiAbsMax = this.msiAbsMax || {};
-        const g = this.msiAbsMax[key];
-        if (Number.isFinite(g) && g > 0) return g;
-        // Fallback (registry not yet built): largest rawRange max among loaded
-        // panels for this key, so the first paint is already correct.
         let mx = 0;
         for (const panel of this.panels.values()) {
+            if (!this._organInScope(panel.section)) continue;
             const ent = (panel.section.msiSeries || {})[key];
             const rr = ent && ent.rawRange;
             if (rr && Number.isFinite(rr[1]) && rr[1] > mx) mx = rr[1];
@@ -11426,6 +11453,7 @@ const App = {
         this.msiAbsMax = this.msiAbsMax || {};
         const next = {};
         for (const panel of this.panels.values()) {
+            if (!this._organInScope(panel.section)) continue;
             for (const [key, ent] of Object.entries(panel.section.msiSeries || {})) {
                 const rr = ent && ent.rawRange;
                 if (!rr || !Number.isFinite(rr[1])) continue;
@@ -12432,6 +12460,11 @@ const App = {
     setActiveOrganFilter(key) {
         this.activeOrganFilter = (key && key !== '__all__') ? key : null;
         this.applyOrganFilter();
+        // The display scale is computed over in-scope (filtered) sections, so
+        // changing the organ filter rescales each molecule (e.g. Brain-only) and
+        // re-renders. Also refresh the toolbar Range to show the new window.
+        this.recomputeMsiAbsScale();
+        Toolbar.refreshRange();
     },
     applyOrganFilter() {
         const filt = this.activeOrganFilter;
