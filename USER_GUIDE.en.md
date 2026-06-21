@@ -115,7 +115,7 @@ The session expires after **12 hours**. Closing the tab is fine — re-opening t
 
 > Each section panel's top-left **section-name label** also shows the **Pixel pitch (μm/px)** when the publisher set it during Align (e.g. `Section 1 · 20×20 μm/px`). Both axes are always written out (`50×60 μm/px` for anisotropic, `20×20 μm/px` for isotropic) so the label is unambiguous.
 
-> **Organ filter**: when **2 or more** organs are inferred from the section names, an **"臓器:" (Organ)** selector appears at the right of the Sections header. Picking one shows only that organ's sections in the center ("すべて"/All shows everything). This only filters the view — it never changes the data or server state.
+> **Organ filter**: when **2 or more** organs are inferred from the first token of the section names, an **"臓器:" (Organ)** selector appears at the right of the Sections header. Picking one shows only that organ's sections in the center ("すべて"/All shows everything). This only filters the view — it never changes the data or server state.
 
 ---
 
