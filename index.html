@@ -636,9 +636,11 @@ async function openFolderShareModal(folderId) {
     }
 }
 
-// Collapsed-folder UI state (local only).
-function _collapsedSet() { try { return new Set(JSON.parse(localStorage.getItem('desi:foldersCollapsed') || '[]')); } catch (e) { return new Set(); } }
-function _saveCollapsed(set) { try { localStorage.setItem('desi:foldersCollapsed', JSON.stringify([...set])); } catch (e) {} }
+// Folder open/closed UI state — in-memory only (no persistence): folders always
+// start collapsed on every page load. Holds the set of EXPANDED folder IDs; a
+// folder not in the set is collapsed. Survives re-renders within the same page
+// session, resets on reload.
+const _openFolders = new Set();
 
 // ===========================================================================
 // Modal helpers (similar to viewer/index.html's openModal but self-contained)
@@ -737,6 +739,31 @@ async function openNewProjectFormModal() {
         };
     };
     return p;
+}
+
+// Create + persist a local project from the new-project form data; returns the
+// stored project. Shared by the top "+新規プロジェクト" button and the per-folder
+// "＋プロジェクト" buttons.
+async function createLocalProjectFromForm(data) {
+    const project = {
+        id: uid('proj'),
+        displayName: data.name,
+        anatomyPalette: {},
+        sections: [],
+        rois: [],
+        roiHidden: {},
+        memo: ensureMemoShape({
+            experimentDate: data.experimentDate,
+            machine: data.machine,
+            sampleTypes: data.sampleTypes,
+            matrix: data.matrix,
+            googleKeep: data.googleKeep,
+            freeNote: data.freeNote,
+        }),
+        createdAt: new Date().toISOString(),
+    };
+    await ProjectStorage.putProject(project);
+    return project;
 }
 
 // ===========================================================================
@@ -886,7 +913,6 @@ async function renderList() {
         if (s) bySlug.set(s, r);
         if (lid) byLocal.set(lid, r);
     }
-    const collapsed = _collapsedSet();
     const placed = new Set();
     const rowForNode = (n) => {
         if (n.slug && bySlug.has(n.slug)) return bySlug.get(n.slug);
@@ -894,10 +920,11 @@ async function renderList() {
         return null;
     };
     const folderHead = (n, depth) => {
-        const isCol = collapsed.has(n.id);
+        const isCol = !_openFolders.has(n.id);
         return '<div class="folder-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:' + (depth ? '6px 0 2px' : '12px 0 2px') + ';">'
             + '<button class="btn" style="padding:0 7px;" data-folder-toggle="' + safe(n.id) + '" title="開閉">' + (isCol ? '▶' : '▼') + '</button>'
             + '<span style="font-weight:700;">📁 ' + safe(n.name) + '</span>'
+            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-add-project="' + safe(n.id) + '" title="このフォルダに新規プロジェクト">＋プロジェクト</button>'
             + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-add="' + safe(n.id) + '" title="サブフォルダ追加">＋サブ</button>'
             + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-rename="' + safe(n.id) + '" title="名前変更">改名</button>'
             + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-move="' + safe(n.id) + '" title="このフォルダを移動">移動</button>'
@@ -909,7 +936,7 @@ async function renderList() {
         let html = '';
         for (const n of (nodes || [])) {
             if (n.type === 'folder') {
-                const isCol = collapsed.has(n.id);
+                const isCol = !_openFolders.has(n.id);
                 const inner = renderNodes(n.children || [], depth + 1);
                 html += folderHead(n, depth)
                     + '<div data-folder-body="' + safe(n.id) + '" class="space-y-2" style="margin-left:18px;border-left:2px solid #e5e7eb;padding-left:10px;' + (isCol ? 'display:none;' : '') + '">'
@@ -930,13 +957,21 @@ async function renderList() {
     const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s;
     list.querySelectorAll('[data-folder-toggle]').forEach(btn => btn.addEventListener('click', () => {
         const id = btn.getAttribute('data-folder-toggle');
-        const set = _collapsedSet();
         const body = list.querySelector('[data-folder-body="' + esc(id) + '"]');
-        if (set.has(id)) { set.delete(id); if (body) body.style.display = ''; btn.textContent = '▼'; }
-        else { set.add(id); if (body) body.style.display = 'none'; btn.textContent = '▶'; }
-        _saveCollapsed(set);
+        if (_openFolders.has(id)) { _openFolders.delete(id); if (body) body.style.display = 'none'; btn.textContent = '▶'; }
+        else { _openFolders.add(id); if (body) body.style.display = ''; btn.textContent = '▼'; }
     }));
     list.querySelectorAll('[data-folder-add]').forEach(b => b.addEventListener('click', () => treeCreateFolder(b.getAttribute('data-folder-add'))));
+    list.querySelectorAll('[data-folder-add-project]').forEach(b => b.addEventListener('click', async () => {
+        const folderId = b.getAttribute('data-folder-add-project');
+        const data = await openNewProjectFormModal();
+        if (!data) return;
+        const project = await createLocalProjectFromForm(data);
+        _ensureTree();
+        _treeChildrenOf(folderId).push({ type: 'project', localId: project.id });
+        await persistTreeAndRender();          // save folder placement before leaving
+        location.href = 'viewer/index.html?project=' + encodeURIComponent(project.id);
+    }));
     list.querySelectorAll('[data-folder-rename]').forEach(b => b.addEventListener('click', () => treeRenameFolder(b.getAttribute('data-folder-rename'))));
     list.querySelectorAll('[data-folder-move]').forEach(b => b.addEventListener('click', () => treeMoveFolder(b.getAttribute('data-folder-move'))));
     list.querySelectorAll('[data-folder-del]').forEach(b => b.addEventListener('click', () => treeDeleteFolder(b.getAttribute('data-folder-del'))));
@@ -1217,24 +1252,7 @@ async function init() {
     document.getElementById('btn-new').addEventListener('click', async () => {
         const data = await openNewProjectFormModal();
         if (!data) return;
-        const project = {
-            id: uid('proj'),
-            displayName: data.name,
-            anatomyPalette: {},
-            sections: [],
-            rois: [],
-            roiHidden: {},
-            memo: ensureMemoShape({
-                experimentDate: data.experimentDate,
-                machine: data.machine,
-                sampleTypes: data.sampleTypes,
-                matrix: data.matrix,
-                googleKeep: data.googleKeep,
-                freeNote: data.freeNote,
-            }),
-            createdAt: new Date().toISOString(),
-        };
-        await ProjectStorage.putProject(project);
+        const project = await createLocalProjectFromForm(data);
         // Jump straight into the viewer with the newly-created project.
         location.href = 'viewer/index.html?project=' + encodeURIComponent(project.id);
     });
