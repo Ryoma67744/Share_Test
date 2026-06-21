@@ -334,9 +334,9 @@ The toolbar's **Flip** group has `⇄` (mirror left-right) and `⇅` (mirror up-
 
 When several organs (e.g. Brain / Heart / Placenta) are stored in one project, the **"臓器:" (Organ)** selector at the right of the Sections header filters the center grid by organ ("すべて"/All shows everything).
 
-- The organ is **auto-inferred from the section name** (e.g. `E15-2-1_Brain1` → `Brain`). The selector appears only when **2 or more** organs are detected.
+- The organ is **auto-inferred from the first token of the section name** (e.g. `Brain_WT_POS` → `Brain`, `LN_WT` → `LN`) — the first letter token after splitting on delimiters (`_`, etc.). The selector appears only when **2 or more** organs are detected.
 - It only filters the view — no data is changed.
-- If the auto-inference is wrong, set **`section.meta.organ`** to override it (renaming sections so the organ token matches is another easy approach).
+- If the auto-inference is wrong, set **`section.meta.organ`** to override it. Names where the organ is at the end (e.g. `E15-2-1_Brain1`) are not picked up by first-token inference, so rename sections to put the organ first or use the override.
 
 ---
 

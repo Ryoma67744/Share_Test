@@ -1055,9 +1055,11 @@ function sectionGroupKey(section) {
 // Organ label for a section, used by the central-grid organ filter (④).
 // Display-only; never written back.
 //   1. explicit manual override  section.meta.organ  wins
-//   2. else infer from displayName: strip a trailing replicate index, then take
-//      the last alphabetic / kana / kanji token
-//      ("E15-2-1_Brain1" → "Brain", "Heart" → "Heart", "肝臓2" → "肝臓")
+//   2. else infer from displayName using the organ-FIRST naming convention
+//      (臓器_遺伝子型_極性): take the letter run of the first delimiter-
+//      separated token
+//      ("Brain_WT_POS" → "Brain", "LN_WT" → "LN", "Brain1_KO" → "Brain",
+//       "肝臓2_NEG" → "肝臓")
 //   3. default-named / none → "(未指定)"
 const UNGROUPED_ORGAN_LABEL = '(未指定)';
 function sectionOrganKey(section) {
@@ -1067,9 +1069,15 @@ function sectionOrganKey(section) {
     if (override) return override;
     const name = String(section.displayName || '');
     if (isDefaultSectionName(name)) return UNGROUPED_ORGAN_LABEL;
-    const base = name.replace(/[\s_\-#・.]*\d+\s*$/, '').trim();
-    const m = base.match(/([A-Za-z぀-ヿ一-鿿]+)\s*$/);
-    return (m && m[1]) ? m[1] : (base || UNGROUPED_ORGAN_LABEL);
+    // Organ-first convention: take the letter run of the first token that
+    // contains letters. Tokens with no letters (pure IDs / coords like "123")
+    // are skipped so the first organ-bearing token wins.
+    const tokens = name.split(/[\s_\-#・.]+/);
+    for (const tok of tokens) {
+        const m = tok.match(/[A-Za-z぀-ヿ一-鿿]+/);
+        if (m) return m[0];
+    }
+    return UNGROUPED_ORGAN_LABEL;
 }
 
 // Produce the preview header title.
