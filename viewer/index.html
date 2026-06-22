@@ -472,7 +472,7 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
     transition:none; will-change:transform;
 }
 #share-preview-overlay .preview-image-cell img {
-    max-width:100%; max-height:100%; object-fit:contain; background:#000;
+    width:100%; height:100%; object-fit:contain; background:#000;
     image-rendering:pixelated;
 }
 #share-preview-overlay .preview-image-cell .cell-empty {
@@ -9772,13 +9772,15 @@ const SharePreview = {
                 // the rotated bbox to overflow the cell wrap — leading to
                 // the "初期表示が見切れている" symptom for portrait MSI scans.
                 let dataUrl = '';
+                let natW = 0, natH = 0;
                 try {
                     const rotDeg = (this._sectionRotations[idx] || 0) - 90;
                     const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
+                    natW = baked.width; natH = baked.height;
                     dataUrl = baked.toDataURL('image/png');
                 } catch (e) { console.warn('preview bake failed', e); }
                 body = dataUrl
-                    ? `<img src="${dataUrl}" alt="${safeName}" data-cell-img>`
+                    ? `<img src="${dataUrl}" alt="${safeName}" data-cell-img data-nat-w="${natW}" data-nat-h="${natH}">`
                     : '<div class="cell-empty">Render failed</div>';
             }
             // Per-section scalebar — read μm/px from this section's own
@@ -9870,7 +9872,18 @@ const SharePreview = {
             bar.style.display = 'none';
             return;
         }
-        const eff = baseUmPerPx / Math.max(scale, 1e-6);
+        // The image is scaled up to fill the cell (object-fit:contain), so one
+        // image pixel renders as `fit` CSS px at zoom 1. Factor it in (with the
+        // zoom `scale`) so the physical bar length stays accurate. natW/H come
+        // from the baked canvas (data-nat-*) so this is correct before the
+        // <img> finishes loading; fall back to the loaded naturalWidth.
+        let fit = 1;
+        const imgEl = wrap.querySelector('[data-cell-img]');
+        const natW = imgEl ? (parseFloat(imgEl.dataset.natW) || imgEl.naturalWidth) : 0;
+        const natH = imgEl ? (parseFloat(imgEl.dataset.natH) || imgEl.naturalHeight) : 0;
+        const cw = wrap.clientWidth, ch = wrap.clientHeight;
+        if (natW > 0 && natH > 0 && cw > 0 && ch > 0) fit = Math.min(cw / natW, ch / natH);
+        const eff = baseUmPerPx / Math.max(scale * fit, 1e-6);
         const chosen = pickPreviewScalebarLength(eff, 100);
         if (!chosen) { bar.style.display = 'none'; return; }
         const px = Math.max(40, Math.min(200, chosen / eff));
