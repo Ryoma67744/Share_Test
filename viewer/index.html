@@ -11735,6 +11735,17 @@ const App = {
         // Share-Only mode: skip the local project picker, prompt for the
         // project password, and hydrate from Supabase. Otherwise behave as a
         // normal Master client backed by IndexedDB.
+        // Folder-index links (and browser back/forward) change only the
+        // #share=/#folder= hash on the same page; init() already ran and there
+        // is no other hash router, so reload on a route-slug change to re-read
+        // the hash and load the target (e.g. clicking a project in a shared
+        // folder index). The initial load hash never fires hashchange -> no loop.
+        window.addEventListener('hashchange', () => {
+            try {
+                const p = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+                if ((p.get('share') || '').trim() || (p.get('folder') || '').trim()) location.reload();
+            } catch (e) {}
+        });
         const shareSlug = this._readShareSlug();
         // ① Phase 2: a folder-share link (#folder=<slug>) shows a read-only
         // index of the folder's published child projects. No master gate and
