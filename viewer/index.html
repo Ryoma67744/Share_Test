@@ -2764,6 +2764,18 @@ class SectionPanel {
                 const ratio = Math.max(heImg.naturalWidth / refImg.naturalWidth, heImg.naturalHeight / refImg.naturalHeight);
                 scale = Math.max(1, Math.min(8, Math.ceil(ratio)));
             }
+        } else if (refIsMsi && App.msiSmoothing === 'linear') {
+            // MSI-only + Linear smoothing: render the backing buffer near the
+            // on-screen size so the upscale is done by the in-canvas drawImage
+            // (where imageSmoothingEnabled = bilinear actually applies). At
+            // scale=1 the drawImage is 1:1 and only the CSS transform upscales,
+            // where image-rendering is unreliable under the GPU layer. 'none'
+            // keeps scale=1 (crisp, unchanged). ROI / scale-bar map by canvas
+            // size (sx = croi.height/ref.w …) so they follow automatically.
+            const host = this.dom.host;
+            const target = Math.max(host ? host.clientWidth : 0, host ? host.clientHeight : 0) || 600;
+            const ratio = target / Math.max(refImg.naturalWidth, refImg.naturalHeight);
+            scale = Math.max(1, Math.min(8, Math.ceil(ratio)));
         }
         w = Math.round(w * scale); h = Math.round(h * scale);
         [this.dom.cdisp, this.dom.croi].forEach(c => { c.width = w; c.height = h; });
@@ -11649,7 +11661,14 @@ const App = {
         const next = (mode === 'linear') ? 'linear' : 'none';
         if (this.msiSmoothing === next) return;
         this.msiSmoothing = next;
-        this.repaintAllMsi();
+        // The MSI backing resolution depends on the mode (Linear renders the
+        // canvas near display size so imageSmoothingEnabled can interpolate),
+        // so re-run setupCanvasSize per panel — it resizes cdisp/croi and
+        // re-renders + redraws ROIs. Fall back to a plain repaint if it no-ops.
+        for (const p of this.panels.values()) {
+            try { p.setupCanvasSize(); } catch (e) { try { p.renderComposite(); } catch (e2) {} }
+        }
+        try { Toolbar.refreshRange(); } catch (e) {}
         if (!this.shareMode && this.project) {
             this.project.meta = this.project.meta || {};
             this.project.meta.msiSmoothing = next;
