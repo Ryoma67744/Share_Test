@@ -2,4 +2,4 @@
 // (index.html / viewer/index.html / mrm.html). Bump ONLY this line to update
 // the version label everywhere. Format: v<YYYY-MM-DD>.<n> (date + same-day
 // counter). The old per-page r-numbers (r26 / r59 / mrm-r5 ...) are retired.
-window.APP_VERSION = 'v2026-06-22.2';
+window.APP_VERSION = 'v2026-06-22.3';

@@ -706,6 +706,12 @@ body.share-mode #btn-share-preview { display:inline-flex; }
             <div class="flex items-center justify-between px-2 py-1 border-b shrink-0">
                 <h2 class="text-sm font-semibold">Sections</h2>
                 <div class="flex items-center gap-2">
+                    <label id="msi-scale-mode-wrap" class="text-[11px] text-gray-500 flex items-center gap-1" title="強度スケール: Same=表示中の全切片で共通レンジ（絶対比較）／ Individual=各切片で自動スケール">スケール:
+                        <select id="msi-scale-mode" class="text-[11px] border border-gray-300 rounded px-1 py-0.5">
+                            <option value="same">Same（共通）</option>
+                            <option value="individual">Individual（個別）</option>
+                        </select>
+                    </label>
                     <label id="organ-filter-wrap" class="text-[11px] text-gray-500 flex items-center gap-1" hidden>臓器:
                         <select id="organ-filter" class="text-[11px] border border-gray-300 rounded px-1 py-0.5" title="臓器ごとに中央の表示を絞り込み"></select>
                     </label>
@@ -11122,6 +11128,9 @@ const App = {
     // where each section shows whichever layers it has visibility flags for.
     viewMode: 'compound',
     activeOrganFilter: null,   // ④ organ filter: organ key, or null = show all
+    msiScaleMode: 'same',      // MSI intensity scale: 'same' = one shared range
+                               // across in-scope sections (HDI "Same"); 'individual'
+                               // = each section auto-scales to its own range.
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
     focusCompoundKey: null,
     // ① Rotation target for the shared toolbar: 'both' (whole-view CSS rot),
@@ -11458,29 +11467,45 @@ const App = {
     },
 
     // ---- MSI display window (raw-intensity units) — Waters HDI style -------
-    // Each MSI layer is shown auto-scaled to its OWN raw range [min,max] (HDI's
-    // per-image contrast), so every section is visible regardless of how it
-    // compares to others. The user can override min/max via App.msiUserWindow
-    // (toolbar Range) — e.g. set the same window across sections to compare.
-    // There is NO cross-section/absolute aggregation; the organ filter is
-    // display-only. _organInScope / getMsiAbsMax / recomputeMsiAbsScale remain
-    // only as harmless legacy helpers and no longer drive the display window.
+    // Two modes (App.msiScaleMode), mirroring HDI's Same / Individual:
+    //  - 'same'       : ONE shared range across the in-scope (organ-filtered)
+    //                   sections so "same colour = same absolute intensity"
+    //                   (weaker sections read as darker). getMsiAbsMax provides
+    //                   the common robust max; msiWindowEval still reconstructs
+    //                   each pixel from its OWN section rawRange, so only the
+    //                   window changes (no re-baking).
+    //  - 'individual' : each layer auto-scales to its OWN raw range (per-image
+    //                   contrast); every section is independently visible.
+    // A user min/max (App.msiUserWindow, toolbar Range) overrides per edge and,
+    // being keyed by molecule, applies to every section showing it. _organInScope
+    // scopes the 'same' aggregation to the active organ filter.
     _organInScope(section) {
         if (!this.activeOrganFilter) return true;
         try { return sectionOrganKey(section) === this.activeOrganFilter; }
         catch (e) { return true; }
     },
-    // Effective display window: user override wins, else the section's own range.
+    // Effective display window. 'same' = shared [0, in-scope common max]; else
+    // the section's own range. A user min/max override wins per edge.
     getMsiWindow(key, rawRange) {
         this.msiUserWindow = this.msiUserWindow || {};
         const u = this.msiUserWindow[key] || null;
-        // HDI-style per-section default: each layer auto-scales to its OWN raw
-        // data range [min,max] (so every section is visible regardless of how it
-        // compares to others). A user min/max (toolbar Range) overrides per edge.
+        // Per-section raw range (= how this layer's PNG was baked).
         const rr = (Array.isArray(rawRange) && rawRange.length === 2
             && Number.isFinite(rawRange[0]) && Number.isFinite(rawRange[1])) ? rawRange : null;
-        const defMin = rr ? rr[0] : 0;
-        const defMax = rr ? rr[1] : 255;
+        let defMin, defMax;
+        if (this.msiScaleMode === 'same') {
+            // HDI "Same": shared range [0, robust common max] across in-scope
+            // sections, so colour encodes absolute intensity. getMsiAbsMax maxes
+            // the per-section robust ceiling (rawRange[1]) over in-scope panels.
+            const shared = this.getMsiAbsMax(key);
+            if (Number.isFinite(shared) && shared > 0) { defMin = 0; defMax = shared; }
+            else if (rr) { defMin = rr[0]; defMax = rr[1]; }   // fallback: own range
+            else { defMin = 0; defMax = 255; }
+        } else {
+            // HDI "Individual": this section's own range (per-image auto-scale).
+            defMin = rr ? rr[0] : 0;
+            defMax = rr ? rr[1] : 255;
+        }
         const min = (u && Number.isFinite(u.min)) ? u.min : defMin;
         let max = (u && Number.isFinite(u.max)) ? u.max : defMax;
         if (!(max > min)) max = min + (Math.abs(defMax - defMin) || 1);
@@ -11550,6 +11575,30 @@ const App = {
         }, 60);
     },
 
+    // Force a full MSI repaint across every panel. Unlike recomputeMsiAbsScale
+    // (which only re-renders layers whose cached cross-section max changed), this
+    // repaints unconditionally — needed when the scale MODE or organ scope
+    // changes (getMsiWindow's result changes but the cached max may not).
+    repaintAllMsi() {
+        for (const panel of this.panels.values()) {
+            try {
+                panel.renderComposite();
+                if (panel.msiThumbRefs) {
+                    for (const key of panel.msiThumbRefs.keys()) panel.renderMsiThumbnail(key);
+                }
+            } catch (e) { console.warn('repaintAllMsi render failed', e); }
+        }
+        try { Toolbar.refreshRange(); } catch (e) {}
+        try { renderMethodTable(); } catch (e) {}
+    },
+    // Switch MSI intensity scale ('same' | 'individual') and repaint everything.
+    setMsiScaleMode(mode) {
+        const next = (mode === 'individual') ? 'individual' : 'same';
+        if (this.msiScaleMode === next) return;
+        this.msiScaleMode = next;
+        this.repaintAllMsi();
+    },
+
     async init() {
         await ProjectStorage.open();
         // Ask the browser to keep our IDB out of its automatic eviction
@@ -11583,6 +11632,11 @@ const App = {
         this.refreshViewModeUI();
         const organSel = document.getElementById('organ-filter');
         if (organSel) organSel.addEventListener('change', () => this.setActiveOrganFilter(organSel.value));
+        const scaleSel = document.getElementById('msi-scale-mode');
+        if (scaleSel) {
+            scaleSel.value = this.msiScaleMode;
+            scaleSel.addEventListener('change', () => this.setMsiScaleMode(scaleSel.value));
+        }
         const roiClip = document.getElementById('roi-clip-toggle');
         if (roiClip) roiClip.addEventListener('change', () => {
             this.roiOnlyMode = roiClip.checked;
@@ -12513,9 +12567,11 @@ const App = {
     setActiveOrganFilter(key) {
         this.activeOrganFilter = (key && key !== '__all__') ? key : null;
         this.applyOrganFilter();
-        // Organ filter is display-only now (each section auto-scales to its own
-        // range = HDI style), so no rescale is needed — just refresh the readout.
-        Toolbar.refreshRange();
+        // In 'same' mode the shared range is computed over the in-scope
+        // (organ-filtered) sections, so changing the filter changes the common
+        // max — repaint every panel (also refreshes the toolbar Range readout).
+        // In 'individual' mode this is a harmless repaint.
+        this.repaintAllMsi();
     },
     applyOrganFilter() {
         const filt = this.activeOrganFilter;
