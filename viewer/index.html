@@ -212,6 +212,7 @@ body.splitting-v { cursor:row-resize !important; }
 .section-panel .viewer-host { position:relative; flex:1 1 auto; min-height:320px; background:#000; overflow:hidden; touch-action:none; }
 .section-panel .viewer-rot { position:absolute; inset:0; transform-origin:50% 50%; transform: translate(var(--vt-tx, 0px), var(--vt-ty, 0px)) rotate(calc(var(--vt-rot, 0deg) - 90deg)) scale(var(--vt-scale, 1)); will-change:transform; }
 .section-panel canvas.disp { position:absolute; image-rendering:pixelated; }
+.section-panel canvas.disp.smooth { image-rendering:auto; }
 .section-panel canvas.roi { position:absolute; pointer-events:none; image-rendering:pixelated; }
 .section-panel .msi-scalebar {
     position:absolute; left:12px; bottom:10px; z-index:5;
@@ -737,6 +738,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     <input type="number" id="tb-range-min" step="any" placeholder="min" title="表示ウィンドウ 下限 (生単位)" aria-label="Range min">
                     <span class="tb-sep">—</span>
                     <input type="number" id="tb-range-max" step="any" placeholder="max" title="表示ウィンドウ 上限 (生単位)" aria-label="Range max">
+                    <button type="button" id="tb-range-reset" class="tb-icon" title="明るさレンジを自動(既定)に戻す" aria-label="Reset range" disabled>⟲</button>
                 </span>
                 <span class="tb-group" title="MSI レイヤーの不透明度 (Opacity)">
                     <input type="number" id="tb-opacity" step="1" min="0" max="100" title="MSI Opacity (%)" aria-label="Opacity" disabled>
@@ -768,6 +770,13 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                         <option value="hot">Hot</option>
                         <option value="jet">Jet</option>
                         <option value="grayscale">Grayscale</option>
+                    </select>
+                </span>
+                <span class="tb-group" title="MSI 表示の補間 (None=ピクセル / Linear=なめらか)">
+                    <span class="tb-label">補間</span>
+                    <select id="tb-smoothing" aria-label="Smoothing" title="MSI Smoothing">
+                        <option value="none">None</option>
+                        <option value="linear">Linear</option>
                     </select>
                 </span>
                 <span class="tb-group" id="tb-he-mono-group" title="HE/IF をモノクロ表示">
@@ -3008,7 +3017,7 @@ class SectionPanel {
                 // path that MSI uses. No LUT was applied above for TIC, so
                 // it stays grayscale as intended.
                 ctx.save();
-                ctx.imageSmoothingEnabled = false;
+                ctx.imageSmoothingEnabled = (App.msiSmoothing === 'linear');
                 // ③ clip real MSI signal to the active ROI (not the TIC backdrop,
                 // which stays full as the anatomical reference). Clip is set in the
                 // current (flip-wrapped) canvas space before the rotate below.
@@ -3037,6 +3046,11 @@ class SectionPanel {
         if (flipped) ctx.restore();
         ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = 1.0;
+        // HDI Smoothing: bilinear (CSS image-rendering:auto) when 'linear', else
+        // nearest. The CSS upscale (.viewer-rot transform) dominates when cdisp
+        // is native-size (MSI-only), so this class is what smooths the on-screen
+        // image; imageSmoothingEnabled above covers the drawImage upscale (MSI+HE).
+        this.dom.cdisp.classList.toggle('smooth', App.msiSmoothing === 'linear');
         this.updateScaleBar();
     }
 
@@ -3596,6 +3610,23 @@ class SectionPanel {
             else cur.max = cur.min + Math.abs(cur.min || 1) * 1e-6 + 1e-9;
         }
         App.msiUserWindow[key] = cur;
+        for (const p of App.panels.values()) {
+            try {
+                p.renderComposite();
+                if (p.msiThumbRefs && p.msiThumbRefs.has(key)) p.renderMsiThumbnail(key);
+            } catch (e) {}
+        }
+        if (App.activeSectionId === this.section.id) renderMethodTable();
+        Toolbar.refreshRange();
+    }
+
+    // Reset the active molecule's brightness Range to the auto default (Same
+    // shared range / Individual per-section): drop the manual override and
+    // repaint every section showing it. Mirrors applyRangeRaw's panel sweep.
+    resetRange() {
+        const key = this.effectiveActiveMsiKey();
+        if (!key) return;
+        if (App.msiUserWindow) delete App.msiUserWindow[key];
         for (const p of App.panels.values()) {
             try {
                 p.renderComposite();
@@ -10500,6 +10531,7 @@ const Toolbar = {
         this.pickerMenu = document.getElementById('section-picker-menu');
         this.rangeMin = document.getElementById('tb-range-min');
         this.rangeMax = document.getElementById('tb-range-max');
+        this.rangeResetBtn = document.getElementById('tb-range-reset');
         this.opacityInp = document.getElementById('tb-opacity');
         this.rotationInp = document.getElementById('tb-rotation');
         this.rotTargetSel = document.getElementById('tb-rot-target');
@@ -10512,6 +10544,7 @@ const Toolbar = {
         this.flipHBtn = document.getElementById('tb-flip-h');
         this.flipVBtn = document.getElementById('tb-flip-v');
         this.colormapSel = document.getElementById('tb-colormap');
+        this.smoothingSel = document.getElementById('tb-smoothing');
         this.syncButtons = this.el.querySelectorAll('.sync-toggle');
 
         this.pickerBtn.addEventListener('click', (ev) => { ev.stopPropagation(); this.togglePickerMenu(); });
@@ -10535,6 +10568,7 @@ const Toolbar = {
 
         this.rangeMin.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRangeRaw('min', this.rangeMin.value); });
         this.rangeMax.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRangeRaw('max', this.rangeMax.value); });
+        if (this.rangeResetBtn) this.rangeResetBtn.addEventListener('click', () => { const p = this.activePanel(); if (p) p.resetRange(); });
         this.opacityInp.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyOpacity(this.opacityInp.value); });
         this.rotationInp.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRotation(this.rotationInp.value, App.rotTarget); });
         if (this.rotTargetSel) this.rotTargetSel.addEventListener('change', () => {
@@ -10605,6 +10639,13 @@ const Toolbar = {
                     App.project.meta.colormap = name;
                     App.queueSave();
                 }
+            });
+        }
+
+        if (this.smoothingSel) {
+            this.smoothingSel.value = App.msiSmoothing || 'none';
+            this.smoothingSel.addEventListener('change', () => {
+                App.setMsiSmoothing(this.smoothingSel.value);
             });
         }
 
@@ -10808,6 +10849,8 @@ const Toolbar = {
         if (document.activeElement !== this.rangeMax) this.rangeMax.value = formatRawForInput(st.rawMax);
         this.rangeMin.title = '表示ウィンドウ 下限 (生単位): ' + st.baseLabel;
         this.rangeMax.title = '表示ウィンドウ 上限 (生単位): ' + st.baseLabel;
+        // Reset enabled only when a manual override exists for this molecule.
+        if (this.rangeResetBtn) this.rangeResetBtn.disabled = !(st.key && App.msiUserWindow && App.msiUserWindow[st.key]);
     },
 
     refreshOpacity() {
@@ -11131,6 +11174,8 @@ const App = {
     msiScaleMode: 'same',      // MSI intensity scale: 'same' = one shared range
                                // across in-scope sections (HDI "Same"); 'individual'
                                // = each section auto-scales to its own range.
+    msiSmoothing: 'none',      // MSI display interpolation: 'none' = nearest
+                               // (pixelated), 'linear' = bilinear (HDI Smoothing).
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
     focusCompoundKey: null,
     // ① Rotation target for the shared toolbar: 'both' (whole-view CSS rot),
@@ -11597,6 +11642,19 @@ const App = {
         if (this.msiScaleMode === next) return;
         this.msiScaleMode = next;
         this.repaintAllMsi();
+    },
+    // Switch MSI display interpolation ('none' | 'linear'), repaint, and persist
+    // (master only; share recipients keep it transient). Mirrors the colormap.
+    setMsiSmoothing(mode) {
+        const next = (mode === 'linear') ? 'linear' : 'none';
+        if (this.msiSmoothing === next) return;
+        this.msiSmoothing = next;
+        this.repaintAllMsi();
+        if (!this.shareMode && this.project) {
+            this.project.meta = this.project.meta || {};
+            this.project.meta.msiSmoothing = next;
+            this.queueSave();
+        }
     },
 
     async init() {
@@ -12257,6 +12315,9 @@ const App = {
             if (cm && COLORMAPS[cm]) setActiveColormap(cm);
             const sel = document.getElementById('tb-colormap');
             if (sel) sel.value = _activeColormapName;
+            App.msiSmoothing = (projectMeta && projectMeta.msiSmoothing === 'linear') ? 'linear' : 'none';
+            const smSel = document.getElementById('tb-smoothing');
+            if (smSel) smSel.value = App.msiSmoothing;
         } catch (e) { /* non-fatal */ }
         document.getElementById('project-name-input').value = project.displayName || '';
         document.getElementById('project-name-input').disabled = true;
@@ -12380,6 +12441,9 @@ const App = {
             if (cm && COLORMAPS[cm]) setActiveColormap(cm);
             const sel = document.getElementById('tb-colormap');
             if (sel) sel.value = _activeColormapName;
+            App.msiSmoothing = (project.meta && project.meta.msiSmoothing === 'linear') ? 'linear' : 'none';
+            const smSel = document.getElementById('tb-smoothing');
+            if (smSel) smSel.value = App.msiSmoothing;
         } catch (e) { /* non-fatal */ }
         localStorage.setItem('desi:lastProjectId', id);
         document.getElementById('project-name-input').value = project.displayName || '';
