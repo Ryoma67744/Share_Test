@@ -784,7 +784,12 @@ begin
     if _slug is null or length(trim(_slug)) = 0 then
         raise exception 'slug required';
     end if;
-    if not coalesce(_is_public, false) and (_password is null or length(_password) < 4) then
+    -- New private folders need a password. An EXISTING private folder may be
+    -- re-published with a null password to refresh only its index_doc (e.g. a
+    -- child project was renamed) — the on-conflict branch below preserves the
+    -- stored password_hash in that case, so the share stays protected.
+    if not coalesce(_is_public, false) and (_password is null or length(_password) < 4)
+       and not exists (select 1 from public.folder_shares where slug = trim(_slug)) then
         raise exception 'password_required';
     end if;
     insert into public.folder_shares(slug, name, index_doc, is_public, password_hash, updated_at)

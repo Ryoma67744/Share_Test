@@ -472,6 +472,36 @@ function _folderDescendantIds(id) {
     if (f) walk(f.children || []);
     return ids;
 }
+// Shared folders (those with a shareSlug) whose subtree contains the given
+// project (matched by slug or localId). Used to auto-refresh a folder's
+// published index snapshot when a child project is renamed, so the listing
+// shows the new name at the SAME folder URL.
+function _sharedFoldersContainingProject(slug, localId) {
+    const out = [];
+    const subtreeHasProject = (folder) => {
+        let found = false;
+        const walk = (nodes) => {
+            for (const n of nodes) {
+                if (found) return;
+                if (n.type === 'project') {
+                    if ((slug && n.slug === slug) || (localId && n.localId === localId)) found = true;
+                } else if (n.type === 'folder') {
+                    walk(n.children || []);
+                }
+            }
+        };
+        walk(folder.children || []);
+        return found;
+    };
+    const walkFolders = (nodes) => {
+        for (const n of nodes) if (n.type === 'folder') {
+            if (n.shareSlug && subtreeHasProject(n)) out.push(n);
+            walkFolders(n.children || []);
+        }
+    };
+    walkFolders(workspaceTree.children || []);
+    return out;
+}
 function _flattenFolders() {
     const out = [{ id: null, label: '（ルート）' }];
     const walk = (nodes, prefix) => {
@@ -1103,7 +1133,40 @@ async function renderList() {
                 try { await ProjectStorage.putProject(proj); }
                 catch (e) { alert('改名に失敗しました: ' + (e && e.message || e)); return; }
                 await renderList();
-                if (slug) alert('ローカル名を変更しました。\n共有先（受信者）の表示名にも反映するには、master で開いて再 Publish してください。');
+                // Auto-refresh any shared folder whose listing includes this
+                // project so its snapshot shows the new name at the SAME folder
+                // URL. Public folders re-share with just the master pw; private
+                // folders need their password (not stored) — publish_folder_share
+                // rejects a null password unless the optional SQL relax is
+                // applied, so those are reported for manual re-share.
+                let folderMsg = '';
+                try {
+                    _ensureTree();
+                    const shared = _sharedFoldersContainingProject(proj.shareInfo && proj.shareInfo.slug, localId);
+                    if (shared.length && SupabaseClient.configured()) {
+                        const masterPw = await _ensureMasterPwForTree();
+                        if (masterPw) {
+                            const rows2 = await buildRows();
+                            const slugToName = new Map();
+                            for (const r of rows2) {
+                                const s = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
+                                if (s) slugToName.set(s, (r.local && r.local.displayName) || (r.server && r.server.display_name) || s);
+                            }
+                            const failed = [];
+                            for (const folder of shared) {
+                                try {
+                                    const indexDoc = _buildFolderIndexDoc(folder, slugToName);
+                                    await SupabaseClient.publishFolderShare(masterPw, folder.shareSlug, folder.name, indexDoc, folder.shareIsPublic, null);
+                                } catch (e) { console.warn('auto re-share folder failed', folder.name, e); failed.push(folder.name); }
+                            }
+                            folderMsg = failed.length
+                                ? '\n\n共有フォルダ「' + failed.join('」「') + '」の一覧名は自動更新できませんでした（パスワード保護のため）。フォルダの「共有」ボタンから再共有してください。'
+                                : '\n\n共有フォルダの一覧名も更新しました。';
+                        }
+                    }
+                } catch (e) { console.warn('folder auto re-share skipped', e); }
+                if (slug) alert('ローカル名を変更しました。' + folderMsg
+                    + '\n\n※ プロジェクト共有ページ自体の表示名は、master で開いて再 Publish すると反映されます。');
             } else if (slug) {
                 if (confirm('Server only のプロジェクトはここでは直接改名できません。\n「Open (master)」でローカルに取り込んでから改名 →（必要なら）再 Publish できます。\n今すぐ master mode で開きますか?')) {
                     location.href = 'viewer/index.html?import=' + encodeURIComponent(slug);
