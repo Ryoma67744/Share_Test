@@ -1888,12 +1888,65 @@ function percentileSorted(vals, p) {
     const idx = Math.min(a.length - 1, Math.max(0, Math.round(p * (a.length - 1))));
     return a[idx];
 }
+// Reconstruct the MSI pixel grid from raw rows the way Waters HDI does. HDI's
+// LOCATION_TABLE places every scan at its sampling coordinate (X,Y -> col,row
+// via the pixel pitch), so a skipped scan leaves a gap at its true position.
+// We mirror that: per axis estimate the pitch (smallest positive spacing
+// between distinct coordinates) and map each coordinate to
+// col = round((x - xmin) / stepX), with W = round((xmax - xmin) / stepX) + 1.
+// On a complete, evenly spaced raster this is identical to ordinal indexing, so
+// existing images and ROI mappings are unchanged; on sparse / ROI-only data it
+// keeps gaps at their correct positions instead of collapsing them. Returns
+// Maps from raw coordinate -> grid index plus the grid size per axis. Irregular
+// spacing or float noise that would inflate the grid past a safety factor / an
+// absolute cap (or collide two distinct coordinates into one cell) falls back
+// to dense ordinal indexing so the canvas never blows up. Rows that are null or
+// lack a finite x/y are ignored.
+function buildMsiGrid(rows) {
+    const xSet = new Set(), ySet = new Set();
+    for (const r of rows) {
+        if (!r) continue;
+        if (Number.isFinite(r.x)) xSet.add(r.x);
+        if (Number.isFinite(r.y)) ySet.add(r.y);
+    }
+    const ordinal = (vals) => new Map(vals.map((v, i) => [v, i]));
+    const axis = (vals) => {
+        const n = vals.length;
+        if (n <= 1) return { index: ordinal(vals), size: Math.max(1, n) };
+        // Smallest positive gap between consecutive distinct coords = pixel pitch.
+        let step = Infinity;
+        for (let i = 1; i < n; i++) {
+            const d = vals[i] - vals[i - 1];
+            if (d > 0 && d < step) step = d;
+        }
+        if (!(step > 0) || !Number.isFinite(step)) return { index: ordinal(vals), size: n };
+        const size = Math.round((vals[n - 1] - vals[0]) / step) + 1;
+        // A coordinate grid should never dwarf the number of distinct
+        // coordinates. Past a safety factor or an absolute cap the spacing is
+        // too irregular (or noisy) to trust — fall back to ordinal indexing.
+        const INFLATION_LIMIT = 4, ABS_CAP = 8192;
+        if (!(size >= n) || size > ABS_CAP || size > n * INFLATION_LIMIT + 1) {
+            return { index: ordinal(vals), size: n };
+        }
+        const index = new Map();
+        const used = new Set();
+        for (const v of vals) {
+            const k = Math.round((v - vals[0]) / step);
+            // Two distinct coords landing in one cell => pitch is wrong for this
+            // data; ordinal indexing is the safe choice.
+            if (used.has(k)) return { index: ordinal(vals), size: n };
+            used.add(k);
+            index.set(v, k);
+        }
+        return { index, size };
+    };
+    const ax = axis([...xSet].sort((a, b) => a - b));
+    const ay = axis([...ySet].sort((a, b) => a - b));
+    return { xIndex: ax.index, yIndex: ay.index, W: ax.size, H: ay.size };
+}
+
 function rasterRowsToPngDataUrl(rows, range) {
-    const xs = [...new Set(rows.map(r => r.x))].sort((a, b) => a - b);
-    const ys = [...new Set(rows.map(r => r.y))].sort((a, b) => a - b);
-    const W = xs.length, H = ys.length;
-    const xIndex = new Map(xs.map((v, i) => [v, i]));
-    const yIndex = new Map(ys.map((v, i) => [v, i]));
+    const { xIndex, yIndex, W, H } = buildMsiGrid(rows);
     const grid = Array(H).fill(0).map(() => Array(W).fill(NaN));
     const cnt  = Array(H).fill(0).map(() => Array(W).fill(0));
     for (const r of rows) {
@@ -2877,16 +2930,16 @@ class SectionPanel {
                     const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
                     const lum = 0.299*r + 0.587*g + 0.114*b;
                     const ev = msiWindowEval(lum, rrC, winC);
-                    // Compositing rule:
-                    //   - Out-of-grid pixels (a === 0) OR pixels at/below the
-                    //     window minimum (ev.belowMin) become an opaque black
-                    //     backdrop, so the background reads as black with the
-                    //     coloured tissue on top (Q: 最低値は黒).
-                    //   - In-raster pixels above win.min go through the colormap.
-                    //   - Backdrop color = getColormapBackground(): black for
-                    //     most colormaps, white for Grayscale (low=white).
-                    // ctx.globalAlpha = settings.opacity then blends with HE.
-                    if (a === 0 || ev.belowMin || Math.round(ev.n * 255) === 0) {
+                    // Compositing rule (HDI-style, no auto threshold):
+                    //   - Only out-of-grid pixels (a === 0; not scanned) become the
+                    //     opaque backdrop, so genuine no-data reads as background.
+                    //   - Every in-raster pixel — including the weakest — goes
+                    //     through the colormap (low → lut[0]) for a CONTINUOUS
+                    //     image with no black speckles. (Hiding low pixels is a
+                    //     separate manual Threshold, not applied here.)
+                    //   - Backdrop = getColormapBackground(): black for most
+                    //     colormaps, white for Grayscale. ctx.globalAlpha blends HE.
+                    if (a === 0) {
                         d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; d[i+3] = 255;
                     } else {
                         const c = lut[Math.round(ev.n * 255)];
@@ -4341,7 +4394,7 @@ class SectionPanel {
             if (d[i+3] === 0) continue;
             const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
             const ev = msiWindowEval(lum, rrT, winT);
-            const cm = (ev.belowMin || Math.round(ev.n * 255) === 0) ? bg : lut[Math.round(ev.n * 255)];
+            const cm = lut[Math.round(ev.n * 255)];
             d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
         }
         ctx.putImageData(data, 0, 0);
@@ -6443,7 +6496,7 @@ const Wizards = {
                 if (d[i+3] === 0) continue;
                 const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
                 const ev = msiWindowEval(lum, rawRange, win);
-                const cm = (ev.belowMin || Math.round(ev.n * 255) === 0) ? bg : lut[Math.round(ev.n * 255)];
+                const cm = lut[Math.round(ev.n * 255)];
                 d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
             }
             cctx.putImageData(data, 0, 0);
@@ -7813,21 +7866,13 @@ async function tryAppendUserRoiColumnsToTxt(srcBlob, section, msiEnt, project) {
 
 // Analyte TXT data rows hold world coordinates (mm) at tok[1] / tok[2],
 // but ROI polygons live in rasterised pixel space (0..W-1, 0..H-1) — the
-// same grid rasterRowsToPngDataUrl builds by sorting the distinct x / y
-// values and indexing them. Re-derive that grid here so pointInPolygon
-// receives the matching pixel indices instead of raw mm.
+// same grid rasterRowsToPngDataUrl builds by mapping each coordinate to its
+// grid cell (buildMsiGrid). Re-derive that grid here so pointInPolygon
+// receives the matching pixel indices instead of raw mm. Sharing buildMsiGrid
+// keeps ROI cells aligned with the image even when gaps are preserved.
 function buildPixelGridFromRows(rowPositions) {
-    const xSet = new Set(), ySet = new Set();
-    for (const p of rowPositions) {
-        if (!p) continue;
-        xSet.add(p.x); ySet.add(p.y);
-    }
-    const xs = [...xSet].sort((a, b) => a - b);
-    const ys = [...ySet].sort((a, b) => a - b);
-    return {
-        xIndex: new Map(xs.map((v, i) => [v, i])),
-        yIndex: new Map(ys.map((v, i) => [v, i])),
-    };
+    const { xIndex, yIndex } = buildMsiGrid(rowPositions || []);
+    return { xIndex, yIndex };
 }
 
 function appendRoisToAnalyteLines(linesAll, parsed, roiPairs) {
