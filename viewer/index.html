@@ -8442,12 +8442,19 @@ async function publishProjectToShare() {
 async function openPublishMetaModal(project) {
     const safe = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const guess = (project.displayName || 'project').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'project';
+    // Re-publish must REUSE the project's existing slug — it is the project's
+    // identity. Deriving a fresh slug from displayName (e.g. after a rename)
+    // would create a SECOND server record and fork the project. So when the
+    // project was already published, default to (and lock) shareInfo.slug; only
+    // a first-time publish lets the user choose the slug.
+    const existingSlug = (project.shareInfo && project.shareInfo.slug) || '';
     const html = `
         <h2>Publish to share</h2>
         <form>
           <label>Project slug (URL identifier)
-            <input type="text" name="slug" value="${safe(guess)}" pattern="[A-Za-z0-9_-]+" required>
+            <input type="text" name="slug" value="${safe(existingSlug || guess)}" pattern="[A-Za-z0-9_-]+" required${existingSlug ? ' readonly title="既存の共有 slug を維持し、同じプロジェクトを更新します（改名もここで反映）。変更すると別プロジェクトになります。"' : ''}>
           </label>
+          ${existingSlug ? '<p style="font-size:11px;color:#475569;margin-top:2px;">※ 再 publish: 既存の slug を維持して同じプロジェクトを更新します（改名もここで反映）。</p>' : ''}
           <label style="display:flex;align-items:center;gap:6px;margin-top:6px;">
             <input type="checkbox" data-is-public name="is_public">
             公開リンク (パスワードなしで閲覧可)
