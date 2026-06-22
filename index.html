@@ -878,6 +878,7 @@ function rowHtml(r) {
               ${url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : '')}
               ${r.local ? '<button type="button" class="btn danger" data-action="delete-local">Delete</button>' : ''}
               ${(!r.local && slug) ? '<button type="button" class="btn danger" data-action="delete-server" title="サーバから完全に削除 (master password 要)">Delete</button>' : ''}
+              <button type="button" class="btn" data-action="rename" title="プロジェクト名を変更">改名</button>
               <button type="button" class="btn" data-action="move" title="フォルダへ移動 (サブプロジェクト階層)">📁 移動</button>
             </div>
           </div>
@@ -1082,6 +1083,31 @@ async function renderList() {
                 const msg = String((e && (e.message || e.details)) || '');
                 if (/unauthorized|28000/i.test(msg)) alert('Master password が違います');
                 else alert('削除失敗: ' + msg);
+            }
+        });
+        click('rename', async () => {
+            // Local-backed rows (Local / Local + Server): rename the IndexedDB
+            // displayName in place — the list updates immediately. The published
+            // copy keeps the server display_name until the project is re-published
+            // from master mode (publish reads project.displayName). Server-only
+            // rows have no local record, so guide the user to import → master →
+            // rename → re-publish.
+            if (localId) {
+                let proj = null;
+                try { proj = await ProjectStorage.getProject(localId); } catch (e) {}
+                if (!proj) { alert('プロジェクトが見つかりません'); return; }
+                const cur = proj.displayName || '';
+                const name = (prompt('プロジェクト名を変更', cur) || '').trim();
+                if (!name || name === cur) return;
+                proj.displayName = name;
+                try { await ProjectStorage.putProject(proj); }
+                catch (e) { alert('改名に失敗しました: ' + (e && e.message || e)); return; }
+                await renderList();
+                if (slug) alert('ローカル名を変更しました。\n共有先（受信者）の表示名にも反映するには、master で開いて再 Publish してください。');
+            } else if (slug) {
+                if (confirm('Server only のプロジェクトはここでは直接改名できません。\n「Open (master)」でローカルに取り込んでから改名 →（必要なら）再 Publish できます。\n今すぐ master mode で開きますか?')) {
+                    location.href = 'viewer/index.html?import=' + encodeURIComponent(slug);
+                }
             }
         });
     });
