@@ -575,15 +575,44 @@ async function treeMoveProject(slug, localId) {
     await persistTreeAndRender();
 }
 
+// Resolve a tree project node (which may carry only a slug, only a localId, or
+// both) to its published share { slug, displayName }, or null when the project
+// is not published yet. Built from buildRows() output so that a project created
+// inside a folder — stored with only a localId and published later — is matched
+// by its localId too, not only by an explicit slug written onto the node. This
+// is what makes "share the parent folder" also pick up the sub-folder projects.
+function _buildProjectResolver(rows) {
+    const slugToName = new Map();
+    const localToShare = new Map();
+    for (const r of (rows || [])) {
+        const slug = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
+        const name = (r.local && r.local.displayName) || (r.server && r.server.display_name) || slug;
+        if (slug) slugToName.set(slug, name);
+        if (r.local && r.local.id && slug) localToShare.set(r.local.id, { slug, displayName: name });
+    }
+    return (n) => {
+        if (n.slug && slugToName.has(n.slug)) return { slug: n.slug, displayName: slugToName.get(n.slug) };
+        if (n.localId && localToShare.has(n.localId)) return localToShare.get(n.localId);
+        return null;
+    };
+}
+
 // ① Phase 2: build the recipient-facing index snapshot for a folder subtree.
-// Only published projects (those with a slug, present in `slugToName`) are
-// included; sub-folders are preserved as nesting.
-function _buildFolderIndexDoc(folderNode, slugToName) {
+// `resolveProject(node)` maps a project node to its published { slug,
+// displayName } (or null if unpublished). When `includeSubfolders` is false,
+// nested sub-folders are skipped and only this folder's direct published
+// projects are listed; otherwise sub-folders are preserved as nesting.
+function _buildFolderIndexDoc(folderNode, resolveProject, includeSubfolders) {
+    const incSub = includeSubfolders !== false;   // default: include sub-folders
     const conv = (nodes) => {
         const out = [];
         for (const n of (nodes || [])) {
-            if (n.type === 'folder') out.push({ type: 'folder', name: n.name, children: conv(n.children || []) });
-            else if (n.type === 'project' && n.slug && slugToName.has(n.slug)) out.push({ type: 'project', slug: n.slug, displayName: slugToName.get(n.slug) });
+            if (n.type === 'folder') {
+                if (incSub) out.push({ type: 'folder', name: n.name, children: conv(n.children || []) });
+            } else if (n.type === 'project') {
+                const p = resolveProject(n);
+                if (p && p.slug) out.push({ type: 'project', slug: p.slug, displayName: p.displayName || p.slug });
+            }
         }
         return out;
     };
@@ -595,23 +624,36 @@ async function openFolderShareModal(folderId) {
     const node = _treeFolderById(folderId);
     if (!node) return;
     const rows = await buildRows();
-    const slugToName = new Map();
-    for (const r of rows) {
-        const slug = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
-        if (slug) slugToName.set(slug, (r.local && r.local.displayName) || (r.server && r.server.display_name) || slug);
-    }
-    let total = 0, withSlug = 0;
-    (function walk(nodes) { for (const n of (nodes || [])) { if (n.type === 'folder') walk(n.children || []); else if (n.type === 'project') { total++; if (n.slug && slugToName.has(n.slug)) withSlug++; } } })(node.children || []);
-    const excluded = total - withSlug;
+    const resolveProject = _buildProjectResolver(rows);
+    const includeSub = node.shareIncludeSubfolders !== false;   // default ON, remembered per folder
+    // Count this folder's direct + (optionally) nested published projects for
+    // the summary line; recomputed live when the sub-folder toggle changes.
+    const computeCounts = (incSub) => {
+        let total = 0, withSlug = 0;
+        (function walk(nodes) {
+            for (const n of (nodes || [])) {
+                if (n.type === 'folder') { if (incSub) walk(n.children || []); }
+                else if (n.type === 'project') { total++; if (resolveProject(n)) withSlug++; }
+            }
+        })(node.children || []);
+        return { total, withSlug };
+    };
+    const countText = (incSub) => {
+        const { total, withSlug } = computeCounts(incSub);
+        const excluded = total - withSlug;
+        return '配下の<b>公開済み</b>プロジェクト ' + withSlug + ' 件を一覧にします。'
+            + (excluded ? '<br><span style="color:#b45309;">未公開の ' + excluded + ' 件は含まれません（先に各プロジェクトを Publish してください）。</span>' : '');
+    };
     const cur = node.shareSlug || '';
     const folderUrl = (s) => location.origin + location.pathname.replace(/[^/]+$/, '') + 'viewer/index.html#folder=' + encodeURIComponent(s);
     const defaultSlug = cur || ('folder-' + (((node.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)) || 'x') + '-' + Math.random().toString(36).slice(2, 6));
     const html = `
         <h2>フォルダを共有: ${safe(node.name)}</h2>
         ${cur ? '<div style="font-size:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;padding:8px;margin-bottom:8px;">共有中（' + (node.shareIsPublic ? 'public' : 'パスワード保護') + '）<br><span style="word-break:break-all;">' + safe(folderUrl(cur)) + '</span><div style="margin-top:6px;display:flex;gap:6px;"><button type="button" class="btn" data-copy>URLコピー</button><button type="button" class="btn danger" data-unshare>共有解除</button></div></div>' : ''}
-        <p style="font-size:12px;color:#475569;margin:0 0 8px;">配下の<b>公開済み</b>プロジェクト ${withSlug} 件を一覧にします。${excluded ? '<br><span style="color:#b45309;">未公開の ' + excluded + ' 件は含まれません（先に各プロジェクトを Publish してください）。</span>' : ''}</p>
+        <p data-count style="font-size:12px;color:#475569;margin:0 0 8px;"></p>
         <form class="row" style="display:flex;flex-direction:column;gap:8px;">
           <label style="font-size:13px;">共有 slug<br><input type="text" name="slug" value="${safe(defaultSlug)}" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
+          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="includesub" ${includeSub ? 'checked' : ''}> サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）</label>
           <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="pwprotect" ${cur && !node.shareIsPublic ? 'checked' : ''}> パスワードで保護する（オフ＝public）</label>
           <label style="font-size:13px;" data-pw-row><input type="password" name="password" placeholder="フォルダ パスワード (4文字以上)" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
           <p class="err" data-err style="color:#b91c1c;font-size:12px;"></p>
@@ -627,6 +669,10 @@ async function openFolderShareModal(folderId) {
     const pwProtect = card.querySelector('[name="pwprotect"]');
     const syncPw = () => { pwRow.style.display = pwProtect.checked ? '' : 'none'; };
     syncPw(); pwProtect.addEventListener('change', syncPw);
+    const incSubEl = card.querySelector('[name="includesub"]');
+    const countEl = card.querySelector('[data-count]');
+    const syncCount = () => { if (countEl) countEl.innerHTML = countText(incSubEl.checked); };
+    syncCount(); incSubEl.addEventListener('change', syncCount);
     const copyBtn = card.querySelector('[data-copy]');
     if (copyBtn) copyBtn.addEventListener('click', async () => { try { await navigator.clipboard.writeText(folderUrl(cur)); copyBtn.textContent = 'Copied ✓'; } catch (e) {} });
     const unshareBtn = card.querySelector('[data-unshare]');
@@ -645,16 +691,16 @@ async function openFolderShareModal(folderId) {
         const isPublic = !pwProtect.checked;
         const password = (card.querySelector('[name="password"]').value || '').trim();
         if (!isPublic && password.length < 4) { errEl.textContent = 'パスワードは4文字以上'; return null; }
-        return { slug, isPublic, password };
+        return { slug, isPublic, password, includeSubfolders: incSubEl.checked };
     };
     const res = await p;
     if (!res) return;
     const pw = await _ensureMasterPwForTree();
     if (!pw) { alert('Master password が必要です'); return; }
-    const indexDoc = _buildFolderIndexDoc(node, slugToName);
+    const indexDoc = _buildFolderIndexDoc(node, resolveProject, res.includeSubfolders);
     try {
         await SupabaseClient.publishFolderShare(pw, res.slug, node.name, indexDoc, res.isPublic, res.isPublic ? null : res.password);
-        node.shareSlug = res.slug; node.shareIsPublic = res.isPublic;
+        node.shareSlug = res.slug; node.shareIsPublic = res.isPublic; node.shareIncludeSubfolders = res.includeSubfolders;
         await persistTreeAndRender();
         const url = folderUrl(res.slug);
         try { await navigator.clipboard.writeText(url); } catch (e) {}
@@ -1147,15 +1193,11 @@ async function renderList() {
                         const masterPw = await _ensureMasterPwForTree();
                         if (masterPw) {
                             const rows2 = await buildRows();
-                            const slugToName = new Map();
-                            for (const r of rows2) {
-                                const s = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
-                                if (s) slugToName.set(s, (r.local && r.local.displayName) || (r.server && r.server.display_name) || s);
-                            }
+                            const resolveProject = _buildProjectResolver(rows2);
                             const failed = [];
                             for (const folder of shared) {
                                 try {
-                                    const indexDoc = _buildFolderIndexDoc(folder, slugToName);
+                                    const indexDoc = _buildFolderIndexDoc(folder, resolveProject, folder.shareIncludeSubfolders !== false);
                                     await SupabaseClient.publishFolderShare(masterPw, folder.shareSlug, folder.name, indexDoc, folder.shareIsPublic, null);
                                 } catch (e) { console.warn('auto re-share folder failed', folder.name, e); failed.push(folder.name); }
                             }
