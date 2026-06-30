@@ -6886,7 +6886,20 @@ const Wizards = {
 
         solveBtn.addEventListener('click', () => {
             try {
-                const r = solveSimilarity(state.landmarks.he, state.landmarks.msi);
+                // solveSimilarity fits a PROPER similarity (rotation + uniform
+                // scale + translation, no reflection). HE landmarks are stored in
+                // raw, un-flipped HE pixel space, but buildHeToMsiAffine re-applies
+                // the active Flip as a sign on the scale (reflecting around the
+                // origin). So when Flip is on, the raw HE cloud is the MIRROR of
+                // the MSI cloud — feeding that to a non-reflective fit collapses
+                // the scale toward zero (HE renders tiny). Pre-apply the same flip
+                // to the HE points here so the fit sees non-mirrored
+                // correspondences; the flip flags are then re-applied by
+                // buildHeToMsiAffine, reproducing the clicked points exactly.
+                const sgnx = state.flip_lr ? -1 : 1;
+                const sgny = state.flip_ud ? -1 : 1;
+                const heAdj = state.landmarks.he.map(p => [sgnx * p[0], sgny * p[1]]);
+                const r = solveSimilarity(heAdj, state.landmarks.msi);
                 state.scale_pct  = r.s * 100;
                 state.rotate_deg = r.theta * 180 / Math.PI;
                 state.offx = r.tx;
