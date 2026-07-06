@@ -82,6 +82,18 @@
       </div>
       <div class="text-xs text-gray-500">ローカル (このブラウザ) と、サーバ (Supabase) の両方から一覧表示します</div>
     </div>
+    <div class="flex items-center gap-2 flex-wrap mt-3">
+      <input id="proj-search" type="search" placeholder="プロジェクトを検索 (名前・装置・サンプル種・メモ・slug)"
+             class="flex-1 min-w-[220px] text-sm border border-gray-300 rounded px-3 py-1.5" />
+      <button id="proj-search-clear" class="btn" title="検索をクリア">クリア</button>
+      <label class="text-xs text-gray-600 flex items-center gap-1">並べ替え
+        <select id="proj-sort" class="text-sm border border-gray-300 rounded px-2 py-1.5">
+          <option value="date_desc">実験日 (新しい順)</option>
+          <option value="date_asc">実験日 (古い順)</option>
+          <option value="name">名前 (A→Z)</option>
+        </select>
+      </label>
+    </div>
   </div>
 
   <div id="list" class="space-y-2">
@@ -90,6 +102,7 @@
 </div>
 
 <div id="modal-host"></div>
+<div id="toast-host" style="position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column;gap:6px;align-items:center;pointer-events:none;"></div>
 
 <script>
 'use strict';
@@ -604,6 +617,19 @@ let workspaceTree = null;
 let _treeLoaded = false;
 
 function _emptyTree() { return { version: 1, children: [] }; }
+
+// Lightweight non-blocking toast (informational messages). Destructive
+// confirmations and critical warnings still use confirm()/alert().
+function showToast(msg, ms) {
+    const host = document.getElementById('toast-host');
+    if (!host) { console.log('toast:', msg); return; }
+    const el = document.createElement('div');
+    el.textContent = String(msg == null ? '' : msg);
+    el.style.cssText = 'pointer-events:auto;max-width:80vw;background:#1e293b;color:#fff;font-size:13px;line-height:1.5;padding:8px 14px;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.25);opacity:0;transition:opacity .2s;white-space:pre-line;';
+    host.appendChild(el);
+    requestAnimationFrame(() => { el.style.opacity = '1'; });
+    setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 250); }, ms || 2600);
+}
 function _ensureTree() { if (!workspaceTree || !Array.isArray(workspaceTree.children)) workspaceTree = _emptyTree(); }
 
 // The dashboard master gate caches the master pw here on unlock; reuse it for
@@ -1123,7 +1149,7 @@ async function fetchServerProjectList(forcePrompt) {
             // do NOT cache a pw that returned nothing (would keep the silent
             // auto-pull empty forever).
             if (forcePrompt) {
-                alert('サーバから 0 件でした。admin パスワードが違うか、まだ Publish 済みプロジェクトがありません。\n(パスワードは 4 文字以上・正しい値かご確認ください)');
+                showToast('サーバから 0 件でした。admin パスワードが違うか、まだ Publish 済みプロジェクトがありません。\n(正しい値かご確認ください)', 4200);
             }
             return list;
         }
@@ -1131,7 +1157,7 @@ async function fetchServerProjectList(forcePrompt) {
         return list;
     } catch (e) {
         console.warn('list_projects failed', e);
-        alert('サーバ一覧の取得に失敗しました (パスワード違い?)');
+        showToast('サーバ一覧の取得に失敗しました (パスワード違い?)', 3600);
         return null;
     }
 }
@@ -1277,13 +1303,32 @@ async function renderList() {
         for (const c of (n.children || [])) { const d = nodeDate(c); if (d > best) best = d; }
         return best;
     };
-    const byDateDesc = (da, db) => {
-        if (da === db) return 0;
+    // Search + sort controls (local filter only; no server refetch).
+    const q = ((document.getElementById('proj-search') || {}).value || '').trim().toLowerCase();
+    const sortMode = ((document.getElementById('proj-sort') || {}).value) || 'date_desc';
+    const rowName = (r) => String((r && r.local && r.local.displayName) || (r && r.server && r.server.display_name) || (r && r.server && r.server.slug) || '');
+    const rowText = (r) => {
+        const memo = (r.local && r.local.memo) || (r.server && r.server.meta && r.server.meta.memo) || {};
+        const slug = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
+        return [rowName(r), memo.machine, memo.matrix,
+                (Array.isArray(memo.sampleTypes) ? memo.sampleTypes.join(' ') : ''),
+                memo.freeNote, memo.experimentDate, slug]
+            .filter(Boolean).join(' ').toLowerCase();
+    };
+    const cmpDate = (da, db, asc) => {   // empty always sorts last regardless of direction
+        if (!da && !db) return 0;
         if (!da) return 1;
         if (!db) return -1;
-        return db.localeCompare(da);
+        return asc ? da.localeCompare(db) : db.localeCompare(da);
     };
-    const sortNodesByDate = (nodes) => (nodes || []).slice().sort((a, b) => byDateDesc(nodeDate(a), nodeDate(b)));
+    const cmpRows = (a, b) => sortMode === 'name'
+        ? rowName(a).localeCompare(rowName(b))
+        : cmpDate(rowExpDate(a), rowExpDate(b), sortMode === 'date_asc');
+    const nodeName = (n) => n.type === 'folder' ? (n.name || '') : rowName(rowForNode(n) || {});
+    const cmpNodes = (a, b) => sortMode === 'name'
+        ? nodeName(a).localeCompare(nodeName(b))
+        : cmpDate(nodeDate(a), nodeDate(b), sortMode === 'date_asc');
+    const sortNodes = (nodes) => (nodes || []).slice().sort(cmpNodes);
     const folderHead = (n, depth) => {
         const isCol = !_openFolders.has(n.id);
         return '<div class="folder-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:' + (depth ? '6px 0 2px' : '12px 0 2px') + ';">'
@@ -1299,7 +1344,7 @@ async function renderList() {
     };
     const renderNodes = (nodes, depth) => {
         let html = '';
-        for (const n of sortNodesByDate(nodes)) {
+        for (const n of sortNodes(nodes)) {
             if (n.type === 'folder') {
                 const isCol = !_openFolders.has(n.id);
                 const inner = renderNodes(n.children || [], depth + 1);
@@ -1314,11 +1359,29 @@ async function renderList() {
         }
         return html;
     };
-    const treeHtml = renderNodes(workspaceTree.children, 0);
-    const unplacedHtml = rows.filter(r => !placed.has(rkey(r)))
-        .slice().sort((a, b) => byDateDesc(rowExpDate(a), rowExpDate(b)))
-        .map(rowHtml).join('');
-    list.innerHTML = treeHtml + unplacedHtml;
+    if (q) {
+        // Search active: flat list of matching projects (folder tree hidden).
+        const hits = rows.filter(r => rowText(r).includes(q)).sort(cmpRows);
+        const header = '<div class="text-xs text-gray-500 px-1 mb-2">検索「' + safe(q) + '」に該当 ' + hits.length
+            + ' 件 <button type="button" id="proj-search-clear-inline" class="text-blue-600 hover:underline" style="margin-left:6px;">クリア</button>（フォルダ表示は検索をクリアで戻ります）</div>';
+        list.innerHTML = header + (hits.length
+            ? hits.map(rowHtml).join('')
+            : '<div class="card p-6 text-center text-sm text-gray-500">該当するプロジェクトがありません。</div>');
+    } else {
+        const treeHtml = renderNodes(workspaceTree.children, 0);
+        const unplacedHtml = rows.filter(r => !placed.has(rkey(r)))
+            .slice().sort(cmpRows)
+            .map(rowHtml).join('');
+        list.innerHTML = treeHtml + unplacedHtml;
+    }
+
+    // Inline "clear search" link inside the search-result header.
+    const inlineClear = document.getElementById('proj-search-clear-inline');
+    if (inlineClear) inlineClear.addEventListener('click', () => {
+        const s = document.getElementById('proj-search');
+        if (s) { s.value = ''; try { localStorage.setItem('desi:projSearch', ''); } catch (e) {} }
+        renderList();
+    });
 
     // ---- folder controls ----
     const esc = (s) => (window.CSS && CSS.escape) ? CSS.escape(s) : s;
@@ -1455,7 +1518,7 @@ async function renderList() {
                 }
                 let msg = '削除しました (DB: ok, storage objects: ' + deleted + ' 件)';
                 if (failed) msg += ' / 失敗: ' + failed + ' 件 (orphan blob として残ります)';
-                alert(msg);
+                showToast(msg, 3600);
                 await renderList();
             } catch (e) {
                 const msg = String((e && (e.message || e.details)) || '');
@@ -1709,6 +1772,29 @@ async function init() {
     document.getElementById('btn-change-master-pw').addEventListener('click', () => {
         openPasswordChangeModal().catch(e => console.error(e));
     });
+    // Project search / sort (local filter; persisted to localStorage).
+    (function wireProjectFilter() {
+        const s = document.getElementById('proj-search');
+        const sort = document.getElementById('proj-sort');
+        const clr = document.getElementById('proj-search-clear');
+        try {
+            if (s) s.value = localStorage.getItem('desi:projSearch') || '';
+            if (sort) sort.value = localStorage.getItem('desi:projSort') || 'date_desc';
+        } catch (e) {}
+        let t = 0;
+        if (s) s.addEventListener('input', () => {
+            try { localStorage.setItem('desi:projSearch', s.value); } catch (e) {}
+            clearTimeout(t); t = setTimeout(() => renderList(), 150);
+        });
+        if (sort) sort.addEventListener('change', () => {
+            try { localStorage.setItem('desi:projSort', sort.value); } catch (e) {}
+            renderList();
+        });
+        if (clr) clr.addEventListener('click', () => {
+            if (s) { s.value = ''; try { localStorage.setItem('desi:projSearch', ''); } catch (e) {} }
+            renderList();
+        });
+    })();
 
     await loadWorkspaceTree();
     await renderList();
