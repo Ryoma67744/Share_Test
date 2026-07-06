@@ -161,7 +161,9 @@ Supabase の **Project Settings → API** から:
 2. **オフライン fallback は廃止**しました。Supabase に到達できない場合は解錠できません（旧版のハードコード SHA-256 `MASTER_FALLBACK_HASH_HEX` は削除済み。これによりパスワードをローテートしても古いクライアントハッシュで迂回されることが無くなります）
 3. 認証成功は sessionStorage に **12 時間** キャッシュ（タブを閉じれば失効）
 
-**マスターパスワードの変更**は、管理画面（`index.html`）ヘッダの **「パスワード変更」** ボタンから行えます（現在のパスワードで認証 → 新パスワードを設定 → RPC `change_master_password`）。初回のブートストラップのみ SQL の `set_master_password('...')` が必要です（`master_credentials` に行が無い状態では変更 UI から設定できないため）。
+管理画面（`index.html`）ヘッダの **「パスワード変更」** ボタンから、入場系パスワードをまとめて変更できます（対象を選択）:
+- **アプリ（プロジェクト一覧）に入るパスワード = マスターパスワード**: 現在のパスワードで認証 → 新パスワードを設定 → RPC `change_master_password`。初回ブートストラップのみ SQL の `set_master_password('...')` が必要（`master_credentials` に行が無いと変更 UI から設定できないため）。
+- **サーバから一覧取得のパスワード = admin パスワード（全プロジェクト共通）**: マスターパスワードで認可 → 新パスワードを設定 → RPC `set_all_admin_passwords_master` が **全プロジェクトの admin 資格情報を一括更新**。以後の「サーバから一覧取得」と master 取り込み（`?import=`）は新しいパスワードが必要になります。
 
 **各プロジェクトの viewer / admin パスワードの変更**は、管理画面のプロジェクト行（Publish 済み = server 行）の **「🔑 パスワード」** ボタンから行えます（マスターパスワードで認証 → ロール(viewer/admin)と新パスワードを指定 → RPC `set_project_password_master`）。再 Publish 不要で `project_credentials` を更新します。
 
