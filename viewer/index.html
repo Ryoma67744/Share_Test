@@ -8553,8 +8553,8 @@ async function openPublishMetaModal(project) {
           <label data-viewer-pw-row>Viewer password (受け手が入力するもの)
             <input type="password" name="viewer_pw" required minlength="4">
           </label>
-          <label>Admin password (管理者ビュー用 / 既定: MSIadomine)
-            <input type="password" name="admin_pw" minlength="4" value="MSIadomine">
+          <label>Admin password (管理者ビュー用 / 独自の値を設定してください)
+            <input type="password" name="admin_pw" minlength="4" placeholder="admin パスワード (一覧取得・取り込み用)">
           </label>
           <p style="font-size:11px;color:#475569;">
             ※ 同じ slug で再 publish するとサーバ側のプロジェクトは丸ごと上書きされます (公開フラグも含む)。<br>
@@ -10235,7 +10235,7 @@ async function _fetchServerProjectList(forcePrompt) {
     if (!SupabaseClient.configured()) return null;
     let pw = forcePrompt ? '' : _readCachedOwnerPw();
     if (!pw) {
-        pw = (prompt('サーバから一覧取得: admin password を入力してください', 'MSIadomine') || '').trim();
+        pw = (prompt('サーバから一覧取得: admin password を入力してください') || '').trim();
         if (!pw) return null;
     }
     try {

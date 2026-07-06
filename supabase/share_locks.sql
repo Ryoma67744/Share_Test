@@ -112,9 +112,9 @@ alter table public.rois     add column if not exists name        text;
 --
 -- BOOTSTRAP (run once in the Supabase SQL Editor after applying this
 -- migration):
---     select public.set_master_password('MSIadomine');
--- Replace the literal with whatever long master password you prefer
--- (8 chars minimum). Re-running rotates the password.
+--     select public.set_master_password('<CHOOSE-A-STRONG-PASSWORD>');
+-- Use your own strong password (8 chars minimum). Never keep a shared/known
+-- default in production. Re-running rotates the password.
 create table if not exists public.master_credentials (
     id            int primary key check (id = 1),
     password_hash text not null,
@@ -132,7 +132,7 @@ begin
         raise exception 'master password must be at least 8 characters';
     end if;
     insert into public.master_credentials(id, password_hash)
-        values (1, crypt(_pw, gen_salt('bf')))
+        values (1, crypt(_pw, gen_salt('bf', 12)))
     on conflict (id) do update
         set password_hash = excluded.password_hash, updated_at = now();
 end
@@ -181,7 +181,7 @@ begin
         raise exception 'master password must be at least 8 characters';
     end if;
     update public.master_credentials
-       set password_hash = crypt(_new_pw, gen_salt('bf')), updated_at = now()
+       set password_hash = crypt(_new_pw, gen_salt('bf', 12)), updated_at = now()
      where id = 1;
 end
 $$;
@@ -227,11 +227,11 @@ begin
     if not public._verify_master_pw(_master_pw) then
         raise exception 'invalid master password' using errcode = '28P01';
     end if;
-    if _new_pw is null or length(_new_pw) < 4 then
-        raise exception 'password must be at least 4 characters';
+    if _new_pw is null or length(_new_pw) < 8 then
+        raise exception 'password must be at least 8 characters';
     end if;
     insert into public.project_credentials(project_id, role, password_hash)
-        select id, 'admin', crypt(_new_pw, gen_salt('bf')) from public.projects
+        select id, 'admin', crypt(_new_pw, gen_salt('bf', 12)) from public.projects
     on conflict (project_id, role) do update
         set password_hash = excluded.password_hash;
     get diagnostics v_count = row_count;
@@ -266,6 +266,11 @@ begin
     end if;
     if _slug is null or length(trim(_slug)) = 0 then
         raise exception 'slug required';
+    end if;
+    -- Restrict the slug charset: it is used as a storage-path prefix, so
+    -- disallow anything that could act as a wildcard or path separator.
+    if _slug !~ '^[A-Za-z0-9_-]+$' then
+        raise exception 'invalid slug (allowed: letters, digits, underscore, hyphen)';
     end if;
     -- Garbage-collect expired tokens opportunistically.
     delete from public.publish_sessions where expires_at < now();
@@ -734,7 +739,9 @@ as $$
         select 1 from public.publish_sessions ps
          where ps.token = p_token
            and ps.expires_at > now()
-           and p_path like ps.slug || '/%'
+           -- Literal prefix match (NOT LIKE): a slug containing % or _ must not
+           -- become a wildcard that matches other projects' object paths.
+           and left(p_path, length(ps.slug) + 1) = ps.slug || '/'
     );
 $$;
 revoke all on function public._publish_session_valid_for_path(text, text) from public;
@@ -749,6 +756,11 @@ begin
     end if;
     if exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='atlases publish-token update') then
         drop policy "atlases publish-token update" on storage.objects;
+    end if;
+    -- Also route DELETE through the helper so it uses the same literal-prefix
+    -- (non-LIKE) path check instead of the earlier inline `like slug||'/%'`.
+    if exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='atlases publish-token delete') then
+        drop policy "atlases publish-token delete" on storage.objects;
     end if;
 
     create policy "atlases publish-token insert" on storage.objects
@@ -771,6 +783,16 @@ begin
             )
         )
         with check (
+            bucket_id = 'atlases'
+            and public._publish_session_valid_for_path(
+                nullif(current_setting('request.headers', true), '')::jsonb->>'x-publish-token',
+                storage.objects.name
+            )
+        );
+
+    create policy "atlases publish-token delete" on storage.objects
+        for delete to anon, authenticated
+        using (
             bucket_id = 'atlases'
             and public._publish_session_valid_for_path(
                 nullif(current_setting('request.headers', true), '')::jsonb->>'x-publish-token',
@@ -872,14 +894,14 @@ begin
     insert into public.folder_shares(slug, name, index_doc, is_public, password_hash, updated_at)
          values (
             trim(_slug), _name, coalesce(_index_doc, '{}'::jsonb), coalesce(_is_public, false),
-            case when coalesce(_is_public, false) then null else crypt(_password, gen_salt('bf')) end,
+            case when coalesce(_is_public, false) then null else crypt(_password, gen_salt('bf', 12)) end,
             now())
     on conflict (slug) do update
          set name          = excluded.name,
              index_doc     = excluded.index_doc,
              is_public     = excluded.is_public,
              password_hash = case when excluded.is_public then null
-                                  when _password is not null then crypt(_password, gen_salt('bf'))
+                                  when _password is not null then crypt(_password, gen_salt('bf', 12))
                                   else public.folder_shares.password_hash end,
              updated_at    = now();
 end

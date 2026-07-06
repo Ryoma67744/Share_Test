@@ -418,7 +418,7 @@ function openPasswordChangeModal() {
             } else {
                 appGroup.style.display = 'none';
                 curEl.required = false;
-                hintEl.textContent = 'マスターパスワードで認可し、全プロジェクトの「サーバから一覧取得」用パスワード (admin, 4 文字以上) を一括で新しい値に統一します。';
+                hintEl.textContent = 'マスターパスワードで認可し、全プロジェクトの「サーバから一覧取得」用パスワード (admin, 8 文字以上) を一括で新しい値に統一します。';
             }
         };
         targetEl.addEventListener('change', syncTarget);
@@ -456,7 +456,12 @@ function openPasswordChangeModal() {
             }
 
             // target === 'listfetch' — bulk admin password across all projects
-            if (next.length < 4) { errEl.textContent = '新しいパスワードは 4 文字以上にしてください'; return; }
+            if (next.length < 8) { errEl.textContent = '新しいパスワードは 8 文字以上にしてください'; return; }
+            // High blast radius: this rewrites EVERY project's admin credential
+            // at once. Require an explicit confirmation.
+            if (!confirm('全プロジェクトの「サーバから一覧取得」用パスワード(admin)を一括で変更します。\nこれ以降、他のPC/セッションでの一覧取得と master 取り込みには新しいパスワードが必要になります。\n続けますか?')) {
+                return;
+            }
             let masterPw = readCachedMasterPw();
             if (!masterPw) {
                 masterPw = (prompt('Master password を入力してください') || '').trim();
@@ -473,7 +478,7 @@ function openPasswordChangeModal() {
                 submit.disabled = false; submit.textContent = '変更する';
                 const code = e && e.code, msg = (e && e.message) || '';
                 if (code === '28P01' || /invalid master/i.test(msg)) errEl.textContent = 'マスターパスワードが違います（再ログインが必要な場合があります）';
-                else if (/at least 4/i.test(msg)) errEl.textContent = '新しいパスワードは 4 文字以上にしてください';
+                else if (/at least \d/i.test(msg)) errEl.textContent = '新しいパスワードは 8 文字以上にしてください';
                 else { console.warn('set_all_admin_passwords_master failed:', e); errEl.textContent = 'サーバに接続できませんでした (ネットワークを確認してください)'; }
             }
         };
@@ -1088,7 +1093,7 @@ async function fetchServerProjectList(forcePrompt) {
     if (!SupabaseClient.configured()) return null;
     let pw = forcePrompt ? '' : readCachedOwnerPw();
     if (!pw) {
-        pw = (prompt('サーバから一覧取得: admin password を入力してください', 'MSIadomine') || '').trim();
+        pw = (prompt('サーバから一覧取得: admin password を入力してください') || '').trim();
         if (!pw) return null;
     }
     try {
