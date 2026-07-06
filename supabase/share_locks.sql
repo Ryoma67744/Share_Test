@@ -213,6 +213,33 @@ end
 $$;
 grant execute on function public.set_project_password_master(text, text, text, text) to anon, authenticated;
 
+-- Master-gated BULK rotation of the admin password across EVERY project. The
+-- "サーバから一覧取得" flow (list_projects) is used with one uniform admin
+-- password that returns all projects, so the manager UI changes it everywhere
+-- at once. Authorised by the master password.
+create or replace function public.set_all_admin_passwords_master(_master_pw text, _new_pw text)
+returns integer   -- number of projects updated
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_count integer;
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'invalid master password' using errcode = '28P01';
+    end if;
+    if _new_pw is null or length(_new_pw) < 4 then
+        raise exception 'password must be at least 4 characters';
+    end if;
+    insert into public.project_credentials(project_id, role, password_hash)
+        select id, 'admin', crypt(_new_pw, gen_salt('bf')) from public.projects
+    on conflict (project_id, role) do update
+        set password_hash = excluded.password_hash;
+    get diagnostics v_count = row_count;
+    return v_count;
+end
+$$;
+grant execute on function public.set_all_admin_passwords_master(text, text) to anon, authenticated;
+
 -- ---- 2c. Publish session token (Phase 1) ---------------------
 -- Short-lived per-publish ticket. Issued by request_publish_session()
 -- after master-pw verification, then sent as the "x-publish-token"

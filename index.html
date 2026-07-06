@@ -68,7 +68,7 @@
     </div>
     <div class="flex items-center gap-2">
       <button id="btn-mrm" class="btn" title="MRM 管理ライブラリ (化合物・トランジション・使用履歴)">MRM管理</button>
-      <button id="btn-change-master-pw" class="btn" title="マスターパスワードを変更">パスワード変更</button>
+      <button id="btn-change-master-pw" class="btn" title="アプリ入場 / サーバ一覧取得のパスワードを変更">パスワード変更</button>
       <button id="btn-help" class="btn">Help</button>
     </div>
   </header>
@@ -190,6 +190,7 @@ const SupabaseClient = (() => {
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
         changeMasterPw(cur, next) { return rpc('change_master_password', { _current_pw: cur, _new_pw: next }); },
         setProjectPasswordMaster(masterPw, slug, role, pw) { return rpc('set_project_password_master', { _master_pw: masterPw, _slug: slug, _role: role, _pw: pw }); },
+        setAllAdminPw(masterPw, newPw) { return rpc('set_all_admin_passwords_master', { _master_pw: masterPw, _new_pw: newPw }); },
         getWorkspaceTree(masterPw) { return rpc('get_workspace_tree', { _master_pw: masterPw }); },
         setWorkspaceTree(masterPw, tree) { return rpc('set_workspace_tree', { _master_pw: masterPw, _tree: tree }); },
         publishFolderShare(masterPw, slug, name, indexDoc, isPublic, password) {
@@ -353,17 +354,29 @@ function openMasterUnlockModal() {
 // master_credentials row. On success we refresh the cached master pw so
 // already-open gated flows (publish, tree, delete) keep working without a
 // re-prompt. Requires Supabase connectivity — there is no offline path.
-function openChangeMasterPwModal() {
+// Unified password-change modal opened from the header. Two targets:
+//  - app: the password to ENTER the app / project list = master password
+//          (change_master_password, needs the current pw).
+//  - listfetch: the "サーバから一覧取得" password = per-project admin, changed
+//          in BULK across every project to one uniform value
+//          (set_all_admin_passwords_master, authorised by the cached master pw).
+// The per-project 🔑 button and viewer passwords are intentionally left alone.
+function openPasswordChangeModal() {
     const html = `
-        <h2>マスターパスワードの変更</h2>
-        <p style="font-size:12px;color:#475569;margin-top:4px;">
-          現在のパスワードで認証してから、新しいパスワード (8 文字以上) を設定します。
-          全プロジェクト共通のマスターパスワードが更新されます。
-        </p>
+        <h2>パスワードの変更</h2>
         <form class="row">
-          <label>現在のパスワード
-            <input type="password" name="cur" autocomplete="current-password" required>
+          <label>変更する対象
+            <select name="target">
+              <option value="app">アプリ（プロジェクト一覧）に入るパスワード</option>
+              <option value="listfetch">サーバから一覧取得のパスワード（全プロジェクト共通）</option>
+            </select>
           </label>
+          <p style="font-size:12px;color:#475569;margin-top:-2px;" data-hint></p>
+          <div data-group="app">
+            <label>現在のパスワード
+              <input type="password" name="cur" autocomplete="current-password">
+            </label>
+          </div>
           <label>新しいパスワード
             <input type="password" name="next" autocomplete="new-password" required>
           </label>
@@ -387,45 +400,81 @@ function openChangeMasterPwModal() {
         host.appendChild(back);
         const errEl = card.querySelector('[data-err]');
         const submit = card.querySelector('[data-modal-ok]');
+        const targetEl = card.querySelector('[name="target"]');
+        const appGroup = card.querySelector('[data-group="app"]');
+        const hintEl = card.querySelector('[data-hint]');
         const curEl = card.querySelector('[name="cur"]');
         const nextEl = card.querySelector('[name="next"]');
         const next2El = card.querySelector('[name="next2"]');
         const close = (v) => { back.remove(); resolve(v); };
         card.querySelector('[data-modal-cancel]').addEventListener('click', () => close(false));
         back.addEventListener('click', (e) => { if (e.target === back) close(false); });
+        const syncTarget = () => {
+            errEl.textContent = ''; errEl.style.color = '';
+            if (targetEl.value === 'app') {
+                appGroup.style.display = '';
+                curEl.required = true;
+                hintEl.textContent = '現在のパスワードで認証してから、新しいパスワード (8 文字以上) を設定します。全プロジェクト共通の「アプリ入場」パスワードが更新されます。';
+            } else {
+                appGroup.style.display = 'none';
+                curEl.required = false;
+                hintEl.textContent = 'マスターパスワードで認可し、全プロジェクトの「サーバから一覧取得」用パスワード (admin, 4 文字以上) を一括で新しい値に統一します。';
+            }
+        };
+        targetEl.addEventListener('change', syncTarget);
+        syncTarget();
         setTimeout(() => curEl.focus(), 30);
         const doChange = async () => {
-            const cur = (curEl.value || '').trim();
+            errEl.style.color = '';
+            const target = targetEl.value;
             const next = (nextEl.value || '').trim();
             const next2 = (next2El.value || '').trim();
-            errEl.style.color = '';
-            if (!cur || !next) { errEl.textContent = 'すべての項目を入力してください'; return; }
-            if (next.length < 8) { errEl.textContent = '新しいパスワードは 8 文字以上にしてください'; return; }
+            if (!next) { errEl.textContent = '新しいパスワードを入力してください'; return; }
             if (next !== next2) { errEl.textContent = '新しいパスワード (確認) が一致しません'; return; }
-            if (next === cur) { errEl.textContent = '新しいパスワードが現在と同じです'; return; }
             if (!SupabaseClient.configured()) { errEl.textContent = 'Supabase が未設定のため変更できません'; return; }
-            submit.disabled = true; submit.textContent = '変更中…';
-            errEl.textContent = '';
+
+            if (target === 'app') {
+                const cur = (curEl.value || '').trim();
+                if (!cur) { errEl.textContent = '現在のパスワードを入力してください'; return; }
+                if (next.length < 8) { errEl.textContent = '新しいパスワードは 8 文字以上にしてください'; return; }
+                if (next === cur) { errEl.textContent = '新しいパスワードが現在と同じです'; return; }
+                submit.disabled = true; submit.textContent = '変更中…'; errEl.textContent = '';
+                try {
+                    await SupabaseClient.changeMasterPw(cur, next);
+                    markMasterUnlocked(next);   // keep the unlocked session valid
+                    errEl.style.color = '#16a34a';
+                    errEl.textContent = 'アプリ入場パスワードを変更しました';
+                    setTimeout(() => close(true), 900);
+                } catch (e) {
+                    submit.disabled = false; submit.textContent = '変更する';
+                    const code = e && e.code, msg = (e && e.message) || '';
+                    if (code === '28P01' || /invalid current/i.test(msg)) { errEl.textContent = '現在のパスワードが違います'; curEl.select(); }
+                    else if (/at least 8|8 characters/i.test(msg)) errEl.textContent = '新しいパスワードは 8 文字以上にしてください';
+                    else { console.warn('change_master_password failed:', e); errEl.textContent = 'サーバに接続できませんでした (ネットワークを確認してください)'; }
+                }
+                return;
+            }
+
+            // target === 'listfetch' — bulk admin password across all projects
+            if (next.length < 4) { errEl.textContent = '新しいパスワードは 4 文字以上にしてください'; return; }
+            let masterPw = readCachedMasterPw();
+            if (!masterPw) {
+                masterPw = (prompt('Master password を入力してください') || '').trim();
+                if (!masterPw) return;
+            }
+            submit.disabled = true; submit.textContent = '変更中…'; errEl.textContent = '';
             try {
-                await SupabaseClient.changeMasterPw(cur, next);
-                // Keep already-unlocked master flows working with the new pw.
-                markMasterUnlocked(next);
+                const n = await SupabaseClient.setAllAdminPw(masterPw, next);
+                saveCachedOwnerPw(next);   // 以後の「サーバから一覧取得」を新pwに追従
                 errEl.style.color = '#16a34a';
-                errEl.textContent = 'マスターパスワードを変更しました';
-                setTimeout(() => close(true), 900);
+                errEl.textContent = '一覧取得パスワードを変更しました' + (typeof n === 'number' ? '（' + n + ' 件のプロジェクト）' : '');
+                setTimeout(() => close(true), 1100);
             } catch (e) {
                 submit.disabled = false; submit.textContent = '変更する';
-                const code = e && e.code;
-                const msg = (e && e.message) || '';
-                if (code === '28P01' || /invalid current/i.test(msg)) {
-                    errEl.textContent = '現在のパスワードが違います';
-                    curEl.select();
-                } else if (/at least 8|8 characters/i.test(msg)) {
-                    errEl.textContent = '新しいパスワードは 8 文字以上にしてください';
-                } else {
-                    console.warn('change_master_password failed:', e);
-                    errEl.textContent = 'サーバに接続できませんでした (ネットワークを確認してください)';
-                }
+                const code = e && e.code, msg = (e && e.message) || '';
+                if (code === '28P01' || /invalid master/i.test(msg)) errEl.textContent = 'マスターパスワードが違います（再ログインが必要な場合があります）';
+                else if (/at least 4/i.test(msg)) errEl.textContent = '新しいパスワードは 4 文字以上にしてください';
+                else { console.warn('set_all_admin_passwords_master failed:', e); errEl.textContent = 'サーバに接続できませんでした (ネットワークを確認してください)'; }
             }
         };
         card.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); doChange(); });
@@ -1570,7 +1619,7 @@ async function init() {
         location.href = 'mrm.html';
     });
     document.getElementById('btn-change-master-pw').addEventListener('click', () => {
-        openChangeMasterPwModal().catch(e => console.error(e));
+        openPasswordChangeModal().catch(e => console.error(e));
     });
 
     await loadWorkspaceTree();
