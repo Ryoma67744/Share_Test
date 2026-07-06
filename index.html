@@ -189,6 +189,7 @@ const SupabaseClient = (() => {
         listProjects(ownerPw) { return rpc('list_projects', { _owner_password: ownerPw }); },
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
         changeMasterPw(cur, next) { return rpc('change_master_password', { _current_pw: cur, _new_pw: next }); },
+        setProjectPasswordMaster(masterPw, slug, role, pw) { return rpc('set_project_password_master', { _master_pw: masterPw, _slug: slug, _role: role, _pw: pw }); },
         getWorkspaceTree(masterPw) { return rpc('get_workspace_tree', { _master_pw: masterPw }); },
         setWorkspaceTree(masterPw, tree) { return rpc('set_workspace_tree', { _master_pw: masterPw, _tree: tree }); },
         publishFolderShare(masterPw, slug, name, indexDoc, isPublic, password) {
@@ -424,6 +425,90 @@ function openChangeMasterPwModal() {
                 } else {
                     console.warn('change_master_password failed:', e);
                     errEl.textContent = 'サーバに接続できませんでした (ネットワークを確認してください)';
+                }
+            }
+        };
+        card.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); doChange(); });
+    });
+}
+
+// Master-gated per-project password change (viewer / admin). Reuses the cached
+// master pw from the unlock gate; the RPC (set_project_password_master) verifies
+// it server-side before writing project_credentials. No re-publish needed.
+function openChangeProjectPwModal(slug, name) {
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const html = `
+        <h2>プロジェクトのパスワード変更</h2>
+        <p style="font-size:12px;color:#475569;margin-top:4px;">
+          <strong>${esc(name || slug)}</strong> の viewer / admin パスワードを変更します
+          （マスターパスワードで認証。再 Publish は不要です）。
+        </p>
+        <form class="row">
+          <label>対象ロール
+            <select name="role">
+              <option value="viewer">viewer（閲覧者に渡す合鍵）</option>
+              <option value="admin">admin（管理者ビュー用）</option>
+            </select>
+          </label>
+          <label>新しいパスワード（4 文字以上）
+            <input type="password" name="pw" autocomplete="new-password" required>
+          </label>
+          <label>新しいパスワード（確認）
+            <input type="password" name="pw2" autocomplete="new-password" required>
+          </label>
+          <p class="err" data-err></p>
+          <div class="actions">
+            <button type="button" class="btn" data-modal-cancel>キャンセル</button>
+            <button type="submit" class="btn primary" data-modal-ok>変更する</button>
+          </div>
+        </form>`;
+    return new Promise((resolve) => {
+        const host = document.getElementById('modal-host');
+        const back = document.createElement('div'); back.className = 'modal-backdrop';
+        const card = document.createElement('div'); card.className = 'modal-card'; card.innerHTML = html;
+        back.appendChild(card); host.appendChild(back);
+        const errEl = card.querySelector('[data-err]');
+        const submit = card.querySelector('[data-modal-ok]');
+        const roleEl = card.querySelector('[name="role"]');
+        const pwEl = card.querySelector('[name="pw"]');
+        const pw2El = card.querySelector('[name="pw2"]');
+        const close = (v) => { back.remove(); resolve(v); };
+        card.querySelector('[data-modal-cancel]').addEventListener('click', () => close(false));
+        back.addEventListener('click', (e) => { if (e.target === back) close(false); });
+        setTimeout(() => pwEl.focus(), 30);
+        const doChange = async () => {
+            const role = roleEl.value;
+            const pw = (pwEl.value || '').trim();
+            const pw2 = (pw2El.value || '').trim();
+            errEl.style.color = '';
+            if (!pw) { errEl.textContent = 'パスワードを入力してください'; return; }
+            if (pw.length < 4) { errEl.textContent = 'パスワードは 4 文字以上にしてください'; return; }
+            if (pw !== pw2) { errEl.textContent = 'パスワード（確認）が一致しません'; return; }
+            if (!SupabaseClient.configured()) { errEl.textContent = 'Supabase が未設定のため変更できません'; return; }
+            let masterPw = readCachedMasterPw();
+            if (!masterPw) {
+                masterPw = (prompt('Master password を入力してください') || '').trim();
+                if (!masterPw) return;
+            }
+            submit.disabled = true; submit.textContent = '変更中…'; errEl.textContent = '';
+            try {
+                await SupabaseClient.setProjectPasswordMaster(masterPw, slug, role, pw);
+                errEl.style.color = '#16a34a';
+                errEl.textContent = (role === 'admin' ? 'admin' : 'viewer') + ' パスワードを変更しました';
+                setTimeout(() => close(true), 900);
+            } catch (e) {
+                submit.disabled = false; submit.textContent = '変更する';
+                const code = e && e.code;
+                const msg = (e && e.message) || '';
+                if (code === '28P01' || /invalid master/i.test(msg)) {
+                    errEl.textContent = 'マスターパスワードが違います（再ログインが必要な場合があります）';
+                } else if (/project not found/i.test(msg)) {
+                    errEl.textContent = 'プロジェクトが見つかりません（未 Publish の可能性）';
+                } else if (/at least 4/i.test(msg)) {
+                    errEl.textContent = 'パスワードは 4 文字以上にしてください';
+                } else {
+                    console.warn('set_project_password_master failed:', e);
+                    errEl.textContent = 'サーバに接続できませんでした（ネットワークを確認してください）';
                 }
             }
         };
@@ -1028,6 +1113,7 @@ function rowHtml(r) {
               ${url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : '')}
               ${r.local ? '<button type="button" class="btn danger" data-action="delete-local">Delete</button>' : ''}
               ${(!r.local && slug) ? '<button type="button" class="btn danger" data-action="delete-server" title="サーバから完全に削除 (master password 要)">Delete</button>' : ''}
+              ${slug ? '<button type="button" class="btn" data-action="change-pw" title="viewer / admin パスワードを変更 (master password 要)">🔑 パスワード</button>' : ''}
               <button type="button" class="btn" data-action="rename" title="プロジェクト名を変更">改名</button>
               <button type="button" class="btn" data-action="move" title="フォルダへ移動 (サブプロジェクト階層)">📁 移動</button>
             </div>
@@ -1138,6 +1224,11 @@ async function renderList() {
             if (btn) btn.addEventListener('click', fn);
         };
         click('move', () => treeMoveProject(slug, localId));
+        click('change-pw', () => {
+            if (!slug) return;
+            const nmEl = row.querySelector('.font-semibold');
+            openChangeProjectPwModal(slug, (nmEl && nmEl.textContent) || slug).catch(e => console.error(e));
+        });
         click('open-local', () => {
             if (!localId) return;
             location.href = 'viewer/index.html?project=' + encodeURIComponent(localId);

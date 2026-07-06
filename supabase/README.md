@@ -163,6 +163,8 @@ Supabase の **Project Settings → API** から:
 
 **マスターパスワードの変更**は、管理画面（`index.html`）ヘッダの **「パスワード変更」** ボタンから行えます（現在のパスワードで認証 → 新パスワードを設定 → RPC `change_master_password`）。初回のブートストラップのみ SQL の `set_master_password('...')` が必要です（`master_credentials` に行が無い状態では変更 UI から設定できないため）。
 
+**各プロジェクトの viewer / admin パスワードの変更**は、管理画面のプロジェクト行（Publish 済み = server 行）の **「🔑 パスワード」** ボタンから行えます（マスターパスワードで認証 → ロール(viewer/admin)と新パスワードを指定 → RPC `set_project_password_master`）。再 Publish 不要で `project_credentials` を更新します。
+
 > このゲートは **shoulder-surf 防止レベル** の補助的なものです。本格的な秘匿は `Publish to share` 経由で Supabase 側 (bcrypt) に置くデータでのみ成立します。
 
 ---
