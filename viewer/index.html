@@ -1495,6 +1495,13 @@ const ProjectStorage = (() => {
 
     async function putProject(project) {
         const rec = Object.assign({}, project, { updatedAt: nowIso() });
+        // Never persist the read-only collaborator overlay (`_collab`): it is a
+        // transient, in-memory-only view of viewer-authored server ROIs. Stripping
+        // here — the single write choke point — keeps it out of IndexedDB (and thus
+        // out of any future publish) no matter which mutation triggered the save.
+        if (Array.isArray(rec.rois) && rec.rois.some(r => r && r._collab)) {
+            rec.rois = rec.rois.filter(r => !(r && r._collab));
+        }
         const t = await tx(['projects'], 'readwrite');
         await pr(t.objectStore('projects').put(rec));
         return rec;
@@ -4673,20 +4680,35 @@ function populateRoiList() {
         const nameSp = document.createElement('span');
         nameSp.className = 'truncate';
         nameSp.textContent = roi.name || roi.colorKey;
-        nameSp.title = 'ダブルクリックで名前を変更';
-        // Inline rename (both master and share mode). Share-mode persistence
-        // goes through update_roi per section row inside App.renameRoi; master
-        // mode persists to the project JSON via queueSave.
-        nameSp.addEventListener('dblclick', (e) => {
-            e.preventDefault(); e.stopPropagation();
-            const cur = roi.name || roi.colorKey;
-            const next = prompt('新しい ROI 名を入力してください', cur);
-            if (next == null) return;
-            const trimmed = String(next).trim();
-            if (!trimmed || trimmed === cur) return;
-            App.renameRoi(roi.id, trimmed);
-        });
+        // Read-only collaborator overlay: no inline rename (edits belong on
+        // the shared copy). Master's own ROIs keep the dblclick rename.
+        if (roi._collab) {
+            nameSp.title = '共同研究者が追加したROI（master では閲覧のみ）';
+        } else {
+            nameSp.title = 'ダブルクリックで名前を変更';
+            // Inline rename (both master and share mode). Share-mode persistence
+            // goes through update_roi per section row inside App.renameRoi; master
+            // mode persists to the project JSON via queueSave.
+            nameSp.addEventListener('dblclick', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                const cur = roi.name || roi.colorKey;
+                const next = prompt('新しい ROI 名を入力してください', cur);
+                if (next == null) return;
+                const trimmed = String(next).trim();
+                if (!trimmed || trimmed === cur) return;
+                App.renameRoi(roi.id, trimmed);
+            });
+        }
         left.appendChild(nameSp);
+
+        if (roi._collab) {
+            const collabBadge = document.createElement('span');
+            collabBadge.className = 'text-[10px] ml-1 px-1 rounded flex-none';
+            collabBadge.style.cssText = 'background:#dbeafe;color:#1d4ed8;';
+            collabBadge.textContent = '共有';
+            collabBadge.title = '共同研究者が共有ビューで追加したROI（master では閲覧のみ）';
+            left.appendChild(collabBadge);
+        }
 
         const sectionsCount = Object.keys(roi.polysBySection || {}).length;
         const totalSections = (project.sections || []).length;
@@ -4700,25 +4722,29 @@ function populateRoiList() {
 
         const actions = document.createElement('div');
         actions.className = 'flex items-center gap-1 flex-none';
-        const addBtn = document.createElement('button');
-        addBtn.className = 'text-[10px] text-blue-600 hover:underline';
-        addBtn.textContent = '+ draw';
-        addBtn.title = 'Draw this ROI on the active section';
-        addBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            App.startDrawing(roi.id);
-        });
-        actions.appendChild(addBtn);
+        // Read-only collaborator overlay has no draw/delete affordances:
+        // it is not persisted locally and must not be published as master's.
+        if (!roi._collab) {
+            const addBtn = document.createElement('button');
+            addBtn.className = 'text-[10px] text-blue-600 hover:underline';
+            addBtn.textContent = '+ draw';
+            addBtn.title = 'Draw this ROI on the active section';
+            addBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                App.startDrawing(roi.id);
+            });
+            actions.appendChild(addBtn);
 
-        const delBtn = document.createElement('button');
-        delBtn.className = 'text-xs text-gray-400 hover:text-red-600';
-        delBtn.title = 'Delete ROI';
-        delBtn.textContent = '×';
-        delBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            App.deleteRoi(roi.id);
-        });
-        actions.appendChild(delBtn);
+            const delBtn = document.createElement('button');
+            delBtn.className = 'text-xs text-gray-400 hover:text-red-600';
+            delBtn.title = 'Delete ROI';
+            delBtn.textContent = '×';
+            delBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                App.deleteRoi(roi.id);
+            });
+            actions.appendChild(delBtn);
+        }
         el.appendChild(actions);
 
         el.addEventListener('click', () => {
@@ -8403,7 +8429,11 @@ async function _publishCore(project, meta, masterPw, opts) {
         if (!silent && typeof showToast === 'function') showToast(msg, 9000);
     }
 
-    const roisPayload = (project.rois || []).flatMap(r => {
+    // Exclude the read-only collaborator overlay (`_collab`): those ROIs are
+    // authored by viewers and live authoritatively on the server. Master
+    // publishes only its own ROIs; upsert_project_doc preserves the viewer
+    // rows (share_locks.sql:420), so they neither disappear nor duplicate.
+    const roisPayload = (project.rois || []).filter(r => !r._collab).flatMap(r => {
         const polys = r.polysBySection || {};
         return Object.entries(polys).map(([sectionId, polyMsi]) => ({
             sectionId,
@@ -12559,6 +12589,10 @@ const App = {
     },
 
     async openProject(id) {
+        // Tear down any collaborator-ROI poll from a previously-open project
+        // and force re-auth for the new slug.
+        this._stopMasterCollabPoll();
+        this._collabSession = null;
         const project = await ProjectStorage.getProject(id);
         if (!project) { localStorage.removeItem('desi:lastProjectId'); this.renderEmpty(); return; }
         this.project = project;
@@ -12614,6 +12648,13 @@ const App = {
         await this.refreshProjectPicker();
         this.refreshShareInfoButton();
         this.renderAnalysis();
+        // Master mode: pull collaborator (viewer) ROIs from the server as a
+        // read-only overlay, then keep polling. Guarded to master + a shared
+        // project; share mode uses its own _startShareRoiPoll instead.
+        if (!this.shareMode && this.project && this.project.shareInfo && this.project.shareInfo.slug) {
+            this._refreshMasterCollabRois().catch(e => console.warn('collab initial pull failed', e));
+            this._startMasterCollabPoll();
+        }
     },
 
     refreshShareInfoButton() {
@@ -12976,6 +13017,129 @@ const App = {
         this.redrawAllRois();
         this.refreshAnalysisScope();
         this.renderAnalysis();
+    },
+
+    // ---- Master-side collaborator ROI layer ---------------------------
+    // Master mode is otherwise one-directional (local IndexedDB → publish).
+    // Collaborators add ROIs on the shared copy (created_by='viewer'); the
+    // server preserves them across master re-publishes (share_locks.sql:420),
+    // but master never re-reads them. These helpers pull those viewer ROIs
+    // back into the open master project as a READ-ONLY overlay (flagged
+    // `_collab`): they render in the list/canvas/analysis but are excluded
+    // from the publish payload and are never written to IndexedDB, so a
+    // master re-publish neither wipes nor duplicates them.
+
+    // Obtain (and cache) an admin token for `slug`. Reuses the master's
+    // cached "サーバ一覧取得" admin password; only prompts when none is set
+    // (once per slug per session) to avoid nagging on every poll/open.
+    async _ensureCollabToken(slug) {
+        const s = this._collabSession;
+        if (s && s.slug === slug && s.token && s.expiresAt && Date.now() < s.expiresAt - 60000) return s.token;
+        if (!SupabaseClient.configured()) return null;
+        let pw = _readCachedOwnerPw();
+        let prompted = false;
+        if (!pw) {
+            this._collabPromptedSlugs = this._collabPromptedSlugs || new Set();
+            if (this._collabPromptedSlugs.has(slug)) return null;
+            this._collabPromptedSlugs.add(slug);
+            pw = (prompt(
+                '"' + slug + '" の共同研究者ROIを取得します。\n' +
+                'このプロジェクトの admin password（サーバ一覧取得用）を入力してください。\n' +
+                '(キャンセルすると今回は取り込みません)',
+                ''
+            ) || '').trim();
+            prompted = true;
+            if (!pw) return null;
+        }
+        let raw;
+        try { raw = await SupabaseClient.unlockProject(slug, pw); }
+        catch (e) {
+            console.warn('collab unlock_project failed', e);
+            if (prompted) showToast('admin password が違うか、プロジェクトが存在しません');
+            return null;
+        }
+        const row = Array.isArray(raw) ? raw[0] : raw;
+        if (!row || !row.token || row.role !== 'admin') {
+            if (prompted) showToast('共同研究者ROIの取得には admin password が必要です');
+            return null;
+        }
+        if (prompted) _saveCachedOwnerPw(pw);
+        const exp = row.expires_at ? Date.parse(row.expires_at) : (Date.now() + 30 * 60 * 1000);
+        this._collabSession = { slug, token: row.token, role: row.role, expiresAt: exp };
+        return row.token;
+    },
+
+    async _refreshMasterCollabRois() {
+        if (this.shareMode) return;                                  // share mode has its own poll
+        if (!this.project || !this.project.shareInfo || !this.project.shareInfo.slug) return;
+        if (this.drawing && this.drawing.mode) return;               // don't reshuffle mid-polygon
+        const slug = this.project.shareInfo.slug;
+        const token = await this._ensureCollabToken(slug);
+        if (!token) return;
+        let doc;
+        try { doc = await SupabaseClient.fetchProjectDoc(token); }
+        catch (e) { console.warn('collab get_project_doc failed', e); return; }
+        if (!doc) return;
+        const serverSections = doc.sections || [];
+        // Server section uuid → local client id. A normally-created master
+        // project keys sections by its own client id; the server assigns a
+        // uuid and stores the client id in meta.client_id. list_rois/
+        // groupRoiRowsByColor speak uuid, the local render speaks client id,
+        // so ROI section keys must be translated or they won't render.
+        const uuidToClient = {};
+        for (const s of serverSections) {
+            if (!s || !s.id) continue;
+            uuidToClient[s.id] = (s.meta && s.meta.client_id) || s.id;
+        }
+        let rows;
+        try { rows = await fetchAllShareRois(token, serverSections); }
+        catch (e) { console.warn('collab list_rois failed', e); return; }
+        // Only collaborator ROIs; master's own ('master') rows already live
+        // in project.rois locally and must not be pulled back (would double).
+        const vrows = (rows || []).filter(r => r && r.created_by === 'viewer');
+        const grouped = groupRoiRowsByColor(vrows, this.project.anatomyPalette);
+        const remote = grouped.map(r => {
+            const polys = {}, sids = {};
+            for (const [uuid, poly] of Object.entries(r.polysBySection || {})) {
+                const cid = uuidToClient[uuid];
+                if (!cid) continue;                                  // section not present locally
+                polys[cid] = poly;
+                if (r.serverIdsBySection && r.serverIdsBySection[uuid]) sids[cid] = r.serverIdsBySection[uuid];
+            }
+            return Object.assign({}, r, {
+                id: 'collab:' + r.colorKey,      // deterministic → stable across polls/reloads
+                _collab: true,                   // read-only overlay marker (excluded from publish)
+                polysBySection: polys,
+                serverIdsBySection: sids,
+            });
+        }).filter(r => Object.keys(r.polysBySection).length > 0);
+        // Keep master's own ROIs untouched; replace the collab overlay.
+        const own = (this.project.rois || []).filter(r => !r._collab);
+        const next = own.concat(remote);
+        if (this.activeRoiId && !next.find(r => r.id === this.activeRoiId)) this.activeRoiId = null;
+        // Re-render only when the collab overlay actually changed.
+        const sig = (list) => JSON.stringify((list || []).filter(r => r._collab)
+            .map(r => ({ ck: r.colorKey, nm: r.name, p: r.polysBySection })));
+        if (sig(this.project.rois) === sig(next)) return;
+        this.project.rois = next;                                    // in-memory only; never putProject
+        populateRoiList();
+        this.redrawAllRois();
+        this.refreshAnalysisScope();
+        this.renderAnalysis();
+    },
+
+    _startMasterCollabPoll() {
+        if (this.shareMode) return;
+        if (!this.project || !this.project.shareInfo || !this.project.shareInfo.slug) return;
+        if (this._collabPollTimer) return;
+        this._collabPollTimer = setInterval(() => {
+            if (this.drawing && this.drawing.mode) return;
+            this._refreshMasterCollabRois().catch(e => console.warn('collab poll failed', e));
+        }, 12000);
+    },
+
+    _stopMasterCollabPoll() {
+        if (this._collabPollTimer) { clearInterval(this._collabPollTimer); this._collabPollTimer = null; }
     },
 
     async finalizeDrawing() {
