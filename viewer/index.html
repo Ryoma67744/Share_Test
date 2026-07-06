@@ -4665,6 +4665,19 @@ function populateRoiList() {
         const nameSp = document.createElement('span');
         nameSp.className = 'truncate';
         nameSp.textContent = roi.name || roi.colorKey;
+        nameSp.title = 'ダブルクリックで名前を変更';
+        // Inline rename (both master and share mode). Share-mode persistence
+        // goes through update_roi per section row inside App.renameRoi; master
+        // mode persists to the project JSON via queueSave.
+        nameSp.addEventListener('dblclick', (e) => {
+            e.preventDefault(); e.stopPropagation();
+            const cur = roi.name || roi.colorKey;
+            const next = prompt('新しい ROI 名を入力してください', cur);
+            if (next == null) return;
+            const trimmed = String(next).trim();
+            if (!trimmed || trimmed === cur) return;
+            App.renameRoi(roi.id, trimmed);
+        });
         left.appendChild(nameSp);
 
         const sectionsCount = Object.keys(roi.polysBySection || {}).length;
@@ -4701,8 +4714,13 @@ function populateRoiList() {
         el.appendChild(actions);
 
         el.addEventListener('click', () => {
+            if (App.activeRoiId === roi.id) return;
             App.activeRoiId = roi.id;
-            populateRoiList();
+            // Toggle the active highlight in place rather than rebuilding the
+            // whole list: a full re-render would replace nameSp between the two
+            // clicks of a dblclick, so the rename dblclick would never fire.
+            host.querySelectorAll('.roi-item.active').forEach(x => x.classList.remove('active'));
+            el.classList.add('active');
             App.redrawAllRois();
             App.renderAnalysis();
         });
@@ -13000,6 +13018,61 @@ const App = {
         this.redrawAllRois();
         this.renderAnalysis();
         if (!this.shareMode) this.queueSave(0);
+    },
+
+    // Rename an ROI. Share mode: one row per (colorKey, section), so the new
+    // name is written to every per-section server row under a write lock —
+    // same fan-out pattern as deleteRoi. Master mode: the name lives in the
+    // project JSON, persisted (and read-back verified) exactly like
+    // renameSection.
+    async renameRoi(id, newName) {
+        const roi = (this.project.rois || []).find(r => r.id === id);
+        if (!roi) return;
+        const cleaned = String(newName || '').trim();
+        if (!cleaned || cleaned === (roi.name || roi.colorKey)) return;
+
+        if (this.shareMode) {
+            const ok = await this._tryAcquireRoiLock();
+            if (!ok) return;
+            try {
+                const entries = (roi.serverIdsBySection && Object.values(roi.serverIdsBySection)) || [];
+                const targets = entries.filter(e => e && e.id);
+                // Legacy ROIs predate serverIdsBySection — fall back to the
+                // single serverId so they can still be renamed.
+                if (!targets.length && roi.serverId) targets.push({ id: roi.serverId, version: roi.version || 1 });
+                for (const ent of targets) {
+                    const rec = await SupabaseClient.updateRoi(
+                        this.shareMode.token, ent.id, ent.version || 1, { p_name: cleaned });
+                    if (rec && rec.id) ent.version = rec.version;
+                }
+                roi.name = cleaned;
+            } catch (e) {
+                console.warn('Share: rename roi failed', e);
+                showToast('ROI 名のサーバ保存に失敗しました');
+                this._releaseRoiLock();
+                return;
+            }
+            this._releaseRoiLock();
+            populateRoiList();
+            this.renderAnalysis();
+            return;
+        }
+
+        roi.name = cleaned;
+        populateRoiList();
+        this.renderAnalysis();
+        await this.queueSave(0);
+        await this._flushSave();
+        try {
+            const idb = await ProjectStorage.getProject(this.project.id);
+            const idbRoi = idb && (idb.rois || []).find(r => r.id === id);
+            if (!idbRoi || idbRoi.name !== cleaned) {
+                this._showSaveError('ROI 名の永続化が確認できません', 'renameRoi');
+                return;
+            }
+        } catch (e) {
+            this._showSaveError('Verify 失敗: ' + ((e && e.message) || e), 'renameRoi');
+        }
     },
 
     // ---- Persistence ----

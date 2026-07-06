@@ -51,12 +51,17 @@ create table if not exists rois (
   project_id  uuid not null references projects(id) on delete cascade,
   section_id  uuid not null references sections(id) on delete cascade,
   color_key   text not null,
+  name        text,
   poly_msi    jsonb not null,
   created_by  text not null,
   created_at  timestamptz not null default now(),
   updated_at  timestamptz not null default now(),
   version     int  not null default 1
 );
+
+-- Idempotent for existing deployments (create table if not exists above is a
+-- no-op once the table exists, so the name column is added here on re-run).
+alter table rois add column if not exists name text;
 
 create index if not exists rois_project_section_idx on rois(project_id, section_id);
 
@@ -278,10 +283,14 @@ end
 $$;
 
 -- Insert a new ROI.
+-- Signature changed (added p_name): drop the old one first so a re-run
+-- replaces it instead of creating a second overload.
+drop function if exists create_roi(text, uuid, text, jsonb, text);
 create or replace function create_roi(
   p_token text,
   p_section_id uuid,
   p_color_key text,
+  p_name text,
   p_poly_msi jsonb,
   p_created_by text
 ) returns rois
@@ -298,20 +307,26 @@ begin
                   where id = p_section_id and project_id = r.project_id) then
     raise exception 'section not in this project';
   end if;
-  insert into rois(project_id, section_id, color_key, poly_msi, created_by)
-       values (r.project_id, p_section_id, p_color_key, p_poly_msi, p_created_by)
+  insert into rois(project_id, section_id, color_key, name, poly_msi, created_by)
+       values (r.project_id, p_section_id, p_color_key, p_name, p_poly_msi, p_created_by)
     returning * into v;
   return v;
 end
 $$;
 
 -- Rename / re-shape (rare) an ROI with optimistic lock.
+-- Signature changed (added p_name): drop the old one first so a re-run
+-- replaces it instead of creating a second overload. The mutable fields
+-- default to null + coalesce so a rename can pass only p_name (leaving
+-- color_key / poly_msi untouched) and a re-shape can pass only those.
+drop function if exists update_roi(text, uuid, int, text, jsonb);
 create or replace function update_roi(
   p_token text,
   p_id uuid,
   p_expected_version int,
-  p_color_key text,
-  p_poly_msi jsonb
+  p_color_key text default null,
+  p_poly_msi jsonb default null,
+  p_name text default null
 ) returns rois
 language plpgsql
 security definer
@@ -325,6 +340,7 @@ begin
   update rois
      set color_key  = coalesce(p_color_key, color_key),
          poly_msi   = coalesce(p_poly_msi,  poly_msi),
+         name       = coalesce(p_name,      name),
          updated_at = now(),
          version    = version + 1
    where id = p_id
@@ -388,8 +404,8 @@ drop function if exists get_signed_url(text, text, int);
 grant execute on function unlock_project(text, text)         to anon, authenticated;
 grant execute on function get_project_doc(text)              to anon, authenticated;
 grant execute on function list_rois(text, uuid)              to anon, authenticated;
-grant execute on function create_roi(text, uuid, text, jsonb, text) to anon, authenticated;
-grant execute on function update_roi(text, uuid, int, text, jsonb)  to anon, authenticated;
+grant execute on function create_roi(text, uuid, text, text, jsonb, text) to anon, authenticated;
+grant execute on function update_roi(text, uuid, int, text, jsonb, text)  to anon, authenticated;
 grant execute on function delete_roi(text, uuid)             to anon, authenticated;
 grant execute on function clear_all_rois(text)               to anon, authenticated;
 
@@ -413,8 +429,8 @@ on conflict (id) do update set public = true;
 -- ===========================================================================
 -- drop function if exists clear_all_rois(text);
 -- drop function if exists delete_roi(text, uuid);
--- drop function if exists update_roi(text, uuid, int, text, jsonb);
--- drop function if exists create_roi(text, uuid, text, jsonb, text);
+-- drop function if exists update_roi(text, uuid, int, text, jsonb, text);
+-- drop function if exists create_roi(text, uuid, text, text, jsonb, text);
 -- drop function if exists list_rois(text, uuid);
 -- drop function if exists get_project_doc(text);
 -- drop function if exists unlock_project(text, text);
