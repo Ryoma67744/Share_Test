@@ -2727,8 +2727,13 @@ class SectionPanel {
         const wc = (this.section.meta && this.section.meta.world_coords) || {};
         const fid = this._refSourceFileId();
         const bySource = wc.T_he_to_msi_by_source || {};
+        // Per-measurement overlay option: when the section is flagged
+        // perSourceAlign, each measurement (source) keeps its own HE↔MSI
+        // transform and must NOT be shadowed by the shared legacy T (which is
+        // what collapses slider-only nudges back to a common alignment).
+        const perSource = !!(this.section.meta && this.section.meta.perSourceAlign);
         if (fid && bySource[fid]) {
-            if (!wc.T_he_to_msi || this._sourceHasGenuineAlignment(fid)) return bySource[fid];
+            if (perSource || !wc.T_he_to_msi || this._sourceHasGenuineAlignment(fid)) return bySource[fid];
             return wc.T_he_to_msi;
         }
         return wc.T_he_to_msi || null;
@@ -5975,14 +5980,18 @@ const Wizards = {
         // picked MSI, then "両方".
         const persistedSourceMode = sec.meta && sec.meta.alignmentSourceMode;
         const initialFidFromMsi = fidOf(state.msiKey);
+        // When per-measurement overlay is enabled, don't collapse same-grid
+        // re-measurements to the shared "__all__" mode — default to the current
+        // measurement's own source so each run is aligned independently.
+        const perSourceAlign = !!(sec.meta && sec.meta.perSourceAlign);
         state.sourceMode = (() => {
             if (!hasSources) return null;
             if (!hasMultipleSources) return sourceFids[0];
-            if (persistedSourceMode === '__all__') return '__all__';
+            if (persistedSourceMode === '__all__' && !perSourceAlign) return '__all__';
             if (persistedSourceMode && sourceFids.includes(persistedSourceMode)) return persistedSourceMode;
-            if (allSourcesSameGrid) return '__all__';
+            if (allSourcesSameGrid && !perSourceAlign) return '__all__';
             if (initialFidFromMsi && sourceFids.includes(initialFidFromMsi)) return initialFidFromMsi;
-            return '__all__';
+            return perSourceAlign ? sourceFids[0] : '__all__';
         })();
         // In shared-T (__all__) mode the canonical state is the top-level
         // (legacy) record, not any single source's per-source entry. The
@@ -6117,6 +6126,9 @@ const Wizards = {
                 </label>
                 ${hasSources ? `<label style="font-size:11px;color:#475569;">
                   Source: <select data-align-source style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;">${sourceOpts}</select>
+                </label>` : ''}
+                ${hasMultipleSources ? `<label style="font-size:11px;color:#475569;display:inline-flex;align-items:center;gap:4px;" title="ON にすると各測定回(Source)の重ね合わせを個別に保持し、共通Tへ集約しません（連続測定の微小なずれを測定ごとに補正）">
+                  <input type="checkbox" data-align-persource${(sec.meta && sec.meta.perSourceAlign) ? ' checked' : ''}> 測定回ごとに個別
                 </label>` : ''}
                 <label style="font-size:11px;color:#475569;">
                   MSI: <select data-align-msi ${(allMsiKeys.length || offerSyntheticTic) ? '' : 'disabled'} style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;">${msiOpts}</select>
@@ -6321,6 +6333,17 @@ const Wizards = {
         bindPair(offyEl,   offyNum,   'offy',       v => parseFloat(v));
         flipLrEl.addEventListener('change', () => { state.flip_lr = flipLrEl.checked; updatePreview(); });
         flipUdEl.addEventListener('change', () => { state.flip_ud = flipUdEl.checked; updatePreview(); });
+        // Per-measurement overlay toggle: store the flag on the section so
+        // _resolveTHeToMsi keeps each source's own transform (instead of
+        // collapsing to the shared T). Persist immediately; re-render so the
+        // section panel reflects the change.
+        const perSourceEl = $('[data-align-persource]');
+        if (perSourceEl) perSourceEl.addEventListener('change', () => {
+            sec.meta = sec.meta || {};
+            sec.meta.perSourceAlign = perSourceEl.checked;
+            updatePreview();
+            try { App.queueSave(0); } catch (e) { console.warn('persist perSourceAlign failed', e); }
+        });
 
         // ---- MSI um/px ------------------------------------------------------
         const onMsiUm = () => {
@@ -8476,7 +8499,23 @@ async function publishProjectToShare() {
     try {
         await _publishCore(project, meta, masterPw, { silent: false });
         _saveCachedMasterPw(masterPw);
-        try { await ProjectStorage.putProject(project); } catch (e) { console.warn('persist shareInfo failed', e); }
+        // Robustly persist the slug write-back. A silent putProject failure here
+        // is what leaves the local record without shareInfo.slug, which the
+        // manager then shows as a Local + Server-only duplicate. Use the
+        // retrying save path, verify the slug landed in IDB, and surface a
+        // warning if it didn't.
+        try { await App.queueSave(0); await App._flushSave(); } catch (e) { console.warn('flushSave shareInfo failed', e); }
+        try {
+            const wantSlug = project.shareInfo && project.shareInfo.slug;
+            let idb = await ProjectStorage.getProject(project.id);
+            if (!(idb && idb.shareInfo && idb.shareInfo.slug === wantSlug)) {
+                await ProjectStorage.putProject(project);   // direct fallback write
+                idb = await ProjectStorage.getProject(project.id);
+            }
+            if (wantSlug && !(idb && idb.shareInfo && idb.shareInfo.slug === wantSlug)) {
+                alert('公開は成功しましたが、共有情報(slug)のローカル保存が確認できませんでした。\nページを再読み込みし「サーバから一覧取得」を実行すると、一覧は自動的に1件へ統合されます。');
+            }
+        } catch (e) { console.warn('persist/verify shareInfo failed', e); }
         App.refreshShareInfoButton();
         if (App._setSyncStatus) App._setSyncStatus('synced');
         await openShareInfoModal(project.shareInfo, { titleSuccess: true });

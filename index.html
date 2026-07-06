@@ -1131,7 +1131,30 @@ async function buildRows() {
                 const r = rows.find(x => x.local && x.local.shareInfo && x.local.shareInfo.slug === sp.slug);
                 if (r) { r.kind = 'local+server'; r.server = sp; }
             } else {
-                rows.push({ kind: 'server-only', server: sp });
+                // Self-heal legacy/orphaned duplicates: if EXACTLY ONE slug-less
+                // local shares this server row's display name, adopt the slug
+                // onto it (write back to IDB) so the manager shows a single
+                // "Local + Server" row instead of "Local" + "Server only".
+                // Ambiguous (0 or >1 same-name) matches are left as server-only.
+                const nm = String(sp.display_name || '').trim().toLowerCase();
+                const cands = nm ? localOnly.filter(lp => String(lp.displayName || '').trim().toLowerCase() === nm) : [];
+                if (cands.length === 1) {
+                    const lp = cands[0];
+                    const prev = lp.shareInfo || {};
+                    lp.shareInfo = Object.assign({}, prev, {
+                        slug: sp.slug,
+                        url: prev.url || new URL('viewer/index.html#share=' + encodeURIComponent(sp.slug), location.href).href,
+                    });
+                    try { await ProjectStorage.putProject(lp); } catch (e) { console.warn('reconcile putProject failed', e); }
+                    localBySlug.set(sp.slug, lp);
+                    const row = rows.find(x => x.kind === 'local-only' && x.local === lp);
+                    if (row) { row.kind = 'local+server'; row.server = sp; }
+                    else rows.push({ kind: 'local+server', local: lp, server: sp });
+                    const idx = localOnly.indexOf(lp);
+                    if (idx >= 0) localOnly.splice(idx, 1);
+                } else {
+                    rows.push({ kind: 'server-only', server: sp });
+                }
             }
         }
     }
