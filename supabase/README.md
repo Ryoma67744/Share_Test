@@ -157,12 +157,13 @@ Supabase の **Project Settings → API** から:
 
 挙動:
 
-1. パスワードを入力すると、まず `list_projects(pw)` をサーバに投げ、bcrypt で照合 (online 経路)
-2. ネットワーク不通や Supabase 障害時のフォールバックとして、ブラウザ側で SHA-256(`pw`) を計算し、ハードコード済みの `MSIadomine` の SHA-256 と一致すれば通します（offline 経路）
+1. パスワードを入力すると、`verify_master_pw(pw)` をサーバに投げ、`master_credentials` の bcrypt ハッシュと照合 (online 経路のみ)
+2. **オフライン fallback は廃止**しました。Supabase に到達できない場合は解錠できません（旧版のハードコード SHA-256 `MASTER_FALLBACK_HASH_HEX` は削除済み。これによりパスワードをローテートしても古いクライアントハッシュで迂回されることが無くなります）
 3. 認証成功は sessionStorage に **12 時間** キャッシュ（タブを閉じれば失効）
 
+**マスターパスワードの変更**は、管理画面（`index.html`）ヘッダの **「パスワード変更」** ボタンから行えます（現在のパスワードで認証 → 新パスワードを設定 → RPC `change_master_password`）。初回のブートストラップのみ SQL の `set_master_password('...')` が必要です（`master_credentials` に行が無い状態では変更 UI から設定できないため）。
+
 > このゲートは **shoulder-surf 防止レベル** の補助的なものです。本格的な秘匿は `Publish to share` 経由で Supabase 側 (bcrypt) に置くデータでのみ成立します。
-> SHA-256 fallback ハッシュを別パスワードに変更したい場合は、`index.html` 内の `MASTER_FALLBACK_HASH_HEX` を `printf '%s' '<新パスワード>' | sha256sum` の出力で差し替えてください。
 
 ---
 
