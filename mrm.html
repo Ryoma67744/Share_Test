@@ -222,13 +222,10 @@ const SupabaseClient = (() => {
 // ===========================================================================
 const MASTER_UNLOCK_KEY = 'desi:masterUnlocked';
 const MASTER_UNLOCK_TTL_MS = 12 * 60 * 60 * 1000;
-const MASTER_FALLBACK_HASH_HEX =
-    'd453b548866689313ef7ee5b37cb869f342e5cd555c704c3298c1534d510cd6a';
+// Online-only unlock (verify_master_pw). The hardcoded SHA-256 offline
+// fallback was removed so a rotated master password can't be bypassed by a
+// stale client hash; Supabase connectivity is required.
 
-async function sha256Hex(s) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s)));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
 function isMasterUnlocked() {
     try {
         const raw = sessionStorage.getItem(MASTER_UNLOCK_KEY);
@@ -265,13 +262,9 @@ async function tryServerUnlock(pw) {
         const ok = await SupabaseClient.verifyMasterPw(pw);
         return ok === true ? { ok: true } : { ok: false, transient: false };
     } catch (e) {
-        console.warn('verify_master_pw failed (will try local hash):', e);
+        console.warn('verify_master_pw failed (no offline fallback):', e);
         return { ok: false, transient: true };
     }
-}
-async function tryLocalUnlock(pw) {
-    try { return (await sha256Hex(pw)) === MASTER_FALLBACK_HASH_HEX; }
-    catch (e) { return false; }
 }
 function openMasterUnlockModal() {
     const html = `
@@ -297,10 +290,9 @@ function openMasterUnlockModal() {
             if (!pw) { errEl.textContent = 'パスワードを入力してください'; return; }
             submit.disabled = true; submit.textContent = '確認中…'; errEl.textContent = '';
             const server = await tryServerUnlock(pw);
-            let ok = server.ok;
-            if (!ok && server.transient) ok = await tryLocalUnlock(pw);
             submit.disabled = false; submit.textContent = 'Unlock';
-            if (ok) { markMasterUnlocked(pw); back.remove(); resolve(true); }
+            if (server.ok) { markMasterUnlocked(pw); back.remove(); resolve(true); }
+            else if (server.transient) { errEl.textContent = 'サーバに接続できません。ネットワーク接続を確認してください'; }
             else { errEl.textContent = 'パスワードが違います'; inp.select(); }
         };
         card.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); tryUnlock(); });

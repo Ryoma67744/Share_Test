@@ -163,6 +163,30 @@ as $$
 $$;
 grant execute on function public.verify_master_pw(text) to anon, authenticated;
 
+-- In-app master-password rotation. Anon-callable (the caller is the manager
+-- UI), but it verifies the CURRENT password before writing, so a leaked
+-- endpoint is still gated by knowing the existing secret (bcrypt-cost bound).
+-- Initial bootstrap of master_credentials stays SQL-only via
+-- set_master_password(): if no row exists, _verify_master_pw() is false for
+-- any input, so rotation is impossible until it's seeded.
+create or replace function public.change_master_password(_current_pw text, _new_pw text)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+begin
+    if not public._verify_master_pw(_current_pw) then
+        raise exception 'invalid current master password' using errcode = '28P01';
+    end if;
+    if _new_pw is null or length(_new_pw) < 8 then
+        raise exception 'master password must be at least 8 characters';
+    end if;
+    update public.master_credentials
+       set password_hash = crypt(_new_pw, gen_salt('bf')), updated_at = now()
+     where id = 1;
+end
+$$;
+grant execute on function public.change_master_password(text, text) to anon, authenticated;
+
 -- ---- 2c. Publish session token (Phase 1) ---------------------
 -- Short-lived per-publish ticket. Issued by request_publish_session()
 -- after master-pw verification, then sent as the "x-publish-token"

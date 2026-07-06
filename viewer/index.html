@@ -55,6 +55,9 @@ canvas, img { image-rendering: pixelated; }
 /* Share-Only mode: hide every entry point that mutates the project
    skeleton (sections / files / memo). Per-layer ROI editing remains
    available but is gated by an exclusive lock at the JS layer. */
+/* Master mode: the header title doubles as a "back to project list" link.
+   Share recipients keep a plain (non-clickable) title. */
+body:not(.share-mode) #app-title { cursor: pointer; }
 body.share-mode #btn-new-project,
 body.share-mode #btn-projects,
 body.share-mode #btn-import-zip,
@@ -605,7 +608,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
     <!-- Top bar -->
     <header class="flex items-center justify-between px-3 py-1 bg-white border-b shrink-0 gap-2">
         <div class="flex items-center gap-3 min-w-0 flex-1">
-            <h1 class="text-base font-bold text-gray-900 whitespace-nowrap">DESI Data Share</h1>
+            <h1 id="app-title" class="text-base font-bold text-gray-900 whitespace-nowrap">DESI Data Share</h1>
             <select id="project-picker" class="text-xs border border-gray-300 rounded px-2 py-1 bg-white max-w-[260px] truncate" title="Switch project"></select>
             <input id="project-name-input" type="text" class="text-xs border border-gray-300 rounded px-2 py-1 bg-white min-w-0 flex-1 max-w-[300px]" placeholder="Project name" />
         </div>
@@ -5266,7 +5269,7 @@ async function registerSelectedToMrmLibrary() {
 
     let masterPw = _readCachedMasterPw();
     if (!masterPw) {
-        masterPw = (prompt('Master password を入力してください', 'MSIadomine') || '').trim();
+        masterPw = (prompt('Master password を入力してください') || '').trim();
         if (!masterPw) return;
     }
 
@@ -8465,7 +8468,7 @@ async function publishProjectToShare() {
     // master pw: reuse the cached value when available; otherwise prompt.
     let masterPw = _readCachedMasterPw();
     if (!masterPw) {
-        masterPw = (prompt('Master password を入力してください', 'MSIadomine') || '').trim();
+        masterPw = (prompt('Master password を入力してください') || '').trim();
         if (!masterPw) return;
     }
 
@@ -13385,7 +13388,7 @@ const App = {
             return;
         }
         if (state === 'needs-master-pw') {
-            const pw = (prompt('Master password を入力してください', 'MSIadomine') || '').trim();
+            const pw = (prompt('Master password を入力してください') || '').trim();
             if (!pw) return;
             _saveCachedMasterPw(pw);
             this.autoPublishProject().catch(e => console.warn('manual sync failed', e));
@@ -13441,6 +13444,14 @@ const App = {
         });
         const projBtn = document.getElementById('btn-projects');
         if (projBtn) projBtn.addEventListener('click', () => { location.href = '../'; });
+        // Master mode only: clicking the header title returns to the project
+        // list (same target as the ← Projects button). Guarded so share
+        // recipients (App.shareMode set) can't navigate to the manager.
+        const titleEl = document.getElementById('app-title');
+        if (titleEl) {
+            titleEl.title = 'プロジェクト一覧に戻る';
+            titleEl.addEventListener('click', () => { if (App.shareMode) return; location.href = '../'; });
+        }
         document.getElementById('btn-delete-project').addEventListener('click', () => this.deleteCurrentProject());
         document.getElementById('btn-add-section').addEventListener('click', () => this.addSection());
         document.getElementById('btn-export-zip').addEventListener('click', () => exportProjectAsZip());

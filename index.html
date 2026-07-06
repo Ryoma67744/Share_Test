@@ -68,6 +68,7 @@
     </div>
     <div class="flex items-center gap-2">
       <button id="btn-mrm" class="btn" title="MRM 管理ライブラリ (化合物・トランジション・使用履歴)">MRM管理</button>
+      <button id="btn-change-master-pw" class="btn" title="マスターパスワードを変更">パスワード変更</button>
       <button id="btn-help" class="btn">Help</button>
     </div>
   </header>
@@ -187,6 +188,7 @@ const SupabaseClient = (() => {
         configured() { return !!_client(); },
         listProjects(ownerPw) { return rpc('list_projects', { _owner_password: ownerPw }); },
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
+        changeMasterPw(cur, next) { return rpc('change_master_password', { _current_pw: cur, _new_pw: next }); },
         getWorkspaceTree(masterPw) { return rpc('get_workspace_tree', { _master_pw: masterPw }); },
         setWorkspaceTree(masterPw, tree) { return rpc('set_workspace_tree', { _master_pw: masterPw, _tree: tree }); },
         publishFolderShare(masterPw, slug, name, indexDoc, isPublic, password) {
@@ -225,11 +227,12 @@ const SupabaseClient = (() => {
 })();
 
 // ===========================================================================
-// Master-mode gate. Hides the management UI until the user enters the admin
-// password. Authenticates via list_projects when the network is available;
-// falls back to a SHA-256 hash of the default password ("MSIadomine") when
-// Supabase is unreachable. Unlocked state is cached in sessionStorage for
-// 12 h so the user only types the password once per tab.
+// Master-mode gate. Hides the management UI until the user enters the master
+// password. Authenticates online via verify_master_pw (bcrypt in
+// master_credentials); there is no offline fallback, so Supabase must be
+// reachable to unlock. Unlocked state is cached in sessionStorage for 12 h so
+// the user only types the password once per tab. Rotate the password in-app
+// via the "パスワード変更" button (change_master_password).
 //
 // SECURITY NOTE: this is a shoulder-surf-level gate, not real security.
 // Anyone with DevTools access can read IndexedDB directly or rewrite the
@@ -238,16 +241,10 @@ const SupabaseClient = (() => {
 // ===========================================================================
 const MASTER_UNLOCK_KEY = 'desi:masterUnlocked';
 const MASTER_UNLOCK_TTL_MS = 12 * 60 * 60 * 1000;
-// SHA-256 of "MSIadomine" — fallback comparison used only when the network
-// to Supabase is unreachable. Regenerate with:
-//   printf '%s' '<password>' | sha256sum
-const MASTER_FALLBACK_HASH_HEX =
-    'd453b548866689313ef7ee5b37cb869f342e5cd555c704c3298c1534d510cd6a';
-
-async function sha256Hex(s) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(s)));
-    return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
+// Master unlock is verified online only (verify_master_pw / bcrypt in
+// master_credentials). The previous hardcoded SHA-256 offline fallback was
+// removed so a rotated password (change_master_password) can't be bypassed by
+// a stale client-side hash — Supabase connectivity is required to unlock.
 
 function isMasterUnlocked() {
     try {
@@ -290,17 +287,12 @@ async function tryServerUnlock(pw) {
         if (ok === true) return { ok: true };
         return { ok: false, transient: false };
     } catch (e) {
-        // Network / 5xx / timeout → fall back to the local SHA-256 hash.
-        console.warn('verify_master_pw failed (will try local hash):', e);
+        // Network / 5xx / timeout. There is no offline fallback anymore, so
+        // this surfaces as a "can't reach server" message rather than a wrong
+        // password.
+        console.warn('verify_master_pw failed (no offline fallback):', e);
         return { ok: false, transient: true };
     }
-}
-
-async function tryLocalUnlock(pw) {
-    try {
-        const h = await sha256Hex(pw);
-        return h === MASTER_FALLBACK_HASH_HEX;
-    } catch (e) { return false; }
 }
 
 function openMasterUnlockModal() {
@@ -339,21 +331,103 @@ function openMasterUnlockModal() {
             submit.disabled = true; submit.textContent = '確認中…';
             errEl.textContent = '';
             const server = await tryServerUnlock(pw);
-            let ok = server.ok;
-            if (!ok && server.transient) {
-                ok = await tryLocalUnlock(pw);
-            }
             submit.disabled = false; submit.textContent = 'Unlock';
-            if (ok) {
+            if (server.ok) {
                 markMasterUnlocked(pw);
                 back.remove();
                 resolve(true);
+            } else if (server.transient) {
+                errEl.textContent = 'サーバに接続できません。ネットワーク接続を確認してください';
             } else {
                 errEl.textContent = 'パスワードが違います';
                 inp.select();
             }
         };
         card.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); tryUnlock(); });
+    });
+}
+
+// In-app master-password rotation. Verifies the current password server-side
+// (change_master_password → _verify_master_pw), then updates the single
+// master_credentials row. On success we refresh the cached master pw so
+// already-open gated flows (publish, tree, delete) keep working without a
+// re-prompt. Requires Supabase connectivity — there is no offline path.
+function openChangeMasterPwModal() {
+    const html = `
+        <h2>マスターパスワードの変更</h2>
+        <p style="font-size:12px;color:#475569;margin-top:4px;">
+          現在のパスワードで認証してから、新しいパスワード (8 文字以上) を設定します。
+          全プロジェクト共通のマスターパスワードが更新されます。
+        </p>
+        <form class="row">
+          <label>現在のパスワード
+            <input type="password" name="cur" autocomplete="current-password" required>
+          </label>
+          <label>新しいパスワード
+            <input type="password" name="next" autocomplete="new-password" required>
+          </label>
+          <label>新しいパスワード (確認)
+            <input type="password" name="next2" autocomplete="new-password" required>
+          </label>
+          <p class="err" data-err></p>
+          <div class="actions">
+            <button type="button" class="btn" data-modal-cancel>キャンセル</button>
+            <button type="submit" class="btn primary" data-modal-ok>変更する</button>
+          </div>
+        </form>`;
+    return new Promise((resolve) => {
+        const host = document.getElementById('modal-host');
+        const back = document.createElement('div');
+        back.className = 'modal-backdrop';
+        const card = document.createElement('div');
+        card.className = 'modal-card';
+        card.innerHTML = html;
+        back.appendChild(card);
+        host.appendChild(back);
+        const errEl = card.querySelector('[data-err]');
+        const submit = card.querySelector('[data-modal-ok]');
+        const curEl = card.querySelector('[name="cur"]');
+        const nextEl = card.querySelector('[name="next"]');
+        const next2El = card.querySelector('[name="next2"]');
+        const close = (v) => { back.remove(); resolve(v); };
+        card.querySelector('[data-modal-cancel]').addEventListener('click', () => close(false));
+        back.addEventListener('click', (e) => { if (e.target === back) close(false); });
+        setTimeout(() => curEl.focus(), 30);
+        const doChange = async () => {
+            const cur = (curEl.value || '').trim();
+            const next = (nextEl.value || '').trim();
+            const next2 = (next2El.value || '').trim();
+            errEl.style.color = '';
+            if (!cur || !next) { errEl.textContent = 'すべての項目を入力してください'; return; }
+            if (next.length < 8) { errEl.textContent = '新しいパスワードは 8 文字以上にしてください'; return; }
+            if (next !== next2) { errEl.textContent = '新しいパスワード (確認) が一致しません'; return; }
+            if (next === cur) { errEl.textContent = '新しいパスワードが現在と同じです'; return; }
+            if (!SupabaseClient.configured()) { errEl.textContent = 'Supabase が未設定のため変更できません'; return; }
+            submit.disabled = true; submit.textContent = '変更中…';
+            errEl.textContent = '';
+            try {
+                await SupabaseClient.changeMasterPw(cur, next);
+                // Keep already-unlocked master flows working with the new pw.
+                markMasterUnlocked(next);
+                errEl.style.color = '#16a34a';
+                errEl.textContent = 'マスターパスワードを変更しました';
+                setTimeout(() => close(true), 900);
+            } catch (e) {
+                submit.disabled = false; submit.textContent = '変更する';
+                const code = e && e.code;
+                const msg = (e && e.message) || '';
+                if (code === '28P01' || /invalid current/i.test(msg)) {
+                    errEl.textContent = '現在のパスワードが違います';
+                    curEl.select();
+                } else if (/at least 8|8 characters/i.test(msg)) {
+                    errEl.textContent = '新しいパスワードは 8 文字以上にしてください';
+                } else {
+                    console.warn('change_master_password failed:', e);
+                    errEl.textContent = 'サーバに接続できませんでした (ネットワークを確認してください)';
+                }
+            }
+        };
+        card.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); doChange(); });
     });
 }
 
@@ -403,7 +477,7 @@ function readCachedMasterPw() {
 async function _ensureMasterPwForTree() {
     let pw = readCachedMasterPw();
     if (pw) return pw;
-    pw = (prompt('Master password を入力してください', 'MSIadomine') || '').trim();
+    pw = (prompt('Master password を入力してください') || '').trim();
     if (pw) { try { sessionStorage.setItem('desi:masterPw', JSON.stringify({ pw, expiresAt: Date.now() + 12*3600*1000 })); } catch (e) {} }
     return pw;
 }
@@ -1109,7 +1183,7 @@ async function renderList() {
                 }
             } catch (e) {}
             if (!masterPw) {
-                masterPw = (prompt('Master password を入力してください', 'MSIadomine') || '').trim();
+                masterPw = (prompt('Master password を入力してください') || '').trim();
                 if (!masterPw) return;
             }
             try {
@@ -1403,6 +1477,9 @@ async function init() {
     });
     document.getElementById('btn-mrm').addEventListener('click', () => {
         location.href = 'mrm.html';
+    });
+    document.getElementById('btn-change-master-pw').addEventListener('click', () => {
+        openChangeMasterPwModal().catch(e => console.error(e));
     });
 
     await loadWorkspaceTree();
