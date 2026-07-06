@@ -311,6 +311,7 @@ declare
     sec   jsonb;
     roi   jsonb;
     v_sec_id uuid;
+    v_client_ids text[];
 begin
     if _slug is null or length(trim(_slug)) = 0 then
         return jsonb_build_object('ok', false, 'reason', 'slug_required');
@@ -368,26 +369,55 @@ begin
         perform public.set_project_password(_slug, 'admin', _admin_pw);
     end if;
 
-    -- Replace sections wholesale. Caller passes the full ordered list.
-    delete from public.sections where project_id = v_pid;
+    -- Merge sections by client_id (do NOT delete-all). Preserving each
+    -- section's UUID keeps its ROIs — including collaborator ('viewer') ROIs
+    -- added on the shared copy — from being cascade-deleted on every master
+    -- auto-publish (schema.sql rois.section_id ON DELETE CASCADE).
+    v_client_ids := (
+        select array_agg(s->>'id')
+          from jsonb_array_elements(coalesce(_sections, '[]'::jsonb)) s
+         where s->>'id' is not null
+    );
+    -- Remove only sections the master no longer has (their client_id is absent
+    -- from the incoming doc). If the doc carries no sections, leave existing
+    -- ones untouched (degenerate case — never wipe everything).
+    if v_client_ids is not null and array_length(v_client_ids, 1) is not null then
+        delete from public.sections
+            where project_id = v_pid
+              and (meta->>'client_id' is null
+                   or not (meta->>'client_id' = any(v_client_ids)));
+    end if;
     for sec in select * from jsonb_array_elements(coalesce(_sections, '[]'::jsonb))
     loop
-        insert into public.sections(project_id, ordinal, display_name, meta, storage_paths)
-            values (
-                v_pid,
-                coalesce((sec->>'ordinal')::int, 0),
-                coalesce(sec->>'displayName', 'Section'),
-                coalesce(sec->'meta', '{}'::jsonb),
-                coalesce(sec->'storagePaths', '{}'::jsonb)
-            )
-            returning id into v_sec_id;
-        -- Persist the synthetic id so the client can map ROIs back.
-        update public.sections set meta = jsonb_set(meta, '{client_id}', to_jsonb(sec->>'id'))
-            where id = v_sec_id;
+        v_sec_id := null;
+        select id into v_sec_id from public.sections
+            where project_id = v_pid
+              and meta->>'client_id' = (sec->>'id')
+            limit 1;
+        if v_sec_id is null then
+            insert into public.sections(project_id, ordinal, display_name, meta, storage_paths)
+                values (
+                    v_pid,
+                    coalesce((sec->>'ordinal')::int, 0),
+                    coalesce(sec->>'displayName', 'Section'),
+                    jsonb_set(coalesce(sec->'meta', '{}'::jsonb), '{client_id}', to_jsonb(sec->>'id')),
+                    coalesce(sec->'storagePaths', '{}'::jsonb)
+                );
+        else
+            update public.sections set
+                ordinal       = coalesce((sec->>'ordinal')::int, 0),
+                display_name  = coalesce(sec->>'displayName', 'Section'),
+                meta          = jsonb_set(coalesce(sec->'meta', '{}'::jsonb), '{client_id}', to_jsonb(sec->>'id')),
+                storage_paths = coalesce(sec->'storagePaths', '{}'::jsonb)
+             where id = v_sec_id;
+        end if;
     end loop;
 
-    -- Replace ROIs wholesale.
-    delete from public.rois where project_id = v_pid;
+    -- Replace only master-authored ROIs; preserve collaborator ('viewer')
+    -- ROIs added on the shared copy so an auto-publish doesn't wipe them.
+    -- (Master's own local deletions still propagate: a removed master ROI is
+    -- simply not re-inserted below.)
+    delete from public.rois where project_id = v_pid and coalesce(created_by, '') <> 'viewer';
     for roi in select * from jsonb_array_elements(coalesce(_rois, '[]'::jsonb))
     loop
         -- ROIs reference sections by client_id; resolve to server uuid.
