@@ -598,6 +598,10 @@ function saveCachedOwnerPw(pw) {
 //   project = { type:'project', slug?, localId? }   (at least one of slug/localId)
 // ===========================================================================
 let workspaceTree = null;
+// True only once the authoritative tree was successfully loaded (or there is
+// no server to load from). While false we must NOT persist the in-memory tree,
+// or a transient load failure would clobber the real server hierarchy.
+let _treeLoaded = false;
 
 function _emptyTree() { return { version: 1, children: [] }; }
 function _ensureTree() { if (!workspaceTree || !Array.isArray(workspaceTree.children)) workspaceTree = _emptyTree(); }
@@ -622,20 +626,34 @@ async function _ensureMasterPwForTree() {
 }
 
 async function loadWorkspaceTree() {
-    if (!SupabaseClient.configured()) { _ensureTree(); return; }
+    if (!SupabaseClient.configured()) { _ensureTree(); _treeLoaded = true; return; }   // no server → nothing to clobber
     const pw = readCachedMasterPw();
-    if (!pw) { _ensureTree(); return; }   // no master pw yet → flat view
+    if (!pw) { _ensureTree(); _treeLoaded = false; return; }   // have server but not authed → don't allow saving
     try {
         const t = await SupabaseClient.getWorkspaceTree(pw);
         workspaceTree = (t && Array.isArray(t.children)) ? t : _emptyTree();
-    } catch (e) { console.warn('get_workspace_tree failed', e); _ensureTree(); }
+        _treeLoaded = true;
+    } catch (e) { console.warn('get_workspace_tree failed', e); _ensureTree(); _treeLoaded = false; }
 }
 async function persistTreeAndRender() {
     await renderList();   // optimistic
+    // Guard: never write a tree we never successfully loaded — a transient
+    // get_workspace_tree failure would otherwise overwrite the real hierarchy
+    // with an empty/near-empty one on the next folder op.
+    if (!_treeLoaded) {
+        alert('フォルダ情報をサーバから取得できていないため、保存を中止しました。\nマスターパスワードを入力してページを再読み込みしてから操作してください（既存のフォルダ構成を誤って消さないための保護です）。');
+        return;
+    }
     const pw = await _ensureMasterPwForTree();
     if (!pw) { alert('Master password が無いためフォルダ構成を保存できませんでした'); return; }
     try { await SupabaseClient.setWorkspaceTree(pw, workspaceTree); }
-    catch (e) { console.warn('set_workspace_tree failed', e); alert('フォルダ構成の保存に失敗しました: ' + ((e && (e.message || e.details)) || e)); }
+    catch (e) {
+        console.warn('set_workspace_tree failed', e);
+        alert('フォルダ構成の保存に失敗しました: ' + ((e && (e.message || e.details)) || e));
+        // Roll back the optimistic in-memory mutation to the authoritative
+        // server tree so a later successful op doesn't persist a diverged state.
+        try { await loadWorkspaceTree(); await renderList(); } catch (e2) { console.warn('tree rollback failed', e2); }
+    }
 }
 
 // ---- tree mutation utilities (operate on workspaceTree) ----
@@ -1428,6 +1446,13 @@ async function renderList() {
                     sessionStorage.setItem('desi:masterPw',
                         JSON.stringify({ pw: masterPw, expiresAt: Date.now() + 12 * 3600 * 1000 }));
                 } catch (e) {}
+                // Drop the just-deleted slug from the cached server list so it
+                // doesn't reappear as a "Server only" ghost row on re-render
+                // (buildRows reads serverRowsCache; without this the row lingers
+                // until the user manually re-fetches the server list).
+                if (Array.isArray(serverRowsCache)) {
+                    serverRowsCache = serverRowsCache.filter(sp => sp && sp.slug !== slug);
+                }
                 let msg = '削除しました (DB: ok, storage objects: ' + deleted + ' 件)';
                 if (failed) msg += ' / 失敗: ' + failed + ' 件 (orphan blob として残ります)';
                 alert(msg);
