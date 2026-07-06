@@ -1093,8 +1093,19 @@ async function fetchServerProjectList(forcePrompt) {
     }
     try {
         const rows = await SupabaseClient.listProjects(pw);
+        const list = Array.isArray(rows) ? rows : [];
+        if (list.length === 0) {
+            // A wrong (but >=4-char) admin pw is NOT a server error — it just
+            // matches 0 projects. So give feedback on an explicit refresh, and
+            // do NOT cache a pw that returned nothing (would keep the silent
+            // auto-pull empty forever).
+            if (forcePrompt) {
+                alert('サーバから 0 件でした。admin パスワードが違うか、まだ Publish 済みプロジェクトがありません。\n(パスワードは 4 文字以上・正しい値かご確認ください)');
+            }
+            return list;
+        }
         saveCachedOwnerPw(pw);
-        return Array.isArray(rows) ? rows : [];
+        return list;
     } catch (e) {
         console.warn('list_projects failed', e);
         alert('サーバ一覧の取得に失敗しました (パスワード違い?)');
@@ -1205,6 +1216,28 @@ async function renderList() {
         if (n.localId && byLocal.has(n.localId)) return byLocal.get(n.localId);
         return null;
     };
+    // ② Experiment-date ordering (display only; the saved tree/placement is
+    // untouched). Within each level: newest 実験日 first; a folder sorts by the
+    // newest experiment date it contains, so 日時 > サブフォルダー. Items with
+    // no experiment date sink to the bottom.
+    const rowExpDate = (r) => {
+        if (!r) return '';
+        const memo = (r.local && r.local.memo) || (r.server && r.server.meta && r.server.meta.memo) || {};
+        return memo.experimentDate || '';
+    };
+    const nodeDate = (n) => {
+        if (n.type === 'project') return rowExpDate(rowForNode(n));
+        let best = '';
+        for (const c of (n.children || [])) { const d = nodeDate(c); if (d > best) best = d; }
+        return best;
+    };
+    const byDateDesc = (da, db) => {
+        if (da === db) return 0;
+        if (!da) return 1;
+        if (!db) return -1;
+        return db.localeCompare(da);
+    };
+    const sortNodesByDate = (nodes) => (nodes || []).slice().sort((a, b) => byDateDesc(nodeDate(a), nodeDate(b)));
     const folderHead = (n, depth) => {
         const isCol = !_openFolders.has(n.id);
         return '<div class="folder-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:' + (depth ? '6px 0 2px' : '12px 0 2px') + ';">'
@@ -1220,7 +1253,7 @@ async function renderList() {
     };
     const renderNodes = (nodes, depth) => {
         let html = '';
-        for (const n of (nodes || [])) {
+        for (const n of sortNodesByDate(nodes)) {
             if (n.type === 'folder') {
                 const isCol = !_openFolders.has(n.id);
                 const inner = renderNodes(n.children || [], depth + 1);
@@ -1236,7 +1269,9 @@ async function renderList() {
         return html;
     };
     const treeHtml = renderNodes(workspaceTree.children, 0);
-    const unplacedHtml = rows.filter(r => !placed.has(rkey(r))).map(rowHtml).join('');
+    const unplacedHtml = rows.filter(r => !placed.has(rkey(r)))
+        .slice().sort((a, b) => byDateDesc(rowExpDate(a), rowExpDate(b)))
+        .map(rowHtml).join('');
     list.innerHTML = treeHtml + unplacedHtml;
 
     // ---- folder controls ----
