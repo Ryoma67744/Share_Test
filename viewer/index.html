@@ -7419,6 +7419,18 @@ function safeName(s) {
     return String(s == null ? '' : s).replace(/[^A-Za-z0-9_\-]/g, '_') || 'X';
 }
 
+// Storage object keys must be ASCII-safe: Supabase Storage rejects keys with
+// non-ASCII chars (e.g. Japanese filenames like "免染データ.tif") as InvalidKey,
+// and chars like spaces/&/? complicate the public-URL round-trip. Replace
+// anything outside [A-Za-z0-9._-] so the blobId-prefixed key stays unique and
+// valid. Unlike safeName this preserves the dot, so already-clean ASCII keys
+// (e.g. "slide1.tif") are byte-identical and their upload cache stays valid.
+// Only the storage KEY is sanitized; ent.filename is kept verbatim in the
+// payload ref for download/display.
+function sanitizeStorageKeySegment(s) {
+    return String(s == null ? '' : s).replace(/[^A-Za-z0-9._-]/g, '_') || 'bin';
+}
+
 // Content signature of a blob, used to deduplicate identical "full" HE/IF
 // images at export. Prefers SHA-256 (crypto.subtle; needs a secure context),
 // falling back to length + FNV-1a over the bytes when subtle crypto is absent.
@@ -8243,7 +8255,13 @@ async function _publishCore(project, meta, masterPw, opts) {
     const enqueue = (sec, storage, kindFolder, slot, k, ent) => {
         if (!ent || !ent.blobId) return;
         const filename = (ent.filename) || (k + '.bin');
-        const path = `${meta.slug}/${sec.id}/${kindFolder}/${ent.blobId}__${filename}`;
+        // Sanitize only the filename segment of the Storage key — Supabase
+        // rejects non-ASCII keys (e.g. Japanese filenames) as InvalidKey. The
+        // blobId prefix keeps the key unique even if two names collapse to the
+        // same sanitized string. The original filename is preserved in `task`
+        // (→ ref.filename) for display/download.
+        const safeFilename = sanitizeStorageKeySegment(filename);
+        const path = `${meta.slug}/${sec.id}/${kindFolder}/${ent.blobId}__${safeFilename}`;
         const task = { blobId: ent.blobId, kindFolder, slot, key: k, ent, sectionId: sec.id, storage, path, filename };
         let bucket = pathTasks.get(path);
         if (!bucket) { bucket = []; pathTasks.set(path, bucket); }
