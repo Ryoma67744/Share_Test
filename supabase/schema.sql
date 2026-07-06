@@ -145,7 +145,7 @@ begin
     raise exception 'project not found: %', p_slug;
   end if;
   insert into project_credentials(project_id, role, password_hash)
-       values (v_project_id, p_role, crypt(p_password, gen_salt('bf')))
+       values (v_project_id, p_role, crypt(p_password, gen_salt('bf', 12)))
   on conflict (project_id, role) do update
        set password_hash = excluded.password_hash;
 end

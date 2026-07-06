@@ -8553,8 +8553,8 @@ async function openPublishMetaModal(project) {
           <label data-viewer-pw-row>Viewer password (受け手が入力するもの)
             <input type="password" name="viewer_pw" required minlength="4">
           </label>
-          <label>Admin password (管理者ビュー用 / 既定: MSIadomine)
-            <input type="password" name="admin_pw" minlength="4" value="MSIadomine">
+          <label>Admin password (管理者ビュー用 / 独自の値を設定してください)
+            <input type="password" name="admin_pw" minlength="4" placeholder="admin パスワード (一覧取得・取り込み用)">
           </label>
           <p style="font-size:11px;color:#475569;">
             ※ 同じ slug で再 publish するとサーバ側のプロジェクトは丸ごと上書きされます (公開フラグも含む)。<br>
@@ -10235,7 +10235,7 @@ async function _fetchServerProjectList(forcePrompt) {
     if (!SupabaseClient.configured()) return null;
     let pw = forcePrompt ? '' : _readCachedOwnerPw();
     if (!pw) {
-        pw = (prompt('サーバから一覧取得: admin password を入力してください', 'MSIadomine') || '').trim();
+        pw = (prompt('サーバから一覧取得: admin password を入力してください') || '').trim();
         if (!pw) return null;
     }
     try {
@@ -12952,6 +12952,13 @@ const App = {
                 if (loc.name && loc.name !== loc.colorKey) rem.name = loc.name;
             }
         }
+        // Preserve locally-drawn ROIs whose server write failed (_unsynced) and
+        // that the server doesn't know about yet, so the poll doesn't silently
+        // discard the user's un-persisted work.
+        const remoteColors = new Set(remote.map(r => r.colorKey));
+        for (const loc of (this.project.rois || [])) {
+            if (loc && loc._unsynced && !remoteColors.has(loc.colorKey)) remote.push(loc);
+        }
         // Drop the active selection if the ROI was deleted on the server.
         if (this.activeRoiId && !remote.find(r => r.id === this.activeRoiId)) {
             this.activeRoiId = null;
@@ -13033,10 +13040,15 @@ const App = {
                     // latest write so any leftover read site still works.
                     roi.serverId = rec.id;
                     roi.version = rec.version;
+                    delete roi._unsynced;   // persisted OK
                 }
             } catch (e) {
                 console.warn('Share: create_roi failed', e);
-                showToast('ROI のサーバ保存に失敗しました');
+                // Mark the ROI as unsynced so the 12 s poll (_refreshShareRois)
+                // does NOT drop this just-drawn polygon before it reaches the
+                // server. The user can retry (redraw / re-acquire lock).
+                roi._unsynced = true;
+                showToast('ROI のサーバ保存に失敗しました。未保存として保持中です。ロックを取り直してもう一度お試しください。', 4500);
             }
         } else {
             await this.queueSave(0);
@@ -13353,19 +13365,24 @@ const App = {
     // row, signalling that another PC pushed since this one last synced.
     async _serverIsNewerThanLocal(project) {
         const localIso = project.shareInfo && project.shareInfo.lastSyncedAt;
-        if (!localIso) return false;
+        if (!localIso) return false;              // no baseline yet → allow first sync
         try {
             const c = SupabaseClient._rawClient();
-            if (!c) return false;
+            if (!c) return false;                 // Supabase not configured → nothing to conflict with
             const { data, error } = await c.from('projects')
                 .select('updated_at')
                 .eq('slug', project.shareInfo.slug)
                 .maybeSingle();
-            if (error || !data || !data.updated_at) return false;
+            // Fail SAFE: if we can't confirm the server is NOT newer (network
+            // error / unreadable), assume it might be and skip the overwrite
+            // rather than clobbering another PC's push. (Previously returned
+            // false here, which silently overwrote peers on flaky networks.)
+            if (error) return true;
+            if (!data || !data.updated_at) return false;   // no server row → nothing to overwrite
             // 1.5 s slop so the row write our own publish triggered
             // doesn't get classified as "newer than local".
             return new Date(data.updated_at).getTime() > new Date(localIso).getTime() + 1500;
-        } catch (e) { return false; }
+        } catch (e) { return true; }              // network throw → fail safe (don't overwrite)
     },
 
     // Update the in-page sync indicator. State machine:
