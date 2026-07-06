@@ -187,6 +187,32 @@ end
 $$;
 grant execute on function public.change_master_password(text, text) to anon, authenticated;
 
+-- Master-gated per-project credential rotation. The manager UI (index.html,
+-- already behind the master gate) calls this to change a project's viewer or
+-- admin password WITHOUT a full re-publish. set_project_password (schema.sql)
+-- is SQL-only (revoked from anon), so this SECURITY DEFINER wrapper is the
+-- anon-callable entry point, authorised by the master password.
+create or replace function public.set_project_password_master(
+    _master_pw text, _slug text, _role text, _pw text)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'invalid master password' using errcode = '28P01';
+    end if;
+    if _role not in ('viewer', 'admin') then
+        raise exception 'role must be viewer or admin';
+    end if;
+    if _pw is null or length(_pw) < 4 then
+        raise exception 'password must be at least 4 characters';
+    end if;
+    -- Raises 'project not found: <slug>' if the slug is unknown.
+    perform public.set_project_password(_slug, _role, _pw);
+end
+$$;
+grant execute on function public.set_project_password_master(text, text, text, text) to anon, authenticated;
+
 -- ---- 2c. Publish session token (Phase 1) ---------------------
 -- Short-lived per-publish ticket. Issued by request_publish_session()
 -- after master-pw verification, then sent as the "x-publish-token"
