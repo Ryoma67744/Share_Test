@@ -1614,6 +1614,41 @@ function labToSrgb(L255, A255, B255) {
     ];
 }
 
+// Environment-adaptive canvas helpers. The heavy decode/raster functions below
+// run BOTH on the main thread (DOM <canvas>) and, verbatim, inside the parse
+// Web Worker (which has no `document`). _mkCanvas branches on that; the worker
+// path gets an OffscreenCanvas. _canvasToDataUrl uses convertToBlob+FileReader
+// for OffscreenCanvas (which lacks toDataURL) and returns the identical PNG
+// data URL the DOM path produces, so downstream consumers are unchanged.
+function _mkCanvas(w, h) {
+    if (typeof document === 'undefined' && typeof OffscreenCanvas !== 'undefined') {
+        return new OffscreenCanvas(w, h);
+    }
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    return c;
+}
+async function _canvasToDataUrl(canvas) {
+    if (typeof canvas.convertToBlob === 'function') {   // OffscreenCanvas (worker)
+        const blob = await canvas.convertToBlob({ type: 'image/png' });
+        return await new Promise((res, rej) => {
+            const r = new FileReader();
+            r.onload = () => res(r.result);
+            r.onerror = () => rej(r.error);
+            r.readAsDataURL(blob);
+        });
+    }
+    return canvas.toDataURL('image/png');
+}
+// Paint an RGBA pixel buffer to a PNG data URL. Used by the worker after
+// computeRasterPixels; the main-thread rasterRowsToPngDataUrl inlines the
+// equivalent so its return stays synchronous for existing callers.
+async function _encodePixelsToDataUrl(width, height, pixels) {
+    const canvas = _mkCanvas(width, height);
+    get2dContext(canvas).putImageData(new ImageData(pixels, width, height), 0, 0);
+    return await _canvasToDataUrl(canvas);
+}
+
 // JPEG-in-TIFF (Compression tag 7): for each strip, build a complete JPEG
 // bitstream (merging shared JPEGTables (t347) when present) and let the
 // browser's JPEG decoder render it. UTIF mishandles YCbCr → sRGB when the
@@ -1669,8 +1704,7 @@ async function decodeJpegInTiffToDataUrl(buf, ifd) {
         tablesInner = t.subarray(s, e);
     }
 
-    const canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
+    const canvas = _mkCanvas(W, H);
     const ctx = get2dContext(canvas);
 
     for (let i = 0; i < N; i++) {
@@ -1694,7 +1728,7 @@ async function decodeJpegInTiffToDataUrl(buf, ifd) {
         ctx.drawImage(bmp, 0, i * rowsPerStrip);
         if (typeof bmp.close === 'function') bmp.close();
     }
-    return canvas.toDataURL('image/png');
+    return await _canvasToDataUrl(canvas);
 }
 
 async function decodeTiffArrayBufferToDataUrl(buf) {
@@ -1711,8 +1745,7 @@ async function decodeTiffArrayBufferToDataUrl(buf) {
     const rgba = UTIF.toRGBA8(ifds[0]);
     const W = ifds[0].width, H = ifds[0].height;
     const t262 = (ifds[0].t262 && ifds[0].t262.length) ? ifds[0].t262[0] : 2;
-    const canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
+    const canvas = _mkCanvas(W, H);
     const ctx = get2dContext(canvas);
     const imgData = ctx.createImageData(W, H);
     const out = imgData.data;
@@ -1738,7 +1771,7 @@ async function decodeTiffArrayBufferToDataUrl(buf) {
         out.set(rgba);
     }
     ctx.putImageData(imgData, 0, 0);
-    return canvas.toDataURL('image/png');
+    return await _canvasToDataUrl(canvas);
 }
 
 async function blobToDataUrl(blob) {
@@ -1767,6 +1800,15 @@ async function decodeImageBlobToDataUrl(blob, mime) {
                 if (typeof bmp.close === 'function') bmp.close();
                 return c.toDataURL('image/png');
             } catch (_) { /* fall through to UTIF */ }
+        }
+        // The UTIF path is synchronous and freeze-prone on large TIFFs —
+        // offload it to the worker (which runs the identical decode via
+        // OffscreenCanvas). Fall back to the main-thread decode on any failure.
+        if (parseWorkerAvailable()) {
+            try {
+                const r = await callParseWorker('tiff-decode', { blob }, 120000);
+                if (r && r.dataUrl) return r.dataUrl;
+            } catch (e) { console.warn('TIFF worker decode failed, main-thread fallback', e); }
         }
         const buf = await readFileAsArrayBuffer(blob);
         return await decodeTiffArrayBufferToDataUrl(buf);
@@ -1970,7 +2012,12 @@ function buildMsiGrid(rows) {
     return { xIndex: ax.index, yIndex: ay.index, W: ax.size, H: ay.size };
 }
 
-function rasterRowsToPngDataUrl(rows, range) {
+// Pure numeric core (no DOM/canvas): build the MSI raster grid, compute stats,
+// and encode an RGBA pixel buffer. Shared verbatim by the main thread and the
+// parse Web Worker (via toString), so the rendered raster + stats are identical
+// regardless of where it runs. Returns { width, height, pixels, rawRange,
+// rawMean, rawTrueMax }.
+function computeRasterPixels(rows, range) {
     const { xIndex, yIndex, W, H } = buildMsiGrid(rows);
     const grid = Array(H).fill(0).map(() => Array(W).fill(NaN));
     const cnt  = Array(H).fill(0).map(() => Array(W).fill(0));
@@ -2013,25 +2060,34 @@ function rasterRowsToPngDataUrl(rows, range) {
         const robust = percentileSorted(vals, MSI_ROBUST_PERCENTILE);
         bakeHi = (Number.isFinite(robust) && robust > vmin) ? robust : vmax;
     }
-    const canvas = document.createElement('canvas');
-    canvas.width = W; canvas.height = H;
-    const ctx = get2dContext(canvas, { willReadFrequently: true });
-    const imgData = ctx.createImageData(W, H);
+    const pixels = new Uint8ClampedArray(W * H * 4);
     let p = 0;
     for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
         const v = grid[i][j];
-        if (!Number.isFinite(v)) { imgData.data[p++] = 0; imgData.data[p++] = 0; imgData.data[p++] = 0; imgData.data[p++] = 0; }
+        if (!Number.isFinite(v)) { pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; }
         else {
             const nn = Math.max(0, Math.min(1, (v - bakeLo) / (bakeHi - bakeLo)));
             const g = Math.round(nn * 255);
-            imgData.data[p++] = g; imgData.data[p++] = g; imgData.data[p++] = g; imgData.data[p++] = 255;
+            pixels[p++] = g; pixels[p++] = g; pixels[p++] = g; pixels[p++] = 255;
         }
     }
-    ctx.putImageData(imgData, 0, 0);
-    return { dataUrl: canvas.toDataURL('image/png'), rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax };
+    return { width: W, height: H, pixels, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax };
 }
 
-async function buildPngFromXlsxArrayBuffer(buf, def) {
+// Main-thread wrapper: kept synchronous (existing callers don't await it) so
+// only the DOM <canvas> encode stays here; the heavy numeric work is in
+// computeRasterPixels.
+function rasterRowsToPngDataUrl(rows, range) {
+    const { width, height, pixels, rawRange, rawMean, rawTrueMax } = computeRasterPixels(rows, range);
+    const canvas = document.createElement('canvas');
+    canvas.width = width; canvas.height = height;
+    get2dContext(canvas, { willReadFrequently: true }).putImageData(new ImageData(pixels, width, height), 0, 0);
+    return { dataUrl: canvas.toDataURL('image/png'), rawRange, rawMean, rawTrueMax };
+}
+
+// Pure parse (no DOM/canvas): xlsx ArrayBuffer → [{x,y,v}] rows. Shared verbatim
+// by the main thread and the parse Web Worker.
+function parseXlsxToRows(buf, def) {
     if (typeof XLSX === 'undefined') throw new Error('SheetJS (XLSX) not loaded');
     const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
     const sheetName = def.sheet || wb.SheetNames[0];
@@ -2052,7 +2108,13 @@ async function buildPngFromXlsxArrayBuffer(buf, def) {
         if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(v)) rows.push({ x, y, v });
     }
     if (!rows.length) throw new Error('no numeric rows in xlsx');
-    return rasterRowsToPngDataUrl(rows, def.range);
+    return rows;
+}
+
+// Main-thread fallback (worker path calls parseXlsxToRows + computeRasterPixels
+// directly). Behaviour/return shape unchanged.
+async function buildPngFromXlsxArrayBuffer(buf, def) {
+    return rasterRowsToPngDataUrl(parseXlsxToRows(buf, def), def.range);
 }
 
 async function inspectXlsxColumns(buf, sheetName, headerRow1based) {
@@ -2174,7 +2236,9 @@ function parseAnalyteHeader(buf) {
     return { compounds, dataStartLine: prodIdx + 1, precIdx, prodIdx, nameIdx };
 }
 
-async function buildPngFromTxtArrayBuffer(buf, def) {
+// Pure parse (no DOM/canvas): txt/tsv/csv ArrayBuffer → [{x,y,v}] rows. Shared
+// verbatim by the main thread and the parse Web Worker.
+function parseTxtToRows(buf, def) {
     const raw = new TextDecoder('utf-8').decode(buf);
     const linesAll = raw.split(/\r?\n/);
     if (linesAll.length < 1) throw new Error('empty txt');
@@ -2218,7 +2282,189 @@ async function buildPngFromTxtArrayBuffer(buf, def) {
         }
     }
     if (!rows.length) throw new Error('no numeric rows in txt');
-    return rasterRowsToPngDataUrl(rows, def.range);
+    return rows;
+}
+
+// Main-thread fallback (worker path calls parseTxtToRows + computeRasterPixels
+// directly). Behaviour/return shape unchanged.
+async function buildPngFromTxtArrayBuffer(buf, def) {
+    return rasterRowsToPngDataUrl(parseTxtToRows(buf, def), def.range);
+}
+
+// =============================================================
+// Parse Web Worker — offload heavy xlsx / txt / TIFF parsing off the main
+// thread so importing large files no longer freezes the UI. The worker
+// importScripts the same CDN XLSX/UTIF libs and runs the EXACT same pure
+// functions (injected via Function.prototype.toString) as the main thread, so
+// output is identical by construction. When Worker/OffscreenCanvas are
+// unavailable or the worker errors, every caller falls back to the unchanged
+// main-thread functions — no regression.
+// =============================================================
+const PARSE_WORKER_LIBS = [
+    'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js',
+    'https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js',
+];
+let _parseWorker = null;
+let _parseWorkerBroken = false;
+let _parseSeq = 0;
+const _parsePending = new Map();
+
+function parseWorkerSupported() {
+    return typeof Worker !== 'undefined'
+        && typeof OffscreenCanvas !== 'undefined'
+        && typeof createImageBitmap === 'function'
+        && typeof Blob !== 'undefined'
+        && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+}
+function parseWorkerAvailable() {
+    return parseWorkerSupported() && !_parseWorkerBroken;
+}
+
+// Non-blocking busy pill (bottom-right). Shown while parse jobs are in flight
+// so a background import is visible without blocking interaction.
+function _updateParseBusyIndicator() {
+    if (typeof document === 'undefined') return;
+    const n = _parsePending.size;
+    let el = document.getElementById('parse-busy-indicator');
+    if (n <= 0) { if (el) el.remove(); return; }
+    if (!el) {
+        if (!document.getElementById('pbi-style')) {
+            const st = document.createElement('style');
+            st.id = 'pbi-style';
+            st.textContent = '@keyframes pbi-spin{to{transform:rotate(360deg)}}';
+            document.head.appendChild(st);
+        }
+        el = document.createElement('div');
+        el.id = 'parse-busy-indicator';
+        el.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:9999;'
+            + 'background:rgba(30,64,175,0.95);color:#fff;padding:6px 12px;border-radius:9999px;'
+            + 'font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,0.25);pointer-events:none;'
+            + 'display:flex;align-items:center;gap:8px;';
+        el.innerHTML = '<span style="width:10px;height:10px;border:2px solid #fff;'
+            + 'border-top-color:transparent;border-radius:50%;display:inline-block;'
+            + 'animation:pbi-spin 0.8s linear infinite;"></span><span class="pbi-text"></span>';
+        document.body.appendChild(el);
+    }
+    const txt = el.querySelector('.pbi-text');
+    if (txt) txt.textContent = 'バックグラウンドで処理中… (' + n + ')';
+}
+
+// Runs INSIDE the worker (dormant on the main thread — defined here only so it
+// is stringified into the worker body alongside the shared pure functions).
+async function _parseWorkerOnMessage(e) {
+    const msg = e.data || {};
+    const id = msg.id;
+    try {
+        const p = msg.payload || {};
+        const buf = p.blob ? await p.blob.arrayBuffer() : null;
+        let result;
+        if (msg.op === 'xlsx-raster' || msg.op === 'txt-raster') {
+            const rows = (msg.op === 'txt-raster') ? parseTxtToRows(buf, p.def) : parseXlsxToRows(buf, p.def);
+            const px = computeRasterPixels(rows, p.def && p.def.range);
+            const dataUrl = await _encodePixelsToDataUrl(px.width, px.height, px.pixels);
+            result = { dataUrl: dataUrl, rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax };
+        } else if (msg.op === 'tiff-decode') {
+            result = { dataUrl: await decodeTiffArrayBufferToDataUrl(buf) };
+        } else if (msg.op === 'xlsx-columns') {
+            result = inspectXlsxColumns(buf, p.sheet, p.headerRow);
+        } else {
+            throw new Error('unknown op: ' + msg.op);
+        }
+        self.postMessage({ id: id, ok: true, result: result });
+    } catch (err) {
+        self.postMessage({ id: id, ok: false, error: String((err && err.message) || err) });
+    }
+}
+
+function _buildParseWorkerSource() {
+    // Function declarations hoist, so order is for readability only. Every name
+    // referenced by these must be a worker global (XLSX/UTIF via importScripts,
+    // OffscreenCanvas, createImageBitmap, FileReader, ImageData, TextDecoder, …)
+    // or present in this list — verified by node --check on the assembled source.
+    const fns = [
+        a1ColToIndex, indexToA1Col, percentileSorted, buildMsiGrid, labToSrgb,
+        get2dContext, _mkCanvas, _canvasToDataUrl, _encodePixelsToDataUrl,
+        computeRasterPixels, parseXlsxToRows, parseTxtToRows,
+        decodeJpegInTiffToDataUrl, decodeTiffArrayBufferToDataUrl, inspectXlsxColumns,
+        _parseWorkerOnMessage,
+    ];
+    return [
+        'importScripts(' + PARSE_WORKER_LIBS.map(u => JSON.stringify(u)).join(', ') + ');',
+        'const MSI_ROBUST_PERCENTILE = ' + MSI_ROBUST_PERCENTILE + ';',
+        fns.map(f => f.toString()).join('\n\n'),
+        'self.onmessage = _parseWorkerOnMessage;',
+    ].join('\n\n');
+}
+
+function _getParseWorker() {
+    if (_parseWorkerBroken) return null;
+    if (_parseWorker) return _parseWorker;
+    try {
+        const src = _buildParseWorkerSource();
+        const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+        const w = new Worker(url);
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
+        w.onmessage = (e) => {
+            const d = e.data || {};
+            const pend = _parsePending.get(d.id);
+            if (!pend) return;
+            if (d.ok) pend.resolve(d.result);
+            else pend.reject(new Error(d.error || 'parse worker error'));
+        };
+        w.onerror = (ev) => {
+            // A worker-level failure (e.g. importScripts blocked) is not
+            // recoverable per-job: mark broken, reject all pending jobs so they
+            // fall back to the main thread, and tear the worker down.
+            console.warn('parse worker error', ev && (ev.message || ev));
+            _parseWorkerBroken = true;
+            const pendings = Array.from(_parsePending.values());
+            _parsePending.clear();
+            _updateParseBusyIndicator();
+            pendings.forEach(p => { try { p.reject(new Error('parse worker crashed')); } catch (_) {} });
+            try { w.terminate(); } catch (_) {}
+            _parseWorker = null;
+        };
+        _parseWorker = w;
+        return _parseWorker;
+    } catch (e) {
+        console.warn('parse worker init failed', e);
+        _parseWorkerBroken = true;
+        return null;
+    }
+}
+
+// op: 'xlsx-raster' | 'txt-raster' | 'tiff-decode' | 'xlsx-columns'.
+// payload carries a Blob (posted by reference; the worker reads its bytes) plus
+// op-specific params. Rejects on worker-unavailable / error / timeout so the
+// caller can fall back to the main-thread parser.
+function callParseWorker(op, payload, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        const w = _getParseWorker();
+        if (!w) { reject(new Error('parse worker unavailable')); return; }
+        const id = ++_parseSeq;
+        let timer = null;
+        const settle = {
+            resolve: (v) => { if (timer) clearTimeout(timer); _parsePending.delete(id); _updateParseBusyIndicator(); resolve(v); },
+            reject:  (e) => { if (timer) clearTimeout(timer); _parsePending.delete(id); _updateParseBusyIndicator(); reject(e); },
+        };
+        _parsePending.set(id, settle);
+        _updateParseBusyIndicator();
+        if (timeoutMs) timer = setTimeout(() => {
+            if (_parsePending.has(id)) settle.reject(new Error('parse worker timeout'));
+        }, timeoutMs);
+        try { w.postMessage({ id: id, op: op, payload: payload }); }
+        catch (e) { settle.reject(e); }
+    });
+}
+
+// Column/sheet preview for the MSI wizard: worker when possible, else the
+// unchanged main-thread inspectXlsxColumns.
+async function inspectXlsxColumnsAuto(file, buf, sheetName, headerRow1based) {
+    if (parseWorkerAvailable() && file) {
+        try { return await callParseWorker('xlsx-columns', { blob: file, sheet: sheetName, headerRow: headerRow1based }, 120000); }
+        catch (e) { console.warn('xlsx-columns worker failed, main-thread fallback', e); }
+    }
+    return inspectXlsxColumns(buf, sheetName, headerRow1based);
 }
 
 // =============================================================
@@ -2431,10 +2677,21 @@ class SectionPanel {
         if (!ent || !ent.blobId) return;
         const rec = await ProjectStorage.getBlob(ent.blobId);
         if (!rec) return;
-        const buf = await rec.blob.arrayBuffer();
-        let result;
-        if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
-        else result = await buildPngFromXlsxArrayBuffer(buf, ent);
+        // Parse + rasterize in the worker (keeps the UI responsive on large
+        // xlsx/txt); fall back to the identical main-thread parser on any
+        // worker failure or when workers aren't supported.
+        let result = null;
+        if (parseWorkerAvailable()) {
+            try {
+                const op = (ent.kind === 'txt') ? 'txt-raster' : 'xlsx-raster';
+                result = await callParseWorker(op, { blob: rec.blob, def: ent }, 120000);
+            } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
+        }
+        if (!result) {
+            const buf = await rec.blob.arrayBuffer();
+            if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
+            else result = await buildPngFromXlsxArrayBuffer(buf, ent);
+        }
         const dataUrl = (result && typeof result === 'object') ? result.dataUrl : result;
         const rawRange = (result && typeof result === 'object' && Array.isArray(result.rawRange)) ? result.rawRange : null;
         const rawMean = (result && typeof result === 'object' && Number.isFinite(result.rawMean)) ? result.rawMean : null;
@@ -7275,10 +7532,13 @@ const Wizards = {
                 return;
             }
             bufCache = await readFileAsArrayBuffer(f);
-            const wb = XLSX.read(new Uint8Array(bufCache), { type: 'array' });
+            // Sheet names via the worker (keeps the UI responsive on large
+            // workbooks); inspectXlsxColumnsAuto returns sheetNames + headers.
+            const firstInspect = await inspectXlsxColumnsAuto(f, bufCache, null, 1);
             const sheetSel = card.querySelector('[name="sheet"]');
-            sheetSel.innerHTML = wb.SheetNames.map(s => '<option>' + s + '</option>').join('');
-            sheetSel.value = wb.SheetNames.includes('MSI_Data') ? 'MSI_Data' : wb.SheetNames[0];
+            const sheetNames = (firstInspect && firstInspect.sheetNames) || [];
+            sheetSel.innerHTML = sheetNames.map(s => '<option>' + s + '</option>').join('');
+            sheetSel.value = sheetNames.includes('MSI_Data') ? 'MSI_Data' : (sheetNames[0] || '');
             await refreshColumns();
         };
 
@@ -7295,7 +7555,7 @@ const Wizards = {
             if (!bufCache) return;
             const sheetSel = card.querySelector('[name="sheet"]');
             const headerRow = parseInt(card.querySelector('[name="header_row"]').value) || 1;
-            const inspect = await inspectXlsxColumns(bufCache, sheetSel.value, headerRow);
+            const inspect = await inspectXlsxColumnsAuto(srcInp.files[0], bufCache, sheetSel.value, headerRow);
             const colSelXY = (sel, want) => {
                 sel.innerHTML = '';
                 inspect.headers.forEach((h, i) => {
