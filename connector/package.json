@@ -1,0 +1,21 @@
+{
+  "name": "desi-share-mcp-connector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only MCP connector for the DESI Data Share app. Lets an AI READ (never write) project data, ROIs, and MSI numbers for analysis.",
+  "bin": {
+    "desi-share-mcp": "src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "selftest": "node src/selftest.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.4.0",
+    "xlsx": "^0.18.5"
+  }
+}
