@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
+    "serve": "node src/http.js",
     "selftest": "node src/selftest.js"
   },
   "engines": {
