@@ -6910,11 +6910,29 @@ const Wizards = {
             const msiW = (ref && ref.w) || heRaw.naturalWidth;
             const msiH = (ref && ref.h) || heRaw.naturalHeight;
             const T = buildHeToMsiAffine(state);
-            // Step 1: HE → MSI raster frame via T.
+            // Step 1: HE → MSI raster frame via T. Supersample by `k` so the HE
+            // keeps its detail instead of collapsing to the (low-res) MSI grid —
+            // otherwise the panel shows HE at MSI resolution, which looks coarse.
+            // The extra pixels are purely visual: the landmark coordinate frame
+            // stays the LOGICAL MSI grid (rawW/rawH below) and the click/marker
+            // math divides `ss` back out, so ss=1 (MSI panels, legacy) behaves
+            // identically to before.
+            const heMax = Math.max(heRaw.naturalWidth, heRaw.naturalHeight);
+            const msiMax = Math.max(1, msiW, msiH);
+            const SS_TARGET = 1600;   // crisp preview cap (balances detail vs re-bake cost)
+            const k = Math.max(1, Math.min(
+                Math.round(SS_TARGET / msiMax),
+                Math.ceil(heMax / msiMax)   // never oversample past HE's own resolution
+            ));
             const heInMsi = document.createElement('canvas');
-            heInMsi.width = Math.max(1, Math.round(msiW));
-            heInMsi.height = Math.max(1, Math.round(msiH));
+            heInMsi.width = Math.max(1, Math.round(msiW * k));
+            heInMsi.height = Math.max(1, Math.round(msiH * k));
             const tctx = get2dContext(heInMsi);
+            // get2dContext disables smoothing (nearest-neighbor); re-enable it so
+            // the HE downsample area-averages instead of dropping pixels.
+            tctx.imageSmoothingEnabled = true;
+            tctx.imageSmoothingQuality = 'high';
+            tctx.scale(k, k);
             tctx.transform(T[0][0], T[1][0], T[0][1], T[1][1], T[0][2], T[1][2]);
             tctx.drawImage(heRaw, 0, 0);
             // Step 2: section transform bake (rotation + flip).
@@ -6922,11 +6940,13 @@ const Wizards = {
             const baked = bakeImageWithSectionTransform(heInMsi, t.deg, t.flipLr, t.flipUd);
             if (!baked) return;
             heImg.src = baked.toDataURL('image/png');
-            // dataset: rawW/rawH = MSI frame dims (since T already mapped HE → MSI).
-            //          T is stored so click/landmark can invert it. The section
-            //          transform is stored as before.
-            heImg.dataset.rawW = String(heInMsi.width);
-            heImg.dataset.rawH = String(heInMsi.height);
+            // dataset: rawW/rawH = the LOGICAL MSI frame (msiW×msiH), NOT the
+            //          supersampled pixel dims. `ss` records the supersample so
+            //          the click/landmark math can divide it back out. T is stored
+            //          so click/landmark can invert it.
+            heImg.dataset.rawW = String(Math.max(1, Math.round(msiW)));
+            heImg.dataset.rawH = String(Math.max(1, Math.round(msiH)));
+            heImg.dataset.ss = String(k);
             heImg.dataset.deg = String(t.deg);
             heImg.dataset.flipLr = t.flipLr ? '1' : '0';
             heImg.dataset.flipUd = t.flipUd ? '1' : '0';
@@ -7094,9 +7114,13 @@ const Wizards = {
             const rect = imgEl.getBoundingClientRect();
             const nW = imgEl.naturalWidth  || rect.width;
             const nH = imgEl.naturalHeight || rect.height;
-            // Click coords in the baked (rotated/flipped) thumbnail frame.
-            const bx = (ev.clientX - rect.left) / Math.max(1, rect.width)  * nW;
-            const by = (ev.clientY - rect.top)  / Math.max(1, rect.height) * nH;
+            // Supersample factor (HE panel is drawn at ss× the MSI grid for
+            // crispness; MSI panels & legacy have ss=1 → this is a no-op there).
+            const ss = Number(imgEl.dataset.ss) || 1;
+            // Click coords in the baked (rotated/flipped) thumbnail frame, mapped
+            // back to the LOGICAL frame by dividing the supersample out.
+            const bx = (ev.clientX - rect.left) / Math.max(1, rect.width)  * nW / ss;
+            const by = (ev.clientY - rect.top)  / Math.max(1, rect.height) * nH / ss;
             const rawW = Number(imgEl.dataset.rawW) || nW;
             const rawH = Number(imgEl.dataset.rawH) || nH;
             const deg = Number(imgEl.dataset.deg) || 0;
@@ -7146,8 +7170,11 @@ const Wizards = {
                 const deg = Number(imgEl.dataset.deg) || 0;
                 const flipLr = imgEl.dataset.flipLr === '1';
                 const flipUd = imgEl.dataset.flipUd === '1';
-                const sx = rect.width  / imgEl.naturalWidth;
-                const sy = rect.height / imgEl.naturalHeight;
+                // Divide the supersample out so markers land in the logical frame
+                // (HE panel: ss>1; MSI & legacy: ss=1 → unchanged).
+                const ss = Number(imgEl.dataset.ss) || 1;
+                const sx = rect.width  / (imgEl.naturalWidth  / ss);
+                const sy = rect.height / (imgEl.naturalHeight / ss);
                 // For HE, stored landmarks are in raw HE pixel space — apply
                 // T to bring them into MSI's raster frame first, then bake
                 // the section transform. MSI landmarks live in raw MSI space
