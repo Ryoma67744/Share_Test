@@ -1,0 +1,24 @@
+# Render.com blueprint for the READ-ONLY HTTP connector (ChatGPT Custom GPT).
+# 1. Push this repo to GitHub.  2. On render.com: New > Blueprint, pick this repo.
+# Render auto-provides PORT. CONNECTOR_API_KEY is generated (copy it into your
+# Custom GPT's Action auth). Edit SUPABASE_* only if your project differs.
+services:
+  - type: web
+    name: desi-share-connector
+    runtime: node
+    rootDir: connector
+    plan: free
+    buildCommand: npm install
+    startCommand: npm run serve
+    envVars:
+      - key: CONNECTOR_API_KEY
+        generateValue: true          # Render generates a secret; copy it to the GPT
+      - key: PUBLIC_ONLY
+        value: "true"                # only expose PUBLIC projects (safe default)
+      - key: SUPABASE_URL
+        value: https://pxlrlhtcvwkqnlryencs.supabase.co
+      - key: SUPABASE_ANON_KEY
+        value: sb_publishable_2K4sqMmKk3g20Jmwho-awQ_Uu_hSKeU
+      # To also read PRIVATE projects (only if you trust this endpoint), set
+      # PUBLIC_ONLY=false and add OWNER_ADMIN_PASSWORD / PROJECT_PW__<slug> as
+      # secret env vars in the Render dashboard. NEVER set a master password.

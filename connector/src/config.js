@@ -28,11 +28,21 @@ export const config = {
   supabaseUrl: (process.env.SUPABASE_URL || '').replace(/\/+$/, ''),
   anonKey: process.env.SUPABASE_ANON_KEY || '',
   ownerAdminPassword: process.env.OWNER_ADMIN_PASSWORD || '',
+  // HTTP (ChatGPT / hosted) settings — unused by the local MCP server.
+  apiKey: process.env.CONNECTOR_API_KEY || '',
+  port: parseInt(process.env.PORT || '3000', 10) || 3000,
+  // Safety valve for the hosted (public-internet) version: when true, private
+  // projects are NEVER unlocked, so the endpoint only ever exposes public data.
+  // Defaults OFF so the local MCP server keeps reading private projects when a
+  // password is configured; the hosted deployment (render.yaml) turns it ON.
+  publicOnly: /^(1|true|yes)$/i.test(process.env.PUBLIC_ONLY || 'false'),
 };
 
 // Password to try for a private project: a per-project override if present,
-// else the shared owner/admin password. Empty string = "public only".
+// else the shared owner/admin password. Returns '' ("public only") when
+// PUBLIC_ONLY is on, or when nothing is configured for the slug.
 export function projectPassword(slug) {
+  if (config.publicOnly) return '';
   return process.env['PROJECT_PW__' + slug] || config.ownerAdminPassword || '';
 }
 

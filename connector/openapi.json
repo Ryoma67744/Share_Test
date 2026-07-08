@@ -1,0 +1,74 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "DESI Data Share — Read-only connector",
+    "description": "Read-only access to DESI/MSI projects: list projects, summaries, compounds, ROI intensity statistics, and raw {x,y,value} matrices. Read-only: it cannot register, edit, or delete anything.",
+    "version": "0.1.0"
+  },
+  "servers": [
+    { "url": "https://YOUR-CONNECTOR-URL", "description": "Replace with your deployed HTTPS URL (e.g. https://desi-share-connector.onrender.com)" }
+  ],
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "summary": "List readable projects (public, plus private ones the server has a password for).",
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/projects/{slug}": {
+      "get": {
+        "operationId": "getProject",
+        "summary": "Project summary: memo, sections, compounds (name/precursor/product + mean/max), ROIs.",
+        "parameters": [
+          { "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/projects/{slug}/compounds": {
+      "get": {
+        "operationId": "listCompounds",
+        "summary": "List a project's compounds (MRM layers) with precursor/product m/z, per section.",
+        "parameters": [
+          { "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/projects/{slug}/roi-stats": {
+      "get": {
+        "operationId": "getRoiStats",
+        "summary": "Raw MSI intensity statistics (mean/median/min/max/quartiles/n/sd) inside ROIs. Optional filters.",
+        "parameters": [
+          { "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "section", "in": "query", "required": false, "schema": { "type": "string" }, "description": "section name or id" },
+          { "name": "roi", "in": "query", "required": false, "schema": { "type": "string" }, "description": "ROI name (substring match)" },
+          { "name": "compound", "in": "query", "required": false, "schema": { "type": "string" }, "description": "compound name or key (substring match)" }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
+    "/projects/{slug}/matrix": {
+      "get": {
+        "operationId": "getMatrix",
+        "summary": "Raw {x,y,value} numbers (CSV) for one compound in one section, optionally clipped to an ROI. Capped; use downsample/max_rows. For very large data, use the local connector + CSV upload.",
+        "parameters": [
+          { "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "compound", "in": "query", "required": true, "schema": { "type": "string" }, "description": "compound name or key" },
+          { "name": "section", "in": "query", "required": false, "schema": { "type": "string" }, "description": "section name or id (required if the compound exists in multiple sections)" },
+          { "name": "roi", "in": "query", "required": false, "schema": { "type": "string" }, "description": "clip to this ROI (name)" },
+          { "name": "max_rows", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "inline row cap (default 10000)" },
+          { "name": "downsample", "in": "query", "required": false, "schema": { "type": "integer" }, "description": "keep every Nth row" }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer" }
+    }
+  }
+}
