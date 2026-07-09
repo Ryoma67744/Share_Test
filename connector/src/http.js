@@ -78,6 +78,18 @@ const server = createServer(async (req, res) => {
         // connector + CSV upload instead (see README "道A").
       }));
     }
+    // --- Registered MRM library (read-only) ---
+    if (path === '/mrm') {
+      return send(res, 200, await tools.searchMrm({
+        q: q.get('q') || undefined,
+        tag: q.get('tag') || undefined,
+        polarity: q.get('polarity') || undefined,
+      }));
+    }
+    // --- Assemble a MassLynx .exp from registered MRMs (repeat ?name=...) ---
+    if (path === '/exp') {
+      return send(res, 200, await tools.buildExpForNames({ names: q.getAll('name') }));
+    }
     return send(res, 404, { error: 'not found: ' + path });
   } catch (e) {
     return send(res, 500, { error: String((e && e.message) || e) });

@@ -1,11 +1,14 @@
 // Offline self-consistency test (no network). Verifies the ported parsing /
 // grid / ROI-extraction / stats produce the expected numbers, so we can trust
 // they match the web app. Run: `npm run selftest`.
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import * as XLSX from 'xlsx';
 import {
   a1ColToIndex, pointInPolygon, buildMsiGrid,
   parseXlsxToRows, parseTxtToRows, extractRoiValues, stats,
 } from './msi.js';
+import { buildExp } from './exp.js';
 
 let failures = 0;
 function check(name, cond, detail) {
@@ -63,6 +66,36 @@ const tbuf = new TextEncoder().encode(txt).buffer;
 const trows = parseTxtToRows(tbuf, {});
 check('txt 3 rows', trows.length === 3, trows.length);
 check('txt row2', trows[2].x === 0 && trows[2].y === 1 && trows[2].v === 30, trows[2]);
+
+console.log('.exp buildExp parity (connector exp.js vs mrm.html)');
+{
+  // Extract the app's buildExp (+ helpers) live from mrm.html and diff its
+  // output against the connector's ported copy — byte-for-byte. Guards drift:
+  // if either buildExp changes, this fails until they are re-synced.
+  const html = readFileSync(fileURLToPath(new URL('../../mrm.html', import.meta.url)), 'utf8');
+  const s = html.indexOf('function _expKey(line)');
+  const e = html.indexOf('// Shared .exp build + download');
+  check('locate app buildExp in mrm.html', s >= 0 && e > s, { s, e });
+  if (s >= 0 && e > s) {
+    const appBuildExp = new Function(html.slice(s, e) + '\n return buildExp;')();
+    const tmpl = [
+      'NumSIRMasses,1', 'SIRMass1,100.0', 'SIRMass_2_1,50.0', 'SIRAutoDwell1,0', 'SIRDwellTime1,0.0100',
+      'SIRDelay1,0.0037', 'UseAsLockMass1,0', 'UseSampleList1,0', 'UseSampleList_21,0',
+      'NoOfChannels,1', 'UseSLMassesP_1,0', 'UseSLMassesD_1,0', 'Mass(amu)_1,100.0', 'Mass2(amu)_1,50.0',
+      'AutoDwell_1,0', 'Dwell(s)_1,0.0100', 'ConeVoltage(V)_1,30', 'CollisionEnergy(eV)_1,15', '',
+      'CompoundName_1,Old', '', 'CompoundFormula_1,', 'CompoundComment_1,', 'FunctionScanTime(sec),0.1960', '',
+    ].join('\n');
+    const rows = [
+      { name: 'Glucose', precursor: 179, product: 89, ce: 12, cv: 20 },
+      { name: 'Succinate', precursor: 117, product: 73, ce: 10, cv: 25 },
+    ];
+    check('LF parity', appBuildExp(tmpl, rows) === buildExp(tmpl, rows));
+    const crlf = tmpl.replace(/\n/g, '\r\n');
+    check('CRLF parity', appBuildExp(crlf, rows) === buildExp(crlf, rows));
+    const edge = [{ name: '', precursor: 100, product: 50, ce: null, cv: null }];
+    check('edge parity (null CE/CV, empty name)', appBuildExp(tmpl, edge) === buildExp(tmpl, edge));
+  }
+}
 
 console.log('');
 if (failures) { console.log('SELFTEST FAILED:', failures, 'check(s)'); process.exit(1); }

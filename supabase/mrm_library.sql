@@ -640,9 +640,131 @@ grant execute on function public.upsert_mrm_set(text, uuid, text, text, text, te
 grant execute on function public.list_mrm_sets(text)                                                             to anon, authenticated;
 grant execute on function public.delete_mrm_set(text, uuid)                                                      to anon, authenticated;
 
+-- ---- 8. Read-only access path (for the ChatGPT / AI connector) -----------
+-- A SEPARATE, read-only password (NOT the master pw) gates a read-only view of
+-- the library so the hosted connector can expose registered MRMs (and the .exp
+-- template) to a Custom GPT WITHOUT ever holding the write-capable master pw.
+-- Mirrors the bcrypt pattern of share_locks.sql (set_master_password /
+-- _verify_master_pw). Idempotent; reuses pgcrypto in the extensions schema.
+create table if not exists public.mrm_read_credentials (
+    id            int primary key check (id = 1),
+    password_hash text not null,
+    updated_at    timestamptz not null default now()
+);
+alter table public.mrm_read_credentials enable row level security;
+revoke all on public.mrm_read_credentials from anon, authenticated;
+
+-- BOOTSTRAP (run once in the Supabase SQL Editor after applying this file):
+--     select public.set_mrm_read_password('<CHOOSE-A-READ-ONLY-PASSWORD>');
+-- Use a value DIFFERENT from the master password. Re-running rotates it.
+create or replace function public.set_mrm_read_password(_pw text)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+begin
+    if _pw is null or length(_pw) < 8 then
+        raise exception 'mrm read password must be at least 8 characters';
+    end if;
+    insert into public.mrm_read_credentials(id, password_hash)
+        values (1, crypt(_pw, gen_salt('bf', 12)))
+    on conflict (id) do update
+        set password_hash = excluded.password_hash, updated_at = now();
+end
+$$;
+revoke all on function public.set_mrm_read_password(text) from public, anon, authenticated;
+
+create or replace function public._verify_mrm_read_pw(_pw text)
+returns boolean
+language sql security definer set search_path = public, extensions
+as $$
+    select exists (
+        select 1 from public.mrm_read_credentials
+         where id = 1 and password_hash = crypt(_pw, password_hash)
+    );
+$$;
+revoke all on function public._verify_mrm_read_pw(text) from public, anon, authenticated;
+
+-- Read-only library snapshot for the connector. Same nested shape as
+-- list_mrm_library, INCLUDING ce/cv (needed so the connector can assemble a
+-- byte-accurate .exp). Gated by the read-only pw, NOT the master pw. Usage rows
+-- are trimmed to non-sensitive fields (project_name / sample_types / source).
+create or replace function public.list_mrm_library_ro(_read_pw text)
+returns jsonb
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_doc jsonb;
+begin
+    if not public._verify_mrm_read_pw(_read_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    select coalesce(jsonb_agg(obj order by nm), '[]'::jsonb) into v_doc
+    from (
+        select co.name as nm,
+               jsonb_build_object(
+                   'id', co.id,
+                   'serial_no', co.serial_no,
+                   'name', co.name,
+                   'tags', to_jsonb(co.tags),
+                   'polarity', co.polarity,
+                   'note', co.note,
+                   'transitions', coalesce((
+                       select jsonb_agg(jsonb_build_object(
+                                  'id', tr.id,
+                                  'precursor', tr.precursor,
+                                  'product', tr.product,
+                                  'ce', tr.ce,
+                                  'cv', tr.cv,
+                                  'role', tr.role,
+                                  'is_recommended', tr.is_recommended,
+                                  'intensity_note', tr.intensity_note,
+                                  'usages', coalesce((
+                                      select jsonb_agg(jsonb_build_object(
+                                                 'project_name', us.project_name,
+                                                 'sample_types', to_jsonb(us.sample_types),
+                                                 'source', us.source
+                                             ) order by us.created_at desc)
+                                        from public.mrm_usages us
+                                       where us.transition_id = tr.id
+                                  ), '[]'::jsonb)
+                              ) order by tr.is_recommended desc, tr.created_at)
+                         from public.mrm_transitions tr
+                        where tr.compound_id = co.id
+                   ), '[]'::jsonb)
+               ) as obj
+          from public.mrm_compounds co
+    ) s;
+    return v_doc;
+end
+$$;
+
+-- Read-only .exp template fetch (read-pw gated) so the connector can assemble
+-- the instrument file server-side with the same fixed template the app uses.
+create or replace function public.get_exp_template_ro(_read_pw text)
+returns text
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare v_content text;
+begin
+    if not public._verify_mrm_read_pw(_read_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    select content into v_content from public.mrm_exp_template where id = 1;
+    return v_content;  -- null when no template saved yet
+end
+$$;
+
+grant execute on function public.list_mrm_library_ro(text) to anon, authenticated;
+grant execute on function public.get_exp_template_ro(text)  to anon, authenticated;
+
 -- ===========================================================================
 -- Optional teardown (commented out by default)
 -- ===========================================================================
+-- drop function if exists public.get_exp_template_ro(text);
+-- drop function if exists public.list_mrm_library_ro(text);
+-- drop function if exists public._verify_mrm_read_pw(text);
+-- drop function if exists public.set_mrm_read_password(text);
+-- drop table if exists public.mrm_read_credentials;
 -- drop function if exists public.delete_mrm_set(text, uuid);
 -- drop function if exists public.list_mrm_sets(text);
 -- drop function if exists public.upsert_mrm_set(text, uuid, text, text, text, text, jsonb);
