@@ -4,10 +4,12 @@ import { join } from 'node:path';
 import { projectPassword } from './config.js';
 import {
   listProjectCatalog, getReadToken, getProjectDoc, listRois, fetchStorageObject,
+  listMrmLibrary, getExpTemplate,
 } from './supabase.js';
 import {
   parseMsiRows, buildMsiGrid, extractRoiValues, stats, pointInPolygon,
 } from './msi.js';
+import { buildExp } from './exp.js';
 
 // =============================================================================
 // Read-only tools exposed to the AI. Every tool here READS ONLY — none of them
@@ -235,4 +237,130 @@ export async function getMatrix(slug, opts = {}) {
       : 'Full data returned. Analyze the CSV with your code tool.',
     csv,
   });
+}
+
+// ---- Tool: search_mrm (registered MRM library, read-only) ----------------
+// Reads the lab-wide MRM registry (mrm_compounds / mrm_transitions) via the
+// read-pw-gated RO RPC — a DIFFERENT data model from the DESI/MSI project
+// functions above. Optional case-insensitive filters: q (name or tag), tag,
+// polarity. Returns compact compounds with their transitions (incl CE/CV) and
+// a usage summary, for measurement-history-aware panel design.
+export async function searchMrm(opts = {}) {
+  const { q, tag, polarity } = opts;
+  const lib = await listMrmLibrary();
+  const rows = Array.isArray(lib) ? lib : [];
+  const out = [];
+  for (const c of rows) {
+    const tags = Array.isArray(c.tags) ? c.tags : [];
+    if (q && !(matchStr(q, c.name) || tags.some((t) => matchStr(q, t)))) continue;
+    if (tag && !tags.some((t) => matchStr(tag, t))) continue;
+    if (polarity && !matchStr(polarity, c.polarity)) continue;
+    out.push(compactMrm(c));
+  }
+  return {
+    count: out.length,
+    filters: { q: q || null, tag: tag || null, polarity: polarity || null },
+    compounds: out,
+    note: out.length ? undefined
+      : 'No registered MRM matched. Drop filters, or call search_mrm with no arguments to list the whole library.',
+  };
+}
+
+function compactMrm(c) {
+  const trans = Array.isArray(c.transitions) ? c.transitions : [];
+  const projects = new Set();
+  const sampleTypes = new Set();
+  let nUsages = 0;
+  for (const t of trans) {
+    for (const u of (Array.isArray(t.usages) ? t.usages : [])) {
+      nUsages++;
+      if (u.project_name) projects.add(u.project_name);
+      for (const s of (Array.isArray(u.sample_types) ? u.sample_types : [])) sampleTypes.add(s);
+    }
+  }
+  return {
+    serial_no: c.serial_no != null ? c.serial_no : null,
+    name: c.name,
+    tags: Array.isArray(c.tags) ? c.tags : [],
+    polarity: c.polarity != null ? c.polarity : null,
+    note: c.note || null,
+    transitions: trans.map((t) => ({
+      precursor: t.precursor != null ? t.precursor : null,
+      product: t.product != null ? t.product : null,
+      ce: t.ce != null ? t.ce : null,
+      cv: t.cv != null ? t.cv : null,
+      role: t.role || null,
+      is_recommended: !!t.is_recommended,
+      intensity_note: t.intensity_note || null,
+    })),
+    usage: { n: nUsages, projects: [...projects], sample_types: [...sampleTypes] },
+  };
+}
+
+// Pick the transition to export for a compound: recommended > quant (定量) > first.
+function pickTransition(c) {
+  const trans = Array.isArray(c.transitions) ? c.transitions : [];
+  if (!trans.length) return null;
+  const rec = trans.find((t) => t.is_recommended);
+  if (rec) return { tr: rec, reason: 'recommended' };
+  const quant = trans.find((t) => String(t.role || '').includes('定量'));
+  if (quant) return { tr: quant, reason: 'quant(定量)' };
+  return { tr: trans[0], reason: trans.length > 1 ? 'first-of-many' : 'only' };
+}
+
+// ---- Tool: build_exp (assemble a MassLynx .exp from registered MRMs) ------
+// names: ordered array of compound names. Resolves each to its export
+// transition from the registry, fetches the fixed template, and runs the SAME
+// buildExp the app uses → byte-identical .exp. CE/CV come from the DB, never
+// guessed. Unregistered names are reported in `missing`, never fabricated.
+export async function buildExpForNames(opts = {}) {
+  const names = Array.isArray(opts.names) ? opts.names : [];
+  if (!names.length) throw new Error('`names` (array of compound names) is required for build_exp');
+  const lib = await listMrmLibrary();
+  const byName = new Map();
+  const byLower = new Map();
+  for (const c of (Array.isArray(lib) ? lib : [])) {
+    byName.set(c.name, c);
+    byLower.set(String(c.name).toLowerCase(), c);
+  }
+  const rows = [];
+  const channels = [];
+  const missing = [];
+  const ambiguous = [];
+  for (const raw of names) {
+    const nm = String(raw == null ? '' : raw).trim();
+    const c = byName.get(nm) || byLower.get(nm.toLowerCase());
+    if (!c) { missing.push(nm); continue; }
+    const pick = pickTransition(c);
+    if (!pick) { missing.push(nm + ' (no transition registered)'); continue; }
+    const t = pick.tr;
+    rows.push({ name: c.name, precursor: t.precursor, product: t.product, ce: t.ce, cv: t.cv });
+    channels.push({
+      name: c.name, precursor: t.precursor, product: t.product, ce: t.ce, cv: t.cv,
+      role: t.role || null, is_recommended: !!t.is_recommended, chosen: pick.reason,
+    });
+    if (pick.reason === 'first-of-many') ambiguous.push(c.name);
+  }
+  if (!rows.length) {
+    return { exp_text: null, count: 0, channels, missing, ambiguous,
+      error: 'No requested compound resolved to a registered MRM; nothing to export.' };
+  }
+  const template = await getExpTemplate();
+  if (!template || !String(template).trim()) {
+    return { exp_text: null, count: rows.length, channels, missing, ambiguous,
+      error: 'No .exp template saved on the server. Save one in the app (「テンプレ設定」) first.' };
+  }
+  let exp_text;
+  try { exp_text = buildExp(template, rows); }
+  catch (e) { throw new Error('.exp build failed: ' + (e.message || e)); }
+  return {
+    exp_text,
+    count: rows.length,
+    channels,
+    missing,
+    ambiguous,
+    note: 'CE/CV are taken from the registered DB values (not estimated). '
+      + (missing.length ? (missing.length + ' name(s) were not in the registry and were excluded (see `missing`). ') : '')
+      + (ambiguous.length ? (ambiguous.length + ' compound(s) had multiple transitions with no recommended/quant flag; the first was used (see `ambiguous`).') : ''),
+  };
 }

@@ -19,6 +19,10 @@ services:
         value: https://pxlrlhtcvwkqnlryencs.supabase.co
       - key: SUPABASE_ANON_KEY
         value: sb_publishable_2K4sqMmKk3g20Jmwho-awQ_Uu_hSKeU
+      - key: MRM_READ_PW
+        sync: false          # enter in the Render dashboard (a SECRET): the read-ONLY
+                             # MRM password (= what you passed to set_mrm_read_password()
+                             # in Supabase). Enables /mrm and /exp. NEVER the master pw.
       # To also read PRIVATE projects (only if you trust this endpoint), set
       # PUBLIC_ONLY=false and add OWNER_ADMIN_PASSWORD / PROJECT_PW__<slug> as
       # secret env vars in the Render dashboard. NEVER set a master password.

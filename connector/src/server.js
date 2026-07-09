@@ -67,6 +67,29 @@ const TOOLS = [
       required: ['slug', 'compound'],
     },
   },
+  {
+    name: 'search_mrm',
+    description: 'Search the lab-wide REGISTERED MRM library (compounds + transitions with precursor/product/CE/CV, tags, polarity, and usage history). This is the MRM management registry from the app — NOT the per-project MSI layers. Optional filters: q (name or tag substring), tag, polarity. Call with no arguments to list the whole library.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        q: { type: 'string', description: 'optional: compound name or tag (substring)' },
+        tag: { type: 'string', description: 'optional: tag/category (substring)' },
+        polarity: { type: 'string', description: 'optional: polarity (e.g. + / -)' },
+      },
+    },
+  },
+  {
+    name: 'build_exp',
+    description: 'Assemble a Waters MassLynx .exp measurement file from registered MRMs. Pass `names` (ordered array of compound names); each resolves to its export transition (recommended > quant(定量) > first) and CE/CV are taken from the registry, never guessed. Returns exp_text plus channels/missing/ambiguous. Unregistered names are reported in `missing`, not fabricated.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        names: { type: 'array', items: { type: 'string' }, description: 'ordered compound names to include as .exp channels' },
+      },
+      required: ['names'],
+    },
+  },
 ];
 
 const server = new Server({ name: 'desi-share', version: '0.1.0' }, { capabilities: { tools: {} } });
@@ -83,6 +106,8 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'list_compounds': result = await tools.listCompounds(args.slug); break;
       case 'get_roi_stats': result = await tools.getRoiStats(args.slug, args); break;
       case 'get_matrix': result = await tools.getMatrix(args.slug, args); break;
+      case 'search_mrm': result = await tools.searchMrm(args); break;
+      case 'build_exp': result = await tools.buildExpForNames(args); break;
       default: throw new Error('unknown tool: ' + name);
     }
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };

@@ -28,6 +28,11 @@ export const config = {
   supabaseUrl: (process.env.SUPABASE_URL || '').replace(/\/+$/, ''),
   anonKey: process.env.SUPABASE_ANON_KEY || '',
   ownerAdminPassword: process.env.OWNER_ADMIN_PASSWORD || '',
+  // Read-ONLY password for the MRM library (SEPARATE from the master password;
+  // the connector must never hold the write-capable master pw). Gates the
+  // list_mrm_library_ro / get_exp_template_ro RPCs. Empty → /mrm and /exp are
+  // disabled with a clear error.
+  mrmReadPw: process.env.MRM_READ_PW || '',
   // HTTP (ChatGPT / hosted) settings — unused by the local MCP server.
   apiKey: process.env.CONNECTOR_API_KEY || '',
   port: parseInt(process.env.PORT || '3000', 10) || 3000,

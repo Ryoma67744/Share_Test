@@ -63,6 +63,35 @@ export async function listRois(token, sectionId) {
   return rpc('list_rois', { p_token: token, p_section_id: sectionId });
 }
 
+// ---- MRM library (read-only) ------------------------------------------------
+// These call the read-pw-gated RO RPCs (list_mrm_library_ro / get_exp_template_ro)
+// added in supabase/mrm_library.sql. They read from a DIFFERENT data model than
+// the DESI/MSI project functions above (mrm_compounds / mrm_transitions), and
+// use the read-only MRM password — never the master password.
+function assertMrmReadPw() {
+  if (!config.mrmReadPw) {
+    throw new Error(
+      'MRM_READ_PW is not configured, so the registered MRM library cannot be read. ' +
+      'Set MRM_READ_PW in .env (or the host env) to the value passed to ' +
+      'set_mrm_read_password() in Supabase.'
+    );
+  }
+}
+
+// The whole registered MRM library as one nested doc:
+// [ { serial_no, name, tags[], polarity, note, transitions:[ { precursor, product,
+//     ce, cv, role, is_recommended, intensity_note, usages:[...] } ] } ].
+export async function listMrmLibrary() {
+  assertMrmReadPw();
+  return rpc('list_mrm_library_ro', { _read_pw: config.mrmReadPw });
+}
+
+// The fixed instrument .exp template text (or null if none saved yet).
+export async function getExpTemplate() {
+  assertMrmReadPw();
+  return rpc('get_exp_template_ro', { _read_pw: config.mrmReadPw });
+}
+
 // GET a public Storage object (the 'atlases' bucket is public-read). Path
 // segments are already ASCII-sanitized at publish time. Returns an ArrayBuffer.
 export async function fetchStorageObject(path) {
