@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { config, assertConfigured } from './config.js';
 import * as tools from './tools.js';
+import { putExp, getExp } from './expstore.js';
 
 // =============================================================================
 // DESI Data Share — READ-ONLY HTTP connector (for ChatGPT Custom GPT Actions).
@@ -23,6 +24,14 @@ function send(res, status, payload) {
   res.end(body);
 }
 
+// Public base URL of this request (honours Render/proxy forwarding headers), so
+// the .exp download_url points back at this same host.
+function baseUrl(req) {
+  const proto = String(req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+  const host = req.headers['host'] || ('localhost:' + config.port);
+  return proto + '://' + host;
+}
+
 function authorized(req) {
   if (!config.apiKey) return false; // an API key MUST be configured
   const h = req.headers['authorization'] || '';
@@ -36,6 +45,7 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const path = url.pathname.replace(/\/+$/, '') || '/';
     const q = url.searchParams;
+    let m;
 
     // --- unauthenticated setup/health endpoints ---
     if (req.method === 'GET' && path === '/healthz') return send(res, 200, { ok: true, publicOnly: config.publicOnly });
@@ -43,12 +53,23 @@ const server = createServer(async (req, res) => {
       if (existsSync(OPENAPI_PATH)) return send(res, 200, readFileSync(OPENAPI_PATH, 'utf8'));
       return send(res, 404, { error: 'openapi.json not found' });
     }
+    // --- unauthenticated .exp file download: the user's BROWSER fetches this
+    //     (it cannot send the Bearer key), so it is gated only by the
+    //     unguessable id minted in the authenticated /exp call above. ---
+    if (req.method === 'GET' && (m = /^\/exp\/file\/([A-Za-z0-9]+)\.exp$/.exec(path))) {
+      const text = getExp(m[1]);
+      if (text == null) return send(res, 404, { error: 'exp not found or expired' });
+      res.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Disposition': 'attachment; filename="panel.exp"',
+      });
+      return res.end(text);
+    }
 
     // --- everything else requires the API key ---
     if (!authorized(req)) return send(res, 401, { error: 'unauthorized: missing or invalid API key' });
     if (req.method !== 'GET') return send(res, 405, { error: 'method not allowed (this connector is read-only)' });
 
-    let m;
     if (path === '/projects') {
       return send(res, 200, await tools.listProjects());
     }
@@ -88,7 +109,14 @@ const server = createServer(async (req, res) => {
     }
     // --- Assemble a MassLynx .exp from registered MRMs (repeat ?name=...) ---
     if (path === '/exp') {
-      return send(res, 200, await tools.buildExpForNames({ names: q.getAll('name') }));
+      const result = await tools.buildExpForNames({ names: q.getAll('name') });
+      // Stash the generated .exp and hand back a browser-downloadable URL, so
+      // the GPT can offer a "download panel.exp" link instead of a text blob.
+      if (result && result.exp_text) {
+        const id = putExp(result.exp_text);
+        result.download_url = baseUrl(req) + '/exp/file/' + id + '.exp';
+      }
+      return send(res, 200, result);
     }
     return send(res, 404, { error: 'not found: ' + path });
   } catch (e) {
