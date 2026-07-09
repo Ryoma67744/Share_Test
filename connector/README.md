@@ -68,6 +68,7 @@ npm run selftest
 - `get_matrix(slug, {compound, section, roi?, max_rows?, downsample?, to_file?})` … 生の `{x,y,value}`。大きい場合は `downsample`/`max_rows` で調整、または `to_file:true` で**フルCSVをローカルファイルに書き出し**（会話に載せず、AIのコード実行ツールで読み込ませる）。
 - `search_mrm({q?, tag?, polarity?})` … **登録MRMライブラリ**（化合物＋transition: precursor / product / CE / CV, tags, polarity, 使用履歴）を検索。無引数で全件。※これは MRM 管理アプリのレジストリ（`mrm_compounds`/`mrm_transitions`）で、上の project 化合物（MSI レイヤ）とは**別データ**。要 `MRM_READ_PW`。
 - `build_exp({names:[...]})` … 登録MRMから **Waters MassLynx `.exp`** を組み立て（transition 選択順位 recommended > 定量 > 先頭、CE/CV は**DB登録値**）。返り値 `{ exp_text, channels, missing, ambiguous }`。未登録の名前は `missing` に返し、勝手に作らない。要 `MRM_READ_PW` と保存済み `.exp` テンプレート。**アプリと同一の `buildExp` を移植**しているので `.exp` はバイト一致（`npm run selftest` で担保）。
+  - HTTP 版（`GET /exp`）では返り値に **`download_url`** も付与される。ブラウザでそのURLを開くと `panel.exp` が**ファイルとして**ダウンロードできる（`Content-Disposition: attachment`）。ダウンロード経路はブラウザが直接叩くため **APIキー不要**で、代わりに**推測不能なランダムID**で保護（メモリ上に短時間=約30分だけ保持。ホストが再起動/スリープすると失効）。ChatGPT のカスタムGPT では、この `download_url` を「📥 panel.exp をダウンロード」リンクとして提示させると、コピペ無しで測定リストを取得できる。
 
 ## 使用例（Claude への頼み方）
 - 「desi-share で読めるプロジェクトを一覧して」
