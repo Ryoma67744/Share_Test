@@ -1949,6 +1949,10 @@ function monoLut(hex) {
 // to the colormap floor; a high percentile clips those outliers so tissue stays
 // visible while the per-MRM absolute comparison is preserved. Tune here.
 const MSI_ROBUST_PERCENTILE = 0.995;
+// 既定表示の上限倍率。1.0 = 従来(切片横断の99.5%ile最大)。< 1 で初期表示を明るく
+// する(表示ウィンドウ上限を一律に下げるだけの線形調整。ガンマ/ゲイン等の非線形補正
+// は行わない)。ユーザーが Range を手入力した上書きには影響しない(getMsiWindow 参照)。
+const MSI_DEFAULT_DISPLAY_FRAC = 0.4;
 function percentileSorted(vals, p) {
     if (!vals || !vals.length) return NaN;
     const a = Float64Array.from(vals).sort();
@@ -9249,6 +9253,10 @@ const SharePreview = {
             cancelAnimationFrame(this._opacityRaf);
             this._opacityRaf = 0;
         }
+        if (this._rangeRebakeRaf) {
+            cancelAnimationFrame(this._rangeRebakeRaf);
+            this._rangeRebakeRaf = 0;
+        }
         this._opacitySnapshot = null;
         this._visibilitySnapshot = null;
         this._grayscaleSnapshot = null;
@@ -9925,8 +9933,14 @@ const SharePreview = {
             // which updates each cdisp canvas, but the preview's <img>
             // dataURLs are baked snapshots — without this rebake the
             // image visible in the overlay stays at its open()-time
-            // contents.
-            this._rebakeCellImages(App.project, focusKey);
+            // contents. Rebake on the next animation frame (mirrors
+            // _applyPreviewOpacity) so a rapid min-then-max Enter coalesces
+            // into one bake and the <img> src swap lands on a real paint.
+            if (this._rangeRebakeRaf) cancelAnimationFrame(this._rangeRebakeRaf);
+            this._rangeRebakeRaf = requestAnimationFrame(() => {
+                this._rangeRebakeRaf = 0;
+                this._rebakeCellImages(App.project, App.focusCompoundKey);
+            });
         };
         minEl.addEventListener('change', () => apply('min', minEl.value));
         maxEl.addEventListener('change', () => apply('max', maxEl.value));
@@ -10421,6 +10435,10 @@ const SharePreview = {
                 const rotDeg = (this._sectionRotations[idx] || 0) - 90;
                 const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
                 img.src = baked.toDataURL('image/png');
+                // 使い回しの <img> は src 差し替え後のデコードが非同期で、静止した
+                // オーバーレイでは再描画が確実にトリガーされず反映が遅れる。decode()
+                // でデコードを確定させ、そのフレームで確実に描画させる。
+                if (img.decode) img.decode().catch(() => {});
             } catch (e) { console.warn('preview rebake failed', idx, e); }
         });
     },
@@ -12012,6 +12030,10 @@ const App = {
             defMin = rr ? rr[0] : 0;
             defMax = rr ? rr[1] : 255;
         }
+        // 初期表示を明るくする: 既定の上限のみを MSI_DEFAULT_DISPLAY_FRAC 倍に下げる
+        // (線形の縮小のみ。全切片を同じ縮小上限で割るので絶対比較は保たれる)。下の
+        // override マージより前なので、ユーザーの手動 min/max はそのまま優先される。
+        defMax = defMin + (defMax - defMin) * MSI_DEFAULT_DISPLAY_FRAC;
         const min = (u && Number.isFinite(u.min)) ? u.min : defMin;
         let max = (u && Number.isFinite(u.max)) ? u.max : defMax;
         if (!(max > min)) max = min + (Math.abs(defMax - defMin) || 1);
