@@ -463,6 +463,22 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
     font-size:13px; font-weight:600; color:#f1f5f9;
     margin-bottom:6px; text-align:center;
 }
+#share-preview-overlay .preview-image-cell .cell-title input[type=checkbox],
+#share-preview-overlay .preview-image-cell .cell-collapsed-label input[type=checkbox] {
+    vertical-align:middle; cursor:pointer; accent-color:#2563eb; margin:0 4px 0 0;
+}
+/* Deselected section: slim strip that only carries the checkbox + vertical name */
+#share-preview-overlay .preview-image-cell.cell-collapsed {
+    justify-content:flex-start; align-items:center; padding-top:2px;
+}
+#share-preview-overlay .cell-collapsed-label {
+    display:flex; flex-direction:column; align-items:center; gap:6px;
+    cursor:pointer; color:#94a3b8; font-size:11px; max-height:100%;
+}
+#share-preview-overlay .cell-collapsed-name {
+    writing-mode:vertical-rl; text-orientation:mixed;
+    max-height:60vh; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
 #share-preview-overlay .preview-image-cell .cell-img-wrap {
     position:relative;
     flex:1 1 auto; min-height:0; min-width:0; width:100%;
@@ -9233,6 +9249,8 @@ const SharePreview = {
             this._roiSnapshot = null;
         }
         this._previewOrgan = null;
+        this._hiddenSectionIds = null;
+        App.activeSectionScope = null;   // stop scoping the main view's window
         if (this._savedColormap) {
             setActiveColormap(this._savedColormap);
             this._savedColormap = null;
@@ -9785,6 +9803,8 @@ const SharePreview = {
 
         // ② Organ filter — preview-local; filters which section cells render.
         this._previewOrgan = null;
+        this._hiddenSectionIds = new Set();   // per-cell deselection (share view)
+        App.activeSectionScope = null;        // start with all sections in scope
         const organWrap = overlay.querySelector('[data-organ-wrap]');
         const organSel = overlay.querySelector('[data-organ-select]');
         if (organWrap && organSel) {
@@ -9800,7 +9820,8 @@ const SharePreview = {
                 organWrap.style.display = '';
                 organSel.addEventListener('change', () => {
                     this._previewOrgan = (organSel.value === '__all__') ? null : organSel.value;
-                    this.refresh(App.project);
+                    this._hiddenSectionIds = new Set();   // fresh selection for the new organ
+                    this._applySectionScope();            // scope → re-scale Range → refresh
                 });
             }
         }
@@ -10180,11 +10201,38 @@ const SharePreview = {
         return all.filter(s => sectionOrganKey(s) === this._previewOrgan);
     },
 
+    // Sections currently SELECTED for display = organ-filtered minus the ones the
+    // user deselected via the per-cell checkbox. Drives the intensity-window
+    // scope (App.activeSectionScope) and the stats table.
+    _selectedSections(project) {
+        const hidden = this._hiddenSectionIds || new Set();
+        return this._sectionsForGrid(project).filter(s => !hidden.has(String(s.id)));
+    },
+
+    // Point the shared intensity-window scope at exactly the displayed sections
+    // and re-auto-scale the focus compound's Range to just those images, then
+    // repaint every panel + rebuild the grid/stats/Range inputs from fresh cdisp.
+    _applySectionScope() {
+        const shown = this._selectedSections(App.project);
+        if (!shown.length) return;                 // always keep at least one
+        App.activeSectionScope = new Set(shown.map(s => String(s.id)));
+        // Auto-rescale (user choice): drop the focus compound's manual Range so
+        // getMsiWindow returns the auto default over the new scope.
+        if (App.focusCompoundKey && App.msiUserWindow) delete App.msiUserWindow[App.focusCompoundKey];
+        try { App.repaintAllMsi(); } catch (e) {}
+        this.refresh(App.project);
+    },
+
     _renderImageGrid(project, focusKey) {
         const grid = this.overlay.querySelector('[data-image-grid]');
         if (!grid) return;
         const sections = this._sectionsForGrid(project);
-        grid.style.gridTemplateColumns = `repeat(${Math.max(sections.length, 1)}, minmax(0, 1fr))`;
+        // Selected cells share the width (1fr); deselected cells collapse to a
+        // slim re-select strip so only the chosen images are shown large.
+        const _hidden = this._hiddenSectionIds || (this._hiddenSectionIds = new Set());
+        grid.style.gridTemplateColumns =
+            sections.map(s => _hidden.has(String(s.id)) ? '2.2rem' : 'minmax(0, 1fr)').join(' ')
+            || 'minmax(0, 1fr)';
         // Reset per-cell transform/rotation state for the new render.
         this._cellTransforms = sections.map(() => ({ tx: 0, ty: 0, scale: 1 }));
         this._sectionRotations = sections.map(sec => {
@@ -10193,6 +10241,17 @@ const SharePreview = {
         });
         const cells = sections.map((sec, idx) => {
             const safeName = String(sec.displayName || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+            const isHidden = _hidden.has(String(sec.id));
+            const cbId = String(sec.id).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+            const selectCb = `<input type="checkbox" class="cell-select" data-cell-select data-sec-id="${cbId}"${isHidden ? '' : ' checked'} title="この切片を表示・Range計算に含める">`;
+            // Deselected: collapse to a slim strip carrying only the checkbox +
+            // vertical name, so the section can be re-selected without an image.
+            if (isHidden) {
+                return `
+                <div class="preview-image-cell cell-collapsed">
+                    <label class="cell-collapsed-label" title="${safeName}">${selectCb}<span class="cell-collapsed-name">${safeName}</span></label>
+                </div>`;
+            }
             // Overlay mode: the cell has content if any member layer exists in
             // this section; the panel's cdisp already shows the overlay
             // (setActiveOverlay re-rendered all panels before this bake).
@@ -10240,7 +10299,7 @@ const SharePreview = {
                 : '';
             return `
                 <div class="preview-image-cell">
-                    <div class="cell-title">${caption}</div>
+                    <div class="cell-title">${selectCb} ${caption}</div>
                     <div class="cell-img-wrap" data-cell-idx="${idx}">
                         <div class="cell-img-stage" data-cell-stage>${body}</div>
                         ${scalebarHtml}
@@ -10248,6 +10307,22 @@ const SharePreview = {
                 </div>`;
         });
         grid.innerHTML = cells.join('');
+
+        // Per-cell select/deselect → update the displayed-section scope and
+        // re-auto-scale the Range to the remaining images. Keep ≥1 selected.
+        grid.querySelectorAll('[data-cell-select]').forEach(cb => {
+            cb.addEventListener('change', () => {
+                const id = cb.getAttribute('data-sec-id');
+                if (!id) return;
+                if (cb.checked) {
+                    _hidden.delete(id);
+                } else {
+                    if (this._selectedSections(project).length <= 1) { cb.checked = true; return; }
+                    _hidden.add(id);
+                }
+                this._applySectionScope();
+            });
+        });
 
         // Attach pan/zoom handlers. Rotation is already baked into the image
         // pixels above so _applyCellTransform only handles translate + scale.
@@ -10447,7 +10522,7 @@ const SharePreview = {
         const head = this.overlay.querySelector('[data-stats-head]');
         const body = this.overlay.querySelector('[data-stats-body]');
         if (!head || !body) return;
-        const sections = this._sectionsForGrid(project);
+        const sections = this._selectedSections(project);
         const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
         // One-row header: each section's displayName is the column label
         // directly. The previous "File Name + commonPrefix" group row was
@@ -11650,6 +11725,7 @@ const App = {
     // where each section shows whichever layers it has visibility flags for.
     viewMode: 'compound',
     activeOrganFilter: null,   // ④ organ filter: organ key, or null = show all
+    activeSectionScope: null,  // share view: Set<sectionId> currently displayed, or null = all. Scopes getMsiAbsMax/window to exactly the shown sections.
     msiScaleMode: 'same',      // MSI intensity scale: 'same' = one shared range
                                // across in-scope sections (HDI "Same"); 'individual'
                                // = each section auto-scales to its own range.
@@ -12004,6 +12080,10 @@ const App = {
     // being keyed by molecule, applies to every section showing it. _organInScope
     // scopes the 'same' aggregation to the active organ filter.
     _organInScope(section) {
+        // Share view: an explicit displayed-section scope (organ filter and/or
+        // per-cell selection) wins so getMsiAbsMax/window use exactly the shown
+        // sections. Falls back to the organ filter (master editor path).
+        if (this.activeSectionScope) return this.activeSectionScope.has(String(section.id));
         if (!this.activeOrganFilter) return true;
         try { return sectionOrganKey(section) === this.activeOrganFilter; }
         catch (e) { return true; }
