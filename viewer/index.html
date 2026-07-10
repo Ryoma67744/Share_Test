@@ -9990,16 +9990,37 @@ const SharePreview = {
         const minEl = this.overlay.querySelector('[data-preview-range-min]');
         const maxEl = this.overlay.querySelector('[data-preview-range-max]');
         if (!minEl || !maxEl) return;
-        // Display is un-normalised: show the per-MRM ABSOLUTE scale [0, globalMax]
-        // (raw units) and disable editing — the window no longer affects render.
-        minEl.disabled = true; maxEl.disabled = true;
-        minEl.title = maxEl.title = '正規化は無効です（MRM単位の絶対スケールで表示）';
         const fmt = (typeof formatRawForInput === 'function')
             ? formatRawForInput
             : (v) => (Number.isFinite(v) ? String(Number(v.toPrecision(6))) : '');
-        const gMax = focusKey ? App.getMsiAbsMax(focusKey) : NaN;
-        if (document.activeElement !== minEl) minEl.value = focusKey ? fmt(0) : '';
-        if (document.activeElement !== maxEl) maxEl.value = (focusKey && Number.isFinite(gMax) && gMax > 0) ? fmt(gMax) : '';
+        // Range editing in the share view: mirror the master toolbar's
+        // refreshRange so recipients can re-window MSI (lower the max to
+        // brighten faint signal). Source the focus compound's raw range from
+        // any panel that holds it, then resolve the effective display window
+        // via App.getMsiWindow (which honours a user min/max override; default
+        // stays [0, per-MRM globalMax] in 'same' scale mode). The already-wired
+        // _wireRangeInputs 'change' handlers apply edits to every panel and
+        // rebake the preview cells.
+        let rawRange = null;
+        if (focusKey && App.panels) {
+            for (const p of App.panels.values()) {
+                const ent = ((p.section && p.section.msiSeries) || {})[focusKey];
+                if (ent && Array.isArray(ent.rawRange)) { rawRange = ent.rawRange; break; }
+            }
+        }
+        if (!focusKey || !rawRange) {
+            if (document.activeElement !== minEl) minEl.value = '';
+            if (document.activeElement !== maxEl) maxEl.value = '';
+            minEl.disabled = true; maxEl.disabled = true;
+            minEl.title = maxEl.title = '';
+            return;
+        }
+        const win = App.getMsiWindow(focusKey, rawRange);
+        minEl.disabled = false; maxEl.disabled = false;
+        minEl.title = '表示ウィンドウ 下限 (生単位)';
+        maxEl.title = '表示ウィンドウ 上限 (生単位)';
+        if (document.activeElement !== minEl) minEl.value = fmt(win.min);
+        if (document.activeElement !== maxEl) maxEl.value = fmt(win.max);
     },
 
     _drawColorbar() {
