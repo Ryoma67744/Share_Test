@@ -77,6 +77,17 @@
         "responses": { "200": { "description": "OK" } }
       }
     },
+    "/projects-by-compound": {
+      "get": {
+        "operationId": "findProjectsByCompound",
+        "summary": "Reverse lookup: given a molecule/compound name, list the projects that measured it (e.g. 'which projects measured Acetylcholine?'). Matching tolerates case/separator/polarity drift and library serial_no aliases; distinct compounds stay distinct. Returns slug/name/is_public/matched_compounds only. Private projects included unless the server is PUBLIC_ONLY.",
+        "parameters": [
+          { "name": "compound", "in": "query", "required": true, "schema": { "type": "string" }, "description": "molecule/compound name to look up (e.g. Acetylcholine)" },
+          { "name": "include_private", "in": "query", "required": false, "schema": { "type": "boolean" }, "description": "include private projects (default true; ignored when the server is PUBLIC_ONLY)" }
+        ],
+        "responses": { "200": { "description": "OK" } }
+      }
+    },
     "/exp": {
       "get": {
         "operationId": "buildExp",

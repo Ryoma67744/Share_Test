@@ -90,6 +90,18 @@ const TOOLS = [
       required: ['names'],
     },
   },
+  {
+    name: 'find_projects_by_compound',
+    description: 'Reverse lookup: given a molecule/compound name, list the DESI/MSI projects that measured it (e.g. "which projects measured Acetylcholine?"). Searches the always-persisted per-project compound list. Name matching tolerates case/separator/polarity drift (NEG/POS) and is widened with registered-library serial_no aliases; distinct compounds stay distinct (PGD2 != PGE2). Returns slug / name / is_public / matched_compounds only. Private projects are included unless the server runs in PUBLIC_ONLY mode.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        compound: { type: 'string', description: 'molecule/compound name to look up (e.g. "Acetylcholine")' },
+        include_private: { type: 'boolean', description: 'optional: include private projects (default true; ignored when the server is PUBLIC_ONLY)' },
+      },
+      required: ['compound'],
+    },
+  },
 ];
 
 const server = new Server({ name: 'desi-share', version: '0.1.0' }, { capabilities: { tools: {} } });
@@ -108,6 +120,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'get_matrix': result = await tools.getMatrix(args.slug, args); break;
       case 'search_mrm': result = await tools.searchMrm(args); break;
       case 'build_exp': result = await tools.buildExpForNames(args); break;
+      case 'find_projects_by_compound': result = await tools.findProjectsByCompound(args); break;
       default: throw new Error('unknown tool: ' + name);
     }
     return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };

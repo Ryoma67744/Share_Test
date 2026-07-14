@@ -92,6 +92,20 @@ export async function getExpTemplate() {
   return rpc('get_exp_template_ro', { _read_pw: config.mrmReadPw });
 }
 
+// Reverse lookup: which projects measured a compound matching `query`.
+// Reads the always-persisted per-project compound list
+// (sections.storage_paths.msiSeries[*].compoundMeta.name) via the read-pw-gated
+// SECURITY DEFINER RPC. Returns [{ slug, display_name, is_public, compounds[] }].
+// Exposes ONLY those non-sensitive fields — never CE/CV, raw data, or images.
+export async function searchProjectsByCompound(query, includePrivate = true) {
+  assertMrmReadPw();
+  return rpc('search_projects_by_compound', {
+    _read_pw: config.mrmReadPw,
+    _query: String(query == null ? '' : query),
+    _include_private: includePrivate !== false,
+  });
+}
+
 // GET a public Storage object (the 'atlases' bucket is public-read). Path
 // segments are already ASCII-sanitized at publish time. Returns an ArrayBuffer.
 export async function fetchStorageObject(path) {

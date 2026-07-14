@@ -1,10 +1,10 @@
 import { tmpdir } from 'node:os';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { projectPassword } from './config.js';
+import { config, projectPassword } from './config.js';
 import {
   listProjectCatalog, getReadToken, getProjectDoc, listRois, fetchStorageObject,
-  listMrmLibrary, getExpTemplate,
+  listMrmLibrary, getExpTemplate, searchProjectsByCompound,
 } from './supabase.js';
 import {
   parseMsiRows, buildMsiGrid, extractRoiValues, stats, pointInPolygon,
@@ -19,6 +19,10 @@ import { buildExp } from './exp.js';
 const lc = (v) => String(v == null ? '' : v).toLowerCase();
 const matchStr = (query, value) => (query == null || query === '') ? true : lc(value).includes(lc(query));
 const safeFile = (v) => String(v || '').replace(/[^\w.\-]+/g, '_').slice(0, 80);
+// Normalise a compound name for drift-tolerant matching: lowercase + drop every
+// non-alphanumeric char (absorbs case / separators / polarity like POS_ or _NEG,
+// while keeping distinct compounds distinct — pgd2 stays != pge2).
+const normName = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]+/g, '');
 
 function compoundInfo(key, def) {
   const meta = (def && def.compoundMeta) || {};
@@ -362,5 +366,79 @@ export async function buildExpForNames(opts = {}) {
     note: 'CE/CV are taken from the registered DB values (not estimated). '
       + (missing.length ? (missing.length + ' name(s) were not in the registry and were excluded (see `missing`). ') : '')
       + (ambiguous.length ? (ambiguous.length + ' compound(s) had multiple transitions with no recommended/quant flag; the first was used (see `ambiguous`).') : ''),
+  };
+}
+
+// ---- Tool: find_projects_by_compound (reverse: compound name -> projects) --
+// Answers "which projects measured compound X?" over the ALWAYS-persisted
+// per-project compound list (sections.storage_paths.msiSeries[*].compoundMeta),
+// via the read-pw-gated reverse RPC. Name matching is drift-tolerant
+// (normalised: case/separators/polarity absorbed; pgd2 stays != pge2) and is
+// widened with serial_no aliases from the registered library (so a search for
+// "Acetylcholine" also catches "POS_Acetylcholine" layers). Private projects
+// are included unless PUBLIC_ONLY is on (config.publicOnly). Returns only
+// slug / display_name / is_public / matched_compounds — nothing sensitive.
+export async function findProjectsByCompound(opts = {}) {
+  const query = String(opts.compound == null ? '' : opts.compound).trim();
+  if (!query) throw new Error('`compound` (a molecule/compound name) is required for find_projects_by_compound');
+  // Respect the hosted safety valve: PUBLIC_ONLY forces public-only.
+  const includePrivate = config.publicOnly ? false : (opts.include_private !== false);
+
+  // Widen the search with name-drift aliases: any registered compound whose
+  // name normalises-matches the query contributes its serial_no siblings' names
+  // (e.g. GABA / POS_GABA share a serial_no). Best-effort — if the library
+  // isn't readable, fall back to the raw query alone.
+  const searchTerms = new Set([query]);
+  let aliasNote = null;
+  try {
+    const lib = await listMrmLibrary();
+    const rows = Array.isArray(lib) ? lib : [];
+    const qn = normName(query);
+    const serials = new Set();
+    for (const c of rows) {
+      const cn = normName(c.name);
+      if (cn && (cn.includes(qn) || qn.includes(cn))) {
+        searchTerms.add(c.name);
+        if (c.serial_no != null) serials.add(c.serial_no);
+      }
+    }
+    if (serials.size) {
+      for (const c of rows) {
+        if (c.serial_no != null && serials.has(c.serial_no)) searchTerms.add(c.name);
+      }
+    }
+  } catch (e) {
+    aliasNote = 'serial_no alias widening skipped (registered library not readable: ' + ((e && e.message) || e) + ')';
+  }
+
+  // Reverse-search each term and merge by project slug.
+  const bySlug = new Map();
+  for (const term of searchTerms) {
+    const found = await searchProjectsByCompound(term, includePrivate);
+    for (const r of (Array.isArray(found) ? found : [])) {
+      const cur = bySlug.get(r.slug)
+        || { slug: r.slug, display_name: r.display_name, is_public: !!r.is_public, matched: new Set() };
+      for (const cn of (Array.isArray(r.compounds) ? r.compounds : [])) cur.matched.add(cn);
+      bySlug.set(r.slug, cur);
+    }
+  }
+
+  const projects = [...bySlug.values()]
+    .map((p) => ({
+      slug: p.slug,
+      display_name: p.display_name,
+      is_public: p.is_public,
+      matched_compounds: [...p.matched].sort(),
+    }))
+    .sort((a, b) => String(a.display_name).localeCompare(String(b.display_name)));
+
+  return {
+    query,
+    include_private: includePrivate,
+    search_terms: [...searchTerms],
+    count: projects.length,
+    projects,
+    note: (aliasNote ? aliasNote + '. ' : '')
+      + (projects.length ? '' : 'No project measured a compound matching this name. Matching normalises case/separators/polarity (e.g. NEG/POS); try the base name.'),
   };
 }
