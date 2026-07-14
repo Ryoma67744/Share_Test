@@ -107,6 +107,14 @@ const server = createServer(async (req, res) => {
         polarity: q.get('polarity') || undefined,
       }));
     }
+    // --- Reverse lookup: which projects measured compound X (read-only) ---
+    if (path === '/projects-by-compound') {
+      return send(res, 200, await tools.findProjectsByCompound({
+        compound: q.get('compound') || undefined,
+        include_private: q.get('include_private') != null
+          ? /^(1|true|yes)$/i.test(q.get('include_private')) : undefined,
+      }));
+    }
     // --- Assemble a MassLynx .exp from registered MRMs (repeat ?name=...) ---
     if (path === '/exp') {
       const result = await tools.buildExpForNames({ names: q.getAll('name') });
