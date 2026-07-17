@@ -1965,10 +1965,13 @@ function monoLut(hex) {
 // to the colormap floor; a high percentile clips those outliers so tissue stays
 // visible while the per-MRM absolute comparison is preserved. Tune here.
 const MSI_ROBUST_PERCENTILE = 0.995;
-// 既定表示の上限倍率。1.0 = 従来(切片横断の99.5%ile最大)。< 1 で初期表示を明るく
-// する(表示ウィンドウ上限を一律に下げるだけの線形調整。ガンマ/ゲイン等の非線形補正
-// は行わない)。ユーザーが Range を手入力した上書きには影響しない(getMsiWindow 参照)。
-const MSI_DEFAULT_DISPLAY_FRAC = 0.4;
+// 既定表示ウィンドウ上限の分位点(データ適応オートスケール)。各切片の強度分布の
+// この分位点(生単位)を既定の表示上限 rawDispMax とする(computeRasterPixels で算出、
+// getMsiWindow で使用)。暗い切片は自分のレンジで明るく、明るい切片は上位数%だけ
+// クリップして飛ばさない。ラスタは MSI_ROBUST_PERCENTILE でベイク・クリップ済みの
+// ため rawDispMax は bakeHi(=p99.5)が上限。値を下げるほど初期表示は明るく(上位
+// クリップ増)。ユーザーが Range を手入力した上書きには影響しない(getMsiWindow 参照)。
+const MSI_DEFAULT_DISPLAY_PERCENTILE = 0.99;
 function percentileSorted(vals, p) {
     if (!vals || !vals.length) return NaN;
     const a = Float64Array.from(vals).sort();
@@ -2070,15 +2073,24 @@ function computeRasterPixels(rows, range) {
     // crushes tissue to the colormap floor. trueMax keeps the real maximum for
     // the Method/Stats "Max intensity" readouts. An explicit def.range wins.
     let bakeLo, bakeHi, trueMax = Number.isFinite(vmax) ? vmax : null;
+    // rawDispMax = 既定表示上限(データ適応)。各画素は [bakeLo, bakeHi] にベイク
+    // 済みで bakeHi を超える値は既にクリップされるため、表示上限は必ず bakeHi 以下。
+    let rawDispMax;
     if (range && range.length === 2) {
         bakeLo = range[0]; bakeHi = range[1]; if (!(bakeHi > bakeLo)) bakeHi = bakeLo + 1e-9;
         if (trueMax == null) trueMax = bakeHi;
+        rawDispMax = bakeHi;   // 明示レンジ指定時は指定上限を尊重
     } else if (!(vmax > vmin)) {
         bakeLo = 0; bakeHi = 1; if (trueMax == null) trueMax = 1;
+        rawDispMax = bakeHi;   // 退化(全画素同値): ベイク上限
     } else {
         bakeLo = vmin;
         const robust = percentileSorted(vals, MSI_ROBUST_PERCENTILE);
         bakeHi = (Number.isFinite(robust) && robust > vmin) ? robust : vmax;
+        // 表示既定上限 = この切片の分布の表示分位点(生単位)。bakeHi でクランプし、
+        // 退化結果は bakeHi にフォールバック。
+        const disp = percentileSorted(vals, MSI_DEFAULT_DISPLAY_PERCENTILE);
+        rawDispMax = (Number.isFinite(disp) && disp > bakeLo) ? Math.min(disp, bakeHi) : bakeHi;
     }
     const pixels = new Uint8ClampedArray(W * H * 4);
     let p = 0;
@@ -2091,18 +2103,18 @@ function computeRasterPixels(rows, range) {
             pixels[p++] = g; pixels[p++] = g; pixels[p++] = g; pixels[p++] = 255;
         }
     }
-    return { width: W, height: H, pixels, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax };
+    return { width: W, height: H, pixels, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax, rawDispMax };
 }
 
 // Main-thread wrapper: kept synchronous (existing callers don't await it) so
 // only the DOM <canvas> encode stays here; the heavy numeric work is in
 // computeRasterPixels.
 function rasterRowsToPngDataUrl(rows, range) {
-    const { width, height, pixels, rawRange, rawMean, rawTrueMax } = computeRasterPixels(rows, range);
+    const { width, height, pixels, rawRange, rawMean, rawTrueMax, rawDispMax } = computeRasterPixels(rows, range);
     const canvas = document.createElement('canvas');
     canvas.width = width; canvas.height = height;
     get2dContext(canvas, { willReadFrequently: true }).putImageData(new ImageData(pixels, width, height), 0, 0);
-    return { dataUrl: canvas.toDataURL('image/png'), rawRange, rawMean, rawTrueMax };
+    return { dataUrl: canvas.toDataURL('image/png'), rawRange, rawMean, rawTrueMax, rawDispMax };
 }
 
 // Pure parse (no DOM/canvas): xlsx ArrayBuffer → [{x,y,v}] rows. Shared verbatim
@@ -2382,7 +2394,7 @@ async function _parseWorkerOnMessage(e) {
             const rows = (msg.op === 'txt-raster') ? parseTxtToRows(buf, p.def) : parseXlsxToRows(buf, p.def);
             const px = computeRasterPixels(rows, p.def && p.def.range);
             const dataUrl = await _encodePixelsToDataUrl(px.width, px.height, px.pixels);
-            result = { dataUrl: dataUrl, rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax };
+            result = { dataUrl: dataUrl, rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax, rawDispMax: px.rawDispMax };
         } else if (msg.op === 'tiff-decode') {
             result = { dataUrl: await decodeTiffArrayBufferToDataUrl(buf) };
         } else if (msg.op === 'xlsx-columns') {
@@ -2411,6 +2423,7 @@ function _buildParseWorkerSource() {
     return [
         'importScripts(' + PARSE_WORKER_LIBS.map(u => JSON.stringify(u)).join(', ') + ');',
         'const MSI_ROBUST_PERCENTILE = ' + MSI_ROBUST_PERCENTILE + ';',
+        'const MSI_DEFAULT_DISPLAY_PERCENTILE = ' + MSI_DEFAULT_DISPLAY_PERCENTILE + ';',
         fns.map(f => f.toString()).join('\n\n'),
         'self.onmessage = _parseWorkerOnMessage;',
     ].join('\n\n');
@@ -2716,6 +2729,7 @@ class SectionPanel {
         const rawRange = (result && typeof result === 'object' && Array.isArray(result.rawRange)) ? result.rawRange : null;
         const rawMean = (result && typeof result === 'object' && Number.isFinite(result.rawMean)) ? result.rawMean : null;
         const rawTrueMax = (result && typeof result === 'object' && Number.isFinite(result.rawTrueMax)) ? result.rawTrueMax : null;
+        const rawDispMax = (result && typeof result === 'object' && Number.isFinite(result.rawDispMax)) ? result.rawDispMax : null;
         this.imageDataUrls[key] = dataUrl;
         // Persist the raw MSI value range so the Method (MRM) table can show
         // intensity Mean/Max in the original scale rather than 0-255 luminance.
@@ -2723,11 +2737,12 @@ class SectionPanel {
         // Mean/Max in the table; flag missing-on-disk so we IDB-save once.
         if (this.section.msiSeries && this.section.msiSeries[key]) {
             const entRef = this.section.msiSeries[key];
-            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean) || !Number.isFinite(entRef.rawTrueMax);
+            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean) || !Number.isFinite(entRef.rawTrueMax) || !Number.isFinite(entRef.rawDispMax);
             if (rawRange) entRef.rawRange = rawRange;
             if (rawMean != null) entRef.rawMean = rawMean;
             if (rawTrueMax != null) entRef.rawTrueMax = rawTrueMax;
-            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null) && App && App.queueSave) App.queueSave();
+            if (rawDispMax != null) entRef.rawDispMax = rawDispMax;
+            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null || rawDispMax != null) && App && App.queueSave) App.queueSave();
         }
         await this.attachImage(key, dataUrl);
     }
@@ -3242,7 +3257,7 @@ class SectionPanel {
                 // layer's raw range; winC defaults to that range (auto-scale) or
                 // the user's manual min/max. msiWindowEval maps each pixel into it.
                 const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
-                const winC = App.getMsiWindow(key, rrC);
+                const winC = App.getMsiWindow(key, rrC, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
                 const lut = overlay ? monoLut(overlayColor[key] || '#ffffff') : getActiveColormap();
                 const bg = overlay ? [0, 0, 0] : getColormapBackground();
                 for (let i = 0; i < d.length; i += 4) {
@@ -3890,7 +3905,7 @@ class SectionPanel {
         const baseLabel = (meta && meta.base) || formatDisplayName(key);
         // Display window in raw units (per-section): default = the section's own
         // range, or the user's manual override. Drives the toolbar Range inputs.
-        const win = App.getMsiWindow(key, ent.rawRange);
+        const win = App.getMsiWindow(key, ent.rawRange, ent.rawDispMax);
         return { available: true, key, baseLabel, rawMin: win.min, rawMax: win.max };
     }
 
@@ -4427,7 +4442,7 @@ class SectionPanel {
             // vmin/vmax window no longer affects rendering. Keep the inputs (the
             // change handlers below query .vmin/.vmax) but disable them and show
             // the observed raster range for reference.
-            const _win = App.getMsiWindow(key, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawRange);
+            const _win = App.getMsiWindow(key, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawRange, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
             const rangeRow = mkRow('表示ウィンドウ (生単位 — ツールバーの Range で調整)',
                 '<div style="display:flex;gap:4px;"><input type="number" value="' + formatRawForInput(_win.min) + '" class="vmin" disabled title="表示ウィンドウ下限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"><input type="number" value="' + formatRawForInput(_win.max) + '" class="vmax" disabled title="表示ウィンドウ上限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"></div>');
             pop.appendChild(rangeRow);
@@ -4728,7 +4743,7 @@ class SectionPanel {
         const d = data.data;
         // Per-section display window (raw units), matching renderComposite.
         const rrT = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
-        const winT = App.getMsiWindow(key, rrT);
+        const winT = App.getMsiWindow(key, rrT, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
         const lut = getActiveColormap();
         const bg = getColormapBackground();
         for (let i = 0; i < d.length; i += 4) {
@@ -7102,7 +7117,7 @@ const Wizards = {
                 // and map into the molecule's window so the preview matches the
                 // main viewer's display.
                 msiRawRange = (sec.msiSeries[msiKey] || {}).rawRange || null;
-                msiWin = App.getMsiWindow(msiKey, msiRawRange);
+                msiWin = App.getMsiWindow(msiKey, msiRawRange, (sec.msiSeries[msiKey] || {}).rawDispMax);
             }
             if (!srcImg) { msiImg.removeAttribute('src'); return; }
             const paintAndSet = () => {
@@ -10037,10 +10052,11 @@ const SharePreview = {
         // _wireRangeInputs 'change' handlers apply edits to every panel and
         // rebake the preview cells.
         let rawRange = null;
+        let rawDispMax;
         if (focusKey && App.panels) {
             for (const p of App.panels.values()) {
                 const ent = ((p.section && p.section.msiSeries) || {})[focusKey];
-                if (ent && Array.isArray(ent.rawRange)) { rawRange = ent.rawRange; break; }
+                if (ent && Array.isArray(ent.rawRange)) { rawRange = ent.rawRange; rawDispMax = ent.rawDispMax; break; }
             }
         }
         if (!focusKey || !rawRange) {
@@ -10050,7 +10066,7 @@ const SharePreview = {
             minEl.title = maxEl.title = '';
             return;
         }
-        const win = App.getMsiWindow(focusKey, rawRange);
+        const win = App.getMsiWindow(focusKey, rawRange, rawDispMax);
         minEl.disabled = false; maxEl.disabled = false;
         minEl.title = '表示ウィンドウ 下限 (生単位)';
         maxEl.title = '表示ウィンドウ 上限 (生単位)';
@@ -12090,30 +12106,31 @@ const App = {
     },
     // Effective display window. 'same' = shared [0, in-scope common max]; else
     // the section's own range. A user min/max override wins per edge.
-    getMsiWindow(key, rawRange) {
+    getMsiWindow(key, rawRange, dispMax) {
         this.msiUserWindow = this.msiUserWindow || {};
         const u = this.msiUserWindow[key] || null;
         // Per-section raw range (= how this layer's PNG was baked).
         const rr = (Array.isArray(rawRange) && rawRange.length === 2
             && Number.isFinite(rawRange[0]) && Number.isFinite(rawRange[1])) ? rawRange : null;
+        // データ適応の既定表示上限(各切片の表示分位点、生単位)。欠落時(レガシー
+        // データや自己正規化の合成TIC等)は堅牢ベイク上限 rawRange[1] にフォールバック。
+        const dm = Number.isFinite(dispMax) ? dispMax : (rr ? rr[1] : null);
         let defMin, defMax;
         if (this.msiScaleMode === 'same') {
-            // HDI "Same": shared range [0, robust common max] across in-scope
+            // HDI "Same": shared range [0, common adaptive max] across in-scope
             // sections, so colour encodes absolute intensity. getMsiAbsMax maxes
-            // the per-section robust ceiling (rawRange[1]) over in-scope panels.
+            // the per-section adaptive ceiling (rawDispMax) over in-scope panels.
             const shared = this.getMsiAbsMax(key);
             if (Number.isFinite(shared) && shared > 0) { defMin = 0; defMax = shared; }
-            else if (rr) { defMin = rr[0]; defMax = rr[1]; }   // fallback: own range
+            else if (Number.isFinite(dm) && dm > 0) { defMin = 0; defMax = dm; }   // fallback: own adaptive ceiling
+            else if (rr) { defMin = rr[0]; defMax = rr[1]; }
             else { defMin = 0; defMax = 255; }
         } else {
-            // HDI "Individual": this section's own range (per-image auto-scale).
+            // HDI "Individual": this section's own adaptive range (per-image auto-scale).
             defMin = rr ? rr[0] : 0;
-            defMax = rr ? rr[1] : 255;
+            defMax = Number.isFinite(dm) ? dm : (rr ? rr[1] : 255);
         }
-        // 初期表示を明るくする: 既定の上限のみを MSI_DEFAULT_DISPLAY_FRAC 倍に下げる
-        // (線形の縮小のみ。全切片を同じ縮小上限で割るので絶対比較は保たれる)。下の
-        // override マージより前なので、ユーザーの手動 min/max はそのまま優先される。
-        defMax = defMin + (defMax - defMin) * MSI_DEFAULT_DISPLAY_FRAC;
+        // ユーザーの手動 min/max はここで既定より優先(従来どおり上書き)。
         const min = (u && Number.isFinite(u.min)) ? u.min : defMin;
         let max = (u && Number.isFinite(u.max)) ? u.max : defMax;
         if (!(max > min)) max = min + (Math.abs(defMax - defMin) || 1);
@@ -12127,7 +12144,11 @@ const App = {
             if (!this._organInScope(panel.section)) continue;
             const ent = (panel.section.msiSeries || {})[key];
             const rr = ent && ent.rawRange;
-            if (rr && Number.isFinite(rr[1]) && rr[1] > mx) mx = rr[1];
+            // 適応共有上限: 各切片の表示分位点(rawDispMax)を優先、無ければ
+            // 堅牢ベイク上限(rawRange[1])にフォールバック。
+            const dm = (ent && Number.isFinite(ent.rawDispMax)) ? ent.rawDispMax
+                     : ((rr && Number.isFinite(rr[1])) ? rr[1] : NaN);
+            if (Number.isFinite(dm) && dm > mx) mx = dm;
         }
         return mx;
     },
@@ -12143,7 +12164,9 @@ const App = {
             for (const [key, ent] of Object.entries(panel.section.msiSeries || {})) {
                 const rr = ent && ent.rawRange;
                 if (!rr || !Number.isFinite(rr[1])) continue;
-                if (!(next[key] >= rr[1])) next[key] = rr[1];
+                // getMsiAbsMax と同じ適応上限基準で変化検出(再描画トリガ漏れ防止)。
+                const dm = Number.isFinite(ent.rawDispMax) ? ent.rawDispMax : rr[1];
+                if (!(next[key] >= dm)) next[key] = dm;
             }
         }
         const changed = new Set();
