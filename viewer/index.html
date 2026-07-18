@@ -13081,6 +13081,13 @@ const App = {
         await this.refreshProjectPicker();
         this.refreshShareInfoButton();
         this.renderAnalysis();
+        // Reset the METHOD (MRM) list to the top on every project open/switch.
+        // #method-body is a persistent scroll container (only its <tbody> is
+        // re-filled by renderMethodTable), so without this the previously-open
+        // project's scroll offset leaks into the newly-opened one and the list
+        // appears to start mid-way instead of at the first compound.
+        const methodBody = document.getElementById('method-body');
+        if (methodBody) methodBody.scrollTop = 0;
         // Master mode: pull collaborator (viewer) ROIs from the server as a
         // read-only overlay, then keep polling. Guarded to master + a shared
         // project; share mode uses its own _startShareRoiPoll instead.

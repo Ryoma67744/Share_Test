@@ -61,6 +61,20 @@
   .usage-list { margin:4px 0 0; padding-left:0; list-style:none; font-size:11px; color:#475569; }
   .usage-list li { padding:1px 0; }
   .usage-list a { color:#2563eb; text-decoration:underline; cursor:pointer; }
+  /* Floating popover: projects that measured a given compound (📁 測定PJ). */
+  .proj-popover { position:absolute; z-index:1000; min-width:200px; max-width:340px; max-height:280px; overflow:auto;
+                  background:#fff; border:1px solid #cbd5e1; border-radius:6px; box-shadow:0 6px 20px rgba(0,0,0,0.15);
+                  padding:8px 10px; font-size:12px; }
+  .proj-popover .pp-head { font-weight:600; font-size:11px; color:#334155; margin-bottom:6px; }
+  .proj-popover .pp-body { color:#475569; }
+  .proj-popover .pp-body.err { color:#b91c1c; }
+  .proj-popover .pp-muted { color:#94a3b8; }
+  .proj-popover .pp-list { list-style:none; margin:0; padding:0; }
+  .proj-popover .pp-list li { padding:2px 0; border-top:1px solid #f1f5f9; display:flex; align-items:center; gap:6px; }
+  .proj-popover .pp-list li:first-child { border-top:none; }
+  .proj-popover .pp-badge { font-size:10px; padding:0 5px; border-radius:8px; white-space:nowrap; }
+  .proj-popover .pp-badge.pub { background:#dcfce7; color:#166534; }
+  .proj-popover .pp-badge.prv { background:#f1f5f9; color:#64748b; }
   .src-badge { font-size:9px; padding:0 5px; border-radius:9999px; background:#f1f5f9; color:#64748b; margin-left:4px; }
   .muted { color:#94a3b8; }
   .filter-bar { display:flex; flex-wrap:wrap; gap:10px 14px; align-items:center; margin-top:10px; padding-top:10px; border-top:1px solid #eef2f7; }
@@ -212,6 +226,13 @@ const SupabaseClient = (() => {
             });
         },
         deleteMrmSet(pw, id) { return rpc('delete_mrm_set', { _master_pw: pw, _id: id }); },
+        // Reverse lookup: which projects measured this compound name? Uses the
+        // master-pw entry point (the browser has no read-only MRM secret).
+        searchProjectsByCompound(pw, query, includePrivate) {
+            return rpc('search_projects_by_compound_master', {
+                _master_pw: pw, _query: query, _include_private: includePrivate !== false,
+            });
+        },
     };
 })();
 
@@ -548,6 +569,7 @@ function renderFilterBar() {
 
 function compoundActions(c) {
     return ''
+        + '<button class="btn mini" data-action="show-projects" data-cname="' + safe(c.name) + '" title="この化合物を測定したプロジェクトを表示">📁 測定PJ</button> '
         + '<button class="btn mini" data-action="add-transition" data-id="' + safe(c.id) + '">+ トランジション</button> '
         + '<button class="btn mini" data-action="edit-compound" data-id="' + safe(c.id) + '">編集</button> '
         + '<button class="btn mini danger" data-action="del-compound" data-id="' + safe(c.id) + '">削除</button>';
@@ -837,6 +859,87 @@ async function addUsage(tid) {
 function openUsageLink(slug) {
     if (!slug) return;
     location.href = 'viewer/index.html#share=' + encodeURIComponent(slug);
+}
+
+// --- 📁 測定PJ: compound -> projects that measured it (auto reverse-lookup) -
+// A single reusable floating popover, filled lazily on click via the
+// master-pw reverse-lookup RPC (search_projects_by_compound_master). Results
+// are cached per compound name so re-opening never re-queries. Text only — no
+// navigation.
+const _projCache = new Map();   // compound name -> array of project rows
+let _projPopover = null;
+
+function _ensureProjPopover() {
+    if (_projPopover) return _projPopover;
+    const el = document.createElement('div');
+    el.className = 'proj-popover';
+    el.style.display = 'none';
+    document.body.appendChild(el);
+    _projPopover = el;
+    // Dismiss on outside click / Esc / scroll. The library's click handler
+    // stops propagation for the 📁 button, so opening never self-dismisses.
+    document.addEventListener('click', (ev) => {
+        if (!_projPopover || _projPopover.style.display === 'none') return;
+        const t = ev.target;
+        if (t && t.closest && (t.closest('.proj-popover') || t.closest('[data-action="show-projects"]'))) return;
+        hideProjPopover();
+    });
+    document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') hideProjPopover(); });
+    window.addEventListener('scroll', () => hideProjPopover(), true);
+    return _projPopover;
+}
+function hideProjPopover() { if (_projPopover) _projPopover.style.display = 'none'; }
+function _positionProjPopover(anchorEl) {
+    const r = anchorEl.getBoundingClientRect();
+    const pop = _projPopover;
+    pop.style.display = 'block';
+    pop.style.top = (r.bottom + window.scrollY + 4) + 'px';
+    pop.style.left = (r.left + window.scrollX) + 'px';
+    // Clamp to the viewport's right edge.
+    const pr = pop.getBoundingClientRect();
+    if (pr.right > window.innerWidth - 8) {
+        pop.style.left = Math.max(8, window.innerWidth - 8 - pr.width) + window.scrollX + 'px';
+    }
+}
+function _renderProjPopover(anchorEl, name, state) {
+    const pop = _ensureProjPopover();
+    let inner = '<div class="pp-head">' + safe(name) + ' を測定したプロジェクト</div>';
+    if (state === 'loading') {
+        inner += '<div class="pp-body pp-muted">検索中…</div>';
+    } else if (state && state.error) {
+        inner += '<div class="pp-body err">検索に失敗しました</div>';
+    } else {
+        const rows = (state && state.rows) || [];
+        if (!rows.length) {
+            inner += '<div class="pp-body pp-muted">測定プロジェクトなし</div>';
+        } else {
+            inner += '<ul class="pp-list">' + rows.map(p =>
+                '<li>' + safe(p.display_name || p.slug || '')
+                + '<span class="pp-badge ' + (p.is_public ? 'pub' : 'prv') + '">'
+                + (p.is_public ? '公開' : '非公開') + '</span></li>'
+            ).join('') + '</ul>';
+        }
+    }
+    pop.innerHTML = inner;
+    _positionProjPopover(anchorEl);
+}
+async function showCompoundProjects(anchorEl) {
+    const name = anchorEl.getAttribute('data-cname') || '';
+    if (!name) return;
+    _ensureProjPopover();
+    if (_projCache.has(name)) { _renderProjPopover(anchorEl, name, { rows: _projCache.get(name) }); return; }
+    _renderProjPopover(anchorEl, name, 'loading');
+    let pw = _readCachedMasterPw();
+    if (!pw) { const ok = await openMasterUnlockModal(); if (!ok) { hideProjPopover(); return; } pw = _readCachedMasterPw(); }
+    try {
+        const rows = await SupabaseClient.searchProjectsByCompound(pw, name, true);
+        const arr = Array.isArray(rows) ? rows : [];
+        _projCache.set(name, arr);
+        _renderProjPopover(anchorEl, name, { rows: arr });
+    } catch (e) {
+        console.warn('searchProjectsByCompound failed', e);
+        _renderProjPopover(anchorEl, name, { error: true });
+    }
 }
 
 // ===========================================================================
@@ -1540,6 +1643,7 @@ function bindLibraryEvents() {
             case 'del-transition': delTransition(tid); break;
             case 'add-usage': addUsage(tid); break;
             case 'open-usage': openUsageLink(el.getAttribute('data-slug')); break;
+            case 'show-projects': showCompoundProjects(el); break;
         }
     });
     // Transition-selection checkboxes (for .exp export).
