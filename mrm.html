@@ -72,6 +72,7 @@
   .proj-popover .pp-list { list-style:none; margin:0; padding:0; }
   .proj-popover .pp-list li { padding:2px 0; border-top:1px solid #f1f5f9; display:flex; align-items:center; gap:6px; }
   .proj-popover .pp-list li:first-child { border-top:none; }
+  .proj-popover .pp-link { flex:1; color:#2563eb; text-decoration:underline; cursor:pointer; }
   .proj-popover .pp-badge { font-size:10px; padding:0 5px; border-radius:8px; white-space:nowrap; }
   .proj-popover .pp-badge.pub { background:#dcfce7; color:#166534; }
   .proj-popover .pp-badge.prv { background:#f1f5f9; color:#64748b; }
@@ -876,6 +877,13 @@ function _ensureProjPopover() {
     el.style.display = 'none';
     document.body.appendChild(el);
     _projPopover = el;
+    // Click a project name -> open that project (same route as usage links).
+    el.addEventListener('click', (ev) => {
+        const a = ev.target && ev.target.closest && ev.target.closest('[data-slug]');
+        if (!a) return;
+        const slug = a.getAttribute('data-slug');
+        if (slug) openUsageLink(slug);
+    });
     // Dismiss on outside click / Esc / scroll. The library's click handler
     // stops propagation for the 📁 button, so opening never self-dismisses.
     document.addEventListener('click', (ev) => {
@@ -913,11 +921,15 @@ function _renderProjPopover(anchorEl, name, state) {
         if (!rows.length) {
             inner += '<div class="pp-body pp-muted">測定プロジェクトなし</div>';
         } else {
-            inner += '<ul class="pp-list">' + rows.map(p =>
-                '<li>' + safe(p.display_name || p.slug || '')
-                + '<span class="pp-badge ' + (p.is_public ? 'pub' : 'prv') + '">'
-                + (p.is_public ? '公開' : '非公開') + '</span></li>'
-            ).join('') + '</ul>';
+            inner += '<ul class="pp-list">' + rows.map(p => {
+                const label = safe(p.display_name || p.slug || '');
+                const name = p.slug
+                    ? '<a class="pp-link" data-slug="' + safe(p.slug) + '" title="このプロジェクトを開く">' + label + ' ↗</a>'
+                    : '<span>' + label + '</span>';
+                const badge = '<span class="pp-badge ' + (p.is_public ? 'pub' : 'prv') + '">'
+                    + (p.is_public ? '公開' : '非公開') + '</span>';
+                return '<li>' + name + badge + '</li>';
+            }).join('') + '</ul>';
         }
     }
     pop.innerHTML = inner;
