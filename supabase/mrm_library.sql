@@ -96,6 +96,15 @@ update public.mrm_usages
    set sample_types = array[sample_name]
  where sample_name is not null and sample_name <> '' and sample_types = '{}';
 
+-- (3) check_level: per-compound validation status of the MRM method —
+--     'std' (標準品で確認済み) / 'lit' (文献のみ) / 'unchecked' (未確認, default).
+--     One status per compound (not per transition). Values coerced in the
+--     write RPCs (see upsert_compound / update_compound), mirroring how
+--     mrm_usages.source is guarded. Null is treated as 'unchecked' by the UI.
+alter table public.mrm_compounds add column if not exists check_level text;
+-- Default any pre-existing null rows to 'unchecked' (idempotent no-op after).
+update public.mrm_compounds set check_level = 'unchecked' where check_level is null;
+
 -- ---- 2. Read RPC (master-pw gated) -------------------------
 -- Returns the whole library as one nested jsonb document:
 -- [ { ...compound, transitions:[ { ...transition, usages:[...] } ] } ].
@@ -121,6 +130,7 @@ begin
                    'tags', to_jsonb(co.tags),
                    'polarity', co.polarity,
                    'note', co.note,
+                   'check_level', co.check_level,
                    'created_at', co.created_at,
                    'updated_at', co.updated_at,
                    'transitions', coalesce((
@@ -162,16 +172,19 @@ $$;
 -- ---- 3. Compound write RPCs --------------------------------
 -- Create (or update fields of an existing same-name) compound. Returns
 -- the id so the viewer's "register from result" can auto-create by name.
--- Phase 2 added _serial_no (auto-assigned next integer when null); drop the
--- old 5-arg signature so CREATE OR REPLACE doesn't leave an overload behind.
+-- Phase 2 added _serial_no (auto-assigned next integer when null); Phase 3
+-- added _check_level. Drop the previous signatures so CREATE OR REPLACE
+-- doesn't leave an overload behind.
 drop function if exists public.upsert_compound(text, text, text[], text, text);
+drop function if exists public.upsert_compound(text, text, text[], text, text, integer);
 create or replace function public.upsert_compound(
-    _master_pw text,
-    _name      text,
-    _tags      text[] default '{}',
-    _polarity  text default null,
-    _note      text default null,
-    _serial_no integer default null
+    _master_pw   text,
+    _name        text,
+    _tags        text[] default '{}',
+    _polarity    text default null,
+    _note        text default null,
+    _serial_no   integer default null,
+    _check_level text default null
 ) returns uuid
 language plpgsql security definer set search_path = public, extensions
 as $$
@@ -183,30 +196,36 @@ begin
     if _name is null or length(trim(_name)) = 0 then
         raise exception 'name required';
     end if;
-    insert into public.mrm_compounds(name, tags, polarity, note, serial_no)
+    insert into public.mrm_compounds(name, tags, polarity, note, serial_no, check_level)
          values (trim(_name), coalesce(_tags, '{}'), _polarity, _note,
-                 coalesce(_serial_no, (select coalesce(max(serial_no), 0) + 1 from public.mrm_compounds)))
+                 coalesce(_serial_no, (select coalesce(max(serial_no), 0) + 1 from public.mrm_compounds)),
+                 case when _check_level in ('std','lit','unchecked') then _check_level else 'unchecked' end)
     on conflict (name) do update
-         set tags       = excluded.tags,
-             polarity   = excluded.polarity,
-             note       = excluded.note,
-             updated_at = now()
+         set tags        = excluded.tags,
+             polarity    = excluded.polarity,
+             note        = excluded.note,
+             -- keep the existing level when the caller didn't specify one
+             check_level = case when _check_level is null then mrm_compounds.check_level else excluded.check_level end,
+             updated_at  = now()
     returning id into v_id;
     return v_id;
 end
 $$;
 
 -- Update an existing compound by id (allows rename + serial_no change so two
--- name variants can be grouped under one number). Drop old 6-arg signature.
+-- name variants can be grouped under one number). Phase 3 added _check_level;
+-- drop the previous signatures before CREATE OR REPLACE.
 drop function if exists public.update_compound(text, uuid, text, text[], text, text);
+drop function if exists public.update_compound(text, uuid, text, text[], text, text, integer);
 create or replace function public.update_compound(
-    _master_pw text,
-    _id        uuid,
-    _name      text,
-    _tags      text[] default '{}',
-    _polarity  text default null,
-    _note      text default null,
-    _serial_no integer default null
+    _master_pw   text,
+    _id          uuid,
+    _name        text,
+    _tags        text[] default '{}',
+    _polarity    text default null,
+    _note        text default null,
+    _serial_no   integer default null,
+    _check_level text default null
 ) returns void
 language plpgsql security definer set search_path = public, extensions
 as $$
@@ -215,12 +234,14 @@ begin
         raise exception 'unauthorized' using errcode = '28000';
     end if;
     update public.mrm_compounds
-       set name       = coalesce(nullif(trim(_name), ''), name),
-           tags       = coalesce(_tags, '{}'),
-           polarity   = _polarity,
-           note       = _note,
-           serial_no  = coalesce(_serial_no, serial_no),
-           updated_at = now()
+       set name        = coalesce(nullif(trim(_name), ''), name),
+           tags        = coalesce(_tags, '{}'),
+           polarity    = _polarity,
+           note        = _note,
+           serial_no   = coalesce(_serial_no, serial_no),
+           -- keep the existing level when the caller passed null/invalid
+           check_level = coalesce(case when _check_level in ('std','lit','unchecked') then _check_level end, check_level),
+           updated_at  = now()
      where id = _id;
 end
 $$;
@@ -626,8 +647,8 @@ $$;
 
 -- ---- 7. Grants ---------------------------------------------
 grant execute on function public.list_mrm_library(text)                                                          to anon, authenticated;
-grant execute on function public.upsert_compound(text, text, text[], text, text, integer)                        to anon, authenticated;
-grant execute on function public.update_compound(text, uuid, text, text[], text, text, integer)                  to anon, authenticated;
+grant execute on function public.upsert_compound(text, text, text[], text, text, integer, text)                  to anon, authenticated;
+grant execute on function public.update_compound(text, uuid, text, text[], text, text, integer, text)            to anon, authenticated;
 grant execute on function public.delete_compound(text, uuid)                                                     to anon, authenticated;
 grant execute on function public.upsert_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text) to anon, authenticated;
 grant execute on function public.update_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text) to anon, authenticated;
@@ -708,6 +729,7 @@ begin
                    'tags', to_jsonb(co.tags),
                    'polarity', co.polarity,
                    'note', co.note,
+                   'check_level', co.check_level,
                    'transitions', coalesce((
                        select jsonb_agg(jsonb_build_object(
                                   'id', tr.id,
@@ -779,8 +801,8 @@ grant execute on function public.get_exp_template_ro(text)  to anon, authenticat
 -- drop function if exists public.update_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text);
 -- drop function if exists public.upsert_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text);
 -- drop function if exists public.delete_compound(text, uuid);
--- drop function if exists public.update_compound(text, uuid, text, text[], text, text, integer);
--- drop function if exists public.upsert_compound(text, text, text[], text, text, integer);
+-- drop function if exists public.update_compound(text, uuid, text, text[], text, text, integer, text);
+-- drop function if exists public.upsert_compound(text, text, text[], text, text, integer, text);
 -- drop function if exists public.list_mrm_library(text);
 -- drop table if exists public.mrm_usages;
 -- drop table if exists public.mrm_transitions;

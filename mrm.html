@@ -85,6 +85,10 @@
   .fchip:hover { border-color:#94a3b8; }
   .fchip.on { background:#2563eb; border-color:#2563eb; color:#fff; }
   .serial-badge { display:inline-block; padding:1px 7px; border-radius:4px; font-size:10px; font-weight:700; background:#fde68a; color:#92400e; }
+  .check-badge { display:inline-block; padding:1px 6px; border-radius:9px; font-size:10px; font-weight:600; }
+  .check-badge.std { background:#dcfce7; color:#166534; }
+  .check-badge.lit { background:#fef3c7; color:#92400e; }
+  .check-badge.unchecked { background:#f1f5f9; color:#94a3b8; }
   .cpd-member { border-top:1px dashed #e5e7eb; padding-top:8px; margin-top:8px; }
   .cpd-member:first-child { border-top:none; padding-top:0; margin-top:0; }
   /* Two-column layout: compound list (left) + selected-MRM panel (right). */
@@ -132,6 +136,7 @@
         <button id="btn-reload" class="btn">再読込</button>
         <button id="btn-exp-template" class="btn" title="出力用テンプレート .exp を設定/確認">テンプレ設定</button>
         <button id="btn-sets" class="btn" title="MRM メソッドセット (保存/読込・プロジェクト履歴から)">メソッドセット</button>
+        <button id="btn-reconcile" class="btn" title="実測PJで測定されているが未登録の化合物を一括で登録/無視">実測棚卸し</button>
         <button id="btn-exp-export" class="btn" title="チェックしたトランジションを .exp に出力" disabled>選択を.exp出力 (0)</button>
         <button id="btn-exp-clear" class="btn" title="選択をすべて解除" style="display:none;">選択クリア</button>
       </div>
@@ -183,11 +188,11 @@ const SupabaseClient = (() => {
         configured() { return !!_client(); },
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
         listMrmLibrary(pw) { return rpc('list_mrm_library', { _master_pw: pw }); },
-        upsertCompound(pw, name, tags, polarity, note, serialNo) {
-            return rpc('upsert_compound', { _master_pw: pw, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo) });
+        upsertCompound(pw, name, tags, polarity, note, serialNo, checkLevel) {
+            return rpc('upsert_compound', { _master_pw: pw, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo), _check_level: checkLevel || null });
         },
-        updateCompound(pw, id, name, tags, polarity, note, serialNo) {
-            return rpc('update_compound', { _master_pw: pw, _id: id, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo) });
+        updateCompound(pw, id, name, tags, polarity, note, serialNo, checkLevel) {
+            return rpc('update_compound', { _master_pw: pw, _id: id, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo), _check_level: checkLevel || null });
         },
         deleteCompound(pw, id) { return rpc('delete_compound', { _master_pw: pw, _id: id }); },
         upsertTransition(pw, t) {
@@ -234,6 +239,17 @@ const SupabaseClient = (() => {
                 _master_pw: pw, _query: query, _include_private: includePrivate !== false,
             });
         },
+        // Reconciliation: measured-in-projects compounds + register/ignore.
+        listMeasuredCompounds(pw) { return rpc('list_measured_compounds', { _master_pw: pw }); },
+        registerMeasuredCompound(pw, m) {
+            return rpc('register_measured_compound', {
+                _master_pw: pw, _name: m.name, _tags: m.tags || [], _polarity: m.polarity || null,
+                _precursor: m.precursor, _product: m.product, _ce: m.ce, _cv: m.cv,
+                _check_level: m.check_level || null,
+            });
+        },
+        ignoreMeasuredCompound(pw, name) { return rpc('ignore_measured_compound', { _master_pw: pw, _name: name }); },
+        unignoreMeasuredCompound(pw, name) { return rpc('unignore_measured_compound', { _master_pw: pw, _name: name }); },
     };
 })();
 
@@ -568,6 +584,14 @@ function renderFilterBar() {
     bar.innerHTML = html;
 }
 
+// Per-compound validation-status badge (std-verified / literature-only / unchecked).
+function checkBadge(c) {
+    const lv = c && c.check_level;
+    if (lv === 'std') return '<span class="check-badge std" title="標準品で確認済み">標準品✓</span>';
+    if (lv === 'lit') return '<span class="check-badge lit" title="文献のみ">文献</span>';
+    return '<span class="check-badge unchecked" title="未確認 (標準品/文献の確認レベル未設定)">未確認</span>';
+}
+
 function compoundActions(c) {
     return ''
         + '<button class="btn mini" data-action="show-projects" data-cname="' + safe(c.name) + '" title="この化合物を測定したプロジェクトを表示">📁 測定PJ</button> '
@@ -587,6 +611,7 @@ function memberHtml(c) {
         +     '<span class="font-semibold text-sm">' + safe(c.name) + '</span>'
         +     ((c.serial_no != null) ? '<span class="serial-badge">#' + safe(c.serial_no) + '</span>' : '')
         +     (c.polarity ? '<span class="chip pol">' + safe(c.polarity) + '</span>' : '')
+        +     checkBadge(c)
         +     (c.tags || []).map(t => '<span class="chip">' + safe(t) + '</span>').join('')
         +     '<span style="flex:1"></span>'
         +     compoundActions(c)
@@ -619,7 +644,7 @@ function unitHtml(u) {
             +     quickSel
             +     serialBadge
             +     '<span class="font-semibold">' + safe(c.name) + '</span>'
-            +     tagChips + pol + countLbl
+            +     tagChips + pol + checkBadge(c) + countLbl
             +     '<span style="flex:1"></span>'
             +     compoundActions(c)
             +   '</summary>'
@@ -708,6 +733,12 @@ async function openCompoundModal(existing) {
             </select></label>
           <label>通し番号 (同じ番号の化合物は1つに統合表示。空欄なら自動採番)
             <input type="number" step="1" name="serial_no" value="${c.serial_no != null ? c.serial_no : ''}"></label>
+          <label>確認レベル
+            <select name="check_level">
+              <option value="unchecked" ${(!c.check_level || c.check_level === 'unchecked') ? 'selected' : ''}>未確認</option>
+              <option value="std" ${c.check_level === 'std' ? 'selected' : ''}>標準品確認済み</option>
+              <option value="lit" ${c.check_level === 'lit' ? 'selected' : ''}>文献のみ</option>
+            </select></label>
           <label>メモ <textarea name="note">${safe(c.note || '')}</textarea></label>
           <p class="err" data-err></p>
           <div class="actions">
@@ -727,6 +758,7 @@ async function openCompoundModal(existing) {
             polarity: card.querySelector('[name="polarity"]').value || null,
             note: (card.querySelector('[name="note"]').value || '').trim() || null,
             serial_no: sv === '' ? null : parseInt(sv, 10),
+            check_level: card.querySelector('[name="check_level"]').value || 'unchecked',
         };
     };
     return p;
@@ -815,14 +847,14 @@ function reportError(e, fallback) {
 async function addCompound() {
     const data = await openCompoundModal(null);
     if (!data) return;
-    try { await SupabaseClient.upsertCompound(_readCachedMasterPw(), data.name, data.tags, data.polarity, data.note, data.serial_no); await loadLibrary(); }
+    try { await SupabaseClient.upsertCompound(_readCachedMasterPw(), data.name, data.tags, data.polarity, data.note, data.serial_no, data.check_level); await loadLibrary(); }
     catch (e) { reportError(e, '化合物の保存'); }
 }
 async function editCompound(id) {
     const c = findCompound(id); if (!c) return;
     const data = await openCompoundModal(c);
     if (!data) return;
-    try { await SupabaseClient.updateCompound(_readCachedMasterPw(), id, data.name, data.tags, data.polarity, data.note, data.serial_no); await loadLibrary(); }
+    try { await SupabaseClient.updateCompound(_readCachedMasterPw(), id, data.name, data.tags, data.polarity, data.note, data.serial_no, data.check_level); await loadLibrary(); }
     catch (e) { reportError(e, '化合物の更新'); }
 }
 async function delCompound(id) {
@@ -1611,6 +1643,164 @@ async function openTemplateModal() {
     catch (e) { reportError(e, 'テンプレ保存'); }
 }
 
+// ===========================================================================
+// 実測棚卸し: bulk-register / ignore compounds measured in projects but not
+// yet in the MRM library (list_measured_compounds + register/ignore RPCs).
+// ===========================================================================
+async function openReconcileModal() {
+    if (!_readCachedMasterPw()) { const ok = await openMasterUnlockModal(); if (!ok) return; }
+    const shell = ''
+        + '<h2>実測棚卸し</h2>'
+        + '<p style="font-size:11px;color:#475569;margin:2px 0 8px;">実測PJで測定された化合物のうち MRM管理に未登録のものを、一括で「登録」または「無視(登録しない)」にできます。名前以外(Precursor 等)は分かる範囲での自動補完です。登録後に編集で補えます。</p>'
+        + '<div data-reconcile-body><div class="muted" style="padding:12px;">読み込み中…</div></div>'
+        + '<div class="modal-actions" style="display:flex;gap:6px;justify-content:flex-end;margin-top:12px;">'
+        +   '<button type="button" class="btn" data-modal-cancel>閉じる</button>'
+        + '</div>';
+    openModal(shell);
+    const card = openModal._card;
+    card.style.width = '90vw';
+    card.style.maxWidth = '780px';
+    let allRows = [];
+    let view = 'new';
+    const body = () => card.querySelector('[data-reconcile-body]');
+    const num = (v) => { if (v == null || v === '') return null; const n = Number(v); return Number.isFinite(n) ? n : null; };
+    const fmt = (v) => (v == null || v === '') ? '—' : safe(String(v));
+
+    async function reload() {
+        body().innerHTML = '<div class="muted" style="padding:12px;">読み込み中…</div>';
+        try {
+            const rows = await SupabaseClient.listMeasuredCompounds(_readCachedMasterPw());
+            allRows = Array.isArray(rows) ? rows : [];
+        } catch (e) {
+            body().innerHTML = '<div class="err" style="padding:12px;">取得に失敗しました: ' + safe(String((e && (e.message || e.details)) || e)) + '</div>';
+            return;
+        }
+        render();
+    }
+    function counts() {
+        let n = 0, ig = 0, rg = 0;
+        for (const r of allRows) { if (r.status === 'new') n++; else if (r.status === 'ignored') ig++; else rg++; }
+        return { n, ig, rg };
+    }
+    function render() {
+        const c = counts();
+        const rows = allRows.filter(r => r.status === view);
+        let inner = ''
+            + '<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap;">'
+            +   '<button type="button" class="btn mini' + (view === 'new' ? ' primary' : '') + '" data-view="new">未処理 (' + c.n + ')</button>'
+            +   '<button type="button" class="btn mini' + (view === 'ignored' ? ' primary' : '') + '" data-view="ignored">無視済み (' + c.ig + ')</button>'
+            +   '<span class="muted" style="font-size:11px;">登録済み ' + c.rg + '</span>'
+            + '</div>';
+        if (!rows.length) {
+            inner += '<div class="muted" style="padding:12px;">' + (view === 'new' ? '未登録の実測化合物はありません。' : '無視済みの化合物はありません。') + '</div>';
+            body().innerHTML = inner;
+            return;
+        }
+        if (view === 'new') {
+            const trows = rows.map((r, i) =>
+                '<tr>'
+                + '<td><input type="checkbox" class="rc-sel" data-i="' + i + '"></td>'
+                + '<td class="l">' + safe(r.name) + '</td>'
+                + '<td>' + fmt(r.precursor) + '</td>'
+                + '<td>' + fmt(r.product) + '</td>'
+                + '<td>' + fmt(r.ce) + '</td>'
+                + '<td>' + fmt(r.cv) + '</td>'
+                + '<td>' + fmt(r.polarity) + '</td>'
+                + '<td>' + safe(String(r.n_projects)) + '</td>'
+                + '</tr>'
+            ).join('');
+            inner += '<div style="max-height:44vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">'
+                + '<table class="tr-table" style="width:100%;">'
+                + '<thead><tr><th><input type="checkbox" data-rc-all title="全選択"></th><th class="l">化合物名</th><th>Precursor</th><th>Fragment</th><th>CE</th><th>CV</th><th>極性</th><th>PJ数</th></tr></thead>'
+                + '<tbody>' + trows + '</tbody></table></div>';
+            inner += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">'
+                + '<label style="font-size:11px;color:#475569;">タグ (任意・一括適用)<br><input type="text" data-rc-tags placeholder="例: アミノ酸" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;"></label>'
+                + '<label style="font-size:11px;color:#475569;">確認レベル<br><select data-rc-level style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;"><option value="unchecked">未確認</option><option value="std">標準品確認済み</option><option value="lit">文献のみ</option></select></label>'
+                + '<span style="flex:1"></span>'
+                + '<button type="button" class="btn" data-rc-ignore>選択を無視</button>'
+                + '<button type="button" class="btn primary" data-rc-register>選択を登録</button>'
+                + '</div>';
+        } else {
+            const trows = rows.map((r, i) =>
+                '<tr><td><input type="checkbox" class="rc-sel" data-i="' + i + '"></td><td class="l">' + safe(r.name) + '</td><td>' + safe(String(r.n_projects)) + '</td></tr>'
+            ).join('');
+            inner += '<div style="max-height:48vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">'
+                + '<table class="tr-table" style="width:100%;">'
+                + '<thead><tr><th><input type="checkbox" data-rc-all title="全選択"></th><th class="l">化合物名</th><th>PJ数</th></tr></thead>'
+                + '<tbody>' + trows + '</tbody></table></div>';
+            inner += '<div style="display:flex;justify-content:flex-end;margin-top:10px;"><button type="button" class="btn" data-rc-unignore>選択を無視解除</button></div>';
+        }
+        body().innerHTML = inner;
+    }
+    function selectedRows() {
+        const rows = allRows.filter(r => r.status === view);
+        const out = [];
+        body().querySelectorAll('.rc-sel:checked').forEach(cb => {
+            const i = parseInt(cb.getAttribute('data-i'), 10);
+            if (rows[i]) out.push(rows[i]);
+        });
+        return out;
+    }
+    async function doRegister() {
+        const sel = selectedRows();
+        if (!sel.length) { alert('登録する行を選択してください'); return; }
+        const tagsEl = body().querySelector('[data-rc-tags]');
+        const lvEl = body().querySelector('[data-rc-level]');
+        const tags = parseTags(tagsEl ? tagsEl.value : '');
+        const level = (lvEl && lvEl.value) || 'unchecked';
+        const pw = _readCachedMasterPw();
+        openModal('<h2>登録中…</h2><p data-prog style="font-size:12px;color:#475569;">0 / ' + sel.length + '</p>');
+        const pcard = openModal._card;
+        let ok = 0, fail = 0;
+        for (let i = 0; i < sel.length; i++) {
+            const r = sel[i];
+            try {
+                await SupabaseClient.registerMeasuredCompound(pw, {
+                    name: r.name, tags, polarity: r.polarity || null,
+                    precursor: num(r.precursor), product: num(r.product), ce: num(r.ce), cv: num(r.cv),
+                    check_level: level,
+                });
+                ok++;
+            } catch (e) { console.warn('register measured failed', r.name, e); fail++; }
+            const pe = pcard.querySelector('[data-prog]'); if (pe) pe.textContent = (i + 1) + ' / ' + sel.length;
+        }
+        if (pcard._close) pcard._close(true);
+        await loadLibrary();
+        await reload();
+        alert('登録: ' + ok + ' 件' + (fail ? ' / 失敗 ' + fail + ' 件' : ''));
+    }
+    async function doIgnore() {
+        const sel = selectedRows();
+        if (!sel.length) { alert('無視する行を選択してください'); return; }
+        if (!confirm(sel.length + ' 件を「登録しない(無視)」にします。よろしいですか?')) return;
+        const pw = _readCachedMasterPw();
+        for (const r of sel) { try { await SupabaseClient.ignoreMeasuredCompound(pw, r.name); } catch (e) { console.warn(e); } }
+        await reload();
+    }
+    async function doUnignore() {
+        const sel = selectedRows();
+        if (!sel.length) { alert('解除する行を選択してください'); return; }
+        const pw = _readCachedMasterPw();
+        for (const r of sel) { try { await SupabaseClient.unignoreMeasuredCompound(pw, r.name); } catch (e) { console.warn(e); } }
+        await reload();
+    }
+    card.addEventListener('click', async (ev) => {
+        const t = ev.target;
+        if (!t || !t.closest) return;
+        const vb = t.closest('[data-view]');
+        if (vb) { view = vb.getAttribute('data-view'); render(); return; }
+        if (t.matches && t.matches('[data-rc-all]')) {
+            const on = t.checked;
+            body().querySelectorAll('.rc-sel').forEach(x => { x.checked = on; });
+            return;
+        }
+        if (t.closest('[data-rc-register]')) { await doRegister(); return; }
+        if (t.closest('[data-rc-ignore]')) { await doIgnore(); return; }
+        if (t.closest('[data-rc-unignore]')) { await doUnignore(); return; }
+    });
+    await reload();
+}
+
 function bindLibraryEvents() {
     const host = document.getElementById('lib');
     host.addEventListener('click', (ev) => {
@@ -1705,6 +1895,7 @@ async function init() {
     document.getElementById('btn-reload').addEventListener('click', () => loadLibrary());
     document.getElementById('btn-exp-template').addEventListener('click', () => openTemplateModal());
     document.getElementById('btn-sets').addEventListener('click', () => openSetsModal());
+    document.getElementById('btn-reconcile').addEventListener('click', () => openReconcileModal());
     document.getElementById('btn-exp-export').addEventListener('click', () => exportSelectedExp());
     document.getElementById('btn-exp-clear').addEventListener('click', () => clearSelection());
     const search = document.getElementById('search');
