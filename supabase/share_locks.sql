@@ -488,6 +488,53 @@ end
 $$;
 grant execute on function public.unlock_public_project(text) to anon, authenticated;
 
+-- ---- 3b-2. unlock_project_master: master-pw token mint for ANY project ------
+-- Like unlock_public_project, but instead of gating on projects.is_public it
+-- gates on the lab-wide master password (_verify_master_pw). This lets a
+-- master-unlocked, same-origin session (e.g. the MRM "実測棚卸し" preview
+-- embedded from mrm.html) open ANY published project — public OR private — with
+-- a read-only VIEWER token, WITHOUT knowing that project's per-project viewer
+-- password and WITHOUT mutating any credential. A master user can already see
+-- every project (that is the premise of the stock-take), so this grants no new
+-- visibility; it only hands the viewer a short-lived read token. Mirrors the
+-- token-mint of unlock_public_project so get_project_doc/_resolve_token accept
+-- it unchanged. Idempotent.
+create or replace function public.unlock_project_master(_master_pw text, _slug text)
+returns table (token text, role text, expires_at timestamptz)
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid     uuid;
+    v_token   text;
+    v_expires timestamptz;
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    if _slug is null or length(trim(_slug)) = 0 then
+        raise exception 'slug_required' using errcode = '22023';
+    end if;
+    select id into v_pid from public.projects
+        where slug = _slug
+        limit 1;
+    if v_pid is null then
+        raise exception 'not_found' using errcode = 'P0002';
+    end if;
+    -- GC expired tokens (same housekeeping as unlock_public_project). The
+    -- session_tokens alias avoids the RETURNS TABLE OUT-param name collision.
+    delete from public.session_tokens st where st.expires_at < now();
+    v_token   := encode(gen_random_bytes(24), 'hex');
+    v_expires := now() + interval '12 hour';
+    insert into public.session_tokens(token, project_id, role, expires_at)
+        values (v_token, v_pid, 'viewer', v_expires);
+    token       := v_token;
+    role        := 'viewer';
+    expires_at  := v_expires;
+    return next;
+end
+$$;
+grant execute on function public.unlock_project_master(text, text) to anon, authenticated;
+
 -- ---- 3c. Anon-readable public-state column subset -----------
 -- bootstrapShareMode() needs to know whether a slug is a public link
 -- before it decides between the password modal and unlock_public_project.

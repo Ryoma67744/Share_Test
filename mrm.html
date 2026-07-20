@@ -1707,11 +1707,12 @@ async function openReconcileModal() {
                 + '<td>' + fmt(r.cv) + '</td>'
                 + '<td>' + fmt(r.polarity) + '</td>'
                 + '<td>' + safe(String(r.n_projects)) + '</td>'
+                + '<td><button type="button" class="btn mini" data-rc-preview data-i="' + i + '" title="測定像をビューアでプレビュー (背景に重ね／強度レンジ／透明度)">🔬 表示</button></td>'
                 + '</tr>'
             ).join('');
             inner += '<div style="max-height:44vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">'
                 + '<table class="tr-table" style="width:100%;">'
-                + '<thead><tr><th><input type="checkbox" data-rc-all title="全選択"></th><th class="l">化合物名</th><th>Precursor</th><th>Fragment</th><th>CE</th><th>CV</th><th>極性</th><th>PJ数</th></tr></thead>'
+                + '<thead><tr><th><input type="checkbox" data-rc-all title="全選択"></th><th class="l">化合物名</th><th>Precursor</th><th>Fragment</th><th>CE</th><th>CV</th><th>極性</th><th>PJ数</th><th>測定像</th></tr></thead>'
                 + '<tbody>' + trows + '</tbody></table></div>';
             inner += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">'
                 + '<label style="font-size:11px;color:#475569;">タグ (任意・一括適用)<br><input type="text" data-rc-tags placeholder="例: アミノ酸" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;"></label>'
@@ -1789,6 +1790,13 @@ async function openReconcileModal() {
         if (!t || !t.closest) return;
         const vb = t.closest('[data-view]');
         if (vb) { view = vb.getAttribute('data-view'); render(); return; }
+        const pv = t.closest('[data-rc-preview]');
+        if (pv) {
+            const i = parseInt(pv.getAttribute('data-i'), 10);
+            const prows = allRows.filter(r => r.status === view);
+            if (prows[i]) openMeasuredPreview(prows[i]);
+            return;
+        }
         if (t.matches && t.matches('[data-rc-all]')) {
             const on = t.checked;
             body().querySelectorAll('.rc-sel').forEach(x => { x.checked = on; });
@@ -1799,6 +1807,59 @@ async function openReconcileModal() {
         if (t.closest('[data-rc-unignore]')) { await doUnignore(); return; }
     });
     await reload();
+}
+
+// ===========================================================================
+// 測定像プレビュー: embed the viewer (preview/focus mode) in an overlay so a
+// master user can judge, from 実測棚卸し, whether a measured compound is a
+// usable MRM — signal overlaid on the tissue background, with intensity-range
+// and opacity adjust — all via the REAL viewer (ROI-draw & analysis-graph UI
+// hidden by the viewer's body.preview class). Reuses each row's projects[]
+// (slug + display_name); no extra RPC. Private published projects open through
+// the master-pw path (unlock_project_master) since this tab is master-unlocked
+// and the same-origin iframe reads the cached master pw from sessionStorage.
+// ===========================================================================
+function measuredPreviewUrl(slug, compoundName) {
+    return 'viewer/index.html#share=' + encodeURIComponent(slug)
+        + '&focus=' + encodeURIComponent(compoundName || '')
+        + '&preview=1';
+}
+function openMeasuredPreview(row) {
+    const projects = (Array.isArray(row && row.projects) ? row.projects : []).filter(p => p && p.slug);
+    if (!projects.length) { alert('プレビューできる測定プロジェクトが見つかりません'); return; }
+    const back = document.createElement('div');
+    back.className = 'modal-backdrop';
+    back.style.zIndex = '80';   // above the reconcile modal (.modal-backdrop z-index:60)
+    const optsHtml = projects.map(p =>
+        '<option value="' + safe(p.slug) + '">' + safe(p.display_name || p.slug) + '</option>').join('');
+    back.innerHTML =
+        '<div class="modal-card" style="width:96vw;max-width:1200px;height:92vh;max-height:92vh;display:flex;flex-direction:column;padding:12px 14px;">'
+        + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">'
+        +   '<h2 style="margin:0;font-size:14px;font-weight:600;">測定像プレビュー: ' + safe(row.name || '') + '</h2>'
+        +   (projects.length > 1
+                ? '<label style="font-size:11px;color:#475569;">測定PJ <select data-mp-proj style="padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;background:#fff;">' + optsHtml + '</select></label>'
+                : '<span class="muted" style="font-size:11px;">' + safe(projects[0].display_name || projects[0].slug) + '</span>')
+        +   '<span style="flex:1"></span>'
+        +   '<span class="muted" style="font-size:11px;">重ね合わせ・強度レンジ・透明度はビューア内で調整 (ROI/グラフは非表示)</span>'
+        +   '<button type="button" class="btn" data-mp-close>閉じる</button>'
+        + '</div>'
+        + '<iframe data-mp-frame title="測定像プレビュー" style="flex:1;width:100%;border:1px solid #e5e7eb;border-radius:6px;background:#000;"></iframe>'
+        + '</div>';
+    document.body.appendChild(back);
+    const frame = back.querySelector('[data-mp-frame]');
+    const sel = back.querySelector('[data-mp-proj]');
+    const load = (slug) => { frame.src = measuredPreviewUrl(slug, row.name); };
+    const close = () => {
+        document.removeEventListener('keydown', onKey);
+        try { frame.src = 'about:blank'; } catch (e) {}
+        back.remove();
+    };
+    const onKey = (e) => { if (e.key === 'Escape') close(); };
+    load(projects[0].slug);
+    if (sel) sel.addEventListener('change', () => load(sel.value));
+    back.querySelector('[data-mp-close]').addEventListener('click', close);
+    back.addEventListener('click', (ev) => { if (ev.target === back) close(); });
+    document.addEventListener('keydown', onKey);
 }
 
 function bindLibraryEvents() {
