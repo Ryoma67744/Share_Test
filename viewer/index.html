@@ -103,6 +103,13 @@ body.share-mode:not(.share-admin) #btn-share-admin-login { display:inline-flex; 
 .sync-status.sync-needs-master-pw { background:#ede9fe; color:#6d28d9; }
 .sync-status.sync-error           { background:#fee2e2; color:#b91c1c; }
 body.share-mode .sync-status { display:none !important; }
+/* Preview/embed mode (opened with #...&preview=1, e.g. the MRM "実測棚卸し"
+   iframe). Keep the image canvas plus the range / opacity / colormap toolbar
+   and per-section layer chips; hide only the ROI-editing panel and the
+   analysis-graph panel. Composes with body.share-mode. */
+body.preview #panel-roi,
+body.preview #splitter-roi-method,
+body.preview #panel-analysis { display:none !important; }
 .modal-backdrop { position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:10000; display:flex; align-items:center; justify-content:center; }
 .modal-card { background:#fff; border-radius:8px; box-shadow:0 12px 30px rgba(0,0,0,0.2); padding:18px; width:480px; max-width:92vw; max-height:88vh; overflow-y:auto; }
 .modal-card h2 { font-size:14px; font-weight:600; margin-bottom:10px; color:#0f172a; }
@@ -11518,6 +11525,8 @@ const SupabaseClient = (() => {
         // is_public flag is true. Throws otherwise (caller falls back to
         // password modal).
         unlockPublicProject(slug) { return rpc('unlock_public_project', { _slug: slug }); },
+        // Master-pw read token for ANY project by slug (preview/embed only).
+        unlockProjectMaster(slug, masterPw) { return rpc('unlock_project_master', { _master_pw: masterPw, _slug: slug }); },
         // Probe a slug's is_public flag via column-restricted anon SELECT.
         // Returns { slug, is_public, display_name } or null. bootstrapShareMode
         // uses this to decide between the password modal and the public-link
@@ -12321,6 +12330,18 @@ const App = {
             } catch (e) {}
         });
         const shareSlug = this._readShareSlug();
+        // Preview/focus params (used by the MRM 実測棚卸し embed):
+        //   focus=<compound>  → pin one compound's MSI layer as the focus
+        //   preview=1         → hide ROI/analysis chrome (body.preview) AND
+        //                       enable the master-pw project unlock path in
+        //                       bootstrapShareMode (so a private measured
+        //                       project is previewable without its viewer pw).
+        try {
+            const _hp = new URLSearchParams((location.hash || '').replace(/^#/, ''));
+            this._previewMode = _hp.get('preview') === '1';
+            this._focusParam  = (_hp.get('focus') || '').trim() || null;
+        } catch (e) { this._previewMode = false; this._focusParam = null; }
+        if (this._previewMode) { try { document.body.classList.add('preview'); } catch (e) {} }
         // ① Phase 2: a folder-share link (#folder=<slug>) shows a read-only
         // index of the folder's published child projects. No master gate and
         // no project hydrate — render the index screen and stop.
@@ -12450,6 +12471,34 @@ const App = {
         })();
 
         let session = stored;
+        // Preview/embed unlock: the MRM 実測棚卸し opens this viewer in a
+        // same-origin iframe while the tab already holds a master unlock
+        // (sessionStorage['desi:masterPw']). In that case mint a read-only
+        // viewer token for the slug via unlock_project_master — this opens
+        // ANY published project (public OR private) without its per-project
+        // viewer password and without mutating anything. Only attempted when
+        // preview=1; the normal share flow (public unlock → password modal)
+        // is left untouched below.
+        if (!session && this._previewMode) {
+            let mpw = '';
+            try { mpw = (typeof _readCachedMasterPw === 'function') ? _readCachedMasterPw() : ''; } catch (e) {}
+            if (mpw) {
+                try {
+                    const mRaw = await SupabaseClient.unlockProjectMaster(slug, mpw);
+                    const mRow = Array.isArray(mRaw) ? mRaw[0] : mRaw;
+                    if (mRow && mRow.token) {
+                        session = {
+                            slug,
+                            token: mRow.token,
+                            role: mRow.role || 'viewer',
+                            expiresAt: mRow.expires_at,
+                            isPublic: false,
+                        };
+                        try { sessionStorage.setItem('desi:share:' + slug, JSON.stringify(session)); } catch (e) {}
+                    }
+                } catch (e) { console.warn('unlock_project_master (preview) failed', e); }
+            }
+        }
         if (!session) {
             // Primary signal for "is this a public link?": try
             // unlock_public_project. The RPC succeeds (returns a viewer
@@ -12946,6 +12995,26 @@ const App = {
             const loadedMsi = new Set();
             for (const p of this.panels.values())
                 for (const k of Object.keys(p.imageSources || {})) if (/^MSI_/i.test(k)) loadedMsi.add(k);
+            // Preview embed: honor focus=<compound> from the hash — resolve it
+            // to a loaded MSI layer (match compoundMeta.name or the MSI_<name>
+            // key, normalized: lowercased, alnum-only) and pin it as the focus
+            // compound so the embed opens straight on the requested compound.
+            if (this._focusParam) {
+                const _norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+                const _target = _norm(this._focusParam);
+                let _hit = null;
+                for (const p of this.panels.values()) {
+                    const ser = (p.section && p.section.msiSeries) || {};
+                    for (const k of Object.keys(ser)) {
+                        if (!/^MSI_/i.test(k) || !loadedMsi.has(k)) continue;
+                        const nm = ser[k] && ser[k].compoundMeta && ser[k].compoundMeta.name;
+                        if (_norm(nm) === _target || _norm(k.replace(/^MSI_/i, '')) === _target) { _hit = k; break; }
+                    }
+                    if (_hit) break;
+                }
+                if (_hit) this.focusCompoundKey = _hit;
+                else console.warn('preview focus not found among loaded layers:', this._focusParam);
+            }
             if (!this.focusCompoundKey || !loadedMsi.has(this.focusCompoundKey))
                 this.focusCompoundKey = loadedMsi.values().next().value || null;
             const fk = this.focusCompoundKey;
@@ -12969,6 +13038,22 @@ const App = {
                     p.renderComposite();
                 } catch (e) { console.warn('share focus apply failed', p.section && p.section.id, e); }
             }
+            // Preview embed: make sure a tissue background is visible so the
+            // focus compound is actually OVERLAID on tissue (the whole point of
+            // the preview). Only turns ON an already-loaded HE/IF/TIC layer —
+            // never force-loads one — then re-renders. No-op outside preview.
+            if (this._previewMode) {
+                for (const p of this.panels.values()) {
+                    try {
+                        const keys = Object.keys(p.imageSources || {});
+                        const hasBg = keys.some(k => /HE_STAIN|IF_STAIN/i.test(k) && p.visibleLayers.has(k));
+                        if (!hasBg) {
+                            const bg = keys.find(k => /HE_STAIN|IF_STAIN/i.test(k));
+                            if (bg) { p.visibleLayers.add(bg); p.renderComposite(); }
+                        }
+                    } catch (e) { /* non-fatal */ }
+                }
+            }
         } catch (e) { console.warn('share focus init failed', e); }
         populateRoiList();
         setupGraphSelector();
@@ -12984,7 +13069,7 @@ const App = {
         // freshly-hydrated detailed view. The overlay is only auto-shown for
         // share-mode visitors (recipients and admins); the master / local
         // project flow keeps going straight to the detailed UI.
-        if (this.shareMode) {
+        if (this.shareMode && !this._previewMode) {
             const role = this.shareMode.role || 'viewer';
             // Two rAFs so the section panels' ResizeObserver has had a chance
             // to run setupCanvasSize() and renderComposite() once. Without
