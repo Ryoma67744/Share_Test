@@ -110,6 +110,17 @@ body.share-mode .sync-status { display:none !important; }
 body.preview #panel-roi,
 body.preview #splitter-roi-method,
 body.preview #panel-analysis { display:none !important; }
+/* Preview: hide the whole right sidebar (Memo is relocated under the Method
+   table in the left sidebar by JS) + its drag handle, so #main-center (flex-1)
+   absorbs that width and the MSI image gets bigger. With #panel-roi hidden, let
+   #method-panel grow to fill the left column and keep the relocated #memo-panel
+   pinned below it. */
+body.preview #sidebar-right,
+body.preview #splitter-main-right { display:none !important; }
+body.preview #method-panel { flex:1 1 auto !important; height:auto !important; }
+/* Evaluation-hue control (recolor the evaluated compound): preview only. */
+#tb-eval-group { display:none !important; }
+body.preview #tb-eval-group { display:inline-flex !important; }
 .modal-backdrop { position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:10000; display:flex; align-items:center; justify-content:center; }
 .modal-card { background:#fff; border-radius:8px; box-shadow:0 12px 30px rgba(0,0,0,0.2); padding:18px; width:480px; max-width:92vw; max-height:88vh; overflow-y:auto; }
 .modal-card h2 { font-size:14px; font-weight:600; margin-bottom:10px; color:#0f172a; }
@@ -797,6 +808,11 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                         <option value="jet">Jet</option>
                         <option value="grayscale">Grayscale</option>
                     </select>
+                </span>
+                <span class="tb-group" id="tb-eval-group" title="評価対象の化合物だけを選んだ単色で表示 (評価色)">
+                    <span class="tb-label" aria-hidden="true">🎯</span>
+                    <input type="color" id="tb-eval-hue" value="#ff3b30" title="評価対象の化合物の表示色 (単色)">
+                    <button type="button" id="tb-eval-hue-clear" class="tb-icon" title="評価色を解除してカラーマップ表示に戻す">✕</button>
                 </span>
                 <span class="tb-group" title="MSI 表示の補間 (None=ピクセル / Linear=なめらか)">
                     <span class="tb-label">補間</span>
@@ -3265,8 +3281,14 @@ class SectionPanel {
                 // the user's manual min/max. msiWindowEval maps each pixel into it.
                 const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
                 const winC = App.getMsiWindow(key, rrC, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
-                const lut = overlay ? monoLut(overlayColor[key] || '#ffffff') : getActiveColormap();
-                const bg = overlay ? [0, 0, 0] : getColormapBackground();
+                // Evaluation hue: in preview the user can recolor the compound
+                // being evaluated (the focus layer) to a single chosen hue via
+                // monoLut, leaving other layers / the global colormap untouched.
+                const _useEvalHue = (!overlay && App.focusHexColor && key === App.focusCompoundKey);
+                const lut = overlay ? monoLut(overlayColor[key] || '#ffffff')
+                          : _useEvalHue ? monoLut(App.focusHexColor)
+                          : getActiveColormap();
+                const bg = (overlay || _useEvalHue) ? [0, 0, 0] : getColormapBackground();
                 for (let i = 0; i < d.length; i += 4) {
                     const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
                     const lum = 0.299*r + 0.587*g + 0.114*b;
@@ -11122,6 +11144,8 @@ const Toolbar = {
         this.flipVBtn = document.getElementById('tb-flip-v');
         this.colormapSel = document.getElementById('tb-colormap');
         this.smoothingSel = document.getElementById('tb-smoothing');
+        this.evalHueInp = document.getElementById('tb-eval-hue');
+        this.evalHueClearBtn = document.getElementById('tb-eval-hue-clear');
         this.syncButtons = this.el.querySelectorAll('.sync-toggle');
 
         this.pickerBtn.addEventListener('click', (ev) => { ev.stopPropagation(); this.togglePickerMenu(); });
@@ -11223,6 +11247,18 @@ const Toolbar = {
             this.smoothingSel.value = App.msiSmoothing || 'none';
             this.smoothingSel.addEventListener('change', () => {
                 App.setMsiSmoothing(this.smoothingSel.value);
+            });
+        }
+
+        // Evaluation hue (preview): live-recolor the focus compound; ✕ clears.
+        if (this.evalHueInp) {
+            this.evalHueInp.addEventListener('input', () => {
+                App.setFocusHexColor(this.evalHueInp.value);
+            });
+        }
+        if (this.evalHueClearBtn) {
+            this.evalHueClearBtn.addEventListener('click', () => {
+                App.setFocusHexColor(null);
             });
         }
 
@@ -11473,6 +11509,10 @@ const Toolbar = {
         this.refreshRange();
         this.refreshOpacity();
         this.refreshRotation();
+    },
+    // Sync the preview evaluation-hue picker's swatch with App.focusHexColor.
+    refreshEvalHueUI() {
+        if (this.evalHueInp && App.focusHexColor) this.evalHueInp.value = App.focusHexColor;
     },
 };
 
@@ -11758,6 +11798,10 @@ const App = {
                                // (pixelated), 'linear' = bilinear (HDI Smoothing).
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
     focusCompoundKey: null,
+    // Preview "evaluation hue": when set (a #rrggbb string), the focus compound
+    // is drawn with a single-hue monoLut instead of the global colormap (see
+    // renderComposite). Preview-only; persisted per compound in localStorage.
+    focusHexColor: null,
     // ① Rotation target for the shared toolbar: 'both' (whole-view CSS rot),
     // 'he' (HE-only) or 'msi' (MSI-only). Per-side rotations are canvas-baked
     // per section (renderComposite) so HE/MSI imported at different
@@ -11818,6 +11862,26 @@ const App = {
         }
         renderMethodTable();
         Toolbar.refreshAll();
+    },
+
+    // Preview evaluation hue: recolor ONLY the focus (evaluated) compound with a
+    // single chosen hue via monoLut (see renderComposite), leaving the tissue
+    // background and any other layers on the global colormap. Persisted per
+    // compound (by normalized name, App._focusEvalNorm) in localStorage so the
+    // same compound reopens in the same colour. Pass null / '' to clear (revert
+    // to the colormap).
+    setFocusHexColor(hex) {
+        const v = (typeof hex === 'string' && /^#[0-9a-fA-F]{6}$/.test(hex)) ? hex.toLowerCase() : null;
+        this.focusHexColor = v;
+        try {
+            const norm = this._focusEvalNorm || '';
+            if (norm) {
+                if (v) localStorage.setItem('desi:evalHue:' + norm, v);
+                else localStorage.removeItem('desi:evalHue:' + norm);
+            }
+        } catch (e) {}
+        if (this.panels) for (const p of this.panels.values()) { try { p.renderComposite(); } catch (e) {} }
+        try { if (typeof Toolbar !== 'undefined' && Toolbar.refreshEvalHueUI) Toolbar.refreshEvalHueUI(); } catch (e) {}
     },
 
     // Rename a compound across the whole project. Touches every place a
@@ -12341,7 +12405,19 @@ const App = {
             this._previewMode = _hp.get('preview') === '1';
             this._focusParam  = (_hp.get('focus') || '').trim() || null;
         } catch (e) { this._previewMode = false; this._focusParam = null; }
-        if (this._previewMode) { try { document.body.classList.add('preview'); } catch (e) {} }
+        if (this._previewMode) {
+            try { document.body.classList.add('preview'); } catch (e) {}
+            // Relocate the Memo panel from the (now-hidden) right sidebar to the
+            // bottom of the left sidebar, under the Method (MRM) table, so the
+            // central MSI image gets the freed width. The memo's inputs and
+            // listeners are bound by id (renderMemoForm / setupEventListeners),
+            // so they travel with the node — no re-wiring needed.
+            try {
+                const _sl = document.getElementById('sidebar-left');
+                const _mp = document.getElementById('memo-panel');
+                if (_sl && _mp) _sl.appendChild(_mp);
+            } catch (e) {}
+        }
         // ① Phase 2: a folder-share link (#folder=<slug>) shows a read-only
         // index of the folder's published child projects. No master gate and
         // no project hydrate — render the index screen and stop.
@@ -13017,6 +13093,19 @@ const App = {
             }
             if (!this.focusCompoundKey || !loadedMsi.has(this.focusCompoundKey))
                 this.focusCompoundKey = loadedMsi.values().next().value || null;
+            // Preview evaluation hue: derive a stable per-compound persistence key
+            // (normalized focus name) and restore the saved colour so the compound
+            // reopens in the same evaluation colour. Set BEFORE the per-panel
+            // render loop below so the first paint already uses it.
+            if (this._previewMode) {
+                const _srcName = this._focusParam
+                    || (this.focusCompoundKey ? String(this.focusCompoundKey).replace(/^MSI_/i, '') : '');
+                this._focusEvalNorm = String(_srcName || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+                let _saved = null;
+                try { _saved = this._focusEvalNorm ? localStorage.getItem('desi:evalHue:' + this._focusEvalNorm) : null; } catch (e) {}
+                this.focusHexColor = (_saved && /^#[0-9a-fA-F]{6}$/.test(_saved)) ? _saved.toLowerCase() : null;
+                try { if (typeof Toolbar !== 'undefined' && Toolbar.refreshEvalHueUI) Toolbar.refreshEvalHueUI(); } catch (e) {}
+            }
             const fk = this.focusCompoundKey;
             for (const p of this.panels.values()) {
                 try {
