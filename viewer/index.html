@@ -859,11 +859,8 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     </span>
                     <span id="analysis-otsu-controls" class="flex items-center gap-1" style="display:none;">
                         <select id="otsu-section-select" class="text-xs border-gray-300 rounded py-0.5 px-1" title="ヒストグラムを表示する切片"></select>
-                        <label style="display:inline-flex;align-items:center;gap:3px;" title="背景除去の強度。右=強く除去(多く消す) / 左=弱く(残す)。0=自動Otsu。ヒストグラムの赤線を直接ドラッグしても調整できます">
-                            <span class="text-gray-500">強度</span>
-                            <input type="range" id="otsu-strength" min="-3" max="3" step="0.02" value="0" style="vertical-align:middle;width:130px;">
-                        </label>
-                        <button type="button" id="otsu-strength-reset" class="tb-icon" title="自動Otsu(強度0)に戻す" aria-label="強度リセット">⟲</button>
+                        <span class="text-[10px] text-gray-400" title="ヒストグラムの赤線を左右にドラッグして背景/組織の境目を調整します">↔ 赤線をドラッグ</span>
+                        <button type="button" id="otsu-strength-reset" class="tb-icon" title="自動Otsu(強度0)に戻す" aria-label="自動Otsuに戻す">⟲</button>
                         <span id="otsu-strength-readout" class="text-[10px] text-gray-500"></span>
                     </span>
                 </div>
