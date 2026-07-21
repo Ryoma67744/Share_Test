@@ -847,17 +847,17 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                 </div>
                 <div class="flex items-center gap-1 text-xs mb-1 shrink-0 flex-wrap">
                     <select id="analysis-mode" class="text-xs border-gray-300 rounded py-0.5 px-1" title="Analysis の表示を切り替え">
-                        <option value="roi">ROI強度</option>
                         <option value="otsu">背景除去(Otsu)</option>
+                        <option value="roi">ROI強度</option>
                     </select>
-                    <span id="analysis-roi-controls" class="flex items-center gap-1">
+                    <span id="analysis-roi-controls" class="flex items-center gap-1" style="display:none;">
                         <select id="graph-select-1" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
                         <span class="text-gray-400">vs</span>
                         <select id="graph-select-2" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
                         <span class="text-gray-400">vs</span>
                         <select id="graph-select-3" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
                     </span>
-                    <span id="analysis-otsu-controls" class="flex items-center gap-1" style="display:none;">
+                    <span id="analysis-otsu-controls" class="flex items-center gap-1">
                         <select id="otsu-section-select" class="text-xs border-gray-300 rounded py-0.5 px-1" title="ヒストグラムを表示する切片"></select>
                         <span class="text-[10px] text-gray-400" title="ヒストグラムの赤線を左右にドラッグして背景/組織の境目を調整します">↔ 赤線をドラッグ</span>
                         <button type="button" id="otsu-strength-reset" class="tb-icon" title="自動Otsu(強度0)に戻す" aria-label="自動Otsuに戻す">⟲</button>
@@ -12229,7 +12229,7 @@ const App = {
     otsuManualThreshold: null, // 手動閾値(生 TIC 単位)。null なら Otsu 自動。
     otsuStrength: 0,           // 背景除去の強度(log10 単位オフセット)。0=自動Otsu、
                                // 正=強く除去(多く消す)、負=弱く(残す)。
-    analysisMode: 'roi',       // Analysis パネルの表示: 'roi' 強度チャート / 'otsu' 背景除去
+    analysisMode: 'otsu',      // Analysis パネルの初期表示: 'otsu' 背景除去 / 'roi' 強度チャート
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
     focusCompoundKey: null,
     // ① Rotation target for the shared toolbar: 'both' (whole-view CSS rot),
@@ -15005,12 +15005,16 @@ const App = {
         });
         // Analysis モード切替(ROI強度 / 背景除去(Otsu))
         const analysisModeSel = document.getElementById('analysis-mode');
-        if (analysisModeSel) analysisModeSel.addEventListener('change', () => {
-            this.analysisMode = (analysisModeSel.value === 'otsu') ? 'otsu' : 'roi';
-            try { updateAnalysisModeUi(); } catch (e) {}
-            if (this.analysisMode === 'otsu') { try { populateOtsuSectionSelect(); } catch (e) {} }
-            this.renderAnalysis();
-        });
+        if (analysisModeSel) {
+            analysisModeSel.value = this.analysisMode;   // 既定(otsu)をドロップダウンに反映
+            analysisModeSel.addEventListener('change', () => {
+                this.analysisMode = (analysisModeSel.value === 'otsu') ? 'otsu' : 'roi';
+                try { updateAnalysisModeUi(); } catch (e) {}
+                if (this.analysisMode === 'otsu') { try { populateOtsuSectionSelect(); } catch (e) {} }
+                this.renderAnalysis();
+            });
+        }
+        try { updateAnalysisModeUi(); } catch (e) {}   // 初期状態(otsu)の表示切替を即反映
         const otsuSecSel = document.getElementById('otsu-section-select');
         if (otsuSecSel) otsuSecSel.addEventListener('change', () => { try { renderOtsuAnalysis(); } catch (e) {} });
         const otsuStrengthInp = document.getElementById('otsu-strength');
