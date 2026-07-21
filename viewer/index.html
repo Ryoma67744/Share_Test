@@ -810,6 +810,12 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                         <input type="checkbox" id="tb-he-mono"> HE モノクロ
                     </label>
                 </span>
+                <span class="tb-group" id="tb-bg-remove-group" title="背景除去(Otsu): 各ピクセルの総信号量(TIC)で背景スポットを自動判定し、全イオン像から一括で非表示にします。生データは変更しません。">
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;font-size:11px;">
+                        <input type="checkbox" id="tb-bg-remove"> 背景除去(Otsu)
+                    </label>
+                    <button type="button" id="tb-bg-remove-all" class="tb-btn" title="今あるデータ(全切片)に背景除去を一括適用。処理済みの切片はスキップします(二重適用防止)。" aria-label="背景除去を全切片に適用">全切片に適用</button>
+                </span>
                 <span class="tb-group" id="tb-msi-um-group">
                     <span class="tb-label">μm/px:</span>
                     <button type="button" id="tb-msi-um" class="tb-icon" title="MSI のピクセル物理サイズ (μm/px) を入力">📏</button>
@@ -2124,6 +2130,179 @@ function rasterRowsToPngDataUrl(rows, range) {
     return { dataUrl: canvas.toDataURL('image/png'), rawRange, rawMean, rawTrueMax, rawDispMax };
 }
 
+// ============================================================
+// ==== 背景除去 (Otsu thresholding on per-pixel TIC) ==========
+// ============================================================
+// R スクリプト (filter_low_count_spots) と同等の背景除去。各ピクセルの
+// 総信号量 (TIC = 全 m/z チャネルの合計) を log10(x+1) した分布に大津の
+// 二値化を適用し、閾値未満のスポットを「背景」として全イオン像から一括で除く。
+// 元ファイル(生データ)は一切変更しない完全な非破壊マスク方式。マスクは
+// section.meta.otsu にキャッシュされ、描画時に参照される。
+const OTSU_NBINS = 256;
+
+// 大津の二値化: R calculate_otsu_threshold の移植。data は log10(TIC+1) 済み想定。
+// [min,max] を nBins 等幅ビンに分割し、クラス間分散 P1*P2*(mu1-mu2)^2 を最大化
+// する bin 中心を閾値として返す。ユニーク値が1つ以下なら中央値にフォールバック。
+function computeOtsuThreshold(data, nBins) {
+    nBins = nBins || OTSU_NBINS;
+    let mn = Infinity, mx = -Infinity, finite = 0;
+    for (let i = 0; i < data.length; i++) {
+        const v = data[i];
+        if (Number.isFinite(v)) { if (v < mn) mn = v; if (v > mx) mx = v; finite++; }
+    }
+    if (finite === 0) return { threshold: 0, degenerate: true };
+    if (!(mx > mn)) {
+        // ≤1 ユニーク値 → 中央値にフォールバック (R と同挙動)
+        const arr = [];
+        for (let i = 0; i < data.length; i++) if (Number.isFinite(data[i])) arr.push(data[i]);
+        arr.sort((a, b) => a - b);
+        const med = arr.length ? arr[Math.floor(arr.length / 2)] : mn;
+        return { threshold: med, degenerate: true };
+    }
+    const width = (mx - mn) / nBins;
+    const counts = new Float64Array(nBins);
+    for (let i = 0; i < data.length; i++) {
+        const v = data[i];
+        if (!Number.isFinite(v)) continue;
+        let b = Math.floor((v - mn) / width);
+        if (b < 0) b = 0; else if (b >= nBins) b = nBins - 1;
+        counts[b]++;
+    }
+    const total = finite;
+    const centers = new Float64Array(nBins);
+    let mu = 0;
+    for (let b = 0; b < nBins; b++) { centers[b] = mn + (b + 0.5) * width; mu += centers[b] * (counts[b] / total); }
+    let P1 = 0, cumCB = 0, bestVar = -Infinity, bestThr = centers[0];
+    for (let b = 0; b < nBins; b++) {
+        const p = counts[b] / total;
+        P1 += p; cumCB += centers[b] * p;
+        const P2 = 1 - P1;
+        if (P1 <= 0 || P2 <= 0) continue;
+        const mu1 = cumCB / P1;
+        const mu2 = (mu - cumCB) / P2;
+        const vb = P1 * P2 * (mu1 - mu2) * (mu1 - mu2);
+        if (vb > bestVar) { bestVar = vb; bestThr = centers[b]; }
+    }
+    return { threshold: bestThr, degenerate: false };
+}
+
+// keep ビット列(1=残す/0=背景) を base64 に pack/unpack。IndexedDB 保存を軽量化。
+function packBitsToB64(u8) {
+    const n = u8.length;
+    const bytes = new Uint8Array((n + 7) >> 3);
+    for (let i = 0; i < n; i++) if (u8[i]) bytes[i >> 3] |= (1 << (i & 7));
+    let s = '';
+    for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+    return btoa(s);
+}
+function unpackBitsFromB64(b64, n) {
+    const keep = new Uint8Array(n);
+    if (!b64) return keep;
+    let s; try { s = atob(b64); } catch (e) { return keep; }
+    for (let i = 0; i < n; i++) {
+        const byte = (i >> 3) < s.length ? s.charCodeAt(i >> 3) : 0;
+        keep[i] = (byte >> (i & 7)) & 1;
+    }
+    return keep;
+}
+
+// 復元済み keep grid のセッションキャッシュ (描画のたびの base64 デコードを回避)。
+// マスク再計算時に App.applyOtsu 経路が clear() する。
+const _otsuKeepDecodeCache = new Map();
+
+// 1 切片の全ソースファイルについて TIC ベースの Otsu マスクを計算する(非破壊)。
+// 戻り値: { bySource: { [srcKey]: { W,H,keepB64, thresholdOriginal, nOriginal,
+//   nKept, nRemoved, signature, layerKeys, manual } }, unavailable:[srcKey...],
+//   nOriginal, nKept, nRemoved }。opts.manualThreshold(生単位) 指定時は Otsu を
+//   使わず手動閾値。opts.useLogScale 既定 true (R filter_low_count_spots と一致)。
+async function computeSectionOtsuMasks(sec, project, opts) {
+    opts = opts || {};
+    const useLog = opts.useLogScale !== false;
+    const series = (sec && sec.msiSeries) || {};
+    const layerKeys = Object.keys(series).filter(k => /^MSI_/i.test(k));
+    const bySourceGrp = new Map();
+    for (const k of layerKeys) {
+        const ent = series[k]; if (!ent) continue;
+        const srcKey = ent.sourceFileId || ent.blobId;
+        if (srcKey == null) continue;
+        if (!bySourceGrp.has(srcKey)) bySourceGrp.set(srcKey, { repr: ent, blobId: ent.blobId, entries: [] });
+        bySourceGrp.get(srcKey).entries.push({ layerKey: k, ent });
+    }
+    const bySource = {};
+    const unavailable = [];
+    let totOrig = 0, totKept = 0, totRem = 0;
+    for (const [srcKey, grp] of bySourceGrp) {
+        let rec = null;
+        try { rec = await ProjectStorage.getBlob(grp.blobId); } catch (e) { rec = null; }
+        if (!rec || !rec.blob) { unavailable.push(srcKey); continue; }
+        let m = null, sig = null;
+        try {
+            const buf = await rec.blob.arrayBuffer();
+            m = extractSourceMatrixForExport(buf, grp.repr, grp.entries);
+        } catch (e) { m = null; }
+        try { sig = await blobContentSig(rec.blob); } catch (e) { sig = null; }
+        if (!m || !m.positions || !m.positions.length) { unavailable.push(srcKey); continue; }
+        const N = m.positions.length;
+        // TIC = 各ピクセルの全チャネル合計 (R colSums(counts) と同じ)
+        const tic = new Float64Array(N);
+        for (const col of m.cols) {
+            const v = col.values;
+            for (let i = 0; i < N; i++) { const x = v[i]; if (Number.isFinite(x)) tic[i] += x; }
+        }
+        // 閾値決定 (手動 or Otsu)
+        let thresholdOriginal;
+        if (opts.manualThreshold != null && Number.isFinite(Number(opts.manualThreshold))) {
+            thresholdOriginal = Number(opts.manualThreshold);
+        } else {
+            const dataArr = new Float64Array(N);
+            for (let i = 0; i < N; i++) {
+                const t = tic[i] > 0 ? tic[i] : 0;
+                dataArr[i] = useLog ? Math.log10(t + 1) : t;
+            }
+            const otsu = computeOtsuThreshold(dataArr, OTSU_NBINS);
+            thresholdOriginal = useLog ? (Math.pow(10, otsu.threshold) - 1) : otsu.threshold;
+        }
+        // keep grid (描画ラスタと同じ buildMsiGrid 座標系で W×H に写像)
+        const { xIndex, yIndex, W, H } = buildMsiGrid(m.positions);
+        const keep = new Uint8Array(W * H);
+        let nKept = 0;
+        for (let i = 0; i < N; i++) {
+            const p = m.positions[i];
+            const ci = xIndex.get(p.x), ri = yIndex.get(p.y);
+            if (ci == null || ri == null) continue;
+            if (tic[i] > thresholdOriginal) { const gi = ri * W + ci; if (!keep[gi]) { keep[gi] = 1; nKept++; } }
+        }
+        const nRemoved = N - nKept;
+        bySource[srcKey] = {
+            W, H, keepB64: packBitsToB64(keep),
+            thresholdOriginal, signature: sig,
+            nOriginal: N, nKept, nRemoved,
+            layerKeys: grp.entries.map(e => e.layerKey),
+            manual: (opts.manualThreshold != null),
+        };
+        totOrig += N; totKept += nKept; totRem += nRemoved;
+        try { if (typeof _yieldUi === 'function') await _yieldUi(); } catch (e) {}
+    }
+    return { bySource, unavailable, nOriginal: totOrig, nKept: totKept, nRemoved: totRem };
+}
+
+// 描画用(同期): あるレイヤーに対応する keep grid を返す。背景除去 OFF や
+// マスク未計算/寸法不一致なら null。renderComposite / renderMsiThumbnail が参照。
+function otsuKeepGridForLayer(section, layerKey) {
+    if (!(typeof App !== 'undefined' && App && App.otsuBgRemove)) return null;
+    const otsu = section && section.meta && section.meta.otsu;
+    if (!otsu || !otsu.bySource) return null;
+    const ent = section.msiSeries && section.msiSeries[layerKey];
+    if (!ent) return null;
+    const srcKey = ent.sourceFileId || ent.blobId;
+    const rec = otsu.bySource[srcKey];
+    if (!rec || !rec.keepB64) return null;
+    const cacheKey = section.id + '|' + srcKey + '|' + (rec.signature || '') + '|' + rec.W + 'x' + rec.H;
+    let grid = _otsuKeepDecodeCache.get(cacheKey);
+    if (!grid) { grid = unpackBitsFromB64(rec.keepB64, rec.W * rec.H); _otsuKeepDecodeCache.set(cacheKey, grid); }
+    return { keep: grid, W: rec.W, H: rec.H };
+}
+
 // Pure parse (no DOM/canvas): xlsx ArrayBuffer → [{x,y,v}] rows. Shared verbatim
 // by the main thread and the parse Web Worker.
 function parseXlsxToRows(buf, def) {
@@ -3267,6 +3446,10 @@ class SectionPanel {
                 const winC = App.getMsiWindow(key, rrC, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
                 const lut = overlay ? monoLut(overlayColor[key] || '#ffffff') : getActiveColormap();
                 const bg = overlay ? [0, 0, 0] : getColormapBackground();
+                // 背景除去(Otsu): keep grid が 0 のピクセルは背景として backdrop に
+                // 落とす(out-of-grid と同じ扱い)。全イオン像で同一マスクを共有する。
+                const keepGrid = otsuKeepGridForLayer(this.section, key);
+                const useKeep = keepGrid && keepGrid.W === tc.width && keepGrid.H === tc.height;
                 for (let i = 0; i < d.length; i += 4) {
                     const r = d[i], g = d[i+1], b = d[i+2], a = d[i+3];
                     const lum = 0.299*r + 0.587*g + 0.114*b;
@@ -3280,7 +3463,7 @@ class SectionPanel {
                     //     separate manual Threshold, not applied here.)
                     //   - Backdrop = getColormapBackground(): black for most
                     //     colormaps, white for Grayscale. ctx.globalAlpha blends HE.
-                    if (a === 0) {
+                    if (a === 0 || (useKeep && keepGrid.keep[i >> 2] === 0)) {
                         d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; d[i+3] = 255;
                     } else {
                         const c = lut[Math.round(ev.n * 255)];
@@ -4753,8 +4936,12 @@ class SectionPanel {
         const winT = App.getMsiWindow(key, rrT, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
         const lut = getActiveColormap();
         const bg = getColormapBackground();
+        // 背景除去(Otsu): メイン表示と一致させるため縮小サムネにも同じマスクを反映。
+        const keepGridT = otsuKeepGridForLayer(this.section, key);
+        const useKeepT = keepGridT && keepGridT.W === c.width && keepGridT.H === c.height;
         for (let i = 0; i < d.length; i += 4) {
             if (d[i+3] === 0) continue;
+            if (useKeepT && keepGridT.keep[i >> 2] === 0) { d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; continue; }
             const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
             const ev = msiWindowEval(lum, rrT, winT);
             const cm = lut[Math.round(ev.n * 255)];
@@ -7965,7 +8152,7 @@ function extractSourceMatrixForExport(buf, repr, compoundEntries) {
 // Merge same-row-count sources of one sample into a single CSV table
 // (x, y, <compound...>, ROI). Rows align by (x,y) value, else by sorted index.
 // Headers are comma/quote-free so the generic-CSV re-import path round-trips.
-function buildOneCsvTable(group, roiPairs, project) {
+function buildOneCsvTable(group, roiPairs, project, otsuMode) {
     const ref = group[0].matrix;
     const order = ref.positions.map((p, i) => i).sort((a, b) => {
         const pa = ref.positions[a], pb = ref.positions[b];
@@ -8029,20 +8216,43 @@ function buildOneCsvTable(group, roiPairs, project) {
     }
     headers.push('ROI');
 
+    // 背景除去(Otsu) をエクスポートに反映(元ファイルは非改変・別ファイルとして出力)。
+    // ピクセルの TIC(全チャネル合計) を log10(x+1) 化して Otsu 閾値を求め、
+    //   'drop' = 背景行を削除 / 'flag' = 1=組織 0=背景 の bg_kept 列を追加。
+    let keepRow = null, dropMode = false;
+    if (otsuMode === 'drop' || otsuMode === 'flag') {
+        const tic = new Float64Array(N);
+        for (const arr of columnArrays) {
+            for (let r = 0; r < N; r++) { const v = arr[r]; if (v !== '') { const num = Number(v); if (Number.isFinite(num)) tic[r] += num; } }
+        }
+        const dataArr = new Float64Array(N);
+        for (let r = 0; r < N; r++) { const t = tic[r] > 0 ? tic[r] : 0; dataArr[r] = Math.log10(t + 1); }
+        const otsu = computeOtsuThreshold(dataArr, OTSU_NBINS);
+        const thrOrig = Math.pow(10, otsu.threshold) - 1;
+        keepRow = new Uint8Array(N);
+        for (let r = 0; r < N; r++) keepRow[r] = tic[r] > thrOrig ? 1 : 0;
+        if (otsuMode === 'flag') headers.push('bg_kept');
+        else dropMode = true;
+    }
+
     const lines = [headers.map(h => csvEscape(String(h))).join(',')];
+    let outRows = 0;
     for (let r = 0; r < N; r++) {
+        if (dropMode && keepRow && keepRow[r] === 0) continue;
         const cells = [String(refPositions[r].x), String(refPositions[r].y)];
         for (const arr of columnArrays) { const v = arr[r]; cells.push(v === '' ? '' : String(v)); }
         cells.push(csvEscape(roiArr[r]));
+        if (otsuMode === 'flag' && keepRow) cells.push(String(keepRow[r]));
         lines.push(cells.join(','));
+        outRows++;
     }
-    return { csvText: lines.join('\r\n') + '\r\n', rowCount: N, compounds };
+    return { csvText: lines.join('\r\n') + '\r\n', rowCount: outRows, compounds, bgRemoved: (otsuMode && otsuMode !== 'none') ? otsuMode : null };
 }
 
 // Build the per-sample combined CSV group(s) for a section (one per pixel-grid;
 // usually a single group). Parses each source once; memory stays bounded to one
 // sample. Returns [{ csvText, rowCount, compounds:[...] }].
-async function buildSampleCsvGroups(sec, project) {
+async function buildSampleCsvGroups(sec, project, otsuMode) {
     const series = sec.msiSeries || {};
     const layerKeys = sortMethodKeys(
         Object.keys(series).filter(k => /^MSI_/i.test(k)),
@@ -8083,15 +8293,42 @@ async function buildSampleCsvGroups(sec, project) {
     const roiPairs = rois.map(r => ({ name: String(r.name || r.colorKey || ''), poly: r.polysBySection[sec.id] }));
 
     const groups = [...byCount.values()].sort((a, b) => b[0].matrix.positions.length - a[0].matrix.positions.length);
-    return groups.map(g => buildOneCsvTable(g, roiPairs, project));
+    return groups.map(g => buildOneCsvTable(g, roiPairs, project, otsuMode));
 }
 
 let _exportInProgress = false;
+// 背景除去エクスポートの選択モーダル。戻り値 Promise<'none'|'drop'|'flag'|'cancel'>。
+function promptOtsuExport() {
+    return new Promise((resolve) => {
+        const ov = document.createElement('div');
+        ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:99999;display:flex;align-items:center;justify-content:center;';
+        const box = document.createElement('div');
+        box.style.cssText = 'background:#fff;border-radius:8px;max-width:460px;width:92%;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3);font-size:13px;color:#1f2937;';
+        box.innerHTML =
+            '<div style="font-weight:700;font-size:15px;margin-bottom:8px;">データ出力: 背景除去(Otsu)</div>' +
+            '<div style="color:#475569;line-height:1.6;margin-bottom:14px;">総信号量(TIC)で背景と判定したスポットを、書き出すデータからどう扱うか選べます。<b>元ファイルは変更されません。</b></div>' +
+            '<div style="display:flex;flex-direction:column;gap:8px;">' +
+            '<button type="button" data-mode="none"  style="text-align:left;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;cursor:pointer;"><b>適用しない</b><br><span style="color:#64748b;">従来どおり全データを出力</span></button>' +
+            '<button type="button" data-mode="drop"  style="text-align:left;padding:9px 12px;border:1px solid #2563eb;border-radius:6px;background:#eff6ff;cursor:pointer;"><b>背景の行を削除して出力(推奨)</b><br><span style="color:#64748b;">Rのスポット除去と同じ。組織のスポットだけを出力</span></button>' +
+            '<button type="button" data-mode="flag"  style="text-align:left;padding:9px 12px;border:1px solid #cbd5e1;border-radius:6px;background:#fff;cursor:pointer;"><b>目印列(bg_kept)を追加</b><br><span style="color:#64748b;">行は残し、1=組織 / 0=背景 の列を1つ追加</span></button>' +
+            '</div>' +
+            '<div style="text-align:right;margin-top:14px;"><button type="button" data-mode="cancel" style="padding:6px 14px;border:none;background:transparent;color:#64748b;cursor:pointer;">キャンセル</button></div>';
+        ov.appendChild(box);
+        const done = (mode) => { try { document.body.removeChild(ov); } catch (e) {} resolve(mode); };
+        box.querySelectorAll('button').forEach(b => b.addEventListener('click', () => done(b.getAttribute('data-mode'))));
+        ov.addEventListener('click', (e) => { if (e.target === ov) done('cancel'); });
+        document.body.appendChild(ov);
+    });
+}
+
 async function exportProjectAsZip() {
     if (_exportInProgress) { showToast('Export already running'); return; }
     _exportInProgress = true;
     let progress = null;
     try {
+        // 出力時に背景除去を適用するか選択(元ファイルは常に非改変)。
+        const otsuMode = await promptOtsuExport();
+        if (otsuMode === 'cancel') return;
         try { await loadScript(LAZY_LIBS.jszip); } catch (e) { alert('JSZip の読み込みに失敗しました'); return; }
         if (typeof JSZip === 'undefined') { alert('JSZip not loaded'); return; }
         const project = App.project;
@@ -8122,6 +8359,7 @@ async function exportProjectAsZip() {
 
         const manifest = {
             format: 'desi_data_share_v2',
+            bgRemoved: (otsuMode && otsuMode !== 'none') ? otsuMode : null,
             id: project.id,
             displayName: project.displayName,
             anatomyPalette: project.anatomyPalette || DEFAULT_ANATOMY_PALETTE,
@@ -8192,14 +8430,16 @@ async function exportProjectAsZip() {
 
             // Data/: per-sample combined CSV(s).
             try {
-                const groups = await buildSampleCsvGroups(sec, project);
+                const groups = await buildSampleCsvGroups(sec, project, otsuMode);
+                const bgTag = (otsuMode === 'drop') ? '__bg_removed' : (otsuMode === 'flag') ? '__bg_flagged' : '';
                 groups.forEach((g, idx) => {
                     const suffix = idx > 0 ? ('__' + (idx + 1)) : '';
-                    const path = 'Data/' + S + suffix + '.csv';
+                    const path = 'Data/' + S + suffix + bgTag + '.csv';
                     zip.file(path, g.csvText);
                     secEntry.data.push({
                         path, sep: ',', xHeader: 'x', yHeader: 'y', roiHeader: 'ROI',
                         rowCount: g.rowCount, compounds: g.compounds,
+                        bgRemoved: g.bgRemoved || null,
                     });
                 });
             } catch (e) { console.warn('[export] sample CSV failed', sec.id, e); }
@@ -11756,6 +11996,9 @@ const App = {
                                // = each section auto-scales to its own range.
     msiSmoothing: 'none',      // MSI display interpolation: 'none' = nearest
                                // (pixelated), 'linear' = bilinear (HDI Smoothing).
+    otsuBgRemove: false,       // 背景除去(Otsu): TIC ベースの背景スポットを全イオン
+                               // 像から一括で非表示にする(生データ非破壊)。
+    otsuManualThreshold: null, // 手動閾値(生 TIC 単位)。null なら Otsu 自動。
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
     focusCompoundKey: null,
     // ① Rotation target for the shared toolbar: 'both' (whole-view CSS rot),
@@ -12259,6 +12502,132 @@ const App = {
         }
     },
 
+    // ---- 背景除去 (Otsu) ----
+    // 現在の MSI ソース(srcKey)の集合。二重適用防止(既処理スキップ)の照合に使う。
+    _otsuSourceKeys(sec) {
+        const series = (sec && sec.msiSeries) || {};
+        const keys = new Set();
+        for (const k of Object.keys(series)) {
+            if (!/^MSI_/i.test(k)) continue;
+            const ent = series[k]; if (!ent) continue;
+            const srcKey = ent.sourceFileId || ent.blobId;
+            if (srcKey != null) keys.add(String(srcKey));
+        }
+        return keys;
+    },
+    // 既に計算済み(=現在のソース集合と一致し、手動閾値の指定も一致)なら true。
+    _otsuIsFresh(sec, opts) {
+        opts = opts || {};
+        const otsu = sec && sec.meta && sec.meta.otsu;
+        if (!otsu || !otsu.applied || !otsu.bySource) return false;
+        if (!!otsu.manual !== !!(opts.manualThreshold != null)) return false;
+        const cur = this._otsuSourceKeys(sec);
+        const had = new Set(Object.keys(otsu.bySource));
+        if (cur.size !== had.size) return false;
+        for (const k of cur) if (!had.has(k)) return false;
+        return true;
+    },
+    // 1 切片のマスクを確保する。既処理はスキップ(force で強制再計算)。
+    // 戻り値 { computed, skipped, unavailable, summary }。
+    async ensureSectionOtsu(sec, opts) {
+        opts = opts || {};
+        if (!sec) return { computed: false, skipped: true };
+        if (!opts.force && this._otsuIsFresh(sec, opts)) {
+            return { computed: false, skipped: true, summary: sec.meta.otsu };
+        }
+        const res = await computeSectionOtsuMasks(sec, this.project, {
+            manualThreshold: (opts.manualThreshold != null) ? opts.manualThreshold : this.otsuManualThreshold,
+        });
+        const hasAny = res && res.bySource && Object.keys(res.bySource).length > 0;
+        sec.meta = sec.meta || {};
+        sec.meta.otsu = {
+            applied: !!hasAny,
+            manual: (opts.manualThreshold != null) || (this.otsuManualThreshold != null),
+            bySource: (res && res.bySource) || {},
+            unavailable: (res && res.unavailable) || [],
+            nOriginal: (res && res.nOriginal) || 0,
+            nKept: (res && res.nKept) || 0,
+            nRemoved: (res && res.nRemoved) || 0,
+        };
+        _otsuKeepDecodeCache.clear();
+        return {
+            computed: hasAny,
+            skipped: false,
+            unavailable: !hasAny && res && res.unavailable && res.unavailable.length > 0,
+            summary: sec.meta.otsu,
+        };
+    },
+    // 表示上の全 MSI パネルを Otsu マスク反映のため再描画。
+    _rerenderOtsu() {
+        for (const p of this.panels.values()) {
+            try { p.renderComposite(); } catch (e) {}
+            try {
+                for (const k of Object.keys(p.imageSources || {})) {
+                    if (/^MSI_/i.test(k)) { try { p.renderMsiThumbnail(k); } catch (e) {} }
+                }
+            } catch (e) {}
+        }
+    },
+    // 背景除去トグル。ON 時は表示中(全)切片のマスクを確保してから再描画。
+    async setOtsuBgRemove(on) {
+        this.otsuBgRemove = !!on;
+        if (this.shareMode) {
+            try { sessionStorage.setItem('desi:share:otsu:' + (this.shareMode.slug || ''), on ? '1' : '0'); } catch (e) {}
+        } else if (this.project) {
+            this.project.meta = this.project.meta || {};
+            this.project.meta.otsuBgRemove = !!on;
+            this.queueSave();
+        }
+        if (on) {
+            const secs = (this.project && this.project.sections) || [];
+            const need = secs.filter(s => !this._otsuIsFresh(s));
+            if (need.length) {
+                try { showToast('背景除去(Otsu)を計算中… (' + need.length + ' 切片)'); } catch (e) {}
+                let ok = 0, un = 0;
+                for (const sec of need) {
+                    try {
+                        const r = await this.ensureSectionOtsu(sec);
+                        if (r.computed) ok++; else if (r.unavailable) un++;
+                    } catch (e) { console.warn('[otsu] ensure failed', e); }
+                }
+                try { this.queueSave(); } catch (e) {}
+                try {
+                    showToast('背景除去: ' + ok + ' 切片に適用' + (un ? ' / ' + un + ' 切片は元データ無しでスキップ' : ''));
+                } catch (e) {}
+            }
+        }
+        this._rerenderOtsu();
+    },
+    // 既存データへの一括適用。既処理(fresh)はスキップして二重適用を防ぐ。
+    async applyOtsuToAllSections(opts) {
+        opts = opts || {};
+        const secs = (this.project && this.project.sections) || [];
+        if (!secs.length) { try { showToast('切片がありません'); } catch (e) {} return; }
+        let applied = 0, skipped = 0, unavailable = 0;
+        try { showToast('背景除去(Otsu)を全切片に適用中…'); } catch (e) {}
+        for (const sec of secs) {
+            if (!opts.force && this._otsuIsFresh(sec)) { skipped++; continue; }
+            try {
+                const r = await this.ensureSectionOtsu(sec, { force: !!opts.force });
+                if (r.computed) applied++;
+                else if (r.unavailable) unavailable++;
+                else skipped++;
+            } catch (e) { console.warn('[otsu] bulk apply failed', e); unavailable++; }
+        }
+        // 一括適用したら表示も ON にする(まだ OFF の場合)
+        if (applied > 0 && !this.otsuBgRemove) { await this.setOtsuBgRemove(true); }
+        else {
+            try { this.queueSave(); } catch (e) {}
+            this._rerenderOtsu();
+        }
+        const tb = document.getElementById('tb-bg-remove');
+        if (tb) tb.checked = this.otsuBgRemove;
+        try {
+            showToast('背景除去 一括適用: 適用 ' + applied + ' / スキップ(処理済み) ' + skipped +
+                (unavailable ? ' / 元データ無し ' + unavailable : ''));
+        } catch (e) {}
+    },
+
     async init() {
         await ProjectStorage.open();
         // Ask the browser to keep our IDB out of its automatic eviction
@@ -12304,6 +12673,14 @@ const App = {
         });
         const heMono = document.getElementById('tb-he-mono');
         if (heMono) heMono.addEventListener('change', () => this.setHeGrayscaleAll(heMono.checked));
+        const bgRemove = document.getElementById('tb-bg-remove');
+        if (bgRemove) bgRemove.addEventListener('change', () => {
+            this.setOtsuBgRemove(bgRemove.checked).catch(e => console.warn('[otsu] toggle failed', e));
+        });
+        const bgRemoveAll = document.getElementById('tb-bg-remove-all');
+        if (bgRemoveAll) bgRemoveAll.addEventListener('click', () => {
+            this.applyOtsuToAllSections().catch(e => console.warn('[otsu] bulk apply failed', e));
+        });
         this._bindMethodHeaderSort();
         this._bindMrmRegister();
         try { bindOverlayUi(); } catch (e) {}
@@ -13137,11 +13514,23 @@ const App = {
             App.msiSmoothing = (project.meta && project.meta.msiSmoothing === 'linear') ? 'linear' : 'none';
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
+            // 背景除去(Otsu) トグルの復元(master は project.meta、共有相手は session)。
+            let bgr = !!(project.meta && project.meta.otsuBgRemove);
+            if (this.shareMode) {
+                const sv = sessionStorage.getItem('desi:share:otsu:' + (this.shareMode.slug || ''));
+                if (sv != null) bgr = (sv === '1');
+            }
+            this.otsuBgRemove = bgr;
+            const bgSel = document.getElementById('tb-bg-remove');
+            if (bgSel) bgSel.checked = bgr;
         } catch (e) { /* non-fatal */ }
         localStorage.setItem('desi:lastProjectId', id);
         document.getElementById('project-name-input').value = project.displayName || '';
         document.getElementById('sections-empty').classList.toggle('hidden', this.project.sections.length > 0);
         await this.rebuildSectionPanels();
+        // 保存済みの背景除去トグルが ON なら、パネル構築後にマスクを確保して再描画
+        // (通常読込は非計算のまま。ON プロジェクトのみ、必要な切片だけバックグラウンド計算)。
+        if (this.otsuBgRemove) { this.setOtsuBgRemove(true).catch(e => console.warn('[otsu] restore failed', e)); }
         // In Compound mode pick a sane default focus compound if none persists
         // or the persisted one no longer exists in this project.
         if (this.viewMode === 'compound') {
