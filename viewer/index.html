@@ -857,11 +857,11 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                         <span class="text-gray-400">vs</span>
                         <select id="graph-select-3" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
                     </span>
-                    <span id="analysis-otsu-controls" class="flex items-center gap-1" hidden>
+                    <span id="analysis-otsu-controls" class="flex items-center gap-1" style="display:none;">
                         <select id="otsu-section-select" class="text-xs border-gray-300 rounded py-0.5 px-1" title="ヒストグラムを表示する切片"></select>
-                        <label style="display:inline-flex;align-items:center;gap:3px;" title="背景除去の強度。右=強く除去(多く消す) / 左=弱く(残す)。0=自動Otsu">
+                        <label style="display:inline-flex;align-items:center;gap:3px;" title="背景除去の強度。右=強く除去(多く消す) / 左=弱く(残す)。0=自動Otsu。ヒストグラムの赤線を直接ドラッグしても調整できます">
                             <span class="text-gray-500">強度</span>
-                            <input type="range" id="otsu-strength" min="-1.5" max="1.5" step="0.05" value="0" style="vertical-align:middle;width:110px;">
+                            <input type="range" id="otsu-strength" min="-3" max="3" step="0.02" value="0" style="vertical-align:middle;width:130px;">
                         </label>
                         <button type="button" id="otsu-strength-reset" class="tb-icon" title="自動Otsu(強度0)に戻す" aria-label="強度リセット">⟲</button>
                         <span id="otsu-strength-readout" class="text-[10px] text-gray-500"></span>
@@ -5468,8 +5468,9 @@ function updateAnalysisModeUi() {
     const mode = App.analysisMode || 'roi';
     const roiC = document.getElementById('analysis-roi-controls');
     const otsuC = document.getElementById('analysis-otsu-controls');
-    if (roiC) roiC.hidden = (mode === 'otsu');
-    if (otsuC) otsuC.hidden = (mode !== 'otsu');
+    // インライン style.display で切替（Tailwind の .flex が [hidden] 属性に勝つため）。
+    if (roiC) roiC.style.display = (mode === 'otsu') ? 'none' : '';
+    if (otsuC) otsuC.style.display = (mode === 'otsu') ? '' : 'none';
     const modeSel = document.getElementById('analysis-mode');
     if (modeSel && modeSel.value !== mode) modeSel.value = mode;
 }
@@ -5536,6 +5537,7 @@ function renderOtsuAnalysis() {
         canvas.style.cssText = 'width:100%;height:100%;display:block;';
         host.appendChild(canvas);
     }
+    bindOtsuHistDrag(canvas);
     drawOtsuHistogram(canvas, rec, App.otsuStrength || 0);
 
     const effLog = rec.manual ? rec.effLog : (rec.autoThresholdLog + (App.otsuStrength || 0));
@@ -5558,6 +5560,47 @@ function renderOtsuAnalysis() {
     if (scopeEl) scopeEl.textContent = (sec.displayName || '') + ' — ' + rec.nOriginal + ' px';
 }
 
+// ヒストグラム上で赤線(有効閾値)を直接ドラッグ/クリックして強度を変える。
+// clientX → log10(TIC+1)値 → 強度(= log値 − 自動Otsu閾値)。ドラッグ中はプレビュー、
+// 離した時に setOtsuStrength で実マスク・表示へ反映。手動閾値モードでは無効。
+function bindOtsuHistDrag(canvas) {
+    if (canvas._otsuDragBound) return;
+    canvas._otsuDragBound = true;
+    canvas.style.cursor = 'ew-resize';
+    canvas.style.touchAction = 'none';
+    let dragging = false;
+    const strengthAt = (clientX) => {
+        const g = canvas._otsuGeom;
+        if (!g || g.manual || !(g.plotW > 0)) return null;
+        const rect = canvas.getBoundingClientRect();
+        let logv = g.hmin + ((clientX - rect.left - g.padL) / g.plotW) * g.span;
+        logv = Math.max(g.hmin, Math.min(g.hmax, logv));
+        return Math.max(-3, Math.min(3, logv - g.autoThresholdLog));
+    };
+    const preview = (clientX) => {
+        const s = strengthAt(clientX);
+        if (s == null) return;
+        App.otsuStrength = s;                 // プレビュー(表示マスクの再計算はまだしない)
+        if (App.analysisMode === 'otsu') { try { renderOtsuAnalysis(); } catch (e) {} }
+    };
+    canvas.addEventListener('pointerdown', (e) => {
+        if (canvas._otsuGeom && canvas._otsuGeom.manual) return;
+        dragging = true;
+        try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+        preview(e.clientX); e.preventDefault();
+    });
+    canvas.addEventListener('pointermove', (e) => { if (dragging) preview(e.clientX); });
+    const end = (e) => {
+        if (!dragging) return;
+        dragging = false;
+        try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+        const s = strengthAt(e.clientX);
+        if (s != null) App.setOtsuStrength(s).catch(err => console.warn('[otsu] drag apply failed', err));
+    };
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', () => { dragging = false; });
+}
+
 // ヒストグラム(棒) + 自動Otsu線(灰破線) + 有効閾値線(赤実線) を canvas に描画。
 function drawOtsuHistogram(canvas, rec, strength) {
     const host = canvas.parentElement;
@@ -5573,6 +5616,8 @@ function drawOtsuHistogram(canvas, rec, strength) {
     const plotW = cssW - padL - padR, plotH = cssH - padT - padB;
     const hist = rec.histCounts, HB = hist.length;
     const hmin = rec.histMin, hmax = rec.histMax, span = (hmax - hmin) || 1;
+    // ドラッグで赤線を動かすための座標系を canvas に保存(clientX → log値 → 強度)。
+    canvas._otsuGeom = { padL, plotW, hmin, hmax, span, autoThresholdLog: rec.autoThresholdLog, manual: !!rec.manual };
     let maxC = 0; for (let b = 0; b < HB; b++) if (hist[b] > maxC) maxC = hist[b];
     // log-y で背景ピークの潰れを防ぐ
     const vm = Math.log10(1 + maxC) || 1;
