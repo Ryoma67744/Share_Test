@@ -846,11 +846,26 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     <span id="analysis-scope" class="text-[10px] text-gray-400"></span>
                 </div>
                 <div class="flex items-center gap-1 text-xs mb-1 shrink-0 flex-wrap">
-                    <select id="graph-select-1" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
-                    <span class="text-gray-400">vs</span>
-                    <select id="graph-select-2" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
-                    <span class="text-gray-400">vs</span>
-                    <select id="graph-select-3" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
+                    <select id="analysis-mode" class="text-xs border-gray-300 rounded py-0.5 px-1" title="Analysis の表示を切り替え">
+                        <option value="roi">ROI強度</option>
+                        <option value="otsu">背景除去(Otsu)</option>
+                    </select>
+                    <span id="analysis-roi-controls" class="flex items-center gap-1">
+                        <select id="graph-select-1" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
+                        <span class="text-gray-400">vs</span>
+                        <select id="graph-select-2" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
+                        <span class="text-gray-400">vs</span>
+                        <select id="graph-select-3" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
+                    </span>
+                    <span id="analysis-otsu-controls" class="flex items-center gap-1" hidden>
+                        <select id="otsu-section-select" class="text-xs border-gray-300 rounded py-0.5 px-1" title="ヒストグラムを表示する切片"></select>
+                        <label style="display:inline-flex;align-items:center;gap:3px;" title="背景除去の強度。右=強く除去(多く消す) / 左=弱く(残す)。0=自動Otsu">
+                            <span class="text-gray-500">強度</span>
+                            <input type="range" id="otsu-strength" min="-1.5" max="1.5" step="0.05" value="0" style="vertical-align:middle;width:110px;">
+                        </label>
+                        <button type="button" id="otsu-strength-reset" class="tb-icon" title="自動Otsu(強度0)に戻す" aria-label="強度リセット">⟲</button>
+                        <span id="otsu-strength-readout" class="text-[10px] text-gray-500"></span>
+                    </span>
                 </div>
                 <div id="graph-container" class="flex-1 flex items-center justify-center border border-gray-200 rounded overflow-hidden min-h-0 bg-gray-50">
                     <p class="text-gray-400 text-xs">Select a ROI</p>
@@ -2210,6 +2225,11 @@ function unpackBitsFromB64(b64, n) {
 // マスク再計算時に App.applyOtsu 経路が clear() する。
 const _otsuKeepDecodeCache = new Map();
 
+// 強度スライダーの高速再スレッショルド用: 切片×ソース単位で per-pixel の
+// log10(TIC+1) と grid index を保持(セッションのみ・非永続・再パース不要化)。
+// キー = section.id + '|' + srcKey + '|' + signature。
+const _otsuTicCache = new Map();
+
 // 1 切片の全ソースファイルについて TIC ベースの Otsu マスクを計算する(非破壊)。
 // 戻り値: { bySource: { [srcKey]: { W,H,keepB64, thresholdOriginal, nOriginal,
 //   nKept, nRemoved, signature, layerKeys, manual } }, unavailable:[srcKey...],
@@ -2249,36 +2269,59 @@ async function computeSectionOtsuMasks(sec, project, opts) {
             const v = col.values;
             for (let i = 0; i < N; i++) { const x = v[i]; if (Number.isFinite(x)) tic[i] += x; }
         }
-        // 閾値決定 (手動 or Otsu)
-        let thresholdOriginal;
-        if (opts.manualThreshold != null && Number.isFinite(Number(opts.manualThreshold))) {
-            thresholdOriginal = Number(opts.manualThreshold);
-        } else {
-            const dataArr = new Float64Array(N);
-            for (let i = 0; i < N; i++) {
-                const t = tic[i] > 0 ? tic[i] : 0;
-                dataArr[i] = useLog ? Math.log10(t + 1) : t;
-            }
-            const otsu = computeOtsuThreshold(dataArr, OTSU_NBINS);
-            thresholdOriginal = useLog ? (Math.pow(10, otsu.threshold) - 1) : otsu.threshold;
+        // log10(TIC+1) 分布 (Otsu 計算・ヒストグラム表示・強度スライダーに共用)
+        const logTic = new Float64Array(N);
+        let lmn = Infinity, lmx = -Infinity;
+        for (let i = 0; i < N; i++) {
+            const t = tic[i] > 0 ? tic[i] : 0;
+            const lv = useLog ? Math.log10(t + 1) : t;
+            logTic[i] = lv; if (lv < lmn) lmn = lv; if (lv > lmx) lmx = lv;
         }
-        // keep grid (描画ラスタと同じ buildMsiGrid 座標系で W×H に写像)
+        const autoRes = computeOtsuThreshold(logTic, OTSU_NBINS);
+        const autoThresholdLog = autoRes.threshold;
+        // ヒストグラム(256bin) — Analysis の強度スライダー UI 用に保存(小サイズ)
+        const HB = OTSU_NBINS;
+        let histMin = lmn, histMax = lmx;
+        const histCounts = new Array(HB).fill(0);
+        if (histMax > histMin) {
+            const w = (histMax - histMin) / HB;
+            for (let i = 0; i < N; i++) { let b = Math.floor((logTic[i] - histMin) / w); if (b < 0) b = 0; else if (b >= HB) b = HB - 1; histCounts[b]++; }
+        } else { histMin = lmn - 0.5; histMax = lmn + 0.5; histCounts[Math.floor(HB / 2)] = N; }
+        // 有効閾値 = 手動指定 or 自動Otsu + 強度オフセット(log10 単位。正=強く除去)
+        const strength = Number(opts.strength) || 0;
+        let effLog, thresholdOriginal, isManual = false;
+        if (opts.manualThreshold != null && Number.isFinite(Number(opts.manualThreshold))) {
+            isManual = true;
+            thresholdOriginal = Number(opts.manualThreshold);
+            effLog = useLog ? Math.log10((thresholdOriginal > 0 ? thresholdOriginal : 0) + 1) : thresholdOriginal;
+        } else {
+            effLog = autoThresholdLog + strength;
+            thresholdOriginal = useLog ? (Math.pow(10, effLog) - 1) : effLog;
+        }
+        // keep grid (描画ラスタと同じ buildMsiGrid 座標系で W×H に写像) + gridIdx(キャッシュ用)
         const { xIndex, yIndex, W, H } = buildMsiGrid(m.positions);
+        const gridIdx = new Int32Array(N).fill(-1);
         const keep = new Uint8Array(W * H);
         let nKept = 0;
         for (let i = 0; i < N; i++) {
             const p = m.positions[i];
             const ci = xIndex.get(p.x), ri = yIndex.get(p.y);
             if (ci == null || ri == null) continue;
-            if (tic[i] > thresholdOriginal) { const gi = ri * W + ci; if (!keep[gi]) { keep[gi] = 1; nKept++; } }
+            const gi = ri * W + ci; gridIdx[i] = gi;
+            if (logTic[i] > effLog) { if (!keep[gi]) { keep[gi] = 1; nKept++; } }
         }
         const nRemoved = N - nKept;
+        // 強度スライダー高速化用のセッションキャッシュ(生 TIC は保存しない)
+        if (sec && sec.id != null) {
+            _otsuTicCache.set(sec.id + '|' + srcKey + '|' + (sig || ''), { W, H, gridIdx, logTic, autoThresholdLog });
+        }
         bySource[srcKey] = {
             W, H, keepB64: packBitsToB64(keep),
-            thresholdOriginal, signature: sig,
-            nOriginal: N, nKept, nRemoved,
+            thresholdOriginal, autoThresholdLog, effLog,
+            histCounts, histMin, histMax,
+            signature: sig, nOriginal: N, nKept, nRemoved,
             layerKeys: grp.entries.map(e => e.layerKey),
-            manual: (opts.manualThreshold != null),
+            manual: isManual,
         };
         totOrig += N; totKept += nKept; totRem += nRemoved;
         try { if (typeof _yieldUi === 'function') await _yieldUi(); } catch (e) {}
@@ -5285,6 +5328,7 @@ function setupGraphSelector() {
     if (ranked[0]) document.getElementById('graph-select-1').value = ranked[0];
     if (ranked[1]) document.getElementById('graph-select-2').value = ranked[1];
     if (ranked[2]) document.getElementById('graph-select-3').value = ranked[2];
+    try { populateOtsuSectionSelect(); } catch (e) {}
 }
 
 // Group MSI option entries by (sourceFile, section) so the dropdown shows
@@ -5360,6 +5404,7 @@ function extractRoiPixelsFromSection(panel, layerKey, polyMsi) {
 }
 
 function renderAnalysisChart() {
+    if (App.analysisMode === 'otsu') { try { renderOtsuAnalysis(); } catch (e) { console.warn('[otsu] analysis render failed', e); } return; }
     const host = document.getElementById('graph-container');
     const project = App.project;
     const roi = (project.rois || []).find(r => r.id === App.activeRoiId);
@@ -5415,6 +5460,145 @@ function renderAnalysisChart() {
     drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi);
     document.getElementById('analysis-scope').textContent = sectionsWithRoi.length + ' section(s)';
     renderMethodTable();
+}
+
+// ---- 背景除去(Otsu) の Analysis 表示: TIC ヒストグラム + 強度スライダー ----
+// ROI 用コントロールと Otsu 用コントロールの表示を切り替える。
+function updateAnalysisModeUi() {
+    const mode = App.analysisMode || 'roi';
+    const roiC = document.getElementById('analysis-roi-controls');
+    const otsuC = document.getElementById('analysis-otsu-controls');
+    if (roiC) roiC.hidden = (mode === 'otsu');
+    if (otsuC) otsuC.hidden = (mode !== 'otsu');
+    const modeSel = document.getElementById('analysis-mode');
+    if (modeSel && modeSel.value !== mode) modeSel.value = mode;
+}
+
+// #otsu-section-select を現在のプロジェクトの(MSIを持つ)切片で埋める。
+function populateOtsuSectionSelect() {
+    const sel = document.getElementById('otsu-section-select');
+    if (!sel) return;
+    const project = App.project;
+    const prev = sel.value;
+    const secs = (project && project.sections) || [];
+    const parts = [];
+    for (const s of secs) {
+        if (!Object.keys(s.msiSeries || {}).some(k => /^MSI_/i.test(k))) continue;
+        const label = (s.displayName || ('Section ' + (s.ordinal || ''))).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        parts.push('<option value="' + s.id + '">' + label + '</option>');
+    }
+    sel.innerHTML = parts.join('');
+    if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+    else if (App.activeSectionId && [...sel.options].some(o => o.value === App.activeSectionId)) sel.value = App.activeSectionId;
+}
+
+// Otsu Analysis 本体: 選択切片の TIC ヒストグラム + 自動/有効閾値線 + 除去%。
+// マスク未計算ならその場で計算してから再描画する。
+function renderOtsuAnalysis() {
+    const host = document.getElementById('graph-container');
+    if (!host) return;
+    updateAnalysisModeUi();
+    const strengthInp = document.getElementById('otsu-strength');
+    if (strengthInp && document.activeElement !== strengthInp) strengthInp.value = String(App.otsuStrength || 0);
+    const project = App.project;
+    if (!project) { host.innerHTML = '<p class="text-gray-400 text-xs">プロジェクトがありません</p>'; return; }
+    const sel = document.getElementById('otsu-section-select');
+    let sec = (project.sections || []).find(s => s.id === (sel && sel.value));
+    if (!sec) sec = (project.sections || []).find(s => Object.keys(s.msiSeries || {}).some(k => /^MSI_/i.test(k)));
+    if (!sec) { host.innerHTML = '<p class="text-gray-400 text-xs">MSI データのある切片がありません</p>'; return; }
+
+    const otsu = sec.meta && sec.meta.otsu;
+    if (!otsu || !otsu.applied || !otsu.bySource || !Object.keys(otsu.bySource).length) {
+        host.innerHTML = '<p class="text-gray-400 text-xs">背景除去(Otsu)を計算中…</p>';
+        App.ensureSectionOtsu(sec).then(() => {
+            try { App.queueSave(); } catch (e) {}
+            if (App.analysisMode === 'otsu') renderOtsuAnalysis();
+        }).catch(e => { console.warn('[otsu] ensure for analysis failed', e); host.innerHTML = '<p class="text-gray-400 text-xs">計算に失敗しました(元データを確認)</p>'; });
+        return;
+    }
+    const srcKey = Object.keys(otsu.bySource)[0];
+    const rec = otsu.bySource[srcKey];
+    if (!rec || !rec.histCounts) {
+        // 旧バージョンで作られたヒストグラム無しのマスク → その場で再計算。
+        host.innerHTML = '<p class="text-gray-400 text-xs">背景除去(Otsu)を計算中…</p>';
+        App.ensureSectionOtsu(sec, { force: true }).then(() => {
+            try { App.queueSave(); } catch (e) {}
+            if (App.analysisMode === 'otsu') renderOtsuAnalysis();
+        }).catch(e => { console.warn('[otsu] recompute for analysis failed', e); host.innerHTML = '<p class="text-gray-400 text-xs">計算に失敗しました(元データを確認)</p>'; });
+        return;
+    }
+
+    let canvas = host.querySelector('canvas.otsu-hist');
+    if (!canvas) {
+        host.innerHTML = '';
+        canvas = document.createElement('canvas');
+        canvas.className = 'otsu-hist';
+        canvas.style.cssText = 'width:100%;height:100%;display:block;';
+        host.appendChild(canvas);
+    }
+    drawOtsuHistogram(canvas, rec, App.otsuStrength || 0);
+
+    const effLog = rec.manual ? rec.effLog : (rec.autoThresholdLog + (App.otsuStrength || 0));
+    const thrOrig = Math.pow(10, effLog) - 1;
+    let total = 0, removed = 0;
+    const HB = rec.histCounts.length;
+    const w = (rec.histMax - rec.histMin) / HB;
+    for (let b = 0; b < HB; b++) {
+        total += rec.histCounts[b];
+        const center = rec.histMin + (b + 0.5) * w;
+        if (center <= effLog) removed += rec.histCounts[b];
+    }
+    const pct = total > 0 ? (100 * removed / total) : 0;
+    const readout = document.getElementById('otsu-strength-readout');
+    if (readout) {
+        readout.textContent = '閾値 ' + formatRawValue(thrOrig) + ' / 除去 ' + pct.toFixed(1) + '%'
+            + (rec.manual ? ' (手動)' : (App.otsuStrength ? ' (強度 ' + (App.otsuStrength > 0 ? '+' : '') + (App.otsuStrength).toFixed(2) + ')' : ' (自動)'));
+    }
+    const scopeEl = document.getElementById('analysis-scope');
+    if (scopeEl) scopeEl.textContent = (sec.displayName || '') + ' — ' + rec.nOriginal + ' px';
+}
+
+// ヒストグラム(棒) + 自動Otsu線(灰破線) + 有効閾値線(赤実線) を canvas に描画。
+function drawOtsuHistogram(canvas, rec, strength) {
+    const host = canvas.parentElement;
+    const cssW = Math.max(120, (host && host.clientWidth) || 300);
+    const cssH = Math.max(80, (host && host.clientHeight) || 160);
+    const dpr = Math.min(2, (window.devicePixelRatio || 1));
+    canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cssW, cssH);
+    const padL = 6, padR = 6, padT = 8, padB = 16;
+    const plotW = cssW - padL - padR, plotH = cssH - padT - padB;
+    const hist = rec.histCounts, HB = hist.length;
+    const hmin = rec.histMin, hmax = rec.histMax, span = (hmax - hmin) || 1;
+    let maxC = 0; for (let b = 0; b < HB; b++) if (hist[b] > maxC) maxC = hist[b];
+    // log-y で背景ピークの潰れを防ぐ
+    const vm = Math.log10(1 + maxC) || 1;
+    const yScale = (c) => plotH * (Math.log10(1 + c) / vm);
+    const xOf = (logv) => padL + plotW * ((logv - hmin) / span);
+    const effLog = rec.manual ? rec.effLog : (rec.autoThresholdLog + (strength || 0));
+    const bw = plotW / HB;
+    for (let b = 0; b < HB; b++) {
+        const c = hist[b]; if (c <= 0) continue;
+        const center = hmin + (b + 0.5) * span / HB;
+        const h = yScale(c);
+        ctx.fillStyle = (center <= effLog) ? '#cbd5e1' : '#60a5fa'; // 左=除去(灰) / 右=残す(青)
+        ctx.fillRect(padL + b * bw, padT + plotH - h, Math.max(1, bw), h);
+    }
+    if (!rec.manual && Number.isFinite(rec.autoThresholdLog)) {
+        const xa = xOf(rec.autoThresholdLog);
+        ctx.strokeStyle = '#9ca3af'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        ctx.beginPath(); ctx.moveTo(xa, padT); ctx.lineTo(xa, padT + plotH); ctx.stroke();
+        ctx.setLineDash([]);
+    }
+    const xe = xOf(effLog);
+    ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 1.5; ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(xe, padT); ctx.lineTo(xe, padT + plotH); ctx.stroke();
+    ctx.fillStyle = '#6b7280'; ctx.font = '9px sans-serif'; ctx.textBaseline = 'bottom';
+    ctx.textAlign = 'left'; ctx.fillText('◀背景', padL, cssH - 3);
+    ctx.textAlign = 'right'; ctx.fillText('組織▶  log10(TIC+1)', cssW - padR, cssH - 3);
 }
 
 // Memo (project-wide) helpers.
@@ -8228,7 +8412,9 @@ function buildOneCsvTable(group, roiPairs, project, otsuMode) {
         const dataArr = new Float64Array(N);
         for (let r = 0; r < N; r++) { const t = tic[r] > 0 ? tic[r] : 0; dataArr[r] = Math.log10(t + 1); }
         const otsu = computeOtsuThreshold(dataArr, OTSU_NBINS);
-        const thrOrig = Math.pow(10, otsu.threshold) - 1;
+        // 表示と同じ強度オフセット(log10 単位)を反映して閾値を決める(強度0=純粋Otsu)。
+        const strength = (typeof App !== 'undefined' && App && Number.isFinite(App.otsuStrength)) ? App.otsuStrength : 0;
+        const thrOrig = Math.pow(10, otsu.threshold + strength) - 1;
         keepRow = new Uint8Array(N);
         for (let r = 0; r < N; r++) keepRow[r] = tic[r] > thrOrig ? 1 : 0;
         if (otsuMode === 'flag') headers.push('bg_kept');
@@ -11999,6 +12185,9 @@ const App = {
     otsuBgRemove: false,       // 背景除去(Otsu): TIC ベースの背景スポットを全イオン
                                // 像から一括で非表示にする(生データ非破壊)。
     otsuManualThreshold: null, // 手動閾値(生 TIC 単位)。null なら Otsu 自動。
+    otsuStrength: 0,           // 背景除去の強度(log10 単位オフセット)。0=自動Otsu、
+                               // 正=強く除去(多く消す)、負=弱く(残す)。
+    analysisMode: 'roi',       // Analysis パネルの表示: 'roi' 強度チャート / 'otsu' 背景除去
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
     focusCompoundKey: null,
     // ① Rotation target for the shared toolbar: 'both' (whole-view CSS rot),
@@ -12537,6 +12726,7 @@ const App = {
         }
         const res = await computeSectionOtsuMasks(sec, this.project, {
             manualThreshold: (opts.manualThreshold != null) ? opts.manualThreshold : this.otsuManualThreshold,
+            strength: this.otsuStrength || 0,
         });
         const hasAny = res && res.bySource && Object.keys(res.bySource).length > 0;
         sec.meta = sec.meta || {};
@@ -12626,6 +12816,61 @@ const App = {
             showToast('背景除去 一括適用: 適用 ' + applied + ' / スキップ(処理済み) ' + skipped +
                 (unavailable ? ' / 元データ無し ' + unavailable : ''));
         } catch (e) {}
+    },
+    // 強度スライダーの高速反映: TIC キャッシュから keep を再構築(再パース不要)。
+    // キャッシュが無い(リロード後など)場合は false を返し、呼び出し側が再計算する。
+    _rethresholdSectionFromCache(sec) {
+        const otsu = sec && sec.meta && sec.meta.otsu;
+        if (!otsu || !otsu.bySource) return false;
+        let allCached = true;
+        for (const srcKey of Object.keys(otsu.bySource)) {
+            const rec = otsu.bySource[srcKey];
+            if (!rec) continue;
+            if (rec.manual) continue; // 手動閾値の切片は強度スライダー非適用
+            const cache = _otsuTicCache.get(sec.id + '|' + srcKey + '|' + (rec.signature || ''));
+            if (!cache) { allCached = false; continue; }
+            const effLog = cache.autoThresholdLog + (this.otsuStrength || 0);
+            const keep = new Uint8Array(rec.W * rec.H);
+            const gridIdx = cache.gridIdx, logTic = cache.logTic;
+            let nKept = 0;
+            for (let i = 0; i < logTic.length; i++) {
+                const gi = gridIdx[i]; if (gi < 0) continue;
+                if (logTic[i] > effLog) { if (!keep[gi]) { keep[gi] = 1; nKept++; } }
+            }
+            rec.keepB64 = packBitsToB64(keep);
+            rec.effLog = effLog;
+            rec.thresholdOriginal = Math.pow(10, effLog) - 1;
+            rec.nKept = nKept; rec.nRemoved = rec.nOriginal - nKept;
+        }
+        let tk = 0, tr = 0;
+        for (const k of Object.keys(otsu.bySource)) { tk += otsu.bySource[k].nKept || 0; tr += otsu.bySource[k].nRemoved || 0; }
+        otsu.nKept = tk; otsu.nRemoved = tr;
+        return allCached;
+    },
+    // 背景除去の強度を変更。全マスク済み切片へ反映(キャッシュ優先、無ければ再計算)。
+    async setOtsuStrength(v, opts) {
+        opts = opts || {};
+        v = Number(v); if (!Number.isFinite(v)) v = 0;
+        v = Math.max(-3, Math.min(3, v));
+        this.otsuStrength = v;
+        if (!this.shareMode && this.project) {
+            this.project.meta = this.project.meta || {};
+            this.project.meta.otsuStrength = v;
+        }
+        const secs = (this.project && this.project.sections) || [];
+        const needRecompute = [];
+        for (const sec of secs) {
+            if (!(sec.meta && sec.meta.otsu && sec.meta.otsu.applied)) continue;
+            const allCached = this._rethresholdSectionFromCache(sec);
+            if (!allCached) needRecompute.push(sec);
+        }
+        for (const sec of needRecompute) {
+            try { await this.ensureSectionOtsu(sec, { force: true }); } catch (e) { console.warn('[otsu] strength recompute failed', e); }
+        }
+        _otsuKeepDecodeCache.clear();
+        if (!opts.noSave) { try { this.queueSave(); } catch (e) {} }
+        this._rerenderOtsu();
+        try { if (this.analysisMode === 'otsu') renderOtsuAnalysis(); } catch (e) {}
     },
 
     async init() {
@@ -13523,6 +13768,10 @@ const App = {
             this.otsuBgRemove = bgr;
             const bgSel = document.getElementById('tb-bg-remove');
             if (bgSel) bgSel.checked = bgr;
+            // 背景除去の強度(log10 オフセット)を復元し、スライダーに反映。
+            this.otsuStrength = (project.meta && Number.isFinite(project.meta.otsuStrength)) ? project.meta.otsuStrength : 0;
+            const stInp = document.getElementById('otsu-strength');
+            if (stInp) stInp.value = String(this.otsuStrength);
         } catch (e) { /* non-fatal */ }
         localStorage.setItem('desi:lastProjectId', id);
         document.getElementById('project-name-input').value = project.displayName || '';
@@ -14711,6 +14960,33 @@ const App = {
         });
         ['graph-select-1', 'graph-select-2', 'graph-select-3'].forEach(id => {
             document.getElementById(id).addEventListener('change', () => this.renderAnalysis());
+        });
+        // Analysis モード切替(ROI強度 / 背景除去(Otsu))
+        const analysisModeSel = document.getElementById('analysis-mode');
+        if (analysisModeSel) analysisModeSel.addEventListener('change', () => {
+            this.analysisMode = (analysisModeSel.value === 'otsu') ? 'otsu' : 'roi';
+            try { updateAnalysisModeUi(); } catch (e) {}
+            if (this.analysisMode === 'otsu') { try { populateOtsuSectionSelect(); } catch (e) {} }
+            this.renderAnalysis();
+        });
+        const otsuSecSel = document.getElementById('otsu-section-select');
+        if (otsuSecSel) otsuSecSel.addEventListener('change', () => { try { renderOtsuAnalysis(); } catch (e) {} });
+        const otsuStrengthInp = document.getElementById('otsu-strength');
+        if (otsuStrengthInp) {
+            // ドラッグ中(input): ヒストグラム線と読み出しだけ即時更新(重い再計算はしない)。
+            otsuStrengthInp.addEventListener('input', () => {
+                this.otsuStrength = Number(otsuStrengthInp.value) || 0;
+                if (this.analysisMode === 'otsu') { try { renderOtsuAnalysis(); } catch (e) {} }
+            });
+            // 離した時(change): 実際のマスク・表示へ反映して保存。
+            otsuStrengthInp.addEventListener('change', () => {
+                this.setOtsuStrength(Number(otsuStrengthInp.value) || 0).catch(e => console.warn('[otsu] strength apply failed', e));
+            });
+        }
+        const otsuStrengthReset = document.getElementById('otsu-strength-reset');
+        if (otsuStrengthReset) otsuStrengthReset.addEventListener('click', () => {
+            const inp = document.getElementById('otsu-strength'); if (inp) inp.value = '0';
+            this.setOtsuStrength(0).catch(e => console.warn('[otsu] strength reset failed', e));
         });
         // Memo form bindings (project-wide)
         const memoMap = {
