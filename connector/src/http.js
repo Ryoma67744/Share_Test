@@ -105,6 +105,8 @@ const server = createServer(async (req, res) => {
         q: q.get('q') || undefined,
         tag: q.get('tag') || undefined,
         polarity: q.get('polarity') || undefined,
+        // Off unless explicitly asked for: archived MRMs have unoptimised CE/CV.
+        include_unvalidated: /^(1|true|yes)$/i.test(q.get('include_unvalidated') || ''),
       }));
     }
     // --- Reverse lookup: which projects measured compound X (read-only) ---

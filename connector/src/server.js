@@ -69,19 +69,20 @@ const TOOLS = [
   },
   {
     name: 'search_mrm',
-    description: 'Search the lab-wide REGISTERED MRM library (compounds + transitions with precursor/product/CE/CV, tags, polarity, and usage history). This is the MRM management registry from the app — NOT the per-project MSI layers. Optional filters: q (name or tag substring), tag, polarity. Call with no arguments to list the whole library.',
+    description: 'Search the lab-wide REGISTERED MRM library (compounds + transitions with precursor/product/CE/CV, tags, polarity, and usage history). This is the MRM management registry from the app — NOT the per-project MSI layers. Optional filters: q (name or tag substring), tag, polarity. Call with no arguments to list the whole validated library. The library has two shelves: 検証済みライブラリ (validated, usable as-is) and 使用実績アーカイブ (measured before but never optimised). Only the validated shelf is returned unless include_unvalidated is true; archived entries have unoptimised CE/CV and must never be presented as ready to use.',
     inputSchema: {
       type: 'object',
       properties: {
         q: { type: 'string', description: 'optional: compound name or tag (substring)' },
         tag: { type: 'string', description: 'optional: tag/category (substring)' },
         polarity: { type: 'string', description: 'optional: polarity (e.g. + / -)' },
+        include_unvalidated: { type: 'boolean', description: 'optional: also return 使用実績アーカイブ entries (used before, CE/CV never optimised). Default false. Each row carries shelf/check_level/validated so they can be told apart.' },
       },
     },
   },
   {
     name: 'build_exp',
-    description: 'Assemble a Waters MassLynx .exp measurement file from registered MRMs. Pass `names` (ordered array of compound names); each resolves to its export transition (recommended > quant(定量) > first) and CE/CV are taken from the registry, never guessed. Returns exp_text plus channels/missing/ambiguous. Unregistered names are reported in `missing`, not fabricated.',
+    description: 'Assemble a Waters MassLynx .exp measurement file from registered MRMs. Pass `names` (ordered array of compound names); each resolves to its export transition (recommended > quant(定量) > first) and CE/CV are taken from the registry, never guessed. Only the 検証済みライブラリ (validated) shelf is exported. Returns exp_text plus channels/missing/ambiguous/unvalidated. Unregistered names are reported in `missing`; names that exist but sit in the 使用実績アーカイブ shelf are reported in `unvalidated` — they are NOT missing, must not be substituted, and their CE/CV must not be guessed.',
     inputSchema: {
       type: 'object',
       properties: {

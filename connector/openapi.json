@@ -68,11 +68,12 @@
     "/mrm": {
       "get": {
         "operationId": "searchMrm",
-        "summary": "Search the REGISTERED MRM library (compounds + transitions incl. precursor/product/CE/CV, tags, polarity, usage history) from the MRM management app. Not the per-project MSI layers. Optional filters; no filter = whole library.",
+        "summary": "Search the REGISTERED MRM library (compounds + transitions incl. precursor/product/CE/CV, tags, polarity, usage history) from the MRM management app. Not the per-project MSI layers. Optional filters; no filter = the whole VALIDATED library. The library has two shelves: 検証済みライブラリ (validated, usable as-is) and 使用実績アーカイブ (measured before but never optimised). Archived entries are excluded unless include_unvalidated=true, and must never be presented as ready to use.",
         "parameters": [
           { "name": "q", "in": "query", "required": false, "schema": { "type": "string" }, "description": "compound name or tag (substring, case-insensitive)" },
           { "name": "tag", "in": "query", "required": false, "schema": { "type": "string" }, "description": "tag/category (substring)" },
-          { "name": "polarity", "in": "query", "required": false, "schema": { "type": "string" }, "description": "polarity (e.g. + / -)" }
+          { "name": "polarity", "in": "query", "required": false, "schema": { "type": "string" }, "description": "polarity (e.g. + / -)" },
+          { "name": "include_unvalidated", "in": "query", "required": false, "schema": { "type": "boolean" }, "description": "also return 使用実績アーカイブ entries (used before, CE/CV never optimised). Default false. Each row carries shelf/check_level/validated so they can be told apart." }
         ],
         "responses": { "200": { "description": "OK" } }
       }
@@ -91,7 +92,7 @@
     "/exp": {
       "get": {
         "operationId": "buildExp",
-        "summary": "Assemble a Waters MassLynx .exp from registered MRMs. Repeat `name` for each channel in output order. CE/CV come from the registry (not estimated); unregistered names are returned in `missing`. Returns { exp_text, channels, missing, ambiguous }.",
+        "summary": "Assemble a Waters MassLynx .exp from registered MRMs. Repeat `name` for each channel in output order. CE/CV come from the registry (not estimated) and ONLY from the 検証済みライブラリ (validated) shelf. Unregistered names are returned in `missing`; names that exist but sit in the 使用実績アーカイブ shelf are returned in `unvalidated` — they are NOT missing, must not be substituted, and their CE/CV must not be guessed. Returns { exp_text, channels, missing, ambiguous, unvalidated }.",
         "parameters": [
           { "name": "name", "in": "query", "required": true, "style": "form", "explode": true, "schema": { "type": "array", "items": { "type": "string" } }, "description": "compound name to include as a channel; repeat for multiple channels, in output order" }
         ],

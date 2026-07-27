@@ -85,6 +85,17 @@
   .fchip:hover { border-color:#94a3b8; }
   .fchip.on { background:#2563eb; border-color:#2563eb; color:#fff; }
   .serial-badge { display:inline-block; padding:1px 7px; border-radius:4px; font-size:10px; font-weight:700; background:#fde68a; color:#92400e; }
+  /* Shelf tabs (検証済みライブラリ / 使用実績アーカイブ) — one shelf on screen at a time. */
+  .shelf-tabs { display:flex; align-items:flex-end; gap:4px; margin-top:12px; border-bottom:1px solid #e5e7eb; }
+  .shelf-tab { padding:6px 14px; font-size:13px; font-weight:600; color:#64748b; cursor:pointer; user-select:none;
+      border:1px solid transparent; border-bottom:none; border-radius:6px 6px 0 0; margin-bottom:-1px; background:transparent; }
+  .shelf-tab:hover { color:#334155; background:#f8fafc; }
+  .shelf-tab.on { color:#0f172a; background:#fff; border-color:#e5e7eb; }
+  .shelf-tab.on.archive { color:#92400e; }
+  .shelf-tab .n { font-weight:400; color:#94a3b8; }
+  .shelf-note { font-size:11px; color:#64748b; margin:6px 2px 0; }
+  .shelf-note.archive { color:#92400e; }
+  .arch-badge { display:inline-block; padding:0 5px; border-radius:8px; font-size:9px; font-weight:700; background:#fef3c7; color:#92400e; margin-left:4px; }
   .check-badge { display:inline-block; padding:1px 6px; border-radius:9px; font-size:10px; font-weight:600; }
   .check-badge.std { background:#dcfce7; color:#166534; }
   .check-badge.lit { background:#fef3c7; color:#92400e; }
@@ -145,6 +156,7 @@
                style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;">
       </div>
     </div>
+    <div id="shelf-tabs" class="shelf-tabs"></div>
     <div id="filter-bar" class="filter-bar"></div>
   </div>
 
@@ -188,11 +200,13 @@ const SupabaseClient = (() => {
         configured() { return !!_client(); },
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
         listMrmLibrary(pw) { return rpc('list_mrm_library', { _master_pw: pw }); },
-        upsertCompound(pw, name, tags, polarity, note, serialNo, checkLevel) {
-            return rpc('upsert_compound', { _master_pw: pw, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo), _check_level: checkLevel || null });
+        // `shelf` ('main' | 'archive') is optional everywhere: passing null keeps
+        // whichever shelf the compound is already on (see mrm_library.sql).
+        upsertCompound(pw, name, tags, polarity, note, serialNo, checkLevel, shelf) {
+            return rpc('upsert_compound', { _master_pw: pw, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo), _check_level: checkLevel || null, _shelf: shelf || null });
         },
-        updateCompound(pw, id, name, tags, polarity, note, serialNo, checkLevel) {
-            return rpc('update_compound', { _master_pw: pw, _id: id, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo), _check_level: checkLevel || null });
+        updateCompound(pw, id, name, tags, polarity, note, serialNo, checkLevel, shelf) {
+            return rpc('update_compound', { _master_pw: pw, _id: id, _name: name, _tags: tags || [], _polarity: polarity || null, _note: note || null, _serial_no: (serialNo == null ? null : serialNo), _check_level: checkLevel || null, _shelf: shelf || null });
         },
         deleteCompound(pw, id) { return rpc('delete_compound', { _master_pw: pw, _id: id }); },
         upsertTransition(pw, t) {
@@ -246,6 +260,7 @@ const SupabaseClient = (() => {
                 _master_pw: pw, _name: m.name, _tags: m.tags || [], _polarity: m.polarity || null,
                 _precursor: m.precursor, _product: m.product, _ce: m.ce, _cv: m.cv,
                 _check_level: m.check_level || null,
+                _shelf: m.shelf || null,
             });
         },
         ignoreMeasuredCompound(pw, name) { return rpc('ignore_measured_compound', { _master_pw: pw, _name: name }); },
@@ -375,13 +390,35 @@ function openModal(html) {
 const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const UNTAGGED = '(未分類)';
 
-let library = [];        // [{id,serial_no,name,tags[],polarity,note,transitions:[{...,usages:[...]}]}]
+let library = [];        // [{id,serial_no,name,tags[],polarity,note,shelf,transitions:[{...,usages:[...]}]}]
 let mrmSets = [];        // ② [{id,name,owner,description,source_project_slug,items:[{transition_id,name,precursor,product,ce,cv,...}]}]
 let searchText = '';
 let filterPolarity = '';          // '', '+', '-'
 let selectedTags = new Set();     // 分類フィルタ (OR)
 let selectedSampleTypes = new Set(); // サンプル種フィルタ (OR)
 let selectedTransitions = new Set(); // .exp 出力に含める transition id
+
+// ---- Shelves --------------------------------------------------------------
+// The library is split into two INDEPENDENT lists, surfaced as two tabs:
+//   'main'    検証済みライブラリ — the pre-existing list; usable as-is.
+//   'archive' 使用実績アーカイブ — measured before, never optimised.
+// Only one shelf is rendered at a time, so the trusted list never gets diluted.
+// A compound with no shelf recorded is treated as 'main' (that is what the
+// mrm_library.sql backfill sets every pre-existing row to).
+const SHELVES = {
+    main:    { label: '検証済みライブラリ', short: '検証済み',   desc: 'そのまま測定に使えるMRM' },
+    archive: { label: '使用実績アーカイブ', short: 'アーカイブ', desc: '使用歴はあるが未最適化のMRM (要最適化)' },
+};
+let currentShelf = 'main';
+function shelfOf(c) { return (c && c.shelf === 'archive') ? 'archive' : 'main'; }
+function otherShelf(s) { return s === 'archive' ? 'main' : 'archive'; }
+function shelfCount(s) { return (library || []).filter(c => shelfOf(c) === s).length; }
+// Remembered across visits so the tab you work in is where you land next time.
+function _loadShelf() {
+    try { const v = localStorage.getItem('desi:mrmShelf'); if (v === 'main' || v === 'archive') return v; } catch (e) {}
+    return 'main';
+}
+function _saveShelf(s) { try { localStorage.setItem('desi:mrmShelf', s); } catch (e) {} }
 
 function parseTags(s) {
     const out = [];
@@ -487,9 +524,16 @@ function transitionsHtml(c) {
 // --- consolidation by serial_no -------------------------------------------
 // Compounds sharing a serial_no are ONE logical compound (handles name drift
 // like GABA / POS_GABA). Build "units" keyed by serial_no (null = own unit).
-function libraryUnits() {
+//
+// The shelf filter is applied HERE, before grouping — not to the finished
+// units. Two names sharing a serial_no can sit on different shelves, and
+// grouping first would build one unit spanning both, which would then show up
+// half-populated in each tab. Filtering first gives each tab exactly the
+// members that belong to it.
+function libraryUnits(shelf) {
     const map = new Map(); const units = [];
     for (const c of (library || [])) {
+        if (shelf && shelfOf(c) !== shelf) continue;
         const key = (c.serial_no != null) ? ('S' + c.serial_no) : ('C' + c.id);
         let u = map.get(key);
         if (!u) { u = { key, serial_no: (c.serial_no != null ? c.serial_no : null), members: [] }; map.set(key, u); units.push(u); }
@@ -513,17 +557,24 @@ function libraryUnits() {
     return units;
 }
 
+// Filter-bar vocabularies are scoped to the shelf on screen, so a tab never
+// offers a chip that matches nothing in it.
 function availableTags() {
     const s = new Set();
-    for (const c of (library || [])) for (const t of (c.tags || [])) if (t) s.add(t);
+    for (const c of (library || [])) {
+        if (shelfOf(c) !== currentShelf) continue;
+        for (const t of (c.tags || [])) if (t) s.add(t);
+    }
     return Array.from(s).sort((a, b) => a.localeCompare(b, 'ja'));
 }
 function availableSampleTypes() {
     const s = new Set();
-    for (const c of (library || []))
+    for (const c of (library || [])) {
+        if (shelfOf(c) !== currentShelf) continue;
         for (const tr of (c.transitions || []))
             for (const u of (tr.usages || []))
                 for (const st of (u.sample_types || [])) if (st) s.add(st);
+    }
     return Array.from(s).sort((a, b) => a.localeCompare(b, 'ja'));
 }
 function unitSampleTypes(u) {
@@ -568,6 +619,17 @@ function unitMatches(u) {
     return true;
 }
 
+function renderShelfTabs() {
+    const bar = document.getElementById('shelf-tabs');
+    if (!bar) return;
+    bar.innerHTML = ['main', 'archive'].map(s => {
+        const on = (currentShelf === s) ? ' on' : '';
+        const kind = (s === 'archive') ? ' archive' : '';
+        return '<span class="shelf-tab' + on + kind + '" data-shelf="' + s + '" title="' + safe(SHELVES[s].desc) + '">'
+            + safe(SHELVES[s].label) + ' <span class="n">(' + shelfCount(s) + ')</span></span>';
+    }).join('');
+}
+
 function renderFilterBar() {
     const bar = document.getElementById('filter-bar');
     if (!bar) return;
@@ -593,8 +655,15 @@ function checkBadge(c) {
 }
 
 function compoundActions(c) {
+    // Move between shelves. Archive → main is the "validated it, promote it"
+    // step; main → archive demotes something that turned out to need work.
+    const toArchive = shelfOf(c) === 'main';
+    const moveBtn = '<button class="btn mini" data-action="move-shelf" data-id="' + safe(c.id) + '"'
+        + ' title="' + (toArchive ? '使用実績アーカイブへ移す (検証済みライブラリから外す)' : '検証済みライブラリへ移す (そのまま使えるMRMとして扱う)') + '">'
+        + (toArchive ? '→ アーカイブ' : '↑ 本登録へ昇格') + '</button> ';
     return ''
         + '<button class="btn mini" data-action="show-projects" data-cname="' + safe(c.name) + '" title="この化合物を測定したプロジェクトを表示">📁 測定PJ</button> '
+        + moveBtn
         + '<button class="btn mini" data-action="add-transition" data-id="' + safe(c.id) + '">+ トランジション</button> '
         + '<button class="btn mini" data-action="edit-compound" data-id="' + safe(c.id) + '">編集</button> '
         + '<button class="btn mini danger" data-action="del-compound" data-id="' + safe(c.id) + '">削除</button>';
@@ -667,14 +736,23 @@ function unitHtml(u) {
 }
 
 function renderLibrary() {
+    renderShelfTabs();
     renderFilterBar();
     renderSelectedPanel();
     const host = document.getElementById('lib');
-    const units = libraryUnits().filter(unitMatches);
+    const units = libraryUnits(currentShelf).filter(unitMatches);
+    const shelfTotal = shelfCount(currentShelf);
+    // A short standing reminder of what the archive shelf means — it is the one
+    // place a CE/CV must not be trusted without re-checking.
+    const note = (currentShelf === 'archive')
+        ? '<p class="shelf-note archive">使用歴はあるが最適化していないMRMです。CE/CV はそのまま信頼せず、検証後は「本登録へ昇格」で検証済みライブラリへ移してください。</p>'
+        : '';
     if (!units.length) {
-        host.innerHTML = '<div class="card p-6 text-center text-sm text-gray-500">'
-            + (library.length ? '条件に一致する化合物がありません。' : 'まだ登録がありません。「+ 化合物」で追加するか、結果画面の Method 表から登録してください。')
-            + '</div>';
+        let msg;
+        if (shelfTotal) msg = '条件に一致する化合物がありません。';
+        else if (currentShelf === 'archive') msg = 'アーカイブはまだ空です。「実測棚卸し」から、過去に測定したが未登録の化合物をまとめて登録できます。';
+        else msg = 'まだ登録がありません。「+ 化合物」で追加するか、結果画面の Method 表から登録してください。';
+        host.innerHTML = note + '<div class="card p-6 text-center text-sm text-gray-500">' + msg + '</div>';
         return;
     }
     // Group by tag — a unit with multiple tags appears under each.
@@ -691,9 +769,9 @@ function renderLibrary() {
     // group open while a search/filter is active so matches are never hidden.
     const anyFilter = !!((searchText || '').trim() || filterPolarity || selectedTags.size || selectedSampleTypes.size);
     const collapsed = _mrmCollapsedSet();
-    host.innerHTML = tagNames.map(t => {
+    host.innerHTML = note + tagNames.map(t => {
         const list = groups.get(t).map(unitHtml).join('');
-        const open = (anyFilter || !collapsed.has(t)) ? ' open' : '';
+        const open = (anyFilter || !collapsed.has(_collapseKey(t))) ? ' open' : '';
         return '<details class="tag-group" data-tag="' + safe(t) + '"' + open + '>'
             + '<summary>' + safe(t) + ' <span class="muted" style="font-weight:400;">(' + groups.get(t).length + ')</span></summary>'
             + '<div class="tag-group-body">' + list + '</div>'
@@ -703,14 +781,17 @@ function renderLibrary() {
     // listeners are discarded with the replaced DOM).
     host.querySelectorAll('details.tag-group').forEach(d => {
         d.addEventListener('toggle', () => {
-            const name = d.getAttribute('data-tag');
+            const name = _collapseKey(d.getAttribute('data-tag'));
             const set = _mrmCollapsedSet();
             if (d.open) set.delete(name); else set.add(name);
             _saveMrmCollapsed(set);
         });
     });
 }
-// Collapsed tag-group names (UI state only, local).
+// Collapsed tag-group names (UI state only, local). Keys are per-shelf so the
+// same tag can be collapsed in one tab and open in the other. 'main' keys stay
+// unprefixed to keep already-saved collapse state working.
+function _collapseKey(tag) { return currentShelf === 'main' ? tag : (currentShelf + '|' + tag); }
 function _mrmCollapsedSet() { try { return new Set(JSON.parse(localStorage.getItem('desi:mrmGroupsCollapsed') || '[]')); } catch (e) { return new Set(); } }
 function _saveMrmCollapsed(set) { try { localStorage.setItem('desi:mrmGroupsCollapsed', JSON.stringify([...set])); } catch (e) {} }
 
@@ -719,6 +800,9 @@ function _saveMrmCollapsed(set) { try { localStorage.setItem('desi:mrmGroupsColl
 // ===========================================================================
 async function openCompoundModal(existing) {
     const c = existing || {};
+    // Editing keeps the compound's own shelf; a new compound defaults to the
+    // tab you are looking at, which is where you would expect it to appear.
+    const shelfSel = existing ? shelfOf(c) : currentShelf;
     const html = `
         <h2>${existing ? '化合物を編集' : '化合物を追加'}</h2>
         <form class="row">
@@ -738,6 +822,11 @@ async function openCompoundModal(existing) {
               <option value="unchecked" ${(!c.check_level || c.check_level === 'unchecked') ? 'selected' : ''}>未確認</option>
               <option value="std" ${c.check_level === 'std' ? 'selected' : ''}>標準品確認済み</option>
               <option value="lit" ${c.check_level === 'lit' ? 'selected' : ''}>文献のみ</option>
+            </select></label>
+          <label>登録先 (一覧のどちらに置くか。確認レベルとは独立です)
+            <select name="shelf">
+              <option value="main" ${shelfSel === 'main' ? 'selected' : ''}>検証済みライブラリ — そのまま使えるMRM</option>
+              <option value="archive" ${shelfSel === 'archive' ? 'selected' : ''}>使用実績アーカイブ — 使用歴はあるが未最適化</option>
             </select></label>
           <label>メモ <textarea name="note">${safe(c.note || '')}</textarea></label>
           <p class="err" data-err></p>
@@ -759,6 +848,7 @@ async function openCompoundModal(existing) {
             note: (card.querySelector('[name="note"]').value || '').trim() || null,
             serial_no: sv === '' ? null : parseInt(sv, 10),
             check_level: card.querySelector('[name="check_level"]').value || 'unchecked',
+            shelf: card.querySelector('[name="shelf"]').value || 'main',
         };
     };
     return p;
@@ -847,15 +937,31 @@ function reportError(e, fallback) {
 async function addCompound() {
     const data = await openCompoundModal(null);
     if (!data) return;
-    try { await SupabaseClient.upsertCompound(_readCachedMasterPw(), data.name, data.tags, data.polarity, data.note, data.serial_no, data.check_level); await loadLibrary(); }
+    try { await SupabaseClient.upsertCompound(_readCachedMasterPw(), data.name, data.tags, data.polarity, data.note, data.serial_no, data.check_level, data.shelf); await loadLibrary(); }
     catch (e) { reportError(e, '化合物の保存'); }
 }
 async function editCompound(id) {
     const c = findCompound(id); if (!c) return;
     const data = await openCompoundModal(c);
     if (!data) return;
-    try { await SupabaseClient.updateCompound(_readCachedMasterPw(), id, data.name, data.tags, data.polarity, data.note, data.serial_no, data.check_level); await loadLibrary(); }
+    try { await SupabaseClient.updateCompound(_readCachedMasterPw(), id, data.name, data.tags, data.polarity, data.note, data.serial_no, data.check_level, data.shelf); await loadLibrary(); }
     catch (e) { reportError(e, '化合物の更新'); }
+}
+// Move a compound to the other shelf. Only `shelf` changes — tags, transitions
+// and usage history all travel with it. Everything else is passed through
+// unchanged so update_compound doesn't clear a field as a side effect.
+async function moveCompoundShelf(id) {
+    const c = findCompound(id); if (!c) return;
+    const from = shelfOf(c), to = otherShelf(from);
+    const msg = (to === 'archive')
+        ? '"' + c.name + '" を 使用実績アーカイブ へ移します。\n検証済みライブラリの一覧からは外れます (登録内容は保持されます)。'
+        : '"' + c.name + '" を 検証済みライブラリ へ移します。\nそのまま測定に使えるMRMとして扱われ、AIコネクタからも参照されるようになります。';
+    if (!confirm(msg)) return;
+    try {
+        await SupabaseClient.updateCompound(_readCachedMasterPw(), id, c.name, c.tags || [],
+            c.polarity, c.note, c.serial_no, c.check_level, to);
+        await loadLibrary();
+    } catch (e) { reportError(e, '棚の移動'); }
 }
 async function delCompound(id) {
     const c = findCompound(id); if (!c) return;
@@ -1115,9 +1221,9 @@ async function importMrmFromExcel(file) {
         alert('「CompoundName」ヘッダを含むブロックが見つかりませんでした。ヘッダ行に CompoundName / Precursor / Product / CV / CE があるか確認してください。');
         return;
     }
-    const groups = await openImportPreviewModal(blocks);
-    if (!groups) return;     // cancelled
-    await runMrmImport(groups);
+    const opts = await openImportPreviewModal(blocks);
+    if (!opts) return;     // cancelled
+    await runMrmImport(opts.groups, opts.shelf, opts.check_level);
 }
 
 function openImportPreviewModal(blocks) {
@@ -1142,7 +1248,7 @@ function openImportPreviewModal(blocks) {
     }).join('');
     const html = `
         <h2>Excel から MRM を取り込み</h2>
-        <p class="muted" style="font-size:12px;margin:0 0 8px;">${blocks.length} ブロック / ${totalC} 化合物 / ${totalT} トランジションを検出しました。カテゴリはタグとして登録されます。極性「—」は化合物名 (NEG/POS) から推定します。既存の同名化合物・同一トランジションは上書き/スキップされます。</p>
+        <p class="muted" style="font-size:12px;margin:0 0 8px;">${blocks.length} ブロック / ${totalC} 化合物 / ${totalT} トランジションを検出しました。カテゴリはタグとして登録されます。極性「—」は化合物名 (NEG/POS) から推定します。既存の同名化合物・同一トランジションは上書き/スキップされます。<br>「登録先」は<b>新規に作られる化合物にのみ</b>適用されます。既に登録済みの化合物は現在の棚から動きません。</p>
         <div style="max-height:50vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">
         <table style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead><tr style="text-align:left;background:#f8fafc;position:sticky;top:0;">
@@ -1151,6 +1257,19 @@ function openImportPreviewModal(blocks) {
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
+        </div>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">
+          <label style="font-size:11px;color:#475569;">登録先<br>
+            <select data-imp-shelf style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;">
+              <option value="main">検証済みライブラリ — そのまま使えるMRM</option>
+              <option value="archive">使用実績アーカイブ — 使用歴はあるが未最適化</option>
+            </select></label>
+          <label style="font-size:11px;color:#475569;">確認レベル<br>
+            <select data-imp-level style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;">
+              <option value="unchecked">未確認</option>
+              <option value="std">標準品確認済み</option>
+              <option value="lit">文献のみ</option>
+            </select></label>
         </div>
         <p class="err" data-err></p>
         <div class="actions">
@@ -1174,14 +1293,28 @@ function openImportPreviewModal(blocks) {
             out.push({ tag: tag, compounds: compounds });
         }
         if (!out.length) { card.querySelector('[data-err]').textContent = '取り込むブロックが選択されていません'; return null; }
-        return out;
+        return {
+            groups: out,
+            shelf: card.querySelector('[data-imp-shelf]').value || 'main',
+            check_level: card.querySelector('[data-imp-level]').value || 'unchecked',
+        };
     };
     return p;
 }
 
-async function runMrmImport(groups) {
+// `shelf` / `checkLevel` come from the preview modal. They used to be omitted
+// from the upsertCompound call entirely, which silently stamped every imported
+// compound as 未確認 — the reason the existing library's levels can't be trusted
+// (see the shelf note in supabase/mrm_library.sql).
+async function runMrmImport(groups, shelf, checkLevel) {
     const pw = _readCachedMasterPw();
     const total = groups.reduce((a, g) => a + g.compounds.length, 0);
+    // The chosen shelf applies to NEWLY created compounds only. A name already
+    // in the library keeps whichever shelf it is on, so re-importing a list with
+    // the destination left on the wrong entry can never bulk-move the validated
+    // library into the archive. (upsert_compound leaves the shelf alone when it
+    // is passed null — see supabase/mrm_library.sql.)
+    const known = new Set((library || []).map(c => String(c.name || '').trim()));
     let done = 0, okC = 0, okT = 0, fail = 0;
     openModal('<h2>取り込み中…</h2><p class="muted" data-prog>0 / ' + total + '</p>');
     const progCard = openModal._card;
@@ -1190,7 +1323,9 @@ async function runMrmImport(groups) {
         const tags = g.tag ? [g.tag] : [];
         for (const c of g.compounds) {
             try {
-                const id = await SupabaseClient.upsertCompound(pw, c.name, tags, c.polarity, null, null);
+                const isNew = !known.has(String(c.name || '').trim());
+                const id = await SupabaseClient.upsertCompound(pw, c.name, tags, c.polarity, null, null,
+                    checkLevel || 'unchecked', isNew ? (shelf || 'main') : null);
                 okC++;
                 for (const tr of c.transitions) {
                     try {
@@ -1207,7 +1342,7 @@ async function runMrmImport(groups) {
     }
     if (progCard && progCard._close) progCard._close(true);
     await loadLibrary();
-    alert('取り込み完了: 化合物 ' + okC + ' 件 / トランジション ' + okT + ' 件'
+    alert((SHELVES[shelf] || SHELVES.main).label + 'へ取り込み完了: 化合物 ' + okC + ' 件 / トランジション ' + okT + ' 件'
         + (fail ? '（失敗 ' + fail + ' 件、詳細はブラウザのコンソール）' : ''));
 }
 
@@ -1228,13 +1363,16 @@ function clearSelection() {
     updateExportBar();
     renderSelectedPanel();
 }
-// Selected transitions in display (library) order.
+// Selected transitions in display (library) order. Scans the WHOLE library, not
+// just the shelf on screen: a selection survives switching tabs, so a method can
+// deliberately mix validated and archived channels. `shelf` rides along so the
+// export can warn about the archived ones (buildExp ignores the extra field).
 function collectSelectedRows() {
     const rows = [];
     for (const c of (library || [])) {
         for (const tr of (c.transitions || [])) {
             if (selectedTransitions.has(tr.id)) {
-                rows.push({ name: c.name || '', precursor: tr.precursor, product: tr.product, cv: tr.cv, ce: tr.ce });
+                rows.push({ name: c.name || '', precursor: tr.precursor, product: tr.product, cv: tr.cv, ce: tr.ce, shelf: shelfOf(c) });
             }
         }
     }
@@ -1264,7 +1402,9 @@ function renderSelectedPanel() {
         return '<div class="sel-item">'
             + '<span class="sel-ch">' + (idx + 1) + '</span>'
             + '<div class="sel-main">'
-            +   '<div class="sel-name">' + safe(it.c.name) + '</div>'
+            +   '<div class="sel-name">' + safe(it.c.name)
+            +     (shelfOf(it.c) === 'archive' ? '<span class="arch-badge" title="使用実績アーカイブ (未最適化)">未最適化</span>' : '')
+            +   '</div>'
             +   '<div class="sel-mz muted">' + pre + ' → ' + pro + '  CE' + ce + ' / CV' + cv + '</div>'
             + '</div>'
             + '<button class="sel-x" data-action="unselect" data-tid="' + safe(it.tr.id) + '" title="選択解除">×</button>'
@@ -1424,6 +1564,14 @@ async function exportExpRows(rows, baseName) {
 async function exportSelectedExp() {
     const rows = collectSelectedRows();
     if (!rows.length) { alert('出力するトランジションをチェックしてください'); return; }
+    // Archived channels carry CE/CV that was never optimised. Exporting them is
+    // allowed (that is how you go and test them) but never silently.
+    const arch = rows.filter(r => r.shelf === 'archive');
+    if (arch.length) {
+        const names = arch.slice(0, 8).map(r => '・' + r.name).join('\n') + (arch.length > 8 ? '\n…' : '');
+        if (!confirm('使用実績アーカイブ (未最適化) のMRMが ' + arch.length + ' 件含まれます。\n'
+            + 'CE/CV は最適化されていない値です。\n\n' + names + '\n\nこのまま .exp に出力しますか?')) return;
+    }
     await exportExpRows(rows, 'DESI_MRM');
 }
 
@@ -1651,7 +1799,7 @@ async function openReconcileModal() {
     if (!_readCachedMasterPw()) { const ok = await openMasterUnlockModal(); if (!ok) return; }
     const shell = ''
         + '<h2>実測棚卸し</h2>'
-        + '<p style="font-size:11px;color:#475569;margin:2px 0 8px;">実測PJで測定された化合物のうち MRM管理に未登録のものを、一括で「登録」または「無視(登録しない)」にできます。名前以外(Precursor 等)は分かる範囲での自動補完です。登録後に編集で補えます。</p>'
+        + '<p style="font-size:11px;color:#475569;margin:2px 0 8px;">実測PJで測定された化合物のうち MRM管理に未登録のものを、一括で「登録」または「無視(登録しない)」にできます。名前以外(Precursor 等)は分かる範囲での自動補完です。登録後に編集で補えます。<br>登録先は既定で <b>使用実績アーカイブ</b> です (ここに出るものは測定実績はあるが未最適化のため)。検証済みライブラリには影響しません。既に登録済みの化合物は、再登録しても現在の棚から動きません。</p>'
         + '<div data-reconcile-body><div class="muted" style="padding:12px;">読み込み中…</div></div>'
         + '<div class="modal-actions" style="display:flex;gap:6px;justify-content:flex-end;margin-top:12px;">'
         +   '<button type="button" class="btn" data-modal-cancel>閉じる</button>'
@@ -1717,6 +1865,9 @@ async function openReconcileModal() {
             inner += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">'
                 + '<label style="font-size:11px;color:#475569;">タグ (任意・一括適用)<br><input type="text" data-rc-tags placeholder="例: アミノ酸" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;"></label>'
                 + '<label style="font-size:11px;color:#475569;">確認レベル<br><select data-rc-level style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;"><option value="unchecked">未確認</option><option value="std">標準品確認済み</option><option value="lit">文献のみ</option></select></label>'
+                // Defaults to the archive: everything listed here was measured
+                // but never optimised, which is exactly what that shelf holds.
+                + '<label style="font-size:11px;color:#475569;">登録先<br><select data-rc-shelf style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;"><option value="archive">使用実績アーカイブ</option><option value="main">検証済みライブラリ</option></select></label>'
                 + '<span style="flex:1"></span>'
                 + '<button type="button" class="btn" data-rc-ignore>選択を無視</button>'
                 + '<button type="button" class="btn primary" data-rc-register>選択を登録</button>'
@@ -1747,8 +1898,10 @@ async function openReconcileModal() {
         if (!sel.length) { alert('登録する行を選択してください'); return; }
         const tagsEl = body().querySelector('[data-rc-tags]');
         const lvEl = body().querySelector('[data-rc-level]');
+        const shEl = body().querySelector('[data-rc-shelf]');
         const tags = parseTags(tagsEl ? tagsEl.value : '');
         const level = (lvEl && lvEl.value) || 'unchecked';
+        const shelf = (shEl && shEl.value) || 'archive';
         const pw = _readCachedMasterPw();
         openModal('<h2>登録中…</h2><p data-prog style="font-size:12px;color:#475569;">0 / ' + sel.length + '</p>');
         const pcard = openModal._card;
@@ -1759,7 +1912,7 @@ async function openReconcileModal() {
                 await SupabaseClient.registerMeasuredCompound(pw, {
                     name: r.name, tags, polarity: r.polarity || null,
                     precursor: num(r.precursor), product: num(r.product), ce: num(r.ce), cv: num(r.cv),
-                    check_level: level,
+                    check_level: level, shelf,
                 });
                 ok++;
             } catch (e) { console.warn('register measured failed', r.name, e); fail++; }
@@ -1768,7 +1921,7 @@ async function openReconcileModal() {
         if (pcard._close) pcard._close(true);
         await loadLibrary();
         await reload();
-        alert('登録: ' + ok + ' 件' + (fail ? ' / 失敗 ' + fail + ' 件' : ''));
+        alert(SHELVES[shelf].label + 'へ登録: ' + ok + ' 件' + (fail ? ' / 失敗 ' + fail + ' 件' : ''));
     }
     async function doIgnore() {
         const sel = selectedRows();
@@ -1900,6 +2053,7 @@ function bindLibraryEvents() {
         switch (action) {
             case 'add-compound': addCompound(); break;
             case 'edit-compound': editCompound(id); break;
+            case 'move-shelf': moveCompoundShelf(id); break;
             case 'del-compound': delCompound(id); break;
             case 'add-transition': addTransition(id); break;
             case 'edit-transition': editTransition(tid); break;
@@ -1919,6 +2073,26 @@ function bindLibraryEvents() {
         if (q) q.checked = cb.checked;   // keep the summary quick-select in sync
         updateExportBar();
         renderSelectedPanel();
+    });
+}
+
+// Switching shelves resets the filters: each shelf has its own tag / sample-type
+// vocabulary, so carrying a chip across would silently show an empty tab.
+function bindShelfTabs() {
+    const bar = document.getElementById('shelf-tabs');
+    if (!bar) return;
+    bar.addEventListener('click', (ev) => {
+        const el = ev.target && ev.target.closest && ev.target.closest('[data-shelf]');
+        if (!el) return;
+        const s = el.getAttribute('data-shelf');
+        if (s === currentShelf) return;
+        currentShelf = s;
+        _saveShelf(s);
+        filterPolarity = ''; selectedTags.clear(); selectedSampleTypes.clear();
+        searchText = '';
+        const search = document.getElementById('search');
+        if (search) search.value = '';
+        renderLibrary();
     });
 }
 
@@ -1961,7 +2135,9 @@ async function init() {
     document.getElementById('btn-exp-clear').addEventListener('click', () => clearSelection());
     const search = document.getElementById('search');
     search.addEventListener('input', () => { searchText = search.value; renderLibrary(); });
+    currentShelf = _loadShelf();
     bindLibraryEvents();
+    bindShelfTabs();
     bindFilterBar();
     bindSelectedPanel();
     updateExportBar();

@@ -243,30 +243,56 @@ export async function getMatrix(slug, opts = {}) {
   });
 }
 
+// The library is split into two shelves (see supabase/mrm_library.sql):
+// 'main' = 検証済みライブラリ (usable as-is) and 'archive' = 使用実績アーカイブ
+// (measured before but never optimised). Rows written before the shelf column
+// existed are backfilled to 'main', so a missing value means main.
+function shelfOf(c) { return (c && c.shelf === 'archive') ? 'archive' : 'main'; }
+
 // ---- Tool: search_mrm (registered MRM library, read-only) ----------------
 // Reads the lab-wide MRM registry (mrm_compounds / mrm_transitions) via the
 // read-pw-gated RO RPC — a DIFFERENT data model from the DESI/MSI project
 // functions above. Optional case-insensitive filters: q (name or tag), tag,
 // polarity. Returns compact compounds with their transitions (incl CE/CV) and
 // a usage summary, for measurement-history-aware panel design.
+//
+// Archived (unvalidated) compounds are EXCLUDED by default: their CE/CV was
+// never optimised, so recommending them as if they were validated would put bad
+// values on the instrument. Pass include_unvalidated:true to see them; every
+// row then carries check_level + shelf so they can be told apart.
 export async function searchMrm(opts = {}) {
   const { q, tag, polarity } = opts;
+  const includeUnvalidated = opts.include_unvalidated === true;
   const lib = await listMrmLibrary();
   const rows = Array.isArray(lib) ? lib : [];
   const out = [];
+  let archivedHidden = 0;
   for (const c of rows) {
     const tags = Array.isArray(c.tags) ? c.tags : [];
     if (q && !(matchStr(q, c.name) || tags.some((t) => matchStr(q, t)))) continue;
     if (tag && !tags.some((t) => matchStr(tag, t))) continue;
     if (polarity && !matchStr(polarity, c.polarity)) continue;
+    if (shelfOf(c) === 'archive' && !includeUnvalidated) { archivedHidden++; continue; }
     out.push(compactMrm(c));
+  }
+  const notes = [];
+  if (!out.length) {
+    notes.push('No registered MRM matched. Drop filters, or call search_mrm with no arguments to list the whole library.');
+  }
+  if (archivedHidden) {
+    notes.push(archivedHidden + ' compound(s) matched but are in the 使用実績アーカイブ shelf '
+      + '(measured before, CE/CV never optimised) and were excluded. '
+      + 'Pass include_unvalidated:true to include them — they must not be presented as ready to use.');
   }
   return {
     count: out.length,
-    filters: { q: q || null, tag: tag || null, polarity: polarity || null },
+    filters: {
+      q: q || null, tag: tag || null, polarity: polarity || null,
+      include_unvalidated: includeUnvalidated,
+    },
+    archived_excluded: archivedHidden,
     compounds: out,
-    note: out.length ? undefined
-      : 'No registered MRM matched. Drop filters, or call search_mrm with no arguments to list the whole library.',
+    note: notes.length ? notes.join(' ') : undefined,
   };
 }
 
@@ -288,6 +314,11 @@ function compactMrm(c) {
     tags: Array.isArray(c.tags) ? c.tags : [],
     polarity: c.polarity != null ? c.polarity : null,
     note: c.note || null,
+    // Validation state travels with every row. These used to be dropped here,
+    // which made an unvalidated MRM indistinguishable from a validated one.
+    shelf: shelfOf(c),
+    check_level: c.check_level || 'unchecked',
+    validated: shelfOf(c) === 'main',
     transitions: trans.map((t) => ({
       precursor: t.precursor != null ? t.precursor : null,
       product: t.product != null ? t.product : null,
@@ -331,10 +362,15 @@ export async function buildExpForNames(opts = {}) {
   const channels = [];
   const missing = [];
   const ambiguous = [];
+  const unvalidated = [];
   for (const raw of names) {
     const nm = String(raw == null ? '' : raw).trim();
     const c = byName.get(nm) || byLower.get(nm.toLowerCase());
     if (!c) { missing.push(nm); continue; }
+    // Only the validated shelf may reach an instrument file. Report the archived
+    // ones separately from `missing` — reported as "not found" they look like a
+    // lookup failure, which invites inventing a substitute.
+    if (shelfOf(c) === 'archive') { unvalidated.push(c.name); continue; }
     const pick = pickTransition(c);
     if (!pick) { missing.push(nm + ' (no transition registered)'); continue; }
     const t = pick.tr;
@@ -345,13 +381,21 @@ export async function buildExpForNames(opts = {}) {
     });
     if (pick.reason === 'first-of-many') ambiguous.push(c.name);
   }
+  // Same wording in both early returns and the success note, so the reason a
+  // name was skipped never depends on which branch was taken.
+  const unvalidatedNote = unvalidated.length
+    ? (unvalidated.length + ' name(s) ARE registered but sit in the 使用実績アーカイブ shelf '
+      + '(measured before, CE/CV never optimised) and were excluded from the .exp (see `unvalidated`). '
+      + 'They are not missing and must not be substituted or their CE/CV guessed. '
+      + 'To use one, it has to be validated and promoted to 検証済みライブラリ in the MRM management screen. ')
+    : '';
   if (!rows.length) {
-    return { exp_text: null, count: 0, channels, missing, ambiguous,
-      error: 'No requested compound resolved to a registered MRM; nothing to export.' };
+    return { exp_text: null, count: 0, channels, missing, ambiguous, unvalidated,
+      error: 'No requested compound resolved to a validated registered MRM; nothing to export. ' + unvalidatedNote };
   }
   const template = await getExpTemplate();
   if (!template || !String(template).trim()) {
-    return { exp_text: null, count: rows.length, channels, missing, ambiguous,
+    return { exp_text: null, count: rows.length, channels, missing, ambiguous, unvalidated,
       error: 'No .exp template saved on the server. Save one in the app (「テンプレ設定」) first.' };
   }
   let exp_text;
@@ -363,8 +407,10 @@ export async function buildExpForNames(opts = {}) {
     channels,
     missing,
     ambiguous,
-    note: 'CE/CV are taken from the registered DB values (not estimated). '
+    unvalidated,
+    note: 'CE/CV are taken from the registered DB values (not estimated), from the 検証済みライブラリ shelf only. '
       + (missing.length ? (missing.length + ' name(s) were not in the registry and were excluded (see `missing`). ') : '')
+      + unvalidatedNote
       + (ambiguous.length ? (ambiguous.length + ' compound(s) had multiple transitions with no recommended/quant flag; the first was used (see `ambiguous`).') : ''),
   };
 }

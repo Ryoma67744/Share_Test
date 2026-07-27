@@ -120,6 +120,12 @@ grant execute on function public.list_measured_compounds(text) to anon, authenti
 -- Upserts the compound (by name, merging tags) and, when any transition value
 -- is present, its transition. Does NOT append a usage row — the projects that
 -- measured it are already shown by the 📁 測定PJ reverse lookup.
+--
+-- _shelf (see mrm_library.sql for the two shelves) defaults to 'archive':
+-- everything this stock-take surfaces was measured but never optimised, which
+-- is exactly what the 使用実績アーカイブ shelf is for. The UI offers a picker.
+-- Drop the pre-shelf signature so CREATE OR REPLACE leaves no overload behind.
+drop function if exists public.register_measured_compound(text, text, text[], text, numeric, numeric, numeric, numeric, text);
 create or replace function public.register_measured_compound(
     _master_pw   text,
     _name        text,
@@ -129,7 +135,8 @@ create or replace function public.register_measured_compound(
     _product     numeric default null,
     _ce          numeric default null,
     _cv          numeric default null,
-    _check_level text default null
+    _check_level text default null,
+    _shelf       text default 'archive'
 ) returns jsonb
 language plpgsql security definer set search_path = public, extensions
 as $$
@@ -142,10 +149,14 @@ begin
         raise exception 'name required';
     end if;
     -- compound: create by name; merge tags; keep existing polarity/level unless empty.
-    insert into public.mrm_compounds(name, tags, polarity, serial_no, check_level)
+    -- The shelf is set ONLY on insert. A compound already in the library keeps
+    -- whichever shelf it is on, so re-running the stock-take over a name that is
+    -- already in 検証済みライブラリ can never demote it into the archive.
+    insert into public.mrm_compounds(name, tags, polarity, serial_no, check_level, shelf)
          values (trim(_name), coalesce(_tags, '{}'), _polarity,
                  (select coalesce(max(serial_no), 0) + 1 from public.mrm_compounds),
-                 case when _check_level in ('std','lit','unchecked') then _check_level else 'unchecked' end)
+                 case when _check_level in ('std','lit','unchecked') then _check_level else 'unchecked' end,
+                 case when _shelf in ('main','archive') then _shelf else 'archive' end)
     on conflict (name) do update
          set tags        = public._mrm_array_union(mrm_compounds.tags, excluded.tags),
              polarity    = coalesce(mrm_compounds.polarity, excluded.polarity),
@@ -164,7 +175,7 @@ begin
 end
 $$;
 
-grant execute on function public.register_measured_compound(text, text, text[], text, numeric, numeric, numeric, numeric, text) to anon, authenticated;
+grant execute on function public.register_measured_compound(text, text, text[], text, numeric, numeric, numeric, numeric, text, text) to anon, authenticated;
 
 -- ---- Ignore / un-ignore a measured compound -------------------------------
 create or replace function public.ignore_measured_compound(_master_pw text, _name text)
@@ -206,6 +217,6 @@ grant execute on function public.unignore_measured_compound(text, text) to anon,
 -- ---------------------------------------------------------------------------
 -- drop function if exists public.unignore_measured_compound(text, text);
 -- drop function if exists public.ignore_measured_compound(text, text);
--- drop function if exists public.register_measured_compound(text, text, text[], text, numeric, numeric, numeric, numeric, text);
+-- drop function if exists public.register_measured_compound(text, text, text[], text, numeric, numeric, numeric, numeric, text, text);
 -- drop function if exists public.list_measured_compounds(text);
 -- drop table if exists public.mrm_ignored_compounds;

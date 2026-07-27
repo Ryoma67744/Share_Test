@@ -574,7 +574,33 @@ An **admin-only page** for managing compounds, transitions and usage history in 
 - Select rows in the viewer's Method (MRM) table and click **"選択を管理へ登録"** to register them into this library straight from measurement results (with tags / role / sample types).
 - Export selected transitions to a **`.exp`** file (substituted into a Waters template).
 
-### 19-2. Bulk-import MRM from Excel
+### 19-2. The two shelves — validated library / used-before archive
+
+The list is split into **two independent shelves**, selected by the tabs at the top of the screen. Only one is on screen at a time, so they never get mixed together.
+
+| Shelf | Meaning | How to use it |
+|---|---|---|
+| **検証済みライブラリ** (validated library) | Confirmed with a standard, or measured cleanly on a section. **Usable as-is.** | This is the normal view. `.exp` export comes from here. |
+| **使用実績アーカイブ** (used-before archive) | **Used at least once, but never optimised.** CE/CV are provisional. | A record for answering "has anyone tried this before?". Always re-validate before use. |
+
+**The archive is not a dumping ground — it is a waiting room for validation.** Once a compound has been validated, move it across with the **`↑ 本登録へ昇格`** (promote) button; tags, transitions and usage history all travel with it. To demote something out of the validated library, use **`→ アーカイブ`**.
+
+> **The shelf and the check level (標準品✓ / 文献 / 未確認) are different things.** The shelf says *which list* a compound belongs in; the check level says *how well supported* it is.
+> Past bulk imports registered compounds without ever setting a check level, so **the check levels on existing entries do not reflect reality**. The shelf split deliberately does NOT use that value, which is why the existing list is preserved exactly as it was. Tidy up check levels by hand as needed.
+
+### 19-3. Registering previously-used MRMs into the archive (実測棚卸し / stock-take)
+
+The **`実測棚卸し`** toolbar button finds **every compound actually measured across all projects that is not yet in the MRM library**.
+
+1. Open `実測棚卸し` to list the unprocessed compounds (Precursor / CE / CV are pre-filled where they can be determined).
+2. Use **`🔬 表示`** on any row to **preview the measured image right there** (signal overlaid on the tissue background), so you can judge before deciding.
+3. Tick the ones worth keeping, and optionally set tags and a check level.
+4. **`登録先`** (destination) defaults to **使用実績アーカイブ**. Click **`選択を登録`**.
+5. Use **`選択を無視`** for ones you never want to see again — that decision is remembered and they stop appearing.
+
+> **A compound that is already registered never moves shelf when re-registered from the stock-take.** Entries in the validated library cannot be accidentally demoted into the archive.
+
+### 19-4. Bulk-import MRM from Excel
 You can import an existing MRM list (xlsx) as-is. Use the **`Excel取り込み`** button on the toolbar:
 
 1. Pick a `.xlsx` / `.xls` file.
@@ -584,8 +610,22 @@ You can import an existing MRM list (xlsx) as-is. Use the **`Excel取り込み`*
    - Each title (e.g. `Amino acid`, `13C6-Glucose`) becomes a **tag (category)**.
    - **Polarity** is taken from a `+ / −` marker next to the title, or inferred from `NEG` / `POS` in the compound name.
 3. In the **preview**, review/adjust which blocks to import, the tag names, and polarity (— = infer from name / + / −).
-4. Click **`取り込み実行`** to bulk-register.
+4. Below the preview, choose the **`登録先`** (destination shelf) and **`確認レベル`** (check level).
+5. Click **`取り込み実行`** to bulk-register.
 
 > **Idempotent (safe to re-run)**: existing compounds are updated and identical transitions (same precursor / product / CE / CV) are skipped, so repeating an import never creates duplicates.
 >
+> **The destination applies only to newly created compounds.** Already-registered compounds keep their current shelf, so re-importing with the wrong destination selected can never sweep the validated library into the archive.
+>
 > The import writes to the production Supabase. For the first run, verify the result with a **small test file** before importing the full list.
+
+### 19-5. `.exp` export and what the AI (Custom GPT) can see
+
+**`.exp` export**: you can select and export from either shelf (that is how you go and test an archived MRM). If any archived entries are included, a **confirmation listing the count and compound names** appears first. A selection of validated entries only exports without any prompt, exactly as before.
+
+**AI connector (Custom GPT)**: by default it **only sees the validated library**.
+
+- MRM search does not return archived entries unless explicitly asked; when it does, they always carry their unvalidated status.
+- `.exp` generation draws **only from the validated library**. If asked for a compound that exists only in the archive, it reports **"registered but unvalidated, so excluded"** rather than "not found" — telling a model "not found" invites it to substitute another compound or invent CE/CV.
+
+So no matter how much goes into the archive, **the AI will never write unoptimised CE/CV into an instrument file**.
