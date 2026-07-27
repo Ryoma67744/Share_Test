@@ -105,6 +105,26 @@ alter table public.mrm_compounds add column if not exists check_level text;
 -- Default any pre-existing null rows to 'unchecked' (idempotent no-op after).
 update public.mrm_compounds set check_level = 'unchecked' where check_level is null;
 
+-- (4) shelf: WHICH LIST a compound belongs to. Two independent shelves, shown
+--     as two tabs in the management UI:
+--       'main'    検証済みライブラリ — the pre-existing list; MRMs that can be
+--                 used as-is.
+--       'archive' 使用実績アーカイブ — measured at least once but never
+--                 optimised. Kept out of 'main' so the trusted list stays clean.
+--
+--     DELIBERATELY INDEPENDENT of check_level. It is tempting to derive the
+--     split from check_level, but that would empty the existing list: the two
+--     historical write paths never set a level — the Excel importer called
+--     upsert_compound without the argument (so every imported row fell through
+--     to 'unchecked'), and register_from_result never listed the column at all
+--     (so those rows are NULL). Almost every currently-visible, genuinely
+--     validated compound is therefore recorded as unchecked/NULL.
+--
+--     Backfilling every pre-existing row to 'main' below is what guarantees the
+--     current screen is unchanged after this migration: no row moves.
+alter table public.mrm_compounds add column if not exists shelf text;
+update public.mrm_compounds set shelf = 'main' where shelf is null;
+
 -- ---- 2. Read RPC (master-pw gated) -------------------------
 -- Returns the whole library as one nested jsonb document:
 -- [ { ...compound, transitions:[ { ...transition, usages:[...] } ] } ].
@@ -131,6 +151,7 @@ begin
                    'polarity', co.polarity,
                    'note', co.note,
                    'check_level', co.check_level,
+                   'shelf', coalesce(co.shelf, 'main'),
                    'created_at', co.created_at,
                    'updated_at', co.updated_at,
                    'transitions', coalesce((
@@ -177,6 +198,7 @@ $$;
 -- doesn't leave an overload behind.
 drop function if exists public.upsert_compound(text, text, text[], text, text);
 drop function if exists public.upsert_compound(text, text, text[], text, text, integer);
+drop function if exists public.upsert_compound(text, text, text[], text, text, integer, text);
 create or replace function public.upsert_compound(
     _master_pw   text,
     _name        text,
@@ -184,7 +206,8 @@ create or replace function public.upsert_compound(
     _polarity    text default null,
     _note        text default null,
     _serial_no   integer default null,
-    _check_level text default null
+    _check_level text default null,
+    _shelf       text default null
 ) returns uuid
 language plpgsql security definer set search_path = public, extensions
 as $$
@@ -196,16 +219,21 @@ begin
     if _name is null or length(trim(_name)) = 0 then
         raise exception 'name required';
     end if;
-    insert into public.mrm_compounds(name, tags, polarity, note, serial_no, check_level)
+    insert into public.mrm_compounds(name, tags, polarity, note, serial_no, check_level, shelf)
          values (trim(_name), coalesce(_tags, '{}'), _polarity, _note,
                  coalesce(_serial_no, (select coalesce(max(serial_no), 0) + 1 from public.mrm_compounds)),
-                 case when _check_level in ('std','lit','unchecked') then _check_level else 'unchecked' end)
+                 case when _check_level in ('std','lit','unchecked') then _check_level else 'unchecked' end,
+                 case when _shelf in ('main','archive') then _shelf else 'main' end)
     on conflict (name) do update
          set tags        = excluded.tags,
              polarity    = excluded.polarity,
              note        = excluded.note,
              -- keep the existing level when the caller didn't specify one
              check_level = case when _check_level is null then mrm_compounds.check_level else excluded.check_level end,
+             -- Same for the shelf. Tested against _shelf (not excluded.shelf,
+             -- which already fell back to 'main') so an unaware caller never
+             -- silently moves an archived compound back into the main list.
+             shelf       = case when _shelf in ('main','archive') then _shelf else coalesce(mrm_compounds.shelf, 'main') end,
              updated_at  = now()
     returning id into v_id;
     return v_id;
@@ -217,6 +245,7 @@ $$;
 -- drop the previous signatures before CREATE OR REPLACE.
 drop function if exists public.update_compound(text, uuid, text, text[], text, text);
 drop function if exists public.update_compound(text, uuid, text, text[], text, text, integer);
+drop function if exists public.update_compound(text, uuid, text, text[], text, text, integer, text);
 create or replace function public.update_compound(
     _master_pw   text,
     _id          uuid,
@@ -225,7 +254,8 @@ create or replace function public.update_compound(
     _polarity    text default null,
     _note        text default null,
     _serial_no   integer default null,
-    _check_level text default null
+    _check_level text default null,
+    _shelf       text default null
 ) returns void
 language plpgsql security definer set search_path = public, extensions
 as $$
@@ -241,6 +271,8 @@ begin
            serial_no   = coalesce(_serial_no, serial_no),
            -- keep the existing level when the caller passed null/invalid
            check_level = coalesce(case when _check_level in ('std','lit','unchecked') then _check_level end, check_level),
+           -- same for the shelf; this is also the "move between shelves" path
+           shelf       = coalesce(case when _shelf in ('main','archive') then _shelf end, shelf, 'main'),
            updated_at  = now()
      where id = _id;
 end
@@ -420,9 +452,17 @@ begin
     end if;
     -- 1. compound: create if missing (auto-assign next serial_no); merge tags
     --    (union); keep existing polarity unless it was empty.
-    insert into public.mrm_compounds(name, tags, polarity, serial_no)
+    --    check_level / shelf are listed EXPLICITLY. Neither column has a DEFAULT,
+    --    so omitting them (as this function used to) inserted NULLs — the UI
+    --    renders a NULL level as 未確認 so it looked fine, but it left the table
+    --    inconsistent and would slip past a level/shelf filter. New rows land in
+    --    'main' (this is the viewer's "選択を管理へ登録", whose results have
+    --    always appeared in the main list); on conflict the shelf is left alone
+    --    so re-registering never moves an archived compound.
+    insert into public.mrm_compounds(name, tags, polarity, serial_no, check_level, shelf)
          values (trim(_name), coalesce(_tags, '{}'), _polarity,
-                 (select coalesce(max(serial_no), 0) + 1 from public.mrm_compounds))
+                 (select coalesce(max(serial_no), 0) + 1 from public.mrm_compounds),
+                 'unchecked', 'main')
     on conflict (name) do update
          set tags       = public._mrm_array_union(mrm_compounds.tags, excluded.tags),
              polarity   = coalesce(mrm_compounds.polarity, excluded.polarity),
@@ -647,8 +687,8 @@ $$;
 
 -- ---- 7. Grants ---------------------------------------------
 grant execute on function public.list_mrm_library(text)                                                          to anon, authenticated;
-grant execute on function public.upsert_compound(text, text, text[], text, text, integer, text)                  to anon, authenticated;
-grant execute on function public.update_compound(text, uuid, text, text[], text, text, integer, text)            to anon, authenticated;
+grant execute on function public.upsert_compound(text, text, text[], text, text, integer, text, text)            to anon, authenticated;
+grant execute on function public.update_compound(text, uuid, text, text[], text, text, integer, text, text)      to anon, authenticated;
 grant execute on function public.delete_compound(text, uuid)                                                     to anon, authenticated;
 grant execute on function public.upsert_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text) to anon, authenticated;
 grant execute on function public.update_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text) to anon, authenticated;
@@ -730,6 +770,7 @@ begin
                    'polarity', co.polarity,
                    'note', co.note,
                    'check_level', co.check_level,
+                   'shelf', coalesce(co.shelf, 'main'),
                    'transitions', coalesce((
                        select jsonb_agg(jsonb_build_object(
                                   'id', tr.id,
@@ -801,8 +842,8 @@ grant execute on function public.get_exp_template_ro(text)  to anon, authenticat
 -- drop function if exists public.update_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text);
 -- drop function if exists public.upsert_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text);
 -- drop function if exists public.delete_compound(text, uuid);
--- drop function if exists public.update_compound(text, uuid, text, text[], text, text, integer, text);
--- drop function if exists public.upsert_compound(text, text, text[], text, text, integer, text);
+-- drop function if exists public.update_compound(text, uuid, text, text[], text, text, integer, text, text);
+-- drop function if exists public.upsert_compound(text, text, text[], text, text, integer, text, text);
 -- drop function if exists public.list_mrm_library(text);
 -- drop table if exists public.mrm_usages;
 -- drop table if exists public.mrm_transitions;
