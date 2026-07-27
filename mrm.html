@@ -1947,7 +1947,9 @@ async function openReconcileModal() {
         if (pv) {
             const i = parseInt(pv.getAttribute('data-i'), 10);
             const prows = allRows.filter(r => r.status === view);
-            if (prows[i]) openMeasuredPreview(prows[i]);
+            // Pass every row so the preview can mark the OTHER still-unprocessed
+            // compounds of the same project (it filters to status 'new' itself).
+            if (prows[i]) openMeasuredPreview(prows[i], allRows);
             return;
         }
         if (t.matches && t.matches('[data-rc-all]')) {
@@ -1972,26 +1974,52 @@ async function openReconcileModal() {
 // the master-pw path (unlock_project_master) since this tab is master-unlocked
 // and the same-origin iframe reads the cached master pw from sessionStorage.
 // ===========================================================================
-function measuredPreviewUrl(slug, compoundName) {
+// `pendingNames` = the OTHER still-unprocessed compounds measured in this same
+// project. The viewer marks them 要評価 so one look at the Method table shows
+// everything worth judging in this section, not just the row that was clicked.
+function measuredPreviewUrl(slug, compoundName, pendingNames) {
+    const pending = (pendingNames && pendingNames.length)
+        ? '&pending=' + encodeURIComponent(pendingNames.join('|'))
+        : '';
     return 'viewer/index.html#share=' + encodeURIComponent(slug)
         + '&focus=' + encodeURIComponent(compoundName || '')
-        + '&preview=1';
+        + '&preview=1' + pending;
 }
-function openMeasuredPreview(row) {
+// Compounds OTHER than `row` that are still unprocessed and were measured in
+// `slug`. Sourced from the rows the stock-take already holds — no extra RPC.
+function pendingNamesForProject(slug, siblings, row) {
+    const out = [];
+    for (const r of (siblings || [])) {
+        if (!r || r === row || r.status !== 'new') continue;
+        if (r.name_norm && row && r.name_norm === row.name_norm) continue;
+        if (!(Array.isArray(r.projects) ? r.projects : []).some(p => p && p.slug === slug)) continue;
+        if (r.name) out.push(r.name);
+    }
+    return out;
+}
+function openMeasuredPreview(row, siblings) {
     const projects = (Array.isArray(row && row.projects) ? row.projects : []).filter(p => p && p.slug);
     if (!projects.length) { alert('プレビューできる測定プロジェクトが見つかりません'); return; }
     const back = document.createElement('div');
     back.className = 'modal-backdrop';
     back.style.zIndex = '80';   // above the reconcile modal (.modal-backdrop z-index:60)
+    // Per-project count of other pending compounds, so the picker shows where
+    // the evaluating is worth doing before switching.
+    const nPending = (slug) => pendingNamesForProject(slug, siblings, row).length;
+    const projLabel = (p) => {
+        const n = nPending(p.slug);
+        return (p.display_name || p.slug) + (n ? ' — 他に未評価 ' + n + ' 件' : '');
+    };
     const optsHtml = projects.map(p =>
-        '<option value="' + safe(p.slug) + '">' + safe(p.display_name || p.slug) + '</option>').join('');
+        '<option value="' + safe(p.slug) + '">' + safe(projLabel(p)) + '</option>').join('');
     back.innerHTML =
         '<div class="modal-card" style="width:96vw;max-width:1200px;height:92vh;max-height:92vh;display:flex;flex-direction:column;padding:12px 14px;">'
         + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">'
         +   '<h2 style="margin:0;font-size:14px;font-weight:600;">測定像プレビュー: ' + safe(row.name || '') + '</h2>'
         +   (projects.length > 1
                 ? '<label style="font-size:11px;color:#475569;">測定PJ <select data-mp-proj style="padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;background:#fff;">' + optsHtml + '</select></label>'
-                : '<span class="muted" style="font-size:11px;">' + safe(projects[0].display_name || projects[0].slug) + '</span>')
+                : '<span class="muted" style="font-size:11px;">' + safe(projLabel(projects[0])) + '</span>')
+        +   '<span data-mp-hint class="muted" style="font-size:11px;"></span>'
         +   '<span style="flex:1"></span>'
         +   '<span class="muted" style="font-size:11px;">重ね合わせ・強度レンジ・透明度はビューア内で調整 (ROI/グラフは非表示)</span>'
         +   '<button type="button" class="btn" data-mp-close>閉じる</button>'
@@ -2001,7 +2029,17 @@ function openMeasuredPreview(row) {
     document.body.appendChild(back);
     const frame = back.querySelector('[data-mp-frame]');
     const sel = back.querySelector('[data-mp-proj]');
-    const load = (slug) => { frame.src = measuredPreviewUrl(slug, row.name); };
+    const hint = back.querySelector('[data-mp-hint]');
+    const load = (slug) => {
+        const pending = pendingNamesForProject(slug, siblings, row);
+        // Re-read on every switch: the pending set is per project.
+        if (hint) {
+            hint.textContent = pending.length
+                ? '（オレンジ = 評価対象 / 薄オレンジ = この測定PJで一緒に評価できる ' + pending.length + ' 件）'
+                : '（Method表のオレンジの行が評価対象です）';
+        }
+        frame.src = measuredPreviewUrl(slug, row.name, pending);
+    };
     const close = () => {
         document.removeEventListener('keydown', onKey);
         try { frame.src = 'about:blank'; } catch (e) {}

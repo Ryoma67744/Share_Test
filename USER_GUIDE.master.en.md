@@ -594,6 +594,10 @@ The **`実測棚卸し`** toolbar button finds **every compound actually measure
 
 1. Open `実測棚卸し` to list the unprocessed compounds (Precursor / CE / CV are pre-filled where they can be determined).
 2. Use **`🔬 表示`** on any row to **preview the measured image right there** (signal overlaid on the tissue background), so you can judge before deciding.
+   - In the preview's Method (MRM) table the **row being evaluated is amber** (`評価対象`), and the list scrolls to it automatically.
+   - Any other unprocessed compounds in the same project are marked **`要評価`** in lighter amber, so opening one preview shows everything worth looking at in that section.
+   - The 測定PJ picker shows how many others can be evaluated in each project (e.g. `… — 他に未評価 3 件`).
+   - If the requested layer is not in that project, a notice says so — switch to another 測定PJ.
 3. Tick the ones worth keeping, and optionally set tags and a check level.
 4. **`登録先`** (destination) defaults to **使用実績アーカイブ**. Click **`選択を登録`**.
 5. Use **`選択を無視`** for ones you never want to see again — that decision is remembered and they stop appearing.

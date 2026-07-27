@@ -291,6 +291,18 @@ body.splitting-v { cursor:row-resize !important; }
    AFTER :hover so the highlight wins over the transient hover bg. */
 #method-rows tr.method-row.focus       { background:#dbeafe; box-shadow:inset 3px 0 0 #2563eb; }
 #method-rows tr.method-row.focus:hover { background:#bfdbfe; }
+/* MRM 実測棚卸し preview marks. Amber, NOT the blue above: blue means "currently
+   displayed" and follows the user's clicks, amber means "this is what you came
+   here to judge" and must stay on its row. Declared after .focus so a row that
+   is both (the normal case on open) reads as the evaluation target. */
+#method-rows tr.method-row.eval-target        { background:#fef3c7; box-shadow:inset 3px 0 0 #d97706; }
+#method-rows tr.method-row.eval-target:hover  { background:#fde68a; }
+#method-rows tr.method-row.eval-pending       { box-shadow:inset 3px 0 0 #fbbf24; }
+#method-rows tr.method-row.eval-pending:hover { background:#fffbeb; }
+.eval-badge { display:inline-block; margin-left:6px; padding:0 5px; border-radius:8px;
+    font-size:9px; font-weight:700; font-family:system-ui, sans-serif; vertical-align:middle; white-space:nowrap; }
+.eval-badge.target  { background:#d97706; color:#fff; }
+.eval-badge.pending { background:#fef3c7; color:#92400e; border:1px solid #fcd34d; }
 /* Column-click sort affordance for the main Method <thead>. Re-clicking
    the same column flips direction; a third click clears the sort. */
 #method-table thead th[data-sort-key] { cursor:pointer; user-select:none; position:relative; }
@@ -5854,10 +5866,23 @@ function renderMethodTable() {
             : ((rawRange && Number.isFinite(rawRange[1])) ? formatRawValue(rawRange[1]) : '—');
         const isFocus = (App.viewMode === 'compound' && App.focusCompoundKey === layerKey);
         const isActive = isFocus || (panel.activeMsiKey === layerKey) || panel.visibleLayers.has(layerKey);
+        // Stock-take embed marks (preview only, amber — deliberately a different
+        // colour from the blue .focus, which means "currently displayed" and
+        // moves as the user clicks rows to compare):
+        //   eval-target  … the compound this preview was opened to evaluate
+        //   eval-pending … other compounds of this project still awaiting a
+        //                  stock-take decision
+        const isEvalTarget = !!(App._previewMode && App._previewFocusKey === layerKey);
+        const isEvalPending = !isEvalTarget && !!(App._previewMode && App._isPendingLayer
+            && App._isPendingLayer(layerKey, meta));
 
         const tr = document.createElement('tr');
-        tr.className = 'method-row' + (isActive ? ' active' : '') + (isFocus ? ' focus' : '');
+        tr.className = 'method-row' + (isActive ? ' active' : '') + (isFocus ? ' focus' : '')
+            + (isEvalTarget ? ' eval-target' : '') + (isEvalPending ? ' eval-pending' : '');
         tr.dataset.layerKey = layerKey;
+        const evalBadge = isEvalTarget
+            ? '<span class="eval-badge target" title="この測定像を評価するためにプレビューを開きました">評価対象</span>'
+            : (isEvalPending ? '<span class="eval-badge pending" title="実測棚卸しで未処理 — この測定PJで一緒に評価できます">要評価</span>' : '');
 
         const markerColor = ent.markerColor || '';
         const markerSwatchStyle = markerColor
@@ -5869,7 +5894,7 @@ function renderMethodTable() {
                 '<button type="button" class="marker-swatch" title="Set marker colour" style="' + markerSwatchStyle + '"></button>' +
                 '<input type="color" class="marker-input" value="' + (markerColor || '#ff0000') + '" tabindex="-1">' +
             '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + '</td>' +
+            '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pre) + '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pro) + '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(ce) + '</td>' +
@@ -5947,6 +5972,19 @@ function renderMethodTable() {
         }
 
         tbody.appendChild(tr);
+    }
+
+    // Stock-take embed: bring the 評価対象 row into view. The Method table
+    // scrolls inside #method-body, and the requested compound is often well
+    // below the fold — a correct highlight the user never sees is no better
+    // than no highlight. Done once per preview so a later re-render (marker
+    // colour, range edit …) doesn't yank the list back under the user.
+    if (App._previewMode && App._previewFocusKey && !App._previewScrolled) {
+        const row = tbody.querySelector('tr.eval-target');
+        if (row) {
+            App._previewScrolled = true;
+            try { row.scrollIntoView({ block: 'center' }); } catch (e) { row.scrollIntoView(); }
+        }
     }
 }
 
@@ -12231,6 +12269,28 @@ const App = {
                                // 正=強く除去(多く消す)、負=弱く(残す)。
     analysisMode: 'otsu',      // Analysis パネルの初期表示: 'otsu' 背景除去 / 'roi' 強度チャート
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
+    // --- MRM 実測棚卸し preview embed (all null/false outside preview=1) ------
+    _previewMode: false,
+    _focusParam: null,
+    _previewFocusKey: null,    // layerKey the embed was opened to evaluate. Held
+                               // separately from focusCompoundKey so the 評価対象
+                               // mark stays put while the user clicks other rows.
+    _previewFocusMissing: false,
+    _previewScrolled: false,   // the 評価対象 row is scrolled into view once, so a
+                               // later re-render doesn't yank the list around.
+    _pendingNorm: null,        // Set<normalised name> still awaiting a stock-take
+                               // decision in THIS project → marked 要評価.
+    // Does this Method-table row belong to a compound the stock-take still wants
+    // evaluated? Matches on compoundMeta.name AND the MSI_-stripped key, with the
+    // same normalisation as the focus lookup, so name drift doesn't lose the mark.
+    _isPendingLayer(layerKey, meta) {
+        const set = this._pendingNorm;
+        if (!set || !set.size) return false;
+        const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+        const nm = norm(meta && meta.name);
+        if (nm && set.has(nm)) return true;
+        return set.has(norm(String(layerKey).replace(/^MSI_/i, '')));
+    },
     focusCompoundKey: null,
     // ① Rotation target for the shared toolbar: 'both' (whole-view CSS rot),
     // 'he' (HE-only) or 'msi' (MSI-only). Per-side rotations are canvas-baked
@@ -13000,11 +13060,22 @@ const App = {
         //                       enable the master-pw project unlock path in
         //                       bootstrapShareMode (so a private measured
         //                       project is previewable without its viewer pw).
+        //   pending=a|b|c     → OTHER compounds of this project that the
+        //                       stock-take still wants evaluated. Marked 要評価
+        //                       in the Method table so one glance shows
+        //                       everything worth looking at in this section.
         try {
             const _hp = new URLSearchParams((location.hash || '').replace(/^#/, ''));
             this._previewMode = _hp.get('preview') === '1';
             this._focusParam  = (_hp.get('focus') || '').trim() || null;
-        } catch (e) { this._previewMode = false; this._focusParam = null; }
+            // Same normalisation the focus lookup uses, and the same rule as the
+            // DB's name_norm (lower + strip non-alphanumerics), so a name drifts
+            // (POS_/NEG_, separators, case) without losing the mark.
+            this._pendingNorm = new Set(
+                String(_hp.get('pending') || '').split('|')
+                    .map(s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ''))
+                    .filter(Boolean));
+        } catch (e) { this._previewMode = false; this._focusParam = null; this._pendingNorm = new Set(); }
         if (this._previewMode) { try { document.body.classList.add('preview'); } catch (e) {} }
         // ① Phase 2: a folder-share link (#folder=<slug>) shows a read-only
         // index of the folder's published child projects. No master gate and
@@ -13659,8 +13730,25 @@ const App = {
             const loadedMsi = new Set();
             for (const p of this.panels.values())
                 for (const k of Object.keys(p.imageSources || {})) if (/^MSI_/i.test(k)) loadedMsi.add(k);
+            // Layers that are not loaded YET but can be: they carry a blobId, so
+            // the per-panel loop below will loadMsiLayer() them on demand. The
+            // phantom keys the comment above warns about have no blobId, so this
+            // set still excludes them.
+            //
+            // The focus lookup must consider these, not just `loadedMsi`. What is
+            // loaded at this point is only what the project was PUBLISHED with
+            // visible — which is almost never the compound the stock-take embed
+            // asked for. Restricting the search to loadedMsi made `focus=` miss,
+            // fall through to the arbitrary first loaded layer, and highlight the
+            // WRONG compound in the Method table while the header claimed another.
+            const loadableMsi = new Set(loadedMsi);
+            for (const p of this.panels.values()) {
+                const ser = (p.section && p.section.msiSeries) || {};
+                for (const k of Object.keys(ser))
+                    if (/^MSI_/i.test(k) && ser[k] && ser[k].blobId) loadableMsi.add(k);
+            }
             // Preview embed: honor focus=<compound> from the hash — resolve it
-            // to a loaded MSI layer (match compoundMeta.name or the MSI_<name>
+            // to a loadable MSI layer (match compoundMeta.name or the MSI_<name>
             // key, normalized: lowercased, alnum-only) and pin it as the focus
             // compound so the embed opens straight on the requested compound.
             if (this._focusParam) {
@@ -13670,16 +13758,24 @@ const App = {
                 for (const p of this.panels.values()) {
                     const ser = (p.section && p.section.msiSeries) || {};
                     for (const k of Object.keys(ser)) {
-                        if (!/^MSI_/i.test(k) || !loadedMsi.has(k)) continue;
+                        if (!/^MSI_/i.test(k) || !loadableMsi.has(k)) continue;
                         const nm = ser[k] && ser[k].compoundMeta && ser[k].compoundMeta.name;
                         if (_norm(nm) === _target || _norm(k.replace(/^MSI_/i, '')) === _target) { _hit = k; break; }
                     }
                     if (_hit) break;
                 }
                 if (_hit) this.focusCompoundKey = _hit;
-                else console.warn('preview focus not found among loaded layers:', this._focusParam);
+                else console.warn('preview focus not found among this project\'s layers:', this._focusParam);
+                // Remember what the embed was ASKED to evaluate, separately from
+                // focusCompoundKey (which moves as the user clicks other rows to
+                // compare). The 評価対象 mark must stay put on the requested one.
+                this._previewFocusKey = _hit;
+                this._previewFocusMissing = !_hit;
             }
-            if (!this.focusCompoundKey || !loadedMsi.has(this.focusCompoundKey))
+            // Keep a resolved focus even when its raster is still pending — the
+            // loop below loads it. Testing loadedMsi here would throw the hit away
+            // and re-introduce the wrong-compound bug the lookup above just fixed.
+            if (!this.focusCompoundKey || !loadableMsi.has(this.focusCompoundKey))
                 this.focusCompoundKey = loadedMsi.values().next().value || null;
             const fk = this.focusCompoundKey;
             for (const p of this.panels.values()) {
@@ -13716,6 +13812,14 @@ const App = {
                             if (bg) { p.visibleLayers.add(bg); p.renderComposite(); }
                         }
                     } catch (e) { /* non-fatal */ }
+                }
+                // The compound the stock-take asked about is not in THIS project
+                // (name drift, or the wrong 測定PJ is selected). Say so — the view
+                // has silently fallen back to some other compound, and letting the
+                // user judge that one as if it were the requested one is worse
+                // than showing nothing.
+                if (this._previewFocusMissing) {
+                    showToast('この測定PJでは「' + this._focusParam + '」のレイヤーが見つかりませんでした。別の測定PJに切り替えてください。', 8000);
                 }
             }
         } catch (e) { console.warn('share focus init failed', e); }
