@@ -201,6 +201,7 @@ Align モーダル上部に **Source** ドロップダウンが表示されま�
       <li><b>Apply opacity</b> ✓ (既定 ON)</li>
       <li>Opacity (0–100%)</li>
       <li>Intensity range (vmin / vmax)</li>
+      <li>外れ値クリップの状態 (表示のみ — 切替は Toolbar)</li>
     </ul>
   </div>
   <div style="border:1px solid #2563eb;border-radius:4px;padding:8px;background:#eff6ff;">

@@ -834,6 +834,11 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     </label>
                     <button type="button" id="tb-bg-remove-all" class="tb-btn" title="今あるデータ(全切片)に背景除去を一括適用。処理済みの切片はスキップします(二重適用防止)。" aria-label="背景除去を全切片に適用">全切片に適用</button>
                 </span>
+                <span class="tb-group" id="tb-outlier-clip-group" title="外れ値クリップ: 各イオン像を上位0.5%(p99.5)でクリップしてベイクします(既定 ON)。OFF にすると真の最大値でベイクし、上位画素が同じ値に潰れなくなります — ただし1画素の外れ値で組織全体が暗くなることがあります。プロジェクト内の全切片・全イオン像に適用され、生データは変更しません。">
+                    <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;font-size:11px;">
+                        <input type="checkbox" id="tb-outlier-clip" checked> 外れ値クリップ
+                    </label>
+                </span>
                 <span class="tb-group" id="tb-msi-um-group">
                     <span class="tb-label">μm/px:</span>
                     <button type="button" id="tb-msi-um" class="tb-icon" title="MSI のピクセル物理サイズ (μm/px) を入力">📏</button>
@@ -4734,20 +4739,23 @@ class SectionPanel {
             pop.appendChild(rangeRow);
             // Outlier clip is a BAKE setting, not a display window: OFF re-rasterises
             // to the true maximum so the top pixels stop collapsing onto one value.
-            // The cost is real (that ceiling exists so one hot pixel does not crush
-            // the tissue), so state it and show how many pixels are affected today.
+            // The *switch* lives in the toolbar next to 背景除去(Otsu) because it is a
+            // project-wide data-processing choice (a per-layer override would let
+            // compounds get baked differently and silently break cross-section
+            // brightness). What stays here is the per-layer FACT the toolbar cannot
+            // show: how many pixels of THIS image are actually sitting on the ceiling.
             const _entB = (this.section.msiSeries && this.section.msiSeries[key]) || {};
             const clipOn = _entB.bakeMode !== 'full';
             const _d = _entB.diag || null;
             const clippedNote = (_d && _d.clippedHigh > 0)
-                ? '<div style="color:#b91c1c;font-size:10px;margin-top:2px;">現在 ' + _d.clippedHigh + ' 画素が上限に潰れています</div>'
+                ? '<div style="color:#b91c1c;font-size:10px;margin-top:2px;">この画像は ' + _d.clippedHigh + ' 画素が上限に潰れています</div>'
                 : '';
-            const clipRow = mkRow('外れ値クリップ (ベイク設定 — 同じMRMの全切片に適用)',
-                '<label style="display:flex;align-items:center;gap:6px;font-size:11px;cursor:pointer;color:#1e293b;">' +
-                    '<input type="checkbox" class="clip"' + (clipOn ? ' checked' : '') + '> 上位 0.5% をクリップ' +
-                '</label>' +
-                '<div style="color:#64748b;font-size:10px;margin-top:2px;">OFF にすると真の最大値でベイクします。' +
-                '1 画素の外れ値で組織が暗くなる場合があります。</div>' + clippedNote);
+            const clipRow = mkRow('外れ値クリップ (ベイク設定 — ツールバーで切替)',
+                '<div style="font-size:11px;color:#1e293b;">' +
+                    (clipOn ? 'ON — 上位 0.5% をクリップしてベイク' : 'OFF — 真の最大値でベイク') +
+                '</div>' +
+                '<div style="color:#64748b;font-size:10px;margin-top:2px;">' +
+                'プロジェクト全体の設定です。ツールバーの「外れ値クリップ」で切り替えます。</div>' + clippedNote);
             pop.appendChild(clipRow);
         }
         const close = document.createElement('div');
@@ -4822,17 +4830,6 @@ class SectionPanel {
                 if (b <= a) { b = a + 1; vmax.value = b; }
                 settings.vmax = b; pushWindow();
             });
-            const clip = pop.querySelector('.clip');
-            if (clip) {
-                clip.addEventListener('change', () => {
-                    // Re-baking reloads the source blob for every same-MRM section, so
-                    // close the popover first: its cached diag/clip text is now stale.
-                    clip.disabled = true;
-                    onClose();
-                    App.setMsiBakeMode(key, clip.checked ? 'robust' : 'full')
-                        .catch(e => console.warn('setMsiBakeMode failed', e));
-                });
-            }
         }
     }
 
@@ -5133,11 +5130,19 @@ class SectionPanel {
                 filename: finalName,
             });
         }
+        // A newly registered compound has to be baked the way the rest of the
+        // project is, or the 'same' absolute scale ends up aggregating a clipped
+        // rawDispMax together with an unclipped one and the sections stop being
+        // comparable. Read the project mode BEFORE inserting this entry — once
+        // it is in msiSeries it counts itself as the default 'robust' and the
+        // answer can never come back 'full'.
+        const inheritedBake = App.currentOutlierClipMode();
         const ent = Object.assign({}, def, {
             blobId,
             filename: finalName,
             sourceFileId: opts.sourceFileId || null,
             compoundMeta: opts.compoundMeta || null,
+            bakeMode: def.bakeMode || inheritedBake,
         });
         delete ent.src;
         this.section.msiSeries = this.section.msiSeries || {};
@@ -5157,6 +5162,7 @@ class SectionPanel {
         await this.loadMsiLayer(key, ent);
         await this.analyzeAndInitSettings();
         App.recomputeMsiAbsScale();
+        try { Toolbar.refreshOutlierClip(); } catch (e) {}
         this.toggleLayer(key, true);
         this.populateThumbnails();
         this.renderEmptyOverlay();
@@ -12116,11 +12122,26 @@ const Toolbar = {
         if (document.activeElement !== this.rotationInp) this.rotationInp.value = String(p.getRotation(App.rotTarget));
     },
 
+    // Outlier clip has no flag of its own: the checkbox is *derived* from the
+    // per-layer ent.bakeMode so there is only ever one truth (see
+    // App.setMsiOutlierClipAll for why project.meta can't hold it). A project
+    // whose layers disagree — only reachable via App.setMsiBakeMode — shows
+    // `indeterminate` instead of picking a side.
+    refreshOutlierClip() {
+        const cb = document.getElementById('tb-outlier-clip');
+        if (!cb) return;
+        const { robust, full } = App._countBakeModes();
+        // No MSI layers yet: show the default (ON) rather than a stuck tri-state.
+        if (!robust && !full) { cb.indeterminate = false; cb.checked = true; return; }
+        cb.indeterminate = (robust > 0 && full > 0);
+        cb.checked = (full === 0);
+    },
     refreshAll() {
         this.refreshSectionPicker();
         this.refreshRange();
         this.refreshOpacity();
         this.refreshRotation();
+        this.refreshOutlierClip();
     },
 };
 
@@ -12751,9 +12772,59 @@ const App = {
 
     // ② Outlier-clip mode is a property of the BAKE, not of the display window, so
     // flipping it re-rasterises from the source file (rawRange / rawDispMax /
-    // rawTrueMax / diag all change). Applied to EVERY section carrying the same MRM:
-    // a per-section mix would encode a different [lo,hi] in each PNG and make the
+    // rawTrueMax / diag all change). It is applied project-wide (every section,
+    // every MRM): a mix would encode a different [lo,hi] in each PNG and make the
     // sections incomparable — the same defect the ROI-chart fix removed.
+    //
+    // Tally how the project's MSI layers are currently baked. Reads
+    // project.sections (not this.panels) so it is valid before panels load.
+    _countBakeModes() {
+        let robust = 0, full = 0;
+        for (const sec of ((this.project && this.project.sections) || [])) {
+            for (const [k, e] of Object.entries((sec && sec.msiSeries) || {})) {
+                if (!/^MSI_/i.test(k) || !e) continue;
+                if (e.bakeMode === 'full') full++; else robust++;
+            }
+        }
+        return { robust, full };
+    },
+    // The project's effective outlier-clip mode: 'full' only when EVERY layer is
+    // unclipped, else the 'robust' default. Used so a newly added compound joins
+    // an OFF project as OFF rather than reintroducing the clip on its own.
+    currentOutlierClipMode() {
+        const { robust, full } = this._countBakeModes();
+        return (full > 0 && robust === 0) ? 'full' : 'robust';
+    },
+
+    // Re-raster a collected set of {panel, key, ent} jobs whose ent.bakeMode was
+    // already flipped, then refresh everything the new rawDispMax feeds.
+    // Shared by setMsiBakeMode (one MRM) and setMsiOutlierClipAll (whole project).
+    async _rebakeJobs(jobs, doneMsg) {
+        if (!jobs || !jobs.length) return 0;
+        for (const { panel, key, ent } of jobs) {
+            try { await panel.loadMsiLayer(key, ent); }
+            catch (e) { console.warn('bake-mode re-raster failed', key, e); }
+        }
+        const touched = new Set(jobs.map(j => j.panel));
+        for (const panel of touched) {
+            try { panel.renderComposite(); panel.populateThumbnails(); } catch (e) {}
+        }
+        // rawDispMax moved, so the shared 'same' ceiling — and the toolbar Range,
+        // which reads it through getMsiWindow — must be recomputed. A manual
+        // override in App.msiUserWindow is in RAW units and stays valid as-is.
+        try { this.recomputeMsiAbsScale(); } catch (e) {}
+        try { Toolbar.refreshRange(); } catch (e) {}
+        try { Toolbar.refreshOutlierClip(); } catch (e) {}
+        try { renderMethodTable(); } catch (e) {}
+        if (this.queueSave) this.queueSave();
+        if (doneMsg) { try { showToast(doneMsg); } catch (e) {} }
+        return jobs.length;
+    },
+
+    // Per-MRM bake mode. No UI drives this any more (the switch is project-wide,
+    // in the toolbar) but it stays as the narrow entry point for a future
+    // per-compound override — the toolbar checkbox is derived state, so a mixed
+    // project renders as `indeterminate` on its own.
     async setMsiBakeMode(msiKey, mode) {
         if (!msiKey) return;
         const target = (mode === 'full') ? 'full' : 'robust';
@@ -12762,27 +12833,59 @@ const App = {
             const ent = (panel.section.msiSeries || {})[msiKey];
             if (!ent) continue;
             ent.bakeMode = target;
-            jobs.push({ panel, ent });
+            jobs.push({ panel, key: msiKey, ent });
         }
         if (!jobs.length) return;
         showToast(target === 'full' ? '外れ値クリップ OFF — 再ベイク中…' : '外れ値クリップ ON — 再ベイク中…');
-        for (const { panel, ent } of jobs) {
-            try { await panel.loadMsiLayer(msiKey, ent); }
-            catch (e) { console.warn('bake-mode re-raster failed', msiKey, e); }
-        }
-        for (const { panel } of jobs) {
-            try { panel.renderComposite(); panel.populateThumbnails(); } catch (e) {}
-        }
-        // rawDispMax moved, so the shared 'same' ceiling — and the toolbar Range,
-        // which reads it through getMsiWindow — must be recomputed. A manual
-        // override in App.msiUserWindow is in RAW units and stays valid as-is.
-        try { this.recomputeMsiAbsScale(); } catch (e) {}
-        try { Toolbar.refreshRange(); } catch (e) {}
-        try { renderMethodTable(); } catch (e) {}
-        if (this.queueSave) this.queueSave();
-        showToast(target === 'full'
+        await this._rebakeJobs(jobs, target === 'full'
             ? '外れ値クリップ OFF: 真の最大値でベイクしました'
             : '外れ値クリップ ON: 上位 0.5% をクリップしました');
+    },
+
+    // Project-wide outlier-clip switch (toolbar, next to 背景除去(Otsu)).
+    //
+    // The truth lives in each ent.bakeMode rather than in project.meta, and that
+    // is deliberate: upsert_project_doc only ever writes `memo` into
+    // projects.meta (supabase/share_locks.sql), so a project.meta flag would be
+    // dropped on publish and recipients would silently see master's *pixels*
+    // baked one way while their toolbar claimed the other. ent.bakeMode rides
+    // along in sections.storage_paths.msiSeries and does reach them.
+    //
+    // Skips layers already baked the requested way (ent.diag.bakeMode is written
+    // by computeRasterPixels), mirroring how _otsuIsFresh avoids re-work.
+    async setMsiOutlierClipAll(on) {
+        const target = on ? 'robust' : 'full';
+        const jobs = [];
+        let fresh = 0;
+        for (const panel of this.panels.values()) {
+            for (const [key, ent] of Object.entries(panel.section.msiSeries || {})) {
+                if (!/^MSI_/i.test(key) || !ent) continue;
+                // diag is the record of how the CURRENT pixels were baked; bakeMode
+                // is the request. Only skip when both already agree with the target.
+                const bakedAs = (ent.diag && ent.diag.bakeMode) || null;
+                const wantedAs = (ent.bakeMode === 'full') ? 'full' : 'robust';
+                if (bakedAs === target && wantedAs === target) { fresh++; continue; }
+                ent.bakeMode = target;
+                jobs.push({ panel, key, ent });
+            }
+        }
+        if (!jobs.length) {
+            try {
+                showToast(fresh
+                    ? (on ? '外れ値クリップ ON: 全レイヤー適用済みです' : '外れ値クリップ OFF: 全レイヤー適用済みです')
+                    : 'MSI レイヤーがありません');
+            } catch (e) {}
+            Toolbar.refreshOutlierClip();
+            return;
+        }
+        try {
+            showToast((on ? '外れ値クリップ ON' : '外れ値クリップ OFF') +
+                ' — 再ベイク中… (' + jobs.length + ' レイヤー)');
+        } catch (e) {}
+        await this._rebakeJobs(jobs, (on
+            ? '外れ値クリップ ON: 上位 0.5% をクリップしました'
+            : '外れ値クリップ OFF: 真の最大値でベイクしました') +
+            ' (' + jobs.length + ' レイヤー' + (fresh ? ' / ' + fresh + ' は済' : '') + ')');
     },
 
     // ② Find an existing display window (in raw units) for `msiKey` from any
@@ -13205,6 +13308,21 @@ const App = {
         const bgRemoveAll = document.getElementById('tb-bg-remove-all');
         if (bgRemoveAll) bgRemoveAll.addEventListener('click', () => {
             this.applyOtsuToAllSections().catch(e => console.warn('[otsu] bulk apply failed', e));
+        });
+        const outlierClip = document.getElementById('tb-outlier-clip');
+        if (outlierClip) outlierClip.addEventListener('change', () => {
+            // Clicking a tri-state box clears `indeterminate` and hands us a plain
+            // boolean — that is what we want: a mixed project resolves to whichever
+            // side the user just picked. Lock the box while the re-bake runs (it
+            // reloads and re-rasterises every source blob).
+            const want = outlierClip.checked;
+            outlierClip.disabled = true;
+            this.setMsiOutlierClipAll(want)
+                .catch(e => console.warn('[clip] toggle failed', e))
+                .finally(() => {
+                    outlierClip.disabled = false;
+                    Toolbar.refreshOutlierClip();
+                });
         });
         this._bindMethodHeaderSort();
         this._bindMrmRegister();
