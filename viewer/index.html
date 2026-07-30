@@ -2284,6 +2284,104 @@ const _otsuKeepDecodeCache = new Map();
 // キー = section.id + '|' + srcKey + '|' + signature。
 const _otsuTicCache = new Map();
 
+// ROI 統計用の生強度グリッド (セッションのみ・非永続)。
+//
+// ROI 統計はベイク済み 8bit PNG ではなく **ソースファイル** から計算する。PNG から
+// 読み戻すと外れ値クリップ (ent.bakeMode) が数値を動かしてしまうため:
+//   - クリップ ON では v > bakeHi が全部 255 に潰れ (computeRasterPixels の量子化)、
+//     逆変換しても一律 bakeHi になる → ROI 平均は必ず過小評価される
+//   - 1 LSB = (bakeHi - bakeLo)/255 なので、クリップを外すと刻み自体が粗くなる
+// Export ZIP の Data CSV (buildSampleCsvGroups) と MCP connector (connector/src/msi.js
+// の extractRoiValues) は既にソース再パースなので、これで 3 者の数値が一致する。
+//
+// キー = section.id + '|' + layerKey + '|' + blobId
+//   layerKey を必ず含める: 1 つのソースファイルを複数の化合物が共有するので、キーを
+//   ソース (path/blobId) だけにすると 2 つ目以降の化合物が 1 つ目の列の値を受け取る。
+// 値 = { W, H, values: Float64Array(W*H) }   NaN = その格子点にデータ無し
+const _roiRawGridCache = new Map();
+// 上限つき LRU。1 グリッドは W*H*8 バイト (200x200 で 320KB)。TIMS の 2000 features
+// のようなケースで全レイヤーを抱え込まないための歯止め。
+const ROI_RAW_GRID_CACHE_MAX = 24;
+
+function _roiGridKey(section, layerKey, ent) {
+    return String(section && section.id) + '|' + layerKey + '|' + String((ent && ent.blobId) || '');
+}
+function _roiGridCacheGet(key) {
+    if (!_roiRawGridCache.has(key)) return null;
+    const v = _roiRawGridCache.get(key);
+    _roiRawGridCache.delete(key); _roiRawGridCache.set(key, v);   // LRU: 参照で末尾へ
+    return v;
+}
+function _roiGridCacheSet(key, val) {
+    if (_roiRawGridCache.has(key)) _roiRawGridCache.delete(key);
+    _roiRawGridCache.set(key, val);
+    while (_roiRawGridCache.size > ROI_RAW_GRID_CACHE_MAX) {
+        const oldest = _roiRawGridCache.keys().next().value;
+        _roiRawGridCache.delete(oldest);
+    }
+}
+
+// ソース blob を 1 回パースして、そのソースを共有するレイヤーの生強度グリッドを作る。
+// 束ね方は computeSectionOtsuMasks (:2308-) / buildSampleCsvGroups (:8689-) と同じ。
+// 同時に materialize する列は LRU 上限まで — 1 ソースに数千 feature がある構成で
+// メモリを線形に食わないため。要求されたレイヤーを必ず先頭に置く。
+async function _ensureRoiRawGrid(section, layerKey) {
+    const series = (section && section.msiSeries) || {};
+    const ent = series[layerKey];
+    if (!ent || !ent.blobId) return null;
+    const wantKey = _roiGridKey(section, layerKey, ent);
+    const hit = _roiGridCacheGet(wantKey);
+    if (hit) return hit;
+
+    const srcKey = ent.sourceFileId || ent.blobId;
+    const entries = [{ layerKey, ent }];
+    for (const k of Object.keys(series)) {
+        if (k === layerKey || !/^MSI_/i.test(k)) continue;
+        const e = series[k];
+        if (!e || e.blobId !== ent.blobId) continue;
+        if ((e.sourceFileId || e.blobId) !== srcKey) continue;
+        if (entries.length >= ROI_RAW_GRID_CACHE_MAX) break;
+        entries.push({ layerKey: k, ent: e });
+    }
+
+    let rec = null;
+    try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
+    if (!rec || !rec.blob) return null;
+    let m = null;
+    try { m = extractSourceMatrixForExport(await rec.blob.arrayBuffer(), ent, entries); }
+    catch (e) { console.warn('[roi] source parse failed', layerKey, e); m = null; }
+    if (!m || !m.positions || !m.positions.length || !m.cols) return null;
+
+    // 描画ラスタと同一の格子に載せる (buildMsiGrid — computeRasterPixels も同じ)。
+    // 重複 (x,y) はセル単位で平均する: computeRasterPixels (:2122-2132) と同じ処理に
+    // しておかないと、ROI 統計とラスタ/rawMean で幾何がずれる。
+    const { xIndex, yIndex, W, H } = buildMsiGrid(m.positions);
+    const N = m.positions.length;
+    let want = null;
+    for (const col of m.cols) {
+        const vals = col.values || [];
+        const sum = new Float64Array(W * H);
+        const cnt = new Int32Array(W * H);
+        for (let i = 0; i < N; i++) {
+            const v = vals[i];
+            if (!Number.isFinite(v)) continue;
+            const p = m.positions[i];
+            const ci = xIndex.get(p.x), ri = yIndex.get(p.y);
+            if (ci == null || ri == null) continue;
+            const gi = ri * W + ci;
+            sum[gi] += v; cnt[gi]++;
+        }
+        const values = new Float64Array(W * H);
+        for (let gi = 0; gi < values.length; gi++) values[gi] = cnt[gi] > 0 ? (sum[gi] / cnt[gi]) : NaN;
+        const grid = { W, H, values };
+        const e2 = series[col.layerKey];
+        if (e2) _roiGridCacheSet(_roiGridKey(section, col.layerKey, e2), grid);
+        // 直接持っておく: 列数が LRU 上限に達していると自分が evict されうる。
+        if (col.layerKey === layerKey) want = grid;
+    }
+    return want;
+}
+
 // 1 切片の全ソースファイルについて TIC ベースの Otsu マスクを計算する(非破壊)。
 // 戻り値: { bySource: { [srcKey]: { W,H,keepB64, thresholdOriginal, nOriginal,
 //   nKept, nRemoved, signature, layerKeys, manual } }, unavailable:[srcKey...],
@@ -5464,51 +5562,57 @@ function collectAvailableCompoundLayers(project) {
 }
 
 // Sample the raw MSI intensities inside a ROI polygon.
+// Returns { values: number[], unavailable: boolean }.
 //
-// The raster is baked to a PER-SECTION window [vmin, p99.5] (computeRasterPixels),
-// so one section's 0-255 luminance is NOT comparable with another's: luminance 128
-// is raw ~50 when rawRange is [0,100] and raw ~5000 when it is [0,10000]. Invert the
-// bake through lumToRaw so the caller gets raw intensity in the original units —
-// which is what the chart's axis label ("Mean Intensity") and title
-// ("— across sections") already promise.
+// 値の出自は **ソースファイル** (_ensureRoiRawGrid)。ベイク済み 8bit ラスタは経由しない
+// ので、外れ値クリップ (ent.bakeMode) を切り替えても値は 1 つも変わらない。
 //
-// Layers registered before rawRange existed have no bake window to invert; those
-// stay in luminance and are reported via `raw:false` so the caller can say so
-// instead of silently averaging mixed units.
-// Returns { values: number[], raw: boolean }.
-function extractRoiPixelsFromSection(panel, layerKey, polyMsi) {
-    const img = panel.imageSources[layerKey];
-    if (!img || !img.complete || img.naturalWidth === 0 || !polyMsi || !polyMsi.length) return { values: [], raw: true };
-    const ent = (panel.section && panel.section.msiSeries) ? panel.section.msiSeries[layerKey] : null;
-    const rr = (ent && Array.isArray(ent.rawRange) && ent.rawRange.length === 2
-        && Number.isFinite(ent.rawRange[0]) && Number.isFinite(ent.rawRange[1])) ? ent.rawRange : null;
-    const iw = img.naturalWidth, ih = img.naturalHeight;
-    const c = document.createElement('canvas');
-    c.width = iw; c.height = ih;
-    const ctx = get2dContext(c, { willReadFrequently: true });
-    ctx.drawImage(img, 0, 0);
-    const data = ctx.getImageData(0, 0, iw, ih).data;
+// 以前はここで imageSources の PNG を getImageData → 輝度 → lumToRaw(rawRange) と
+// 逆変換していた。ラスタは切片ごとの窓 [vmin, p99.5] に焼かれているので単位を戻す
+// 必要があり (fa9c545)、それは直ったが、8bit に落ちた時点の情報損失は戻らない:
+//   - クリップ ON で上限を超えた画素は全部 255 → 逆変換すると一律 bakeHi。
+//     真の値は復元できず、ROI 平均は必ず過小評価される
+//   - 1 LSB = (bakeHi - bakeLo)/255 の量子化誤差が乗る
+// Export ZIP の Data CSV と MCP connector は元々ソース再パースなので、これで
+// 「画面の数値」「CSV」「AI が読む数値」の 3 者が一致する。
+//
+// 背景除去(Otsu) ON のときは keep grid で画素を落とす。renderComposite (:3552) と
+// renderMsiThumbnail (:5061) は既にこれを適用しているので、ROI 統計だけ適用しないと
+// 「画面で見えている領域の平均」と数値が食い違う (暗い背景が平均を下に引く)。
+async function extractRoiRawFromSection(panel, layerKey, polyMsi) {
+    if (!panel || !polyMsi || !polyMsi.length) return { values: [], unavailable: false };
+    const section = panel.section;
+    const grid = await _ensureRoiRawGrid(section, layerKey);
+    if (!grid) return { values: [], unavailable: true };
+    const { W, H, values } = grid;
+    // keep grid はラスタと同じ W×H。寸法が食い違う場合はマスクを当てない
+    // (誤った位置の画素を落とすより、マスク無しで全画素を返す方が安全)。
+    const keepRec = otsuKeepGridForLayer(section, layerKey);
+    const keep = (keepRec && keepRec.W === W && keepRec.H === H) ? keepRec.keep : null;
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     for (const [mx, my] of polyMsi) {
         if (mx < minX) minX = mx; if (mx > maxX) maxX = mx;
         if (my < minY) minY = my; if (my > maxY) maxY = my;
     }
-    const x0 = Math.max(0, Math.floor(minX)), x1 = Math.min(iw - 1, Math.ceil(maxX));
-    const y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(ih - 1, Math.ceil(maxY));
+    const x0 = Math.max(0, Math.floor(minX)), x1 = Math.min(W - 1, Math.ceil(maxX));
+    const y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(H - 1, Math.ceil(maxY));
     const out = [];
     for (let py = y0; py <= y1; py++) for (let px = x0; px <= x1; px++) {
-        if (pointInPolygon(px, py, polyMsi)) {
-            const idx = (py * iw + px) * 4;
-            if (data[idx + 3] === 0) continue;
-            const lum = 0.299*data[idx] + 0.587*data[idx+1] + 0.114*data[idx+2];
-            out.push(rr ? lumToRaw(lum, rr) : lum);
-        }
+        if (!pointInPolygon(px, py, polyMsi)) continue;
+        const gi = py * W + px;
+        if (keep && !keep[gi]) continue;
+        const v = values[gi];
+        if (Number.isFinite(v)) out.push(v);
     }
-    return { values: out, raw: !!rr };
+    return { values: out, unavailable: false };
 }
 
-function renderAnalysisChart() {
+// gen = App._analysisGen のスナップショット。ROI 統計はソース blob をパースするため
+// 非同期になり、ROI を連続で切り替えると複数走る。自分より新しい実行が始まっていたら
+// 描画せず捨てる (古い結果が新しい ROI を上書きしないように)。
+async function renderAnalysisChart(gen) {
     if (App.analysisMode === 'otsu') { try { renderOtsuAnalysis(); } catch (e) { console.warn('[otsu] analysis render failed', e); } return; }
+    const stale = () => (gen !== undefined && gen !== App._analysisGen);
     const host = document.getElementById('graph-container');
     const project = App.project;
     const roi = (project.rois || []).find(r => r.id === App.activeRoiId);
@@ -5525,23 +5629,27 @@ function renderAnalysisChart() {
     if (!sectionsWithRoi.length) { host.innerHTML = '<p class="text-gray-400 text-xs">This ROI is not drawn on any section yet</p>'; return; }
 
     // statsBySection[sectionId][channel] = {mean, sd, n}
-    // mixedUnits: at least one sampled layer had no rawRange to invert, so its
-    // numbers are 0-255 luminance while the rest are raw intensity. Surfaced on the
-    // chart rather than silently plotted on one axis.
+    // unavailable: ソースファイルを読めなかったレイヤーがある (共有モードで blob の
+    // ダウンロードに失敗した等)。黙って n=0 の空棒にすると「信号が無い」と読めてしまう
+    // ので、チャート上に出す。値は常に生強度単位なので旧 mixedUnits は不要になった。
     const stats = {};
-    let mixedUnits = false;
+    let unavailable = 0;
+    // 初回は各ソースのパースが走る。空欄のまま固まったように見えるのを避ける。
+    if (!host.querySelector('canvas')) {
+        host.innerHTML = '<p class="text-gray-400 text-xs">ROI 統計を計算中…</p>';
+    }
     for (const s of sectionsWithRoi) {
         const panel = App.panels.get(s.id);
         if (!panel) continue;
         stats[s.id] = {};
         for (const ch of channels) {
-            const res = panel.imageSources[ch]
-                ? extractRoiPixelsFromSection(panel, ch, roi.polysBySection[s.id])
-                : { values: [], raw: true };
-            if (res.values.length && !res.raw) mixedUnits = true;
+            const res = await extractRoiRawFromSection(panel, ch, roi.polysBySection[s.id]);
+            if (stale()) return;
+            if (res.unavailable) unavailable++;
             stats[s.id][ch] = calcStats(res.values);
         }
     }
+    if (stale()) return;
 
     let canvas = host.querySelector('canvas');
     if (!canvas) {
@@ -5554,7 +5662,7 @@ function renderAnalysisChart() {
     // size. Without this the CSS width/height:100% stretches a stale bitmap →
     // distorted bars + overlapping text. Redraw cheaply from cached stats (no
     // pixel re-scan); rAF-debounced so a drag-resize coalesces to one redraw.
-    host._lastChart = { sections: sectionsWithRoi, channels, stats, roi, mixedUnits };
+    host._lastChart = { sections: sectionsWithRoi, channels, stats, roi, unavailable };
     if (!host._chartResizeObserver && typeof ResizeObserver !== 'undefined') {
         let raf = 0;
         host._chartResizeObserver = new ResizeObserver(() => {
@@ -5563,12 +5671,12 @@ function renderAnalysisChart() {
                 raf = 0;
                 const last = host._lastChart;
                 const cv = host.querySelector('canvas');
-                if (last && cv) { try { drawSectionMultiBar(cv, last.sections, last.channels, last.stats, last.roi, last.mixedUnits); } catch (e) {} }
+                if (last && cv) { try { drawSectionMultiBar(cv, last.sections, last.channels, last.stats, last.roi, last.unavailable); } catch (e) {} }
             });
         });
         host._chartResizeObserver.observe(host);
     }
-    drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi, mixedUnits);
+    drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi, unavailable);
     document.getElementById('analysis-scope').textContent = sectionsWithRoi.length + ' section(s)';
     renderMethodTable();
 }
@@ -6393,7 +6501,7 @@ function bindOverlayUi() {
     }
 }
 
-function drawSectionMultiBar(canvas, sections, channels, stats, roi, mixedUnits) {
+function drawSectionMultiBar(canvas, sections, channels, stats, roi, unavailable) {
     const host = canvas.parentElement;
     // Draw at the canvas's actual displayed size (in CSS px) so the CSS
     // width/height:100% never stretches a stale or over-sized bitmap. The old
@@ -6491,12 +6599,12 @@ function drawSectionMultiBar(canvas, sections, channels, stats, roi, mixedUnits)
     }
     ctx.fillStyle = '#0f172a'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText((roi.name || roi.colorKey) + ' — across sections', W / 2, 36);
-    // Legacy layers carry no rawRange, so their samples stay in 0-255 luminance while
-    // properly-ranged layers are in raw units. Say so instead of letting the reader
-    // assume a single scale. Fits in the gap between the title (y=36) and margin.top.
-    if (mixedUnits) {
+    // ROI 統計はソースファイルから計算するので、ソースが読めないレイヤーは値ゼロでは
+    // なく「不明」。黙って空の棒にすると「信号が無い」と誤読されるので明示する。
+    // タイトル (y=36) と margin.top の隙間に収まる位置。
+    if (unavailable) {
         ctx.fillStyle = '#b91c1c'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText('⚠ 単位混在: rawRange 未保存のレイヤーは輝度(0-255)のまま — 切片間で比較できません', W / 2, 47);
+        ctx.fillText('⚠ ' + unavailable + ' 件のレイヤーはソースファイルを読めず統計を計算できませんでした (0 ではありません)', W / 2, 47);
     }
 }
 
@@ -8613,7 +8721,10 @@ function buildOneCsvTable(group, roiPairs, project, otsuMode) {
             }
             headers.push(header);
             columnArrays.push(arr);
-            compounds.push({ layerKey, vHeader: header, sourceFileId: ent.sourceFileId || null, kind: ent.kind || 'xlsx', compoundMeta: ent.compoundMeta || meta || null });
+            // bakeMode も記録する: CSV の数値はソースの生値なのでベイクに依存しないが、
+            // これを落とすと Export→Import でクリップ OFF のプロジェクトが既定の
+            // robust に戻り、表示と ROI グラフが黙って変わってしまう。
+            compounds.push({ layerKey, vHeader: header, sourceFileId: ent.sourceFileId || null, kind: ent.kind || 'xlsx', compoundMeta: ent.compoundMeta || meta || null, bakeMode: ent.bakeMode || null });
         }
     }
 
@@ -11623,6 +11734,10 @@ async function importZipFile(file) {
                         filename: fname,
                         sourceFileId: cmp.sourceFileId || null,
                         compoundMeta: cmp.compoundMeta || null,
+                        // この経路は msiSeries を直接組むので addMsiLayer の
+                        // inheritedBake を通らない。ZIP に記録された設定を復元する
+                        // (無ければ undefined = 既定の robust)。
+                        bakeMode: (cmp.bakeMode === 'full') ? 'full' : undefined,
                     };
                 }
             }
@@ -12816,6 +12931,9 @@ const App = {
         try { Toolbar.refreshRange(); } catch (e) {}
         try { Toolbar.refreshOutlierClip(); } catch (e) {}
         try { renderMethodTable(); } catch (e) {}
+        // ROI 統計はソース由来なので数値自体は動かないが、⚠加工 バッジなど周辺表示が
+        // 変わる。キャッシュヒットで再パースは走らないので実質ゼロコスト。
+        try { this.renderAnalysis(); } catch (e) {}
         if (this.queueSave) this.queueSave();
         if (doneMsg) { try { showToast(doneMsg); } catch (e) {} }
         return jobs.length;
@@ -13987,6 +14105,7 @@ const App = {
         } catch (e) { console.warn('share ROI fetch failed', e); }
 
         this.project = project;
+        _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         // Restore the project-level colormap before the first render so the
         // initial paint already uses the recipient's last-picked map (or
         // master's published default). sessionStorage entry wins so a
@@ -14178,6 +14297,7 @@ const App = {
         const project = await ProjectStorage.getProject(id);
         if (!project) { localStorage.removeItem('desi:lastProjectId'); this.renderEmpty(); return; }
         this.project = project;
+        _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         this.project.anatomyPalette = this.project.anatomyPalette || DEFAULT_ANATOMY_PALETTE;
         this.project.sections = this.project.sections || [];
         this.project.rois = this.project.rois || [];
@@ -14311,6 +14431,7 @@ const App = {
         if (!confirm('プロジェクト "' + this.project.displayName + '" を削除しますか? (取り消し不可)')) return;
         const id = this.project.id;
         this.project = null;
+        _roiRawGridCache.clear();
         this.panels.forEach(p => p.destroy());
         this.panels.clear();
         await ProjectStorage.deleteProject(id);
@@ -14492,9 +14613,14 @@ const App = {
         if (this.roiOnlyMode) this.panels.forEach(p => { try { p.renderComposite(); } catch (e) {} });
     },
 
+    // ROI 統計がソース blob のパースを伴うため renderAnalysisChart は async だが、
+    // 呼び出し元 (13 箇所) は同期のまま使えるようここで fire-and-forget する。
+    // 世代カウンタで、ROI を連続で切り替えたときに古い実行の結果を捨てる。
+    _analysisGen: 0,
     renderAnalysis() {
         if (!this.project) return;
-        renderAnalysisChart();
+        const gen = ++this._analysisGen;
+        renderAnalysisChart(gen).catch(e => console.warn('renderAnalysis failed', e));
     },
 
     // ---- ROI drawing ----
