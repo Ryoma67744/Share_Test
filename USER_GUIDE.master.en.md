@@ -201,6 +201,7 @@ Click the **gear ⚙** at the right edge of any layer chip to open a per-layer p
       <li><b>Apply opacity</b> ✓ (default ON)</li>
       <li>Opacity (0–100%)</li>
       <li>Intensity range (vmin / vmax)</li>
+      <li>Outlier-clip state (read-only — the switch is in the Toolbar)</li>
     </ul>
   </div>
   <div style="border:1px solid #2563eb;border-radius:4px;padding:8px;background:#eff6ff;">
