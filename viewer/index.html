@@ -5385,9 +5385,25 @@ function collectAvailableCompoundLayers(project) {
     return Array.from(set).filter(k => /^MSI_/i.test(k)).sort();
 }
 
+// Sample the raw MSI intensities inside a ROI polygon.
+//
+// The raster is baked to a PER-SECTION window [vmin, p99.5] (computeRasterPixels),
+// so one section's 0-255 luminance is NOT comparable with another's: luminance 128
+// is raw ~50 when rawRange is [0,100] and raw ~5000 when it is [0,10000]. Invert the
+// bake through lumToRaw so the caller gets raw intensity in the original units —
+// which is what the chart's axis label ("Mean Intensity") and title
+// ("— across sections") already promise.
+//
+// Layers registered before rawRange existed have no bake window to invert; those
+// stay in luminance and are reported via `raw:false` so the caller can say so
+// instead of silently averaging mixed units.
+// Returns { values: number[], raw: boolean }.
 function extractRoiPixelsFromSection(panel, layerKey, polyMsi) {
     const img = panel.imageSources[layerKey];
-    if (!img || !img.complete || img.naturalWidth === 0 || !polyMsi || !polyMsi.length) return [];
+    if (!img || !img.complete || img.naturalWidth === 0 || !polyMsi || !polyMsi.length) return { values: [], raw: true };
+    const ent = (panel.section && panel.section.msiSeries) ? panel.section.msiSeries[layerKey] : null;
+    const rr = (ent && Array.isArray(ent.rawRange) && ent.rawRange.length === 2
+        && Number.isFinite(ent.rawRange[0]) && Number.isFinite(ent.rawRange[1])) ? ent.rawRange : null;
     const iw = img.naturalWidth, ih = img.naturalHeight;
     const c = document.createElement('canvas');
     c.width = iw; c.height = ih;
@@ -5406,10 +5422,11 @@ function extractRoiPixelsFromSection(panel, layerKey, polyMsi) {
         if (pointInPolygon(px, py, polyMsi)) {
             const idx = (py * iw + px) * 4;
             if (data[idx + 3] === 0) continue;
-            out.push(0.299*data[idx] + 0.587*data[idx+1] + 0.114*data[idx+2]);
+            const lum = 0.299*data[idx] + 0.587*data[idx+1] + 0.114*data[idx+2];
+            out.push(rr ? lumToRaw(lum, rr) : lum);
         }
     }
-    return out;
+    return { values: out, raw: !!rr };
 }
 
 function renderAnalysisChart() {
@@ -5430,14 +5447,21 @@ function renderAnalysisChart() {
     if (!sectionsWithRoi.length) { host.innerHTML = '<p class="text-gray-400 text-xs">This ROI is not drawn on any section yet</p>'; return; }
 
     // statsBySection[sectionId][channel] = {mean, sd, n}
+    // mixedUnits: at least one sampled layer had no rawRange to invert, so its
+    // numbers are 0-255 luminance while the rest are raw intensity. Surfaced on the
+    // chart rather than silently plotted on one axis.
     const stats = {};
+    let mixedUnits = false;
     for (const s of sectionsWithRoi) {
         const panel = App.panels.get(s.id);
         if (!panel) continue;
         stats[s.id] = {};
         for (const ch of channels) {
-            const arr = panel.imageSources[ch] ? extractRoiPixelsFromSection(panel, ch, roi.polysBySection[s.id]) : [];
-            stats[s.id][ch] = calcStats(arr);
+            const res = panel.imageSources[ch]
+                ? extractRoiPixelsFromSection(panel, ch, roi.polysBySection[s.id])
+                : { values: [], raw: true };
+            if (res.values.length && !res.raw) mixedUnits = true;
+            stats[s.id][ch] = calcStats(res.values);
         }
     }
 
@@ -5452,7 +5476,7 @@ function renderAnalysisChart() {
     // size. Without this the CSS width/height:100% stretches a stale bitmap →
     // distorted bars + overlapping text. Redraw cheaply from cached stats (no
     // pixel re-scan); rAF-debounced so a drag-resize coalesces to one redraw.
-    host._lastChart = { sections: sectionsWithRoi, channels, stats, roi };
+    host._lastChart = { sections: sectionsWithRoi, channels, stats, roi, mixedUnits };
     if (!host._chartResizeObserver && typeof ResizeObserver !== 'undefined') {
         let raf = 0;
         host._chartResizeObserver = new ResizeObserver(() => {
@@ -5461,12 +5485,12 @@ function renderAnalysisChart() {
                 raf = 0;
                 const last = host._lastChart;
                 const cv = host.querySelector('canvas');
-                if (last && cv) { try { drawSectionMultiBar(cv, last.sections, last.channels, last.stats, last.roi); } catch (e) {} }
+                if (last && cv) { try { drawSectionMultiBar(cv, last.sections, last.channels, last.stats, last.roi, last.mixedUnits); } catch (e) {} }
             });
         });
         host._chartResizeObserver.observe(host);
     }
-    drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi);
+    drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi, mixedUnits);
     document.getElementById('analysis-scope').textContent = sectionsWithRoi.length + ' section(s)';
     renderMethodTable();
 }
@@ -6252,7 +6276,7 @@ function bindOverlayUi() {
     }
 }
 
-function drawSectionMultiBar(canvas, sections, channels, stats, roi) {
+function drawSectionMultiBar(canvas, sections, channels, stats, roi, mixedUnits) {
     const host = canvas.parentElement;
     // Draw at the canvas's actual displayed size (in CSS px) so the CSS
     // width/height:100% never stretches a stale or over-sized bitmap. The old
@@ -6350,6 +6374,13 @@ function drawSectionMultiBar(canvas, sections, channels, stats, roi) {
     }
     ctx.fillStyle = '#0f172a'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText((roi.name || roi.colorKey) + ' — across sections', W / 2, 36);
+    // Legacy layers carry no rawRange, so their samples stay in 0-255 luminance while
+    // properly-ranged layers are in raw units. Say so instead of letting the reader
+    // assume a single scale. Fits in the gap between the title (y=36) and margin.top.
+    if (mixedUnits) {
+        ctx.fillStyle = '#b91c1c'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText('⚠ 単位混在: rawRange 未保存のレイヤーは輝度(0-255)のまま — 切片間で比較できません', W / 2, 47);
+    }
 }
 
 // =============================================================
