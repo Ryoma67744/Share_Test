@@ -31,6 +31,10 @@ export function pointInPolygon(x, y, vertices) {
 
 // Reconstruct the MSI pixel grid from raw rows exactly as the app does, so ROI
 // polygons (which live in this pixel space) line up with the raw coordinates.
+//
+// The ordinal fallback COLLAPSES GAPS, changing the geometry. Kept in sync with the
+// app: each axis reports which guard tripped and the result carries `gridFallback`.
+// Nothing here consumes it yet — it exists so this stays a verbatim port.
 export function buildMsiGrid(rows) {
   const xSet = new Set(), ySet = new Set();
   for (const r of rows) {
@@ -41,31 +45,34 @@ export function buildMsiGrid(rows) {
   const ordinal = (vals) => new Map(vals.map((v, i) => [v, i]));
   const axis = (vals) => {
     const n = vals.length;
-    if (n <= 1) return { index: ordinal(vals), size: Math.max(1, n) };
+    if (n <= 1) return { index: ordinal(vals), size: Math.max(1, n), fallback: null };
     let step = Infinity;
     for (let i = 1; i < n; i++) {
       const d = vals[i] - vals[i - 1];
       if (d > 0 && d < step) step = d;
     }
-    if (!(step > 0) || !Number.isFinite(step)) return { index: ordinal(vals), size: n };
+    if (!(step > 0) || !Number.isFinite(step)) return { index: ordinal(vals), size: n, fallback: 'pitch' };
     const size = Math.round((vals[n - 1] - vals[0]) / step) + 1;
     const INFLATION_LIMIT = 4, ABS_CAP = 8192;
     if (!(size >= n) || size > ABS_CAP || size > n * INFLATION_LIMIT + 1) {
-      return { index: ordinal(vals), size: n };
+      return { index: ordinal(vals), size: n, fallback: 'inflation' };
     }
     const index = new Map();
     const used = new Set();
     for (const v of vals) {
       const k = Math.round((v - vals[0]) / step);
-      if (used.has(k)) return { index: ordinal(vals), size: n };
+      if (used.has(k)) return { index: ordinal(vals), size: n, fallback: 'collision' };
       used.add(k);
       index.set(v, k);
     }
-    return { index, size };
+    return { index, size, fallback: null };
   };
   const ax = axis([...xSet].sort((a, b) => a - b));
   const ay = axis([...ySet].sort((a, b) => a - b));
-  return { xIndex: ax.index, yIndex: ay.index, W: ax.size, H: ay.size };
+  const gridFallback = (ax.fallback || ay.fallback)
+    ? { x: ax.fallback || null, y: ay.fallback || null }
+    : null;
+  return { xIndex: ax.index, yIndex: ay.index, W: ax.size, H: ay.size, gridFallback };
 }
 
 // xlsx ArrayBuffer/Buffer → [{x,y,v}] using the def stored in the project doc's

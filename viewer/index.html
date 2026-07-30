@@ -303,6 +303,12 @@ body.splitting-v { cursor:row-resize !important; }
     font-size:9px; font-weight:700; font-family:system-ui, sans-serif; vertical-align:middle; white-space:nowrap; }
 .eval-badge.target  { background:#d97706; color:#fff; }
 .eval-badge.pending { background:#fef3c7; color:#92400e; border:1px solid #fcd34d; }
+/* Bake diagnostics: the raster pipeline clips outliers, averages duplicate
+   coordinates and can fall back to gap-collapsing grid indexing. Those used to be
+   silent; this badge says it happened (details in the title tooltip). */
+.diag-badge { display:inline-block; margin-left:6px; padding:0 5px; border-radius:8px;
+    font-size:9px; font-weight:700; font-family:system-ui, sans-serif; vertical-align:middle;
+    white-space:nowrap; cursor:help; background:#fee2e2; color:#b91c1c; border:1px solid #fca5a5; }
 /* Column-click sort affordance for the main Method <thead>. Re-clicking
    the same column flips direction; a third click clears the sort. */
 #method-table thead th[data-sort-key] { cursor:pointer; user-select:none; position:relative; }
@@ -2029,6 +2035,11 @@ function percentileSorted(vals, p) {
 // absolute cap (or collide two distinct coordinates into one cell) falls back
 // to dense ordinal indexing so the canvas never blows up. Rows that are null or
 // lack a finite x/y are ignored.
+//
+// The ordinal fallback COLLAPSES GAPS — the image geometry changes (a skipped scan
+// no longer sits at its true position). That used to happen silently, so each axis
+// now reports which guard tripped ('pitch' / 'inflation' / 'collision') and
+// buildMsiGrid surfaces it as `gridFallback` for the Method table to flag.
 function buildMsiGrid(rows) {
     const xSet = new Set(), ySet = new Set();
     for (const r of rows) {
@@ -2039,21 +2050,23 @@ function buildMsiGrid(rows) {
     const ordinal = (vals) => new Map(vals.map((v, i) => [v, i]));
     const axis = (vals) => {
         const n = vals.length;
-        if (n <= 1) return { index: ordinal(vals), size: Math.max(1, n) };
+        // n <= 1 is degenerate, not a fallback: with one coordinate there is no
+        // spacing to get wrong and nothing to collapse.
+        if (n <= 1) return { index: ordinal(vals), size: Math.max(1, n), fallback: null };
         // Smallest positive gap between consecutive distinct coords = pixel pitch.
         let step = Infinity;
         for (let i = 1; i < n; i++) {
             const d = vals[i] - vals[i - 1];
             if (d > 0 && d < step) step = d;
         }
-        if (!(step > 0) || !Number.isFinite(step)) return { index: ordinal(vals), size: n };
+        if (!(step > 0) || !Number.isFinite(step)) return { index: ordinal(vals), size: n, fallback: 'pitch' };
         const size = Math.round((vals[n - 1] - vals[0]) / step) + 1;
         // A coordinate grid should never dwarf the number of distinct
         // coordinates. Past a safety factor or an absolute cap the spacing is
         // too irregular (or noisy) to trust — fall back to ordinal indexing.
         const INFLATION_LIMIT = 4, ABS_CAP = 8192;
         if (!(size >= n) || size > ABS_CAP || size > n * INFLATION_LIMIT + 1) {
-            return { index: ordinal(vals), size: n };
+            return { index: ordinal(vals), size: n, fallback: 'inflation' };
         }
         const index = new Map();
         const used = new Set();
@@ -2061,15 +2074,18 @@ function buildMsiGrid(rows) {
             const k = Math.round((v - vals[0]) / step);
             // Two distinct coords landing in one cell => pitch is wrong for this
             // data; ordinal indexing is the safe choice.
-            if (used.has(k)) return { index: ordinal(vals), size: n };
+            if (used.has(k)) return { index: ordinal(vals), size: n, fallback: 'collision' };
             used.add(k);
             index.set(v, k);
         }
-        return { index, size };
+        return { index, size, fallback: null };
     };
     const ax = axis([...xSet].sort((a, b) => a - b));
     const ay = axis([...ySet].sort((a, b) => a - b));
-    return { xIndex: ax.index, yIndex: ay.index, W: ax.size, H: ay.size };
+    const gridFallback = (ax.fallback || ay.fallback)
+        ? { x: ax.fallback || null, y: ay.fallback || null }
+        : null;
+    return { xIndex: ax.index, yIndex: ay.index, W: ax.size, H: ay.size, gridFallback };
 }
 
 // Pure numeric core (no DOM/canvas): build the MSI raster grid, compute stats,
@@ -2077,8 +2093,11 @@ function buildMsiGrid(rows) {
 // parse Web Worker (via toString), so the rendered raster + stats are identical
 // regardless of where it runs. Returns { width, height, pixels, rawRange,
 // rawMean, rawTrueMax }.
-function computeRasterPixels(rows, range) {
-    const { xIndex, yIndex, W, H } = buildMsiGrid(rows);
+// bakeMode: 'robust' (default) clips the top outliers to MSI_ROBUST_PERCENTILE;
+// 'full' bakes to the true maximum so no pixel is flattened. Carried per layer on
+// `ent` (= the worker's `def`), so it survives IDB + publish and reaches recipients.
+function computeRasterPixels(rows, range, bakeMode) {
+    const { xIndex, yIndex, W, H, gridFallback } = buildMsiGrid(rows);
     const grid = Array(H).fill(0).map(() => Array(W).fill(NaN));
     const cnt  = Array(H).fill(0).map(() => Array(W).fill(0));
     for (const r of rows) {
@@ -2091,8 +2110,13 @@ function computeRasterPixels(rows, range) {
     let vmin = Infinity, vmax = -Infinity;
     let sum = 0, n = 0;
     const vals = [];
+    // Rows sharing one (x,y) are summed above and averaged below. That is a real
+    // change to the data, so count how often it happened (dupCells = grid cells fed
+    // by >1 row, dupRows = the surplus rows folded in) instead of doing it silently.
+    let dupCells = 0, dupRows = 0;
     for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
         if (cnt[i][j] > 0) {
+            if (cnt[i][j] > 1) { dupCells++; dupRows += cnt[i][j] - 1; }
             grid[i][j] /= cnt[i][j];
             const v = grid[i][j];
             if (v < vmin) vmin = v;
@@ -2120,6 +2144,14 @@ function computeRasterPixels(rows, range) {
     } else if (!(vmax > vmin)) {
         bakeLo = 0; bakeHi = 1; if (trueMax == null) trueMax = 1;
         rawDispMax = bakeHi;   // 退化(全画素同値): ベイク上限
+    } else if (bakeMode === 'full') {
+        // 外れ値クリップ OFF: 真の最大値でベイクするので上位画素が潰れない。代償は
+        // 1 画素の外れ値で組織全体が暗くなること (9a22e47 がこれを解くために robust
+        // 上限を導入した経緯)。rawDispMax も連動させないと、クリップを外しても既定
+        // 表示が p99 で飽和したままになる。
+        bakeLo = vmin;
+        bakeHi = vmax;
+        rawDispMax = vmax;
     } else {
         bakeLo = vmin;
         const robust = percentileSorted(vals, MSI_ROBUST_PERCENTILE);
@@ -2131,27 +2163,35 @@ function computeRasterPixels(rows, range) {
     }
     const pixels = new Uint8ClampedArray(W * H * 4);
     let p = 0;
+    // Pixels outside [bakeLo, bakeHi] are clamped, and every value above bakeHi
+    // becomes the same 255 — indistinguishable in the PNG. Count them so the UI can
+    // say how much of the image was flattened (and so the outlier-clip toggle has a
+    // number to justify itself).
+    let clippedHigh = 0, clippedLow = 0;
     for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
         const v = grid[i][j];
         if (!Number.isFinite(v)) { pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; }
         else {
+            if (v > bakeHi) clippedHigh++; else if (v < bakeLo) clippedLow++;
             const nn = Math.max(0, Math.min(1, (v - bakeLo) / (bakeHi - bakeLo)));
             const g = Math.round(nn * 255);
             pixels[p++] = g; pixels[p++] = g; pixels[p++] = g; pixels[p++] = 255;
         }
     }
-    return { width: W, height: H, pixels, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax, rawDispMax };
+    const diag = { dupCells, dupRows, clippedHigh, clippedLow, gridFallback: gridFallback || null, nPixels: n,
+                   bakeMode: (bakeMode === 'full') ? 'full' : 'robust' };
+    return { width: W, height: H, pixels, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax, rawDispMax, diag };
 }
 
 // Main-thread wrapper: kept synchronous (existing callers don't await it) so
 // only the DOM <canvas> encode stays here; the heavy numeric work is in
 // computeRasterPixels.
-function rasterRowsToPngDataUrl(rows, range) {
-    const { width, height, pixels, rawRange, rawMean, rawTrueMax, rawDispMax } = computeRasterPixels(rows, range);
+function rasterRowsToPngDataUrl(rows, range, bakeMode) {
+    const { width, height, pixels, rawRange, rawMean, rawTrueMax, rawDispMax, diag } = computeRasterPixels(rows, range, bakeMode);
     const canvas = document.createElement('canvas');
     canvas.width = width; canvas.height = height;
     get2dContext(canvas, { willReadFrequently: true }).putImageData(new ImageData(pixels, width, height), 0, 0);
-    return { dataUrl: canvas.toDataURL('image/png'), rawRange, rawMean, rawTrueMax, rawDispMax };
+    return { dataUrl: canvas.toDataURL('image/png'), rawRange, rawMean, rawTrueMax, rawDispMax, diag };
 }
 
 // ============================================================
@@ -2384,7 +2424,7 @@ function parseXlsxToRows(buf, def) {
 // Main-thread fallback (worker path calls parseXlsxToRows + computeRasterPixels
 // directly). Behaviour/return shape unchanged.
 async function buildPngFromXlsxArrayBuffer(buf, def) {
-    return rasterRowsToPngDataUrl(parseXlsxToRows(buf, def), def.range);
+    return rasterRowsToPngDataUrl(parseXlsxToRows(buf, def), def.range, def.bakeMode);
 }
 
 async function inspectXlsxColumns(buf, sheetName, headerRow1based) {
@@ -2558,7 +2598,7 @@ function parseTxtToRows(buf, def) {
 // Main-thread fallback (worker path calls parseTxtToRows + computeRasterPixels
 // directly). Behaviour/return shape unchanged.
 async function buildPngFromTxtArrayBuffer(buf, def) {
-    return rasterRowsToPngDataUrl(parseTxtToRows(buf, def), def.range);
+    return rasterRowsToPngDataUrl(parseTxtToRows(buf, def), def.range, def.bakeMode);
 }
 
 // =============================================================
@@ -2630,9 +2670,9 @@ async function _parseWorkerOnMessage(e) {
         let result;
         if (msg.op === 'xlsx-raster' || msg.op === 'txt-raster') {
             const rows = (msg.op === 'txt-raster') ? parseTxtToRows(buf, p.def) : parseXlsxToRows(buf, p.def);
-            const px = computeRasterPixels(rows, p.def && p.def.range);
+            const px = computeRasterPixels(rows, p.def && p.def.range, p.def && p.def.bakeMode);
             const dataUrl = await _encodePixelsToDataUrl(px.width, px.height, px.pixels);
-            result = { dataUrl: dataUrl, rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax, rawDispMax: px.rawDispMax };
+            result = { dataUrl: dataUrl, rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax, rawDispMax: px.rawDispMax, diag: px.diag };
         } else if (msg.op === 'tiff-decode') {
             result = { dataUrl: await decodeTiffArrayBufferToDataUrl(buf) };
         } else if (msg.op === 'xlsx-columns') {
@@ -2968,6 +3008,9 @@ class SectionPanel {
         const rawMean = (result && typeof result === 'object' && Number.isFinite(result.rawMean)) ? result.rawMean : null;
         const rawTrueMax = (result && typeof result === 'object' && Number.isFinite(result.rawTrueMax)) ? result.rawTrueMax : null;
         const rawDispMax = (result && typeof result === 'object' && Number.isFinite(result.rawDispMax)) ? result.rawDispMax : null;
+        // Bake diagnostics (clipped / averaged-duplicate / grid-fallback counts).
+        // Plain data object, so it round-trips through IDB and publish untouched.
+        const diag = (result && typeof result === 'object' && result.diag && typeof result.diag === 'object') ? result.diag : null;
         this.imageDataUrls[key] = dataUrl;
         // Persist the raw MSI value range so the Method (MRM) table can show
         // intensity Mean/Max in the original scale rather than 0-255 luminance.
@@ -2975,12 +3018,13 @@ class SectionPanel {
         // Mean/Max in the table; flag missing-on-disk so we IDB-save once.
         if (this.section.msiSeries && this.section.msiSeries[key]) {
             const entRef = this.section.msiSeries[key];
-            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean) || !Number.isFinite(entRef.rawTrueMax) || !Number.isFinite(entRef.rawDispMax);
+            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean) || !Number.isFinite(entRef.rawTrueMax) || !Number.isFinite(entRef.rawDispMax) || !entRef.diag;
             if (rawRange) entRef.rawRange = rawRange;
             if (rawMean != null) entRef.rawMean = rawMean;
             if (rawTrueMax != null) entRef.rawTrueMax = rawTrueMax;
             if (rawDispMax != null) entRef.rawDispMax = rawDispMax;
-            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null || rawDispMax != null) && App && App.queueSave) App.queueSave();
+            if (diag) entRef.diag = diag;
+            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null || rawDispMax != null || diag) && App && App.queueSave) App.queueSave();
         }
         await this.attachImage(key, dataUrl);
     }
@@ -4688,6 +4732,23 @@ class SectionPanel {
             const rangeRow = mkRow('表示ウィンドウ (生単位 — ツールバーの Range で調整)',
                 '<div style="display:flex;gap:4px;"><input type="number" value="' + formatRawForInput(_win.min) + '" class="vmin" disabled title="表示ウィンドウ下限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"><input type="number" value="' + formatRawForInput(_win.max) + '" class="vmax" disabled title="表示ウィンドウ上限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"></div>');
             pop.appendChild(rangeRow);
+            // Outlier clip is a BAKE setting, not a display window: OFF re-rasterises
+            // to the true maximum so the top pixels stop collapsing onto one value.
+            // The cost is real (that ceiling exists so one hot pixel does not crush
+            // the tissue), so state it and show how many pixels are affected today.
+            const _entB = (this.section.msiSeries && this.section.msiSeries[key]) || {};
+            const clipOn = _entB.bakeMode !== 'full';
+            const _d = _entB.diag || null;
+            const clippedNote = (_d && _d.clippedHigh > 0)
+                ? '<div style="color:#b91c1c;font-size:10px;margin-top:2px;">現在 ' + _d.clippedHigh + ' 画素が上限に潰れています</div>'
+                : '';
+            const clipRow = mkRow('外れ値クリップ (ベイク設定 — 同じMRMの全切片に適用)',
+                '<label style="display:flex;align-items:center;gap:6px;font-size:11px;cursor:pointer;color:#1e293b;">' +
+                    '<input type="checkbox" class="clip"' + (clipOn ? ' checked' : '') + '> 上位 0.5% をクリップ' +
+                '</label>' +
+                '<div style="color:#64748b;font-size:10px;margin-top:2px;">OFF にすると真の最大値でベイクします。' +
+                '1 画素の外れ値で組織が暗くなる場合があります。</div>' + clippedNote);
+            pop.appendChild(clipRow);
         }
         const close = document.createElement('div');
         close.style.cssText = 'text-align:right;margin-top:4px;';
@@ -4761,6 +4822,17 @@ class SectionPanel {
                 if (b <= a) { b = a + 1; vmax.value = b; }
                 settings.vmax = b; pushWindow();
             });
+            const clip = pop.querySelector('.clip');
+            if (clip) {
+                clip.addEventListener('change', () => {
+                    // Re-baking reloads the source blob for every same-MRM section, so
+                    // close the popover first: its cached diag/clip text is now stale.
+                    clip.disabled = true;
+                    onClose();
+                    App.setMsiBakeMode(key, clip.checked ? 'robust' : 'full')
+                        .catch(e => console.warn('setMsiBakeMode failed', e));
+                });
+            }
         }
     }
 
@@ -5385,9 +5457,25 @@ function collectAvailableCompoundLayers(project) {
     return Array.from(set).filter(k => /^MSI_/i.test(k)).sort();
 }
 
+// Sample the raw MSI intensities inside a ROI polygon.
+//
+// The raster is baked to a PER-SECTION window [vmin, p99.5] (computeRasterPixels),
+// so one section's 0-255 luminance is NOT comparable with another's: luminance 128
+// is raw ~50 when rawRange is [0,100] and raw ~5000 when it is [0,10000]. Invert the
+// bake through lumToRaw so the caller gets raw intensity in the original units —
+// which is what the chart's axis label ("Mean Intensity") and title
+// ("— across sections") already promise.
+//
+// Layers registered before rawRange existed have no bake window to invert; those
+// stay in luminance and are reported via `raw:false` so the caller can say so
+// instead of silently averaging mixed units.
+// Returns { values: number[], raw: boolean }.
 function extractRoiPixelsFromSection(panel, layerKey, polyMsi) {
     const img = panel.imageSources[layerKey];
-    if (!img || !img.complete || img.naturalWidth === 0 || !polyMsi || !polyMsi.length) return [];
+    if (!img || !img.complete || img.naturalWidth === 0 || !polyMsi || !polyMsi.length) return { values: [], raw: true };
+    const ent = (panel.section && panel.section.msiSeries) ? panel.section.msiSeries[layerKey] : null;
+    const rr = (ent && Array.isArray(ent.rawRange) && ent.rawRange.length === 2
+        && Number.isFinite(ent.rawRange[0]) && Number.isFinite(ent.rawRange[1])) ? ent.rawRange : null;
     const iw = img.naturalWidth, ih = img.naturalHeight;
     const c = document.createElement('canvas');
     c.width = iw; c.height = ih;
@@ -5406,10 +5494,11 @@ function extractRoiPixelsFromSection(panel, layerKey, polyMsi) {
         if (pointInPolygon(px, py, polyMsi)) {
             const idx = (py * iw + px) * 4;
             if (data[idx + 3] === 0) continue;
-            out.push(0.299*data[idx] + 0.587*data[idx+1] + 0.114*data[idx+2]);
+            const lum = 0.299*data[idx] + 0.587*data[idx+1] + 0.114*data[idx+2];
+            out.push(rr ? lumToRaw(lum, rr) : lum);
         }
     }
-    return out;
+    return { values: out, raw: !!rr };
 }
 
 function renderAnalysisChart() {
@@ -5430,14 +5519,21 @@ function renderAnalysisChart() {
     if (!sectionsWithRoi.length) { host.innerHTML = '<p class="text-gray-400 text-xs">This ROI is not drawn on any section yet</p>'; return; }
 
     // statsBySection[sectionId][channel] = {mean, sd, n}
+    // mixedUnits: at least one sampled layer had no rawRange to invert, so its
+    // numbers are 0-255 luminance while the rest are raw intensity. Surfaced on the
+    // chart rather than silently plotted on one axis.
     const stats = {};
+    let mixedUnits = false;
     for (const s of sectionsWithRoi) {
         const panel = App.panels.get(s.id);
         if (!panel) continue;
         stats[s.id] = {};
         for (const ch of channels) {
-            const arr = panel.imageSources[ch] ? extractRoiPixelsFromSection(panel, ch, roi.polysBySection[s.id]) : [];
-            stats[s.id][ch] = calcStats(arr);
+            const res = panel.imageSources[ch]
+                ? extractRoiPixelsFromSection(panel, ch, roi.polysBySection[s.id])
+                : { values: [], raw: true };
+            if (res.values.length && !res.raw) mixedUnits = true;
+            stats[s.id][ch] = calcStats(res.values);
         }
     }
 
@@ -5452,7 +5548,7 @@ function renderAnalysisChart() {
     // size. Without this the CSS width/height:100% stretches a stale bitmap →
     // distorted bars + overlapping text. Redraw cheaply from cached stats (no
     // pixel re-scan); rAF-debounced so a drag-resize coalesces to one redraw.
-    host._lastChart = { sections: sectionsWithRoi, channels, stats, roi };
+    host._lastChart = { sections: sectionsWithRoi, channels, stats, roi, mixedUnits };
     if (!host._chartResizeObserver && typeof ResizeObserver !== 'undefined') {
         let raf = 0;
         host._chartResizeObserver = new ResizeObserver(() => {
@@ -5461,12 +5557,12 @@ function renderAnalysisChart() {
                 raf = 0;
                 const last = host._lastChart;
                 const cv = host.querySelector('canvas');
-                if (last && cv) { try { drawSectionMultiBar(cv, last.sections, last.channels, last.stats, last.roi); } catch (e) {} }
+                if (last && cv) { try { drawSectionMultiBar(cv, last.sections, last.channels, last.stats, last.roi, last.mixedUnits); } catch (e) {} }
             });
         });
         host._chartResizeObserver.observe(host);
     }
-    drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi);
+    drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi, mixedUnits);
     document.getElementById('analysis-scope').textContent = sectionsWithRoi.length + ' section(s)';
     renderMethodTable();
 }
@@ -5826,6 +5922,44 @@ function findCompoundMeta(project, layerKey) {
     return null;
 }
 
+// Why an ordinal-indexed axis stopped trusting the measured pixel pitch.
+const GRID_FALLBACK_REASON = {
+    pitch:     'ピクセル間隔を推定できず',
+    inflation: 'グリッドが膨張しすぎ',
+    collision: '異なる座標が同一セルに衝突',
+};
+
+// Badge for computeRasterPixels' bake diagnostics (ent.diag). The raster pipeline
+// clips outliers above the robust ceiling, averages rows that share one (x,y), and
+// can fall back to gap-collapsing ordinal grid indexing — all of which change what
+// the image shows. Returns '' when nothing was altered, so clean layers stay clean.
+function diagBadgeHtml(diag) {
+    if (!diag || typeof diag !== 'object') return '';
+    const notes = [];
+    const nPix = Number.isFinite(diag.nPixels) && diag.nPixels > 0 ? diag.nPixels : null;
+    const pct = (k) => (nPix ? ' (' + ((k / nPix) * 100).toFixed(2) + '%)' : '');
+    if (diag.clippedHigh > 0) {
+        notes.push('上限クリップ: ' + diag.clippedHigh + ' 画素' + pct(diag.clippedHigh)
+            + ' — これらは同じ最大値に潰れており区別できません');
+    }
+    if (diag.clippedLow > 0) notes.push('下限クリップ: ' + diag.clippedLow + ' 画素' + pct(diag.clippedLow));
+    if (diag.dupCells > 0) {
+        notes.push('重複座標の平均: ' + diag.dupCells + ' セル (' + diag.dupRows + ' 行を統合)');
+    }
+    const gf = diag.gridFallback;
+    if (gf && (gf.x || gf.y)) {
+        const ax = [];
+        if (gf.x) ax.push('X軸 — ' + (GRID_FALLBACK_REASON[gf.x] || gf.x));
+        if (gf.y) ax.push('Y軸 — ' + (GRID_FALLBACK_REASON[gf.y] || gf.y));
+        notes.push('グリッド順序詰め: ' + ax.join(' / ') + ' — 本来の間隔が詰められ形状が変わっています');
+    }
+    if (!notes.length) return '';
+    const title = '生値→画像の変換で以下が行われました:\n・' + notes.join('\n・');
+    const attr = String(title).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return '<span class="diag-badge" title="' + attr + '">⚠ 加工</span>';
+}
+
 function renderMethodTable() {
     try { renderOverlayBar(); } catch (e) {}
     const tbody = document.getElementById('method-rows');
@@ -5883,6 +6017,7 @@ function renderMethodTable() {
         const evalBadge = isEvalTarget
             ? '<span class="eval-badge target" title="この測定像を評価するためにプレビューを開きました">評価対象</span>'
             : (isEvalPending ? '<span class="eval-badge pending" title="実測棚卸しで未処理 — この測定PJで一緒に評価できます">要評価</span>' : '');
+        const diagBadge = diagBadgeHtml(ent.diag);
 
         const markerColor = ent.markerColor || '';
         const markerSwatchStyle = markerColor
@@ -5894,7 +6029,7 @@ function renderMethodTable() {
                 '<button type="button" class="marker-swatch" title="Set marker colour" style="' + markerSwatchStyle + '"></button>' +
                 '<input type="color" class="marker-input" value="' + (markerColor || '#ff0000') + '" tabindex="-1">' +
             '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + '</td>' +
+            '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + diagBadge + '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pre) + '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pro) + '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(ce) + '</td>' +
@@ -6252,7 +6387,7 @@ function bindOverlayUi() {
     }
 }
 
-function drawSectionMultiBar(canvas, sections, channels, stats, roi) {
+function drawSectionMultiBar(canvas, sections, channels, stats, roi, mixedUnits) {
     const host = canvas.parentElement;
     // Draw at the canvas's actual displayed size (in CSS px) so the CSS
     // width/height:100% never stretches a stale or over-sized bitmap. The old
@@ -6350,6 +6485,13 @@ function drawSectionMultiBar(canvas, sections, channels, stats, roi) {
     }
     ctx.fillStyle = '#0f172a'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText((roi.name || roi.colorKey) + ' — across sections', W / 2, 36);
+    // Legacy layers carry no rawRange, so their samples stay in 0-255 luminance while
+    // properly-ranged layers are in raw units. Say so instead of letting the reader
+    // assume a single scale. Fits in the gap between the title (y=36) and margin.top.
+    if (mixedUnits) {
+        ctx.fillStyle = '#b91c1c'; ctx.font = '9px sans-serif'; ctx.textAlign = 'center';
+        ctx.fillText('⚠ 単位混在: rawRange 未保存のレイヤーは輝度(0-255)のまま — 切片間で比較できません', W / 2, 47);
+    }
 }
 
 // =============================================================
@@ -12605,6 +12747,42 @@ const App = {
             try { panel.applyWindowForKey(msiKey, rawMin, rawMax); }
             catch (e) { console.warn('range broadcast failed', e); }
         }
+    },
+
+    // ② Outlier-clip mode is a property of the BAKE, not of the display window, so
+    // flipping it re-rasterises from the source file (rawRange / rawDispMax /
+    // rawTrueMax / diag all change). Applied to EVERY section carrying the same MRM:
+    // a per-section mix would encode a different [lo,hi] in each PNG and make the
+    // sections incomparable — the same defect the ROI-chart fix removed.
+    async setMsiBakeMode(msiKey, mode) {
+        if (!msiKey) return;
+        const target = (mode === 'full') ? 'full' : 'robust';
+        const jobs = [];
+        for (const panel of this.panels.values()) {
+            const ent = (panel.section.msiSeries || {})[msiKey];
+            if (!ent) continue;
+            ent.bakeMode = target;
+            jobs.push({ panel, ent });
+        }
+        if (!jobs.length) return;
+        showToast(target === 'full' ? '外れ値クリップ OFF — 再ベイク中…' : '外れ値クリップ ON — 再ベイク中…');
+        for (const { panel, ent } of jobs) {
+            try { await panel.loadMsiLayer(msiKey, ent); }
+            catch (e) { console.warn('bake-mode re-raster failed', msiKey, e); }
+        }
+        for (const { panel } of jobs) {
+            try { panel.renderComposite(); panel.populateThumbnails(); } catch (e) {}
+        }
+        // rawDispMax moved, so the shared 'same' ceiling — and the toolbar Range,
+        // which reads it through getMsiWindow — must be recomputed. A manual
+        // override in App.msiUserWindow is in RAW units and stays valid as-is.
+        try { this.recomputeMsiAbsScale(); } catch (e) {}
+        try { Toolbar.refreshRange(); } catch (e) {}
+        try { renderMethodTable(); } catch (e) {}
+        if (this.queueSave) this.queueSave();
+        showToast(target === 'full'
+            ? '外れ値クリップ OFF: 真の最大値でベイクしました'
+            : '外れ値クリップ ON: 上位 0.5% をクリップしました');
     },
 
     // ② Find an existing display window (in raw units) for `msiKey` from any
