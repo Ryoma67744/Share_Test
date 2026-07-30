@@ -2093,7 +2093,10 @@ function buildMsiGrid(rows) {
 // parse Web Worker (via toString), so the rendered raster + stats are identical
 // regardless of where it runs. Returns { width, height, pixels, rawRange,
 // rawMean, rawTrueMax }.
-function computeRasterPixels(rows, range) {
+// bakeMode: 'robust' (default) clips the top outliers to MSI_ROBUST_PERCENTILE;
+// 'full' bakes to the true maximum so no pixel is flattened. Carried per layer on
+// `ent` (= the worker's `def`), so it survives IDB + publish and reaches recipients.
+function computeRasterPixels(rows, range, bakeMode) {
     const { xIndex, yIndex, W, H, gridFallback } = buildMsiGrid(rows);
     const grid = Array(H).fill(0).map(() => Array(W).fill(NaN));
     const cnt  = Array(H).fill(0).map(() => Array(W).fill(0));
@@ -2141,6 +2144,14 @@ function computeRasterPixels(rows, range) {
     } else if (!(vmax > vmin)) {
         bakeLo = 0; bakeHi = 1; if (trueMax == null) trueMax = 1;
         rawDispMax = bakeHi;   // 退化(全画素同値): ベイク上限
+    } else if (bakeMode === 'full') {
+        // 外れ値クリップ OFF: 真の最大値でベイクするので上位画素が潰れない。代償は
+        // 1 画素の外れ値で組織全体が暗くなること (9a22e47 がこれを解くために robust
+        // 上限を導入した経緯)。rawDispMax も連動させないと、クリップを外しても既定
+        // 表示が p99 で飽和したままになる。
+        bakeLo = vmin;
+        bakeHi = vmax;
+        rawDispMax = vmax;
     } else {
         bakeLo = vmin;
         const robust = percentileSorted(vals, MSI_ROBUST_PERCENTILE);
@@ -2167,15 +2178,16 @@ function computeRasterPixels(rows, range) {
             pixels[p++] = g; pixels[p++] = g; pixels[p++] = g; pixels[p++] = 255;
         }
     }
-    const diag = { dupCells, dupRows, clippedHigh, clippedLow, gridFallback: gridFallback || null, nPixels: n };
+    const diag = { dupCells, dupRows, clippedHigh, clippedLow, gridFallback: gridFallback || null, nPixels: n,
+                   bakeMode: (bakeMode === 'full') ? 'full' : 'robust' };
     return { width: W, height: H, pixels, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax, rawDispMax, diag };
 }
 
 // Main-thread wrapper: kept synchronous (existing callers don't await it) so
 // only the DOM <canvas> encode stays here; the heavy numeric work is in
 // computeRasterPixels.
-function rasterRowsToPngDataUrl(rows, range) {
-    const { width, height, pixels, rawRange, rawMean, rawTrueMax, rawDispMax, diag } = computeRasterPixels(rows, range);
+function rasterRowsToPngDataUrl(rows, range, bakeMode) {
+    const { width, height, pixels, rawRange, rawMean, rawTrueMax, rawDispMax, diag } = computeRasterPixels(rows, range, bakeMode);
     const canvas = document.createElement('canvas');
     canvas.width = width; canvas.height = height;
     get2dContext(canvas, { willReadFrequently: true }).putImageData(new ImageData(pixels, width, height), 0, 0);
@@ -2412,7 +2424,7 @@ function parseXlsxToRows(buf, def) {
 // Main-thread fallback (worker path calls parseXlsxToRows + computeRasterPixels
 // directly). Behaviour/return shape unchanged.
 async function buildPngFromXlsxArrayBuffer(buf, def) {
-    return rasterRowsToPngDataUrl(parseXlsxToRows(buf, def), def.range);
+    return rasterRowsToPngDataUrl(parseXlsxToRows(buf, def), def.range, def.bakeMode);
 }
 
 async function inspectXlsxColumns(buf, sheetName, headerRow1based) {
@@ -2586,7 +2598,7 @@ function parseTxtToRows(buf, def) {
 // Main-thread fallback (worker path calls parseTxtToRows + computeRasterPixels
 // directly). Behaviour/return shape unchanged.
 async function buildPngFromTxtArrayBuffer(buf, def) {
-    return rasterRowsToPngDataUrl(parseTxtToRows(buf, def), def.range);
+    return rasterRowsToPngDataUrl(parseTxtToRows(buf, def), def.range, def.bakeMode);
 }
 
 // =============================================================
@@ -2658,7 +2670,7 @@ async function _parseWorkerOnMessage(e) {
         let result;
         if (msg.op === 'xlsx-raster' || msg.op === 'txt-raster') {
             const rows = (msg.op === 'txt-raster') ? parseTxtToRows(buf, p.def) : parseXlsxToRows(buf, p.def);
-            const px = computeRasterPixels(rows, p.def && p.def.range);
+            const px = computeRasterPixels(rows, p.def && p.def.range, p.def && p.def.bakeMode);
             const dataUrl = await _encodePixelsToDataUrl(px.width, px.height, px.pixels);
             result = { dataUrl: dataUrl, rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax, rawDispMax: px.rawDispMax, diag: px.diag };
         } else if (msg.op === 'tiff-decode') {
@@ -4720,6 +4732,23 @@ class SectionPanel {
             const rangeRow = mkRow('表示ウィンドウ (生単位 — ツールバーの Range で調整)',
                 '<div style="display:flex;gap:4px;"><input type="number" value="' + formatRawForInput(_win.min) + '" class="vmin" disabled title="表示ウィンドウ下限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"><input type="number" value="' + formatRawForInput(_win.max) + '" class="vmax" disabled title="表示ウィンドウ上限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"></div>');
             pop.appendChild(rangeRow);
+            // Outlier clip is a BAKE setting, not a display window: OFF re-rasterises
+            // to the true maximum so the top pixels stop collapsing onto one value.
+            // The cost is real (that ceiling exists so one hot pixel does not crush
+            // the tissue), so state it and show how many pixels are affected today.
+            const _entB = (this.section.msiSeries && this.section.msiSeries[key]) || {};
+            const clipOn = _entB.bakeMode !== 'full';
+            const _d = _entB.diag || null;
+            const clippedNote = (_d && _d.clippedHigh > 0)
+                ? '<div style="color:#b91c1c;font-size:10px;margin-top:2px;">現在 ' + _d.clippedHigh + ' 画素が上限に潰れています</div>'
+                : '';
+            const clipRow = mkRow('外れ値クリップ (ベイク設定 — 同じMRMの全切片に適用)',
+                '<label style="display:flex;align-items:center;gap:6px;font-size:11px;cursor:pointer;color:#1e293b;">' +
+                    '<input type="checkbox" class="clip"' + (clipOn ? ' checked' : '') + '> 上位 0.5% をクリップ' +
+                '</label>' +
+                '<div style="color:#64748b;font-size:10px;margin-top:2px;">OFF にすると真の最大値でベイクします。' +
+                '1 画素の外れ値で組織が暗くなる場合があります。</div>' + clippedNote);
+            pop.appendChild(clipRow);
         }
         const close = document.createElement('div');
         close.style.cssText = 'text-align:right;margin-top:4px;';
@@ -4793,6 +4822,17 @@ class SectionPanel {
                 if (b <= a) { b = a + 1; vmax.value = b; }
                 settings.vmax = b; pushWindow();
             });
+            const clip = pop.querySelector('.clip');
+            if (clip) {
+                clip.addEventListener('change', () => {
+                    // Re-baking reloads the source blob for every same-MRM section, so
+                    // close the popover first: its cached diag/clip text is now stale.
+                    clip.disabled = true;
+                    onClose();
+                    App.setMsiBakeMode(key, clip.checked ? 'robust' : 'full')
+                        .catch(e => console.warn('setMsiBakeMode failed', e));
+                });
+            }
         }
     }
 
@@ -12707,6 +12747,42 @@ const App = {
             try { panel.applyWindowForKey(msiKey, rawMin, rawMax); }
             catch (e) { console.warn('range broadcast failed', e); }
         }
+    },
+
+    // ② Outlier-clip mode is a property of the BAKE, not of the display window, so
+    // flipping it re-rasterises from the source file (rawRange / rawDispMax /
+    // rawTrueMax / diag all change). Applied to EVERY section carrying the same MRM:
+    // a per-section mix would encode a different [lo,hi] in each PNG and make the
+    // sections incomparable — the same defect the ROI-chart fix removed.
+    async setMsiBakeMode(msiKey, mode) {
+        if (!msiKey) return;
+        const target = (mode === 'full') ? 'full' : 'robust';
+        const jobs = [];
+        for (const panel of this.panels.values()) {
+            const ent = (panel.section.msiSeries || {})[msiKey];
+            if (!ent) continue;
+            ent.bakeMode = target;
+            jobs.push({ panel, ent });
+        }
+        if (!jobs.length) return;
+        showToast(target === 'full' ? '外れ値クリップ OFF — 再ベイク中…' : '外れ値クリップ ON — 再ベイク中…');
+        for (const { panel, ent } of jobs) {
+            try { await panel.loadMsiLayer(msiKey, ent); }
+            catch (e) { console.warn('bake-mode re-raster failed', msiKey, e); }
+        }
+        for (const { panel } of jobs) {
+            try { panel.renderComposite(); panel.populateThumbnails(); } catch (e) {}
+        }
+        // rawDispMax moved, so the shared 'same' ceiling — and the toolbar Range,
+        // which reads it through getMsiWindow — must be recomputed. A manual
+        // override in App.msiUserWindow is in RAW units and stays valid as-is.
+        try { this.recomputeMsiAbsScale(); } catch (e) {}
+        try { Toolbar.refreshRange(); } catch (e) {}
+        try { renderMethodTable(); } catch (e) {}
+        if (this.queueSave) this.queueSave();
+        showToast(target === 'full'
+            ? '外れ値クリップ OFF: 真の最大値でベイクしました'
+            : '外れ値クリップ ON: 上位 0.5% をクリップしました');
     },
 
     // ② Find an existing display window (in raw units) for `msiKey` from any
