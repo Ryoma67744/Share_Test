@@ -2119,11 +2119,18 @@ function computeRasterPixels(rows, range, bakeMode) {
     // change to the data, so count how often it happened (dupCells = grid cells fed
     // by >1 row, dupRows = the surplus rows folded in) instead of doing it silently.
     let dupCells = 0, dupRows = 0;
+    // values = 重複平均まで済ませた生強度を W*H に並べたもの (NaN = データ無し)。
+    // 描画は本来これを直接カラーマップに通せば足りる。8bit の pixels は
+    // Math.round(nn*255) で潰した表示用コピーで、renderComposite は描画のたびに
+    // msiWindowEval で生値へ逆変換し直している。値ラスタを返しておけば、その
+    // 逆変換 (と、それに伴う量子化・クリップの損失) を将来まるごと外せる。
+    const values = new Float32Array(W * H).fill(NaN);
     for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
         if (cnt[i][j] > 0) {
             if (cnt[i][j] > 1) { dupCells++; dupRows += cnt[i][j] - 1; }
             grid[i][j] /= cnt[i][j];
             const v = grid[i][j];
+            values[i * W + j] = v;
             if (v < vmin) vmin = v;
             if (v > vmax) vmax = v;
             sum += v;
@@ -2185,18 +2192,18 @@ function computeRasterPixels(rows, range, bakeMode) {
     }
     const diag = { dupCells, dupRows, clippedHigh, clippedLow, gridFallback: gridFallback || null, nPixels: n,
                    bakeMode: (bakeMode === 'full') ? 'full' : 'robust' };
-    return { width: W, height: H, pixels, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax, rawDispMax, diag };
+    return { width: W, height: H, pixels, values, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax, rawDispMax, diag };
 }
 
 // Main-thread wrapper: kept synchronous (existing callers don't await it) so
 // only the DOM <canvas> encode stays here; the heavy numeric work is in
 // computeRasterPixels.
 function rasterRowsToPngDataUrl(rows, range, bakeMode) {
-    const { width, height, pixels, rawRange, rawMean, rawTrueMax, rawDispMax, diag } = computeRasterPixels(rows, range, bakeMode);
+    const { width, height, pixels, values, rawRange, rawMean, rawTrueMax, rawDispMax, diag } = computeRasterPixels(rows, range, bakeMode);
     const canvas = document.createElement('canvas');
     canvas.width = width; canvas.height = height;
     get2dContext(canvas, { willReadFrequently: true }).putImageData(new ImageData(pixels, width, height), 0, 0);
-    return { dataUrl: canvas.toDataURL('image/png'), rawRange, rawMean, rawTrueMax, rawDispMax, diag };
+    return { dataUrl: canvas.toDataURL('image/png'), values, width, height, rawRange, rawMean, rawTrueMax, rawDispMax, diag };
 }
 
 // ============================================================
@@ -2775,7 +2782,10 @@ async function _parseWorkerOnMessage(e) {
             const rows = (msg.op === 'txt-raster') ? parseTxtToRows(buf, p.def) : parseXlsxToRows(buf, p.def);
             const px = computeRasterPixels(rows, p.def && p.def.range, p.def && p.def.bakeMode);
             const dataUrl = await _encodePixelsToDataUrl(px.width, px.height, px.pixels);
-            result = { dataUrl: dataUrl, rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax, rawDispMax: px.rawDispMax, diag: px.diag };
+            // values は Float32Array。転送リストに載せてコピーを避ける (下の
+            // postMessage 参照)。構造化複製だと 10 万画素級で無駄なコピーが乗る。
+            result = { dataUrl: dataUrl, values: px.values, width: px.width, height: px.height,
+                       rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax, rawDispMax: px.rawDispMax, diag: px.diag };
         } else if (msg.op === 'tiff-decode') {
             result = { dataUrl: await decodeTiffArrayBufferToDataUrl(buf) };
         } else if (msg.op === 'xlsx-columns') {
@@ -2783,7 +2793,10 @@ async function _parseWorkerOnMessage(e) {
         } else {
             throw new Error('unknown op: ' + msg.op);
         }
-        self.postMessage({ id: id, ok: true, result: result });
+        // Float32Array があれば転送 (detach) してコピーを省く。worker 側ではこの後
+        // result を使わないので detach して問題ない。
+        const transfer = (result && result.values && result.values.buffer) ? [result.values.buffer] : [];
+        self.postMessage({ id: id, ok: true, result: result }, transfer);
     } catch (err) {
         self.postMessage({ id: id, ok: false, error: String((err && err.message) || err) });
     }
@@ -2891,6 +2904,13 @@ class SectionPanel {
         this.imageSources = {};      // key -> HTMLImageElement
         this.imageSettings = {};     // key -> {vmin,vmax,opacity,actualMin,actualMax}
         this.imageDataUrls = {};     // key -> data URL
+        // MSI レイヤーの生強度ラスタ。key -> { W, H, values: Float32Array }
+        // (NaN = データ無し)。imageSources と同じ寿命 (パネル破棄で一緒に消える)。
+        // 8bit PNG は表示用の潰したコピーで、描画は毎回 msiWindowEval で生値へ
+        // 逆変換し直している。ここに生値を持っておけば逆変換ごと外せる。
+        // ※ 段階 A では PNG と両方を保持するので一時的にメモリが 2 倍になる。
+        //    段階 B で MSI の imageSources / imageDataUrls を落として元に戻る。
+        this.msiValueRasters = new Map();
         this.visibleLayers = new Set();
         this.msiThumbRefs = new Map();
         this.layerPopover = null;
@@ -3114,6 +3134,15 @@ class SectionPanel {
         // Bake diagnostics (clipped / averaged-duplicate / grid-fallback counts).
         // Plain data object, so it round-trips through IDB and publish untouched.
         const diag = (result && typeof result === 'object' && result.diag && typeof result.diag === 'object') ? result.diag : null;
+        // 生強度ラスタ。worker 経路 (transferable) / メインスレッド fallback の
+        // どちらからも同じ形で届く。旧バージョンのキャッシュ結果など values を
+        // 持たない結果でも壊れないよう、無ければ登録しないだけにする。
+        if (result && typeof result === 'object' && result.values
+            && Number.isFinite(result.width) && Number.isFinite(result.height)) {
+            this.msiValueRasters.set(key, { W: result.width, H: result.height, values: result.values });
+        } else {
+            this.msiValueRasters.delete(key);
+        }
         this.imageDataUrls[key] = dataUrl;
         // Persist the raw MSI value range so the Method (MRM) table can show
         // intensity Mean/Max in the original scale rather than 0-255 luminance.
