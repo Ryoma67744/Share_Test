@@ -330,22 +330,35 @@ begin
         raise exception 'unauthorized' using errcode = '28000';
     end if;
 
+    -- projects.meta stores the master's project-level view settings so recipients
+    -- open the share the way the master left it. It used to be hardcoded to
+    -- `memo` only, which silently DROPPED every other key the client sent —
+    -- `colormap` was published by the viewer (and read back on hydrate) but never
+    -- survived the round trip, so recipients on another browser always got the
+    -- default colour scheme. Pass `_meta` through instead of enumerating keys, so
+    -- a new view setting round-trips without another SQL migration (the viewer's
+    -- share-hydrate already carries project meta forward wholesale for the same
+    -- reason). `anatomyPalette` is excluded because projects.anatomy_palette is
+    -- its authoritative home — keeping a copy in meta would be two sources of
+    -- truth. jsonb_strip_nulls drops keys the client sent as null, so "master
+    -- has no value for this" leaves whatever is already stored alone rather than
+    -- overwriting it with null.
     insert into public.projects(slug, display_name, anatomy_palette, meta, is_public)
         values (
             _slug,
             coalesce(_display_name, _slug),
             coalesce(_meta->'anatomyPalette', '{}'::jsonb),
-            jsonb_strip_nulls(jsonb_build_object('memo', coalesce(_meta->'memo', '{}'::jsonb))),
+            jsonb_strip_nulls(coalesce(_meta, '{}'::jsonb) - 'anatomyPalette'),
             coalesce(_is_public, false)
         )
         on conflict (slug) do update
         set display_name    = excluded.display_name,
             anatomy_palette = excluded.anatomy_palette,
-            meta            = jsonb_set(
-                                  coalesce(public.projects.meta, '{}'::jsonb),
-                                  '{memo}',
-                                  coalesce(_meta->'memo', '{}'::jsonb)
-                              ),
+            -- Merge (not replace): `||` is a shallow right-wins union, so keys the
+            -- master just sent take effect while keys absent from this publish keep
+            -- their stored value. `memo` is a single object key, so it is replaced
+            -- wholesale exactly as the previous jsonb_set did.
+            meta            = coalesce(public.projects.meta, '{}'::jsonb) || excluded.meta,
             is_public       = excluded.is_public,
             updated_at      = now()
         returning id into v_pid;
