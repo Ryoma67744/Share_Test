@@ -9639,12 +9639,22 @@ async function _publishCore(project, meta, masterPw, opts) {
         _master_pw: masterPw,
         _slug: meta.slug,
         _display_name: project.displayName || meta.slug,
+        // Project-level view settings travel with project meta so recipients open
+        // with the master's chosen presentation on first load. Every key here has
+        // a reader on the hydrate side (_hydrateSharedProject / _openProjectCore);
+        // they were being lost for two different reasons — colormap was sent but
+        // upsert_project_doc only stored `memo`, and the other three were never
+        // put on the payload at all. Booleans/numbers are sent explicitly rather
+        // than `|| null` so that master turning a setting OFF propagates as OFF
+        // (the SQL strips nulls, which would otherwise mean "keep the old value").
         _meta: {
             anatomyPalette: project.anatomyPalette || {},
             memo: project.memo || {},
-            // colormap travels with project meta so recipients open with
-            // the master's chosen colour scheme on first load.
             colormap: (project.meta && project.meta.colormap) || null,
+            msiSmoothing: (project.meta && project.meta.msiSmoothing === 'linear') ? 'linear' : 'none',
+            otsuBgRemove: !!(project.meta && project.meta.otsuBgRemove),
+            otsuStrength: (project.meta && Number.isFinite(project.meta.otsuStrength))
+                ? project.meta.otsuStrength : 0,
         },
         _viewer_pw: meta.viewerPassword,
         _admin_pw: meta.adminPassword || null,
@@ -13059,11 +13069,13 @@ const App = {
     // Project-wide outlier-clip switch (toolbar, next to 背景除去(Otsu)).
     //
     // The truth lives in each ent.bakeMode rather than in project.meta, and that
-    // is deliberate: upsert_project_doc only ever writes `memo` into
-    // projects.meta (supabase/share_locks.sql), so a project.meta flag would be
-    // dropped on publish and recipients would silently see master's *pixels*
-    // baked one way while their toolbar claimed the other. ent.bakeMode rides
-    // along in sections.storage_paths.msiSeries and does reach them.
+    // stays deliberate even now that upsert_project_doc persists all of
+    // project.meta (it used to store only `memo`, which was the original reason).
+    // bakeMode describes how a specific layer's PIXELS were produced, so it has to
+    // travel with the layer: a project-level flag would let a partially re-baked
+    // project claim one mode while individual layers were baked the other way.
+    // ent.bakeMode rides along in sections.storage_paths.msiSeries and reaches
+    // recipients per layer.
     //
     // Skips layers already baked the requested way (ent.diag.bakeMode is written
     // by computeRasterPixels), mirroring how _otsuIsFresh avoids re-work.
@@ -14217,12 +14229,31 @@ const App = {
             App.msiSmoothing = (projectMeta && projectMeta.msiSmoothing === 'linear') ? 'linear' : 'none';
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
+            // 背景除去(Otsu) の復元。_openProjectCore には元からあったのにこの共有
+            // ハイドレート経路だけ抜けており、master が ON で公開しても受信者は常に
+            // OFF で開いていた。優先順位は colormap と同じ (publish 値が既定、この
+            // タブで受信者が動かしていれば sessionStorage が勝つ)。受信者の操作は
+            // setOtsuBgRemove が sessionStorage 止まりにするので、ここで変わるのは
+            // 「最初に開いたときの既定値」だけ。
+            let bgr = !!(projectMeta && projectMeta.otsuBgRemove);
+            const sv = slug ? sessionStorage.getItem('desi:share:otsu:' + slug) : null;
+            if (sv != null) bgr = (sv === '1');
+            this.otsuBgRemove = bgr;
+            const bgSel = document.getElementById('tb-bg-remove');
+            if (bgSel) bgSel.checked = bgr;
+            this.otsuStrength = (projectMeta && Number.isFinite(projectMeta.otsuStrength)) ? projectMeta.otsuStrength : 0;
+            const stInp = document.getElementById('otsu-strength');
+            if (stInp) stInp.value = String(this.otsuStrength);
         } catch (e) { /* non-fatal */ }
         document.getElementById('project-name-input').value = project.displayName || '';
         document.getElementById('project-name-input').disabled = true;
         document.getElementById('section-count').textContent = project.sections.length + ' sections';
         document.getElementById('sections-empty').classList.toggle('hidden', project.sections.length > 0);
         await this.rebuildSectionPanels();
+        // 復元した背景除去が ON なら、_openProjectCore と同じくパネル構築後に
+        // マスクを確保して再描画する (computeSectionOtsuMasks はソースから計算する
+        // ので、下のレイヤー読み込みを待つ必要はない)。
+        if (this.otsuBgRemove) { this.setOtsuBgRemove(true).catch(e => console.warn('[otsu] share restore failed', e)); }
         // --- Share fix: only the first section showed the focus MSI ---
         // The master/local open flow (_openProjectCore, ~:11600) initialises the
         // compound focus and pushes it onto EVERY panel. The share hydrate
