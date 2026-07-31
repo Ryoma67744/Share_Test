@@ -113,6 +113,13 @@ The session expires after **12 hours**. Closing the tab is fine — re-opening t
 | ANALYSIS | Bar chart of the selected ROI across sections × compounds |
 | Memo | Sample / Machine / Matrix / Google Keep / +α … (temporary edits) |
 
+> **Where the ANALYSIS numbers come from**: the bar chart's Mean Intensity is computed
+> **directly from the source data file** (xlsx / txt), never from the 8-bit display image.
+> Changing the toolbar's **outlier clip** or **Range** therefore cannot move the numbers —
+> only the image brightness changes. The values match the Data CSV in an Export ZIP and the
+> MCP connector's `get_roi_stats`. When **background removal (Otsu)** is on, the background
+> pixels hidden from the image are also excluded from the mean.
+
 > Each section panel's top-left **section-name label** also shows the **Pixel pitch (μm/px)** when the publisher set it during Align (e.g. `Section 1 · 20×20 μm/px`). Both axes are always written out (`50×60 μm/px` for anisotropic, `20×20 μm/px` for isotropic) so the label is unambiguous.
 
 > **Organ filter**: when **2 or more** organs are inferred from the first token of the section names, an **"臓器:" (Organ)** selector appears at the right of the Sections header. Picking one shows only that organ's sections in the center ("すべて"/All shows everything). This only filters the view — it never changes the data or server state.
