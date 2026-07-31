@@ -24,16 +24,40 @@ const safeFile = (v) => String(v || '').replace(/[^\w.\-]+/g, '_').slice(0, 80);
 // while keeping distinct compounds distinct — pgd2 stays != pge2).
 const normName = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0-9]+/g, '');
 
+// A layer's "max intensity". rawTrueMax (the measured true maximum) is
+// authoritative, but layers registered before that field existed don't carry it;
+// for those we fall back to the bake ceiling rawRange[1] and flag the result as
+// estimated (under the default robust bake that ceiling is the 99.5th percentile,
+// so it is LOWER than the real maximum — reporting it as exact would be a lie).
+//
+// This connector used to return rawTrueMax raw, with no fallback, while the
+// viewer's tables fell back to rawRange[1]. The same compound therefore reported
+// a number in the app and "unknown" here. Mirrors msiMaxIntensity in
+// viewer/index.html — **do not change one without the other.**
+function msiMaxIntensity(def) {
+  if (def && Number.isFinite(def.rawTrueMax)) return { value: def.rawTrueMax, estimated: false };
+  const rr = def && def.rawRange;
+  if (Array.isArray(rr) && Number.isFinite(rr[1])) return { value: rr[1], estimated: true };
+  return { value: null, estimated: false };
+}
+
 function compoundInfo(key, def) {
   const meta = (def && def.compoundMeta) || {};
+  const max = msiMaxIntensity(def);
   return {
     key,
     name: meta.name || meta.base || String(key).replace(/^MSI_/, ''),
     precursor: meta.precursor != null ? meta.precursor : null,
     product: meta.product != null ? meta.product : null,
     rawMean: (def && Number.isFinite(def.rawMean)) ? def.rawMean : null,
+    // rawTrueMax stays raw (null when genuinely absent) so callers that need the
+    // measured value can still tell it apart from a derived one. maxIntensity is
+    // the number the app's tables show; maxIsEstimated says whether it came from
+    // the fallback.
     rawTrueMax: (def && Number.isFinite(def.rawTrueMax)) ? def.rawTrueMax : null,
     rawRange: (def && Array.isArray(def.rawRange)) ? def.rawRange : null,
+    maxIntensity: max.value,
+    maxIsEstimated: max.estimated,
   };
 }
 

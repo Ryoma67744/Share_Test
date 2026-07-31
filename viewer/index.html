@@ -1057,6 +1057,22 @@ function msiRawFallbackMax(rawRange) {
     return (Array.isArray(rawRange) && rawRange.length === 2
         && Number.isFinite(rawRange[0]) && Number.isFinite(rawRange[1])) ? rawRange[1] : 255;
 }
+// レイヤーの「最大強度」。rawTrueMax (実測の真の最大) が正だが、このフィールドが
+// 入る前に登録されたレガシー層には無いので、その場合はベイク上限 rawRange[1] で
+// 代用する。代用値は robust ベイクだと上位 0.5% をクリップした位置なので真の最大
+// より小さく、値が違うことを呼び出し側が示せるよう estimated で返す。
+//
+// この規則は 3 箇所 (並び替え / Method 表 / 切片比較表) で個別に書かれていて、
+// しかも connector (compoundInfo) はフォールバックせず null を返していたため、
+// 同じ化合物の "最大値" が viewer では数値・connector では不明という食い違いが
+// 起きていた。**connector/src/tools.js の msiMaxIntensity と対になっているので、
+// 片方だけ変えないこと。**
+function msiMaxIntensity(ent) {
+    if (ent && Number.isFinite(ent.rawTrueMax)) return { value: ent.rawTrueMax, estimated: false };
+    const rr = ent && ent.rawRange;
+    if (Array.isArray(rr) && Number.isFinite(rr[1])) return { value: rr[1], estimated: true };
+    return { value: null, estimated: false };
+}
 function formatRawValue(v) {
     if (!Number.isFinite(v)) return '—';
     if (Math.abs(v) >= 1000) return Math.round(v).toLocaleString();
@@ -1304,7 +1320,7 @@ function sortMethodKeys(layerKeys, getEntry, getMeta, sortKey, sortDir) {
             case 'ce':        return num(meta.ce);
             case 'cv':        return num(meta.cv);
             case 'mean':      return Number.isFinite(ent.rawMean) ? ent.rawMean : null;
-            case 'max':       return Number.isFinite(ent.rawTrueMax) ? ent.rawTrueMax : ((ent.rawRange && Number.isFinite(ent.rawRange[1])) ? ent.rawRange[1] : null);
+            case 'max':       return msiMaxIntensity(ent).value;
         }
         return null;
     };
@@ -2183,6 +2199,9 @@ function computeRasterPixels(rows, range, bakeMode) {
     // crushes tissue to the colormap floor. trueMax keeps the real maximum for
     // the Method/Stats "Max intensity" readouts. An explicit def.range wins.
     let bakeLo, bakeHi, trueMax = Number.isFinite(vmax) ? vmax : null;
+    // ベイク範囲が実データから導かれたか。退化ケースだけ仮の 0..1 を使うので、
+    // そこではクリップ診断を出さない (下の clippedHigh を参照)。
+    let bakeRangeFromData = true;
     // rawDispMax = 既定表示上限(データ適応)。各画素は [bakeLo, bakeHi] にベイク
     // 済みで bakeHi を超える値は既にクリップされるため、表示上限は必ず bakeHi 以下。
     let rawDispMax;
@@ -2193,6 +2212,11 @@ function computeRasterPixels(rows, range, bakeMode) {
     } else if (!(vmax > vmin)) {
         bakeLo = 0; bakeHi = 1; if (trueMax == null) trueMax = 1;
         rawDispMax = bakeHi;   // 退化(全画素同値): ベイク上限
+        // この 0..1 はデータから導いた範囲ではなく、ゼロ除算を避けるための仮値。
+        // 全画素が同値なのでどう写しても同じ色になり、「クリップされた」という
+        // 診断は意味を持たない。下のカウントを止めないと、たとえば全画素 100 の
+        // 平坦なラスタが「上限クリップ 100%」と表示されてしまう。
+        bakeRangeFromData = false;
     } else if (bakeMode === 'full') {
         // 外れ値クリップ OFF: 真の最大値でベイクするので上位画素が潰れない。代償は
         // 1 画素の外れ値で組織全体が暗くなること (9a22e47 がこれを解くために robust
@@ -2212,22 +2236,26 @@ function computeRasterPixels(rows, range, bakeMode) {
     }
     const pixels = new Uint8ClampedArray(W * H * 4);
     let p = 0;
-    // Pixels outside [bakeLo, bakeHi] are clamped, and every value above bakeHi
-    // becomes the same 255 — indistinguishable in the PNG. Count them so the UI can
-    // say how much of the image was flattened (and so the outlier-clip toggle has a
-    // number to justify itself).
-    let clippedHigh = 0, clippedLow = 0;
+    // Values above bakeHi are clamped and all become the same 255 —
+    // indistinguishable in the PNG. Count them so the UI can say how much of the
+    // image was flattened (and so the outlier-clip toggle has a number to justify
+    // itself). There is deliberately NO matching low-side counter: every branch
+    // above sets bakeLo to the data's own minimum (or to the caller's explicit
+    // range floor), so `v < bakeLo` cannot happen. The `clippedLow` field that
+    // used to be reported here was therefore always 0 — the badge could never
+    // fire. Old projects may still carry it in a saved `diag`; nothing reads it.
+    let clippedHigh = 0;
     for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
         const v = grid[i][j];
         if (!Number.isFinite(v)) { pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; }
         else {
-            if (v > bakeHi) clippedHigh++; else if (v < bakeLo) clippedLow++;
+            if (bakeRangeFromData && v > bakeHi) clippedHigh++;
             const nn = Math.max(0, Math.min(1, (v - bakeLo) / (bakeHi - bakeLo)));
             const g = Math.round(nn * 255);
             pixels[p++] = g; pixels[p++] = g; pixels[p++] = g; pixels[p++] = 255;
         }
     }
-    const diag = { dupCells, dupRows, clippedHigh, clippedLow, gridFallback: gridFallback || null, nPixels: n,
+    const diag = { dupCells, dupRows, clippedHigh, gridFallback: gridFallback || null, nPixels: n,
                    bakeMode: (bakeMode === 'full') ? 'full' : 'robust' };
     return { width: W, height: H, pixels, values, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax, rawDispMax, diag };
 }
@@ -6139,7 +6167,6 @@ function diagBadgeHtml(diag) {
         notes.push('上限クリップ: ' + diag.clippedHigh + ' 画素' + pct(diag.clippedHigh)
             + ' — これらは同じ最大値に潰れており区別できません');
     }
-    if (diag.clippedLow > 0) notes.push('下限クリップ: ' + diag.clippedLow + ' 画素' + pct(diag.clippedLow));
     if (diag.dupCells > 0) {
         notes.push('重複座標の平均: ' + diag.dupCells + ' セル (' + diag.dupRows + ' 行を統合)');
     }
@@ -6192,9 +6219,7 @@ function renderMethodTable() {
         const ce  = (meta.ce  != null) ? String(meta.ce) : '—';
         const cv  = (meta.cv  != null) ? String(meta.cv) : '—';
         const rawMean = (ent.rawMean != null) ? formatRawValue(ent.rawMean) : '—';
-        const rawRange = ent.rawRange || null;
-        const rawMax = Number.isFinite(ent.rawTrueMax) ? formatRawValue(ent.rawTrueMax)
-            : ((rawRange && Number.isFinite(rawRange[1])) ? formatRawValue(rawRange[1]) : '—');
+        const rawMax = formatRawValue(msiMaxIntensity(ent).value);
         const isFocus = (App.viewMode === 'compound' && App.focusCompoundKey === layerKey);
         const isActive = isFocus || (panel.activeMsiKey === layerKey) || panel.visibleLayers.has(layerKey);
         // Stock-take embed marks (preview only, amber — deliberately a different
@@ -11431,7 +11456,9 @@ const SharePreview = {
             return `<td>${formatScientific(Number(v))}</td>`;
         }).join('');
         body.innerHTML =
-            `<tr><th>Max Intensity</th>${cellsFor(ent => Number.isFinite(ent.rawTrueMax) ? ent.rawTrueMax : (Array.isArray(ent.rawRange) ? ent.rawRange[1] : NaN))}</tr>` +
+            // ?? NaN: cellsFor は Number(v) を通すので null をそのまま渡すと 0 と
+            // 表示されてしまう。値なしは従来どおり NaN → '—' に落とす。
+            `<tr><th>Max Intensity</th>${cellsFor(ent => msiMaxIntensity(ent).value ?? NaN)}</tr>` +
             `<tr><th>Avg Intensity</th>${cellsFor(ent => ent.rawMean)}</tr>`;
     },
 
