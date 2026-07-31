@@ -393,6 +393,15 @@ const UNTAGGED = '(未分類)';
 let library = [];        // [{id,serial_no,name,tags[],polarity,note,shelf,transitions:[{...,usages:[...]}]}]
 let mrmSets = [];        // ② [{id,name,owner,description,source_project_slug,items:[{transition_id,name,precursor,product,ce,cv,...}]}]
 let searchText = '';
+// 検索入力のデバウンス。renderLibrary は全件を組み直すので、1 打鍵ごとに走らせると
+// ライブラリが大きいほど入力が引っかかる。打鍵が止まってから 1 回だけ描き直す。
+// 棚の切替など searchText を直接空にする経路は、保留中のタイマーが後から古い入力で
+// 上書きしないよう cancelPendingSearch() を呼ぶこと。
+let _searchTimer = 0;
+const SEARCH_DEBOUNCE_MS = 150;
+function cancelPendingSearch() {
+    if (_searchTimer) { clearTimeout(_searchTimer); _searchTimer = 0; }
+}
 let filterPolarity = '';          // '', '+', '-'
 let selectedTags = new Set();     // 分類フィルタ (OR)
 let selectedSampleTypes = new Set(); // サンプル種フィルタ (OR)
@@ -2127,6 +2136,7 @@ function bindShelfTabs() {
         currentShelf = s;
         _saveShelf(s);
         filterPolarity = ''; selectedTags.clear(); selectedSampleTypes.clear();
+        cancelPendingSearch();   // 保留中の入力が棚切替の後から効かないように
         searchText = '';
         const search = document.getElementById('search');
         if (search) search.value = '';
@@ -2172,7 +2182,14 @@ async function init() {
     document.getElementById('btn-exp-export').addEventListener('click', () => exportSelectedExp());
     document.getElementById('btn-exp-clear').addEventListener('click', () => clearSelection());
     const search = document.getElementById('search');
-    search.addEventListener('input', () => { searchText = search.value; renderLibrary(); });
+    search.addEventListener('input', () => {
+        cancelPendingSearch();
+        _searchTimer = setTimeout(() => {
+            _searchTimer = 0;
+            searchText = search.value;
+            renderLibrary();
+        }, SEARCH_DEBOUNCE_MS);
+    });
     currentShelf = _loadShelf();
     bindLibraryEvents();
     bindShelfTabs();
