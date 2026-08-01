@@ -36,6 +36,10 @@ const normName = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0
 // viewer/index.html — **do not change one without the other.**
 function msiMaxIntensity(def) {
   if (def && Number.isFinite(def.rawTrueMax)) return { value: def.rawTrueMax, estimated: false };
+  // statMax = parquet (TIMS ノンターゲット) のフッタ統計から得た **ファイル全体** の
+  // 最大値。列を読まずに埋まるので未表示の化合物にも値があるが、切片ごとの値では
+  // ないので概算扱いにする。列を読むと rawTrueMax が入って上書きされる。
+  if (def && Number.isFinite(def.statMax)) return { value: def.statMax, estimated: true };
   const rr = def && def.rawRange;
   if (Array.isArray(rr) && Number.isFinite(rr[1])) return { value: rr[1], estimated: true };
   return { value: null, estimated: false };
