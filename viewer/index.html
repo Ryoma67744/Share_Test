@@ -342,11 +342,15 @@ body.splitting-v { cursor:row-resize !important; }
 }
 /* In share mode, hide CE / CV columns from non-admin viewers. Master and
    admin (logged in via the admin password) keep the full table. Precursor
-   / Fragment stay visible to viewers / public-link recipients. */
-body.share-mode:not(.share-admin) #method-table thead th:nth-child(5),
-body.share-mode:not(.share-admin) #method-table thead th:nth-child(6),
-body.share-mode:not(.share-admin) #method-rows tr > td:nth-child(5),
-body.share-mode:not(.share-admin) #method-rows tr > td:nth-child(6) { display:none !important; }
+   / Fragment stay visible to viewers / public-link recipients.
+   These rules are positional, so they only hold for the MRM column layout.
+   Non-target sections use a different 4-column layout (Compound | m/z |
+   Adduct | Formula) where column 5 is Formula — .method-nontarget on the
+   table opts that layout out. */
+body.share-mode:not(.share-admin) #method-table:not(.method-nontarget) thead th:nth-child(5),
+body.share-mode:not(.share-admin) #method-table:not(.method-nontarget) thead th:nth-child(6),
+body.share-mode:not(.share-admin) #method-table:not(.method-nontarget) #method-rows tr > td:nth-child(5),
+body.share-mode:not(.share-admin) #method-table:not(.method-nontarget) #method-rows tr > td:nth-child(6) { display:none !important; }
 /* MRM-library register UI is master-only: hide the trailing select column and
    the bulk-register button for ANY share recipient (incl. share-admin). The
    select column is appended last, so the CE/CV nth-child(5)/(6) rules above
@@ -724,7 +728,21 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     <input type="search" id="method-filter" placeholder="化合物 / m/z / アダクト / 分子式 で絞り込み"
                            title="空白区切りで AND 検索。ノンターゲットでは化合物が数千件になるため、ここから目的の化合物を探します"
                            style="font-size:11px;padding:3px 6px;border:1px solid #d1d5db;border-radius:3px;margin-left:6px;width:220px;">
+                    <!-- m/z の範囲検索。ハイフンは化合物名 (13-HODE) やアダクト ([M-H]-)
+                         と衝突するので、検索欄とは別に専用の数値入力を置く。片方だけでも効く。 -->
+                    <span id="method-mz-range" style="margin-left:6px;font-size:10px;color:#64748b;white-space:nowrap;"
+                          title="m/z の範囲で絞り込みます。片方だけでも効きます (下限のみ=以上 / 上限のみ=以下)。名前検索とは AND。MRM では Precursor を m/z として見ます">m/z
+                        <input type="number" id="method-mz-min" step="any" placeholder="下限"
+                               title="この値以上だけを表示 (空欄なら下限なし)"
+                               style="font-size:11px;padding:3px 4px;border:1px solid #d1d5db;border-radius:3px;width:72px;">
+                        <span style="color:#94a3b8;">〜</span>
+                        <input type="number" id="method-mz-max" step="any" placeholder="上限"
+                               title="この値以下だけを表示 (空欄なら上限なし)"
+                               style="font-size:11px;padding:3px 4px;border:1px solid #d1d5db;border-radius:3px;width:72px;">
+                    </span>
                     <span id="method-filter-count" style="font-size:10px;color:#64748b;margin-left:4px;"></span>
+                    <button type="button" id="btn-build-tic" style="font-size:11px;padding:3px 8px;border:1px solid #d1d5db;border-radius:3px;background:#fff;color:#475569;cursor:pointer;margin-left:6px;display:none;"
+                            title="全化合物を足した TIC 背景を作ります。化合物数によっては数分かかります (途中で止められます)。一度作れば保存され、次回以降は即座に表示されます">TIC を作る</button>
                     <div id="overlay-list"></div>
                 </div>
                 <div id="method-body" class="overflow-auto flex-1 min-h-0">
@@ -793,7 +811,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                 <span class="tb-group" title="MSI レイヤーの不透明度 (Opacity)">
                     <input type="number" id="tb-opacity" step="1" min="0" max="100" title="MSI Opacity (%)" aria-label="Opacity" disabled>
                     <span class="tb-pct">%</span>
-                    <button type="button" class="sync-toggle" data-sync="opacity" title="Sync Opacity across sections">🔗</button>
+                    <button type="button" class="sync-toggle" data-sync="opacity" title="透明度を全切片へ同期 (クリックで切替。青=同期中)">🔗</button>
                 </span>
                 <span class="tb-group" title="切片を回転 (Rotation)">
                     <select id="tb-rot-target" title="回転対象 — 両方 / HE のみ / MSI のみ。HE と MSI が別向きのときは片方だけ回して重ね合わせを揃えます" aria-label="Rotation target" disabled>
@@ -805,7 +823,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     <span class="tb-deg">°</span>
                     <button type="button" id="tb-rot-reset" class="tb-icon" title="Reset translate/rotate/zoom">↻</button>
                     <button type="button" id="tb-rot-share-default" class="tb-icon" title="現在の回転角度を Share preview の初期値として保存">📌</button>
-                    <button type="button" class="sync-toggle" data-sync="rot" title="Sync Rotation across sections">🔗</button>
+                    <button type="button" class="sync-toggle" data-sync="rot" title="回転を全切片へ同期 (クリックで切替。青=同期中)">🔗</button>
                 </span>
                 <span class="tb-group" id="tb-flip-group" title="MSI/HE をこの section で反転 (Flip)">
                     <button type="button" id="tb-flip-h" class="tb-icon" title="左右反転 (master only)" aria-label="Flip horizontal" disabled>⇄</button>
@@ -1327,6 +1345,10 @@ function sortMethodKeys(layerKeys, getEntry, getMeta, sortKey, sortDir) {
             case 'cv':        return num(meta.cv);
             case 'mean':      return Number.isFinite(ent.rawMean) ? ent.rawMean : null;
             case 'max':       return msiMaxIntensity(ent).value;
+            // Non-target columns (Compound | m/z | Adduct | Formula).
+            case 'mz':        return num(meta.mz);
+            case 'adduct':    return meta.adduct  ? String(meta.adduct).toLowerCase()  : null;
+            case 'formula':   return meta.formula ? String(meta.formula).toLowerCase() : null;
         }
         return null;
     };
@@ -1360,7 +1382,8 @@ function _updateMethodHeaderArrows(theadSel, sort) {
 // (Compound = asc, numeric columns = desc), second click flips it,
 // third click clears the sort and falls back to sourceFile → name.
 function _advanceMethodSort(curSort, k) {
-    const defaultDir = (k === 'compound') ? 'asc' : 'desc';
+    // Text columns default to A→Z, numeric ones to High→Low.
+    const defaultDir = (k === 'compound' || k === 'adduct' || k === 'formula') ? 'asc' : 'desc';
     if (!curSort || curSort.key !== k) return { key: k, dir: defaultDir };
     if (curSort.dir === defaultDir)    return { key: k, dir: defaultDir === 'asc' ? 'desc' : 'asc' };
     return { key: null, dir: 'asc' };
@@ -2394,12 +2417,7 @@ const ROI_RAW_GRID_CACHE_MAX = 24;
 // 生強度ラスタ + デコード済み画像 + PNG 文字列で 10 万画素なら約 850 KB。
 // 16 本 = 約 14 MB/パネル。TIMS の 2000 features でもここで頭打ちになる。
 const MSI_LAYER_CACHE_MAX = 16;
-// 合成 TIC に足し込む化合物の数。TIC は全化合物の合計なので遅延読み込みと相性が
-// 悪く、素直にやると化合物数ぶんの読み込みが要る。強度の強い上位だけを足しても
-// 解剖参照としての見た目はほぼ変わらない (強度分布は裾が重く、上位が総和を支配する)
-// ため、上位 N 本で打ち切る。N 以下の切片 (DESI の実運用) は全化合物を足すので
-// 従来と完全に同じ絵になる。
-const TIC_SYNTH_TOP_N = 200;
+
 
 function _roiGridKey(section, layerKey, ent) {
     return String(section && section.id) + '|' + layerKey + '|' + String((ent && ent.blobId) || '');
@@ -3933,18 +3951,23 @@ class SectionPanel {
             const hasHE = Object.keys(this.section.images || {})
                 .some(k => /HE_STAIN/i.test(k) && k !== TIC_KEY);
             if (hasHE) return;
-            const allMsi = this.registeredMsiKeys();
-            if (allMsi.length < 2) return;
+            const msiKeys = this.registeredMsiKeys();
+            if (msiKeys.length < 2) return;
             if (this.imageSources && this.imageSources[TIC_KEY]) return;   // already injected
             // 合成 TIC は全化合物の合計なので、遅延読み込みと相性が悪い唯一の処理。
-            // 強度の強い上位だけを足す (下記 _ticContributorKeys)。1 枚ずつ読んで
-            // 足す (_generateSyntheticTic 側) のでメモリは増えない。
-            const msiKeys = this._ticContributorKeys(allMsi);
-            if (msiKeys.length < allMsi.length) {
-                console.info('[tic] 強度上位 ' + msiKeys.length + ' 化合物で合成 TIC を作ります (全 '
-                    + allMsi.length + ')');
+            // 1 枚ずつ読んで足す (_generateSyntheticTic 側) のでメモリは増えないが、
+            // 読み込み回数は化合物数ぶんかかる。
+            //
+            // ノンターゲット (数千化合物) では自動生成しない — 開くたびに数分
+            // かかってしまうため。ツールバーの「TIC を作る」から明示的に作り、
+            // 結果は切片へ保存して次回以降は再計算しない (下の savedTic)。
+            const saved = this.section.meta && this.section.meta.ticDataUrl;
+            if (!saved && this.isNonTargetSection()) {
+                console.info('[tic] ノンターゲットでは合成 TIC を自動生成しません (「TIC を作る」から実行してください)');
+                return;
             }
-            const ticImg = await this._generateSyntheticTic(msiKeys);
+            const ticImg = saved ? await this._imageFromDataUrl(saved)
+                                 : await this._generateSyntheticTic(msiKeys);
             if (!ticImg) return;
             this.imageSources = this.imageSources || {};
             this.imageSettings = this.imageSettings || {};
@@ -3981,33 +4004,48 @@ class SectionPanel {
         }
     }
 
-    // 合成 TIC に足し込む化合物を、強度の強い順に上位 TIC_SYNTH_TOP_N 本選ぶ。
-    //
-    // 並べる基準は rawMean (その層の全画素の平均強度)。TIC は総和なので、ある層の
-    // 寄与は「平均強度 × 画素数」であり、同じ切片なら画素数は共通なので平均で並べる
-    // のが総和で並べるのと同じになる。rawTrueMax (ピーク) で並べてはいけない —
-    // 1 画素だけ強くて他が空の層が上位に来てしまい、TIC への寄与と一致しない。
-    //
-    // rawMean はレイヤー登録時に ent へ保存されるので、**データを 1 バイトも読まずに**
-    // 順位が決まる。古いプロジェクトで欠けている層は末尾に回す (全体が N 以下なら
-    // どのみち全部使うので影響しない)。
-    _ticContributorKeys(msiKeys) {
-        if (msiKeys.length <= TIC_SYNTH_TOP_N) return msiKeys;
-        const series = this.section.msiSeries || {};
-        const score = (k) => {
-            const ent = series[k];
-            return (ent && Number.isFinite(ent.rawMean)) ? ent.rawMean : -Infinity;
+    // data URL から <img> を作る。保存済みの合成 TIC を復元するのに使う。
+    _imageFromDataUrl(dataUrl) {
+        return new Promise((resolve) => {
+            if (!dataUrl) { resolve(null); return; }
+            const im = new Image();
+            im.onload = () => resolve(im);
+            im.onerror = () => resolve(null);
+            im.src = dataUrl;
+        });
+    }
+
+    // 「TIC を作る」の実体。全化合物を 1 枚ずつ読んで足し、結果を切片へ保存する。
+    // 上位だけを選ぶ打ち切りは廃止した (ユーザー指定で全化合物を使う)。
+    // onProgress(done, total) で進捗を返し、shouldAbort() が true なら途中で止める。
+    async buildAndStoreTic(onProgress, shouldAbort) {
+        const TIC_KEY = 'HE_STAIN_TIC';
+        const msiKeys = this.registeredMsiKeys();
+        if (msiKeys.length < 2) return { ok: false, reason: 'MSI レイヤーが 2 つ未満です' };
+        const img = await this._generateSyntheticTic(msiKeys, onProgress, shouldAbort);
+        if (!img) return { ok: false, reason: '中断したか、生成できませんでした' };
+        this.section.meta = this.section.meta || {};
+        // 保存しておくと次回以降は再計算しない (数千化合物では数分かかるため)。
+        this.section.meta.ticDataUrl = img.src;
+        this.imageSources = this.imageSources || {};
+        this.imageSettings = this.imageSettings || {};
+        this.imageDataUrls = this.imageDataUrls || {};
+        this.imageSources[TIC_KEY] = img;
+        this.imageDataUrls[TIC_KEY] = img.src;
+        this.imageSettings[TIC_KEY] = {
+            opacity: 1.0, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255,
+            grayscale: false, applyOpacity: false, synthetic: true,
         };
-        // キーで tie-break して、同じデータなら毎回同じ TIC になるようにする。
-        return msiKeys.slice()
-            .sort((a, b) => (score(b) - score(a)) || (a < b ? -1 : a > b ? 1 : 0))
-            .slice(0, TIC_SYNTH_TOP_N);
+        this.toggleLayer(TIC_KEY, true);
+        this.setupCanvasSize();
+        this.renderComposite();
+        return { ok: true, used: msiKeys.length };
     }
 
     // 全化合物の輝度を足して 1 枚の灰色画像にする。遅延読み込みでは全レイヤーが
     // 同時に手元にあるとは限らないので、**1 枚ずつ読み込んで足し込む**。累積バッファ
     // 1 本ぶんしか増えないので、LRU が途中でレイヤーを捨てても結果は変わらない。
-    async _generateSyntheticTic(msiKeys) {
+    async _generateSyntheticTic(msiKeys, onProgress, shouldAbort) {
         // 基準寸法。ent の記録から取れるので、まだ 1 枚も読んでいなくても決まる。
         let ref = null;
         for (const k of msiKeys) { ref = this.msiRasterSize(k); if (ref) break; }
@@ -4019,11 +4057,15 @@ class SectionPanel {
         tc.width = w; tc.height = h;
         const tctx = get2dContext(tc, { willReadFrequently: true });
         let summed = 0;
+        let processed = 0;
         for (const key of msiKeys) {
+            // 数千化合物では数分かかるので、途中で止められるようにする。
+            if (shouldAbort && shouldAbort()) return null;
             // 読めなければ黙って飛ばす (従来と同じ寛容さ)。
             if (!this.imageSources[key]) {
-                try { await this.ensureMsiLayerLoaded(key); } catch (e) { continue; }
+                try { await this.ensureMsiLayerLoaded(key); } catch (e) { processed++; continue; }
             }
+            if (onProgress) { try { onProgress(++processed, msiKeys.length); } catch (e) {} }
             const img = this.imageSources[key];
             if (!img || !img.complete || img.naturalWidth !== w || img.naturalHeight !== h) continue;
             tctx.clearRect(0, 0, w, h);
@@ -6919,13 +6961,30 @@ function diagBadgeHtml(diag) {
 // Method 表の絞り込み。空白区切りで AND 検索し、化合物名 / m/z / アダクト /
 // 分子式 / 脂質クラス / DB 名 のどれかに部分一致すれば残す。
 // 数値だけを入れたときは m/z の前方一致も見る (「885」で 885.5499 を出したい)。
+//
+// これに加えて m/z の範囲 (App.methodMzMin / methodMzMax) を AND で掛ける。
+// 検索欄で `700-800` と書けないのは、ハイフンが化合物名 (`13-HODE`) や
+// アダクト (`[M-H]-`) と衝突するため。専用の数値欄を別に置いている。
+// 片方だけ入れれば「以上」「以下」になる。比較に使うのは compoundMeta.mz で、
+// 無ければ precursor (MRM のプリカーサ = 親イオンの m/z) で代用する。
+// どちらも持たない層は判定できないので、範囲を指定したときだけ落とす。
 function filterMethodKeys(keys, getEntry, getMeta) {
     const q = String((App && App.methodFilter) || '').trim().toLowerCase();
-    if (!q) return keys;
-    const terms = q.split(/\s+/).filter(Boolean);
+    const lo = (App && Number.isFinite(App.methodMzMin)) ? App.methodMzMin : null;
+    const hi = (App && Number.isFinite(App.methodMzMax)) ? App.methodMzMax : null;
+    if (!q && lo == null && hi == null) return keys;
+    const terms = q ? q.split(/\s+/).filter(Boolean) : [];
     return keys.filter(k => {
         const ent = getEntry(k) || {};
         const m = getMeta(k, ent) || {};
+        if (lo != null || hi != null) {
+            const v = Number.isFinite(m.mz) ? Number(m.mz)
+                : (Number.isFinite(m.precursor) ? Number(m.precursor) : NaN);
+            if (!Number.isFinite(v)) return false;
+            if (lo != null && v < lo) return false;
+            if (hi != null && v > hi) return false;
+        }
+        if (!terms.length) return true;
         const mz = Number.isFinite(m.mz) ? String(m.mz) : '';
         const hay = [m.name, m.base, m.adduct, m.formula, m.lipidClass, m.database,
                      mz, k.replace(/^MSI_/, ''),
@@ -6936,6 +6995,60 @@ function filterMethodKeys(keys, getEntry, getMeta) {
     });
 }
 
+// Method 表の列構成。ノンターゲット (parquet) では MRM 固有の
+// Fragment / CE / CV が常に空欄になるので、m/z・アダクト・分子式に差し替える。
+// 「選択を管理へ登録」(MRM ライブラリ登録) も意味を持たないので隠す。
+// DESI は従来のままなので、切片の種別で切り替える。
+function methodTableIsNonTarget(panel) {
+    return !!(panel && panel.isNonTargetSection && panel.isNonTargetSection());
+}
+// ノンターゲットで出す列 (ユーザー指定): Compound | m/z | Adduct | Formula
+const METHOD_COLS_NONTARGET = [
+    { key: 'compound', label: 'Compound', align: 'left',  sort: 'A↔Z' },
+    { key: 'mz',       label: 'm/z',      align: 'right', sort: 'High↔Low' },
+    { key: 'adduct',   label: 'Adduct',   align: 'left',  sort: 'A↔Z' },
+    { key: 'formula',  label: 'Formula',  align: 'left',  sort: 'A↔Z' },
+];
+const METHOD_COLS_MRM = [
+    { key: 'compound',  label: 'Compound',  align: 'left',  sort: 'A↔Z' },
+    { key: 'precursor', label: 'Precursor', align: 'right', sort: 'High↔Low' },
+    { key: 'product',   label: 'Fragment',  align: 'right', sort: 'High↔Low' },
+    { key: 'ce',        label: 'CE',        align: 'right', sort: 'High↔Low' },
+    { key: 'cv',        label: 'CV',        align: 'right', sort: 'High↔Low' },
+    { key: 'mean',      label: 'Mean',      align: 'right', sort: 'High↔Low' },
+    { key: 'max',       label: 'Max',       align: 'right', sort: 'High↔Low' },
+];
+function _renderMethodHead(nonTarget) {
+    const thead = document.querySelector('#method-table thead tr');
+    if (!thead) return;
+    const cols = nonTarget ? METHOD_COLS_NONTARGET : METHOD_COLS_MRM;
+    const cells = ['<th class="px-1 py-1 border-b border-gray-200 font-medium text-gray-500" title="Click to set marker colour"></th>'];
+    for (const c of cols) {
+        cells.push('<th class="text-' + c.align + ' px-2 py-1 border-b border-gray-200 font-medium text-gray-500"'
+            + ' data-sort-key="' + c.key + '" title="Click to sort ' + c.sort + ' (3rd click clears)">'
+            + c.label + '</th>');
+    }
+    // 選択チェックは MRM ライブラリ登録用。ノンターゲットでは出さない。
+    if (!nonTarget) {
+        cells.push('<th id="method-select-col" class="px-1 py-1 border-b border-gray-200 font-medium text-gray-500 text-center"'
+            + ' title="MRM管理へ登録する行を選択"><input type="checkbox" id="method-select-all" title="表示中の全行を選択"></th>');
+    }
+    thead.innerHTML = cells.join('');
+    // 共有モードの CE/CV 隠しは nth-child(5)/(6) の位置指定なので、列構成が
+    // 変わるノンターゲットでは効かせない (5 列目が Formula になるため)。
+    const table = document.getElementById('method-table');
+    if (table) table.classList.toggle('method-nontarget', !!nonTarget);
+    // 「選択を管理へ登録」ボタンも一緒に隠す。
+    const reg = document.getElementById('btn-mrm-register');
+    if (reg) reg.style.display = nonTarget ? 'none' : '';
+    // 「TIC を作る」はノンターゲットのときだけ出す (DESI は自動生成のまま)。
+    const tic = document.getElementById('btn-build-tic');
+    if (tic) tic.style.display = nonTarget ? '' : 'none';
+}
+function methodColumnCount(nonTarget) {
+    return 1 + (nonTarget ? METHOD_COLS_NONTARGET.length : METHOD_COLS_MRM.length + 1);
+}
+
 function renderMethodTable() {
     try { renderOverlayBar(); } catch (e) {}
     const tbody = document.getElementById('method-rows');
@@ -6944,6 +7057,11 @@ function renderMethodTable() {
     if (!project) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No project</td></tr>'; return; }
     const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
     if (!panel) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No active section</td></tr>'; return; }
+
+    // 列構成は切片の種別で決まる (ノンターゲットは MRM 固有の列を出さない)。
+    const nonTarget = methodTableIsNonTarget(panel);
+    _renderMethodHead(nonTarget);
+    const nCols = methodColumnCount(nonTarget);
 
     const allKeys = Object.keys(panel.section.msiSeries || {}).filter(k => /^MSI_/i.test(k));
     // 絞り込み (要望①)。ノンターゲットでは化合物が数千件になり、イオン像の一覧も
@@ -6965,7 +7083,7 @@ function renderMethodTable() {
     _updateMethodHeaderArrows('#method-table thead', App.methodSort);
 
     if (!layerKeys.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">'
+        tbody.innerHTML = '<tr><td colspan="' + nCols + '" class="px-2 py-2 text-center text-gray-400">'
             + (allKeys.length ? '絞り込みに一致する化合物がありません' : 'No MSI layer in this section')
             + '</td></tr>';
         return;
@@ -6984,6 +7102,11 @@ function renderMethodTable() {
         const cv  = (meta.cv  != null) ? String(meta.cv) : '—';
         const rawMean = (ent.rawMean != null) ? formatRawValue(ent.rawMean) : '—';
         const rawMax = formatRawValue(msiMaxIntensity(ent).value);
+        // ノンターゲット用の 3 列。いずれも compoundMeta (サイドカー / フッタ由来) に
+        // 既に入っているので追加の読み込みは発生しない。
+        const mzTxt      = Number.isFinite(meta.mz) ? Number(meta.mz).toFixed(4) : '—';
+        const adductTxt  = meta.adduct  || '—';
+        const formulaTxt = meta.formula || '—';
         const isFocus = (App.viewMode === 'compound' && App.focusCompoundKey === layerKey);
         const isActive = isFocus || (panel.activeMsiKey === layerKey) || panel.visibleLayers.has(layerKey);
         // Stock-take embed marks (preview only, amber — deliberately a different
@@ -7016,15 +7139,21 @@ function renderMethodTable() {
                 '<input type="color" class="marker-input" value="' + (markerColor || '#ff0000') + '" tabindex="-1">' +
             '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + diagBadge + '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pre) + '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pro) + '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(ce) + '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(cv) + '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(rawMean) + '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(rawMax) + '</td>' +
-            '<td class="px-1 py-1 border-b border-gray-100 text-center method-select-cell" data-cell="select">' +
-                '<input type="checkbox" class="method-select" data-layer-key="' + safe(layerKey) + '" title="MRM管理へ登録">' +
-            '</td>';
+            // ノンターゲットは m/z・アダクト・分子式。MRM 固有の Fragment/CE/CV と
+            // Mean/Max、および MRM ライブラリ登録用のチェックは出さない (ユーザー指定)。
+            (nonTarget
+              ? ('<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(mzTxt) + '</td>' +
+                 '<td class="px-2 py-1 border-b border-gray-100 text-gray-700">' + safe(adductTxt) + '</td>' +
+                 '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[10px]">' + safe(formulaTxt) + '</td>')
+              : ('<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pre) + '</td>' +
+                 '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pro) + '</td>' +
+                 '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(ce) + '</td>' +
+                 '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(cv) + '</td>' +
+                 '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(rawMean) + '</td>' +
+                 '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(rawMax) + '</td>' +
+                 '<td class="px-1 py-1 border-b border-gray-100 text-center method-select-cell" data-cell="select">' +
+                    '<input type="checkbox" class="method-select" data-layer-key="' + safe(layerKey) + '" title="MRM管理へ登録">' +
+                 '</td>'));
         tr.innerHTML = cellHtml;
 
         const swatch = tr.querySelector('.marker-swatch');
@@ -10373,6 +10502,14 @@ function openPublishProgressModal(totalCount, opts) {
     const _title = o.title || 'Supabase へアップロード中…';
     const _subtitle = o.subtitle || '大きなプロジェクトでは数分かかることがあります。タブは閉じないでください。';
     const _unit = o.unit || 'files';
+    // 中断できる処理だけ「中断」ボタンを出す (アップロードは中断不可のまま)。
+    // 押しても即座には止まらない — 呼び出し側が次のチェック点で気づいて抜ける。
+    const cancelHtml = o.cancelLabel
+        ? `<div style="margin-top:10px;text-align:right;">
+             <button type="button" data-progress-cancel
+               style="font-size:12px;padding:4px 12px;border:1px solid #d1d5db;border-radius:4px;background:#fff;color:#475569;cursor:pointer;">${o.cancelLabel}</button>
+           </div>`
+        : '';
     const html = `
         <h2>${_title}</h2>
         <p style="font-size:12px;color:#475569;">${_subtitle}</p>
@@ -10382,7 +10519,7 @@ function openPublishProgressModal(totalCount, opts) {
           <div style="margin-top:6px;height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;">
             <div data-bar style="height:100%;width:0%;background:#2563eb;transition:width 0.2s;"></div>
           </div>
-        </div>`;
+        </div>${cancelHtml}`;
     const p = openModal(html);
     const card = openModal._card;
     const bar = card && card.querySelector('[data-bar]');
@@ -10390,8 +10527,18 @@ function openPublishProgressModal(totalCount, opts) {
     const statsEl = card && card.querySelector('[data-stats]');
     // Suppress backdrop click / cancel button while uploading.
     if (card && card._back) card._back.addEventListener('click', (ev) => { ev.stopPropagation(); });
+    let onCancel = null;
+    const cancelBtn = card && card.querySelector('[data-progress-cancel]');
+    if (cancelBtn) cancelBtn.addEventListener('click', () => {
+        cancelBtn.disabled = true;
+        cancelBtn.textContent = '中断しています…';
+        if (onCancel) { try { onCancel(); } catch (e) {} }
+    });
     const fmtMB = (b) => (b / (1024 * 1024)).toFixed(1) + ' MB';
     return {
+        // 中断ボタンが押されたときに呼ばれる関数を差す。ボタンを出していない
+        // ときは何も起きない (呼び出し側で分岐しなくていいように黙って無視する)。
+        setCancelHandler(fn) { onCancel = fn; },
         update(done, total, doneBytes, totalBytes) {
             const pct = total ? Math.round((done / total) * 100) : 0;
             if (pctEl) pctEl.textContent = pct + '%';
@@ -11948,13 +12095,19 @@ const SharePreview = {
         const body = this.overlay.querySelector('[data-method-body]');
         if (!head || !body) return;
         const isAdmin = this.role === 'admin';
+        // ノンターゲット (parquet) は MRM 測定ではないので Precursor / Product /
+        // CE / CV が常に空欄になる。メインの Method 表と同じ 4 列に差し替える
+        // (SharePreview とメイン表示の食い違いは過去に 3 回起きているので揃える)。
+        const nonTarget = (project.sections || []).some(s => s && s.meta && s.meta.kind === 'nontarget');
         // Non-admin viewers see Compound + Precursor + Product (matches the
         // main Method panel, which now only hides CE/CV from share-mode
         // viewers). CV / CE remain admin-only.
-        const colDefs = isAdmin
-            ? [['compound','Compound'], ['precursor','Precursor'], ['product','Product'],
-               ['cv','CV'], ['ce','CE']]
-            : [['compound','Compound'], ['precursor','Precursor'], ['product','Product']];
+        const colDefs = nonTarget
+            ? [['compound','Compound'], ['mz','m/z'], ['adduct','Adduct'], ['formula','Formula']]
+            : (isAdmin
+                ? [['compound','Compound'], ['precursor','Precursor'], ['product','Product'],
+                   ['cv','CV'], ['ce','CE']]
+                : [['compound','Compound'], ['precursor','Precursor'], ['product','Product']]);
         head.innerHTML = '<tr>' + colDefs.map(([k, label]) =>
             `<th data-sort-key="${k}" title="Click to sort (3rd click clears)">${label}</th>`
         ).join('') + '</tr>';
@@ -12003,15 +12156,22 @@ const SharePreview = {
             const compoundTd = `<td class="compound-cell">${safe(base)}</td>`;
             const precursorTd = `<td>${meta && meta.precursor != null ? safe(meta.precursor) : '—'}</td>`;
             const productTd = `<td>${meta && meta.product != null ? safe(meta.product) : '—'}</td>`;
-            const tds = isAdmin
+            const tds = nonTarget
                 ? [
                     compoundTd,
-                    precursorTd,
-                    productTd,
-                    `<td>${meta && meta.cv != null ? safe(meta.cv) : '—'}</td>`,
-                    `<td>${meta && meta.ce != null ? safe(meta.ce) : '—'}</td>`,
+                    `<td>${meta && Number.isFinite(meta.mz) ? safe(Number(meta.mz).toFixed(4)) : '—'}</td>`,
+                    `<td>${meta && meta.adduct ? safe(meta.adduct) : '—'}</td>`,
+                    `<td>${meta && meta.formula ? safe(meta.formula) : '—'}</td>`,
                   ]
-                : [compoundTd, precursorTd, productTd];
+                : (isAdmin
+                    ? [
+                        compoundTd,
+                        precursorTd,
+                        productTd,
+                        `<td>${meta && meta.cv != null ? safe(meta.cv) : '—'}</td>`,
+                        `<td>${meta && meta.ce != null ? safe(meta.ce) : '—'}</td>`,
+                      ]
+                    : [compoundTd, precursorTd, productTd]);
             return `<tr data-key="${safe(key)}">${tds.join('')}</tr>`;
         });
         // Registered molecule overlays appear after the compounds — but only
@@ -13510,6 +13670,11 @@ const App = {
     // visible row order, keyboard nav, and the column-arrow indicator agree.
     methodSort: { key: null, dir: 'asc' },
     methodFilter: '',      // Method 表の絞り込み文字列 (要望①)。空 = 絞り込みなし。
+    // m/z の範囲絞り込み (要望②)。null = その側の制限なし。名前検索とは AND。
+    // 検索欄に `700-800` と書けないのは、ハイフンが化合物名 (`13-HODE`) や
+    // アダクト (`[M-H]-`) と衝突するため。専用の数値欄を別に置いている。
+    methodMzMin: null,
+    methodMzMax: null,
     // Shared thumb-row height across every section panel (px). The
     // section-internal splitter writes this on drag and re-broadcasts
     // it to each panel via the --thumb-h CSS variable.
@@ -13550,11 +13715,16 @@ const App = {
     // once; the per-row checkboxes are re-created by renderMethodTable and are
     // queried live at click time.
     _bindMrmRegister() {
-        const selectAll = document.getElementById('method-select-all');
-        if (selectAll && !selectAll._mrmBound) {
-            selectAll._mrmBound = true;
-            selectAll.addEventListener('change', () => {
-                document.querySelectorAll('#method-rows .method-select').forEach(cb => { cb.checked = selectAll.checked; });
+        // ★ 委譲で拾う。_renderMethodHead が列構成を切り替えるたびに thead を
+        //   innerHTML で組み直すので、#method-select-all の要素自体が作り直される。
+        //   要素に直接張ると 1 回目の再描画で「全選択」が効かなくなる。
+        const thead = document.querySelector('#method-table thead');
+        if (thead && !thead._mrmBound) {
+            thead._mrmBound = true;
+            thead.addEventListener('change', (ev) => {
+                const sa = ev.target;
+                if (!sa || sa.id !== 'method-select-all') return;
+                document.querySelectorAll('#method-rows .method-select').forEach(cb => { cb.checked = sa.checked; });
             });
         }
         const btn = document.getElementById('btn-mrm-register');
@@ -13606,7 +13776,12 @@ const App = {
     // independent comparison workflows.
     // Range (vmin/vmax) はトグル不能で常に「同じ MRM の全切片」に反映するため
     // syncFlags 管理対象から外す (broadcastRangeToSameMrm を参照)。
-    syncFlags: { rot: false, opacity: false },
+    // 透明度は既定で全切片へ同期する。切片ごとに別々の透明度にしたい場面より、
+    // 揃えたい場面のほうが圧倒的に多い (とくに parquet 登録では切片が自動生成
+    // されて数が増える)。回転は切片ごとに向きが違うのが普通なので既定 OFF のまま。
+    // ※ loadSyncFlags が localStorage の保存値で上書きするので、過去に明示的に
+    //    OFF にした人の設定は壊れない (新規のブラウザだけ ON で始まる)。
+    syncFlags: { rot: false, opacity: true },
 
     // 'compound' = focus on one MSI layer across every section side-by-side
     // (default; tuned for WT/HET comparisons). 'free' = the previous behaviour
@@ -15670,6 +15845,42 @@ const App = {
         }
     },
 
+    // 「TIC を作る」(要望③)。全化合物を足した TIC 背景を作って切片へ保存する。
+    // ノンターゲットでは化合物数ぶんの読み込みになるので明示操作にしてある。
+    async buildTicForActiveSection() {
+        const panel = this.activeSectionId ? this.panels.get(this.activeSectionId) : null;
+        if (!panel) { showToast('切片を選択してください'); return; }
+        const total = panel.registeredMsiKeys().length;
+        if (total < 2) { showToast('MSI レイヤーが 2 つ未満のため TIC は作れません'); return; }
+        let aborted = false;
+        const progress = openPublishProgressModal(total, {
+            title: 'TIC を作成中…',
+            subtitle: '全化合物を 1 つずつ読み込んで合計します。「中断」で途中で止められます。',
+            unit: 'compounds',
+            cancelLabel: '中断',
+        });
+        // 中断してもデータは壊れない (途中経過を保存せず、単に作らないだけ)。
+        progress.setCancelHandler(() => { aborted = true; });
+        try {
+            const r = await panel.buildAndStoreTic(
+                (done, tot) => { try { progress.update(done, tot); } catch (e) {} },
+                () => aborted);
+            if (r.ok) {
+                await this.queueSave(0);
+                showToast('TIC を作成しました (' + r.used + ' 化合物)。次回以降は保存済みのものを使います', 7000);
+            } else if (aborted) {
+                showToast('TIC の作成を中断しました', 4000);
+            } else {
+                showToast('TIC を作成できませんでした: ' + r.reason, 7000);
+            }
+        } catch (e) {
+            console.error('TIC 作成に失敗', e);
+            showToast('TIC の作成に失敗しました: ' + (e && e.message ? e.message : e), 9000);
+        } finally {
+            try { progress.close(); } catch (e) {}
+        }
+    },
+
     async deleteSection(id) {
         const idx = this.project.sections.findIndex(s => s.id === id);
         if (idx < 0) return;
@@ -16612,19 +16823,41 @@ const App = {
             if (bp) bp.addEventListener('click', () => this.addParquetSource());
         }
         {
-            // Method 表の絞り込み (要望①)。renderMethodTable は数千行を組み直すので、
-            // mrm.html の検索と同じく打鍵が止まってから 1 回だけ走らせる。
+            // 「TIC を作る」(要望③)。ノンターゲットでは自動生成しないので明示操作。
+            const bt = document.getElementById('btn-build-tic');
+            if (bt) bt.addEventListener('click', () => this.buildTicForActiveSection());
+        }
+        {
+            // Method 表の絞り込み (要望①) と m/z 範囲 (要望②)。
+            // renderMethodTable は数千行を組み直すので、mrm.html の検索と同じく
+            // 打鍵が止まってから 1 回だけ走らせる。3 つの入力で 1 本のタイマーを
+            // 共有するので、名前と範囲を続けて触っても再描画は 1 回で済む。
             const fi = document.getElementById('method-filter');
-            if (fi) {
-                let timer = 0;
-                fi.addEventListener('input', () => {
-                    if (timer) clearTimeout(timer);
-                    timer = setTimeout(() => {
-                        timer = 0;
-                        this.methodFilter = fi.value;
-                        try { renderMethodTable(); } catch (e) {}
-                    }, 150);
-                });
+            const mzLo = document.getElementById('method-mz-min');
+            const mzHi = document.getElementById('method-mz-max');
+            let timer = 0;
+            const numOrNull = (el) => {
+                const s = el ? String(el.value).trim() : '';
+                if (!s) return null;
+                const v = Number(s);
+                return Number.isFinite(v) ? v : null;
+            };
+            const apply = () => {
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(() => {
+                    timer = 0;
+                    this.methodFilter = fi ? fi.value : '';
+                    this.methodMzMin = numOrNull(mzLo);
+                    this.methodMzMax = numOrNull(mzHi);
+                    try { renderMethodTable(); } catch (e) {}
+                }, 150);
+            };
+            if (fi) fi.addEventListener('input', apply);
+            // number 入力はスピナー / 上下キーでも値が変わるので change も拾う。
+            for (const el of [mzLo, mzHi]) {
+                if (!el) continue;
+                el.addEventListener('input', apply);
+                el.addEventListener('change', apply);
             }
         }
         document.getElementById('btn-export-zip').addEventListener('click', () => exportProjectAsZip());
