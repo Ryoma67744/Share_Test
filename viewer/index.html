@@ -2378,10 +2378,12 @@ const ROI_RAW_GRID_CACHE_MAX = 24;
 // 生強度ラスタ + デコード済み画像 + PNG 文字列で 10 万画素なら約 850 KB。
 // 16 本 = 約 14 MB/パネル。TIMS の 2000 features でもここで頭打ちになる。
 const MSI_LAYER_CACHE_MAX = 16;
-// 合成 TIC を作るために読み込む化合物数の上限。TIC は全化合物の合計なので
-// 遅延読み込みと相性が悪く、化合物数ぶんの読み込みが要る。DESI の実運用
-// (数十化合物) は通し、TIMS の数千 features では打ち切る。
-const TIC_SYNTH_MAX_LAYERS = 64;
+// 合成 TIC に足し込む化合物の数。TIC は全化合物の合計なので遅延読み込みと相性が
+// 悪く、素直にやると化合物数ぶんの読み込みが要る。強度の強い上位だけを足しても
+// 解剖参照としての見た目はほぼ変わらない (強度分布は裾が重く、上位が総和を支配する)
+// ため、上位 N 本で打ち切る。N 以下の切片 (DESI の実運用) は全化合物を足すので
+// 従来と完全に同じ絵になる。
+const TIC_SYNTH_TOP_N = 200;
 
 function _roiGridKey(section, layerKey, ent) {
     return String(section && section.id) + '|' + layerKey + '|' + String((ent && ent.blobId) || '');
@@ -3508,18 +3510,16 @@ class SectionPanel {
             const hasHE = Object.keys(this.section.images || {})
                 .some(k => /HE_STAIN/i.test(k) && k !== TIC_KEY);
             if (hasHE) return;
-            const msiKeys = this.registeredMsiKeys();
-            if (msiKeys.length < 2) return;
+            const allMsi = this.registeredMsiKeys();
+            if (allMsi.length < 2) return;
             if (this.imageSources && this.imageSources[TIC_KEY]) return;   // already injected
             // 合成 TIC は全化合物の合計なので、遅延読み込みと相性が悪い唯一の処理。
-            // 1 枚ずつ読んで足す (_generateSyntheticTic 側) のでメモリは増えないが、
-            // 読み込み回数だけは化合物数ぶんかかる。TIMS の数千 features でこれを
-            // 毎回やるのは現実的でないので上限で打ち切る。上限超えは登録時に 1 回
-            // だけ作って保存する方式 (別 PR) に回す。
-            if (msiKeys.length > TIC_SYNTH_MAX_LAYERS) {
-                console.info('[tic] 化合物が多いため合成 TIC をスキップしました ('
-                    + msiKeys.length + ' > ' + TIC_SYNTH_MAX_LAYERS + ')');
-                return;
+            // 強度の強い上位だけを足す (下記 _ticContributorKeys)。1 枚ずつ読んで
+            // 足す (_generateSyntheticTic 側) のでメモリは増えない。
+            const msiKeys = this._ticContributorKeys(allMsi);
+            if (msiKeys.length < allMsi.length) {
+                console.info('[tic] 強度上位 ' + msiKeys.length + ' 化合物で合成 TIC を作ります (全 '
+                    + allMsi.length + ')');
             }
             const ticImg = await this._generateSyntheticTic(msiKeys);
             if (!ticImg) return;
@@ -3556,6 +3556,29 @@ class SectionPanel {
         } catch (e) {
             console.warn('TIC backdrop injection failed', e);
         }
+    }
+
+    // 合成 TIC に足し込む化合物を、強度の強い順に上位 TIC_SYNTH_TOP_N 本選ぶ。
+    //
+    // 並べる基準は rawMean (その層の全画素の平均強度)。TIC は総和なので、ある層の
+    // 寄与は「平均強度 × 画素数」であり、同じ切片なら画素数は共通なので平均で並べる
+    // のが総和で並べるのと同じになる。rawTrueMax (ピーク) で並べてはいけない —
+    // 1 画素だけ強くて他が空の層が上位に来てしまい、TIC への寄与と一致しない。
+    //
+    // rawMean はレイヤー登録時に ent へ保存されるので、**データを 1 バイトも読まずに**
+    // 順位が決まる。古いプロジェクトで欠けている層は末尾に回す (全体が N 以下なら
+    // どのみち全部使うので影響しない)。
+    _ticContributorKeys(msiKeys) {
+        if (msiKeys.length <= TIC_SYNTH_TOP_N) return msiKeys;
+        const series = this.section.msiSeries || {};
+        const score = (k) => {
+            const ent = series[k];
+            return (ent && Number.isFinite(ent.rawMean)) ? ent.rawMean : -Infinity;
+        };
+        // キーで tie-break して、同じデータなら毎回同じ TIC になるようにする。
+        return msiKeys.slice()
+            .sort((a, b) => (score(b) - score(a)) || (a < b ? -1 : a > b ? 1 : 0))
+            .slice(0, TIC_SYNTH_TOP_N);
     }
 
     // 全化合物の輝度を足して 1 枚の灰色画像にする。遅延読み込みでは全レイヤーが
