@@ -62,6 +62,7 @@ body.share-mode #btn-new-project,
 body.share-mode #btn-projects,
 body.share-mode #btn-import-zip,
 body.share-mode #btn-add-section,
+body.share-mode #btn-add-parquet,
 body.share-mode #btn-delete-project,
 body.share-mode #btn-publish-share,
 body.share-mode #btn-share-info,
@@ -636,7 +637,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
   /* View-only on phones: hide editing / admin / management affordances. */
   header h1, #project-picker,
   #btn-share-admin-login, #btn-projects, #btn-new-project, #btn-import-zip,
-  #btn-publish-share, #btn-share-info, #btn-add-section, #btn-delete-project,
+  #btn-publish-share, #btn-share-info, #btn-add-section, #btn-add-parquet, #btn-delete-project,
   #tb-add-heif, #tb-add-msi, #tb-align-heif, #tb-del-section,
   #tb-flip-group, #tb-msi-um-group, #tb-rot-share-default,
   #roi-draw-toggle, #method-actions { display:none !important; }
@@ -675,6 +676,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
             <button id="btn-publish-share" class="btn" title="Upload this project to Supabase and get a shareable URL">Publish to share</button>
             <button id="btn-share-info" class="btn" title="View the share URL and passwords from the last publish" style="display:none;">Share info</button>
             <button id="btn-add-section" class="btn primary" title="Add a tissue section panel">+ Section</button>
+            <button id="btn-add-parquet" class="btn" title="TIMS ノンターゲット (parquet) を登録。annotation ごとに切片を自動生成します">+ parquet</button>
             <button id="btn-delete-project" class="btn danger" title="Delete current project">Delete</button>
             <button id="btn-help" class="btn" title="Open the user guide">Help</button>
         </div>
@@ -719,6 +721,10 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                 <div id="method-actions" class="px-2 py-1 border-b border-gray-100 shrink-0 bg-white">
                     <button type="button" id="btn-mrm-register" style="font-size:11px;padding:3px 8px;border:1px solid #d1d5db;border-radius:3px;background:#fff;color:#475569;cursor:pointer;" title="チェックした行を MRM管理ライブラリへ登録">選択を管理へ登録</button>
                     <button type="button" id="btn-add-overlay" style="font-size:11px;padding:3px 8px;border:1px solid #d1d5db;border-radius:3px;background:#fff;color:#475569;cursor:pointer;" title="2分子以上のカラー重ね合わせを登録">＋重ね合わせ</button>
+                    <input type="search" id="method-filter" placeholder="化合物 / m/z / アダクト / 分子式 で絞り込み"
+                           title="空白区切りで AND 検索。ノンターゲットでは化合物が数千件になるため、ここから目的の化合物を探します"
+                           style="font-size:11px;padding:3px 6px;border:1px solid #d1d5db;border-radius:3px;margin-left:6px;width:220px;">
+                    <span id="method-filter-count" style="font-size:10px;color:#64748b;margin-left:4px;"></span>
                     <div id="overlay-list"></div>
                 </div>
                 <div id="method-body" class="overflow-auto flex-1 min-h-0">
@@ -5718,7 +5724,24 @@ class SectionPanel {
     }
 
     // ---- Thumbnails ----
+    // ノンターゲット (parquet) はこの切片だけで数千化合物になりうる。要望により
+    // イオン像の一覧は出さない — 化合物の選択は Method 表の絞り込みで行う。
+    // DESI は従来どおりサムネイルを出す。
+    isNonTargetSection() {
+        return !!(this.section && this.section.meta && this.section.meta.kind === 'nontarget');
+    }
+
     populateThumbnails() {
+        if (this.isNonTargetSection()) {
+            // 帯ごと空にする。2000 個の DOM と canvas 焼きが丸ごと不要になる。
+            if (this._thumbObserver) { try { this._thumbObserver.disconnect(); } catch (e) {} }
+            this._thumbObserver = null;
+            this._thumbPaint.clear();
+            this.msiThumbRefs.clear();
+            if (this.dom.thumbCells) this.dom.thumbCells.clear();
+            if (this.dom.thumbs) this.dom.thumbs.innerHTML = '';
+            return;
+        }
         const host = this.dom.thumbs;
         // 作り直す前に監視を切る。古い <img> を監視したままだと、破棄済みの
         // 要素を掴み続けてリークする。
@@ -6893,6 +6916,26 @@ function diagBadgeHtml(diag) {
     return '<span class="diag-badge" title="' + attr + '">⚠ 加工</span>';
 }
 
+// Method 表の絞り込み。空白区切りで AND 検索し、化合物名 / m/z / アダクト /
+// 分子式 / 脂質クラス / DB 名 のどれかに部分一致すれば残す。
+// 数値だけを入れたときは m/z の前方一致も見る (「885」で 885.5499 を出したい)。
+function filterMethodKeys(keys, getEntry, getMeta) {
+    const q = String((App && App.methodFilter) || '').trim().toLowerCase();
+    if (!q) return keys;
+    const terms = q.split(/\s+/).filter(Boolean);
+    return keys.filter(k => {
+        const ent = getEntry(k) || {};
+        const m = getMeta(k, ent) || {};
+        const mz = Number.isFinite(m.mz) ? String(m.mz) : '';
+        const hay = [m.name, m.base, m.adduct, m.formula, m.lipidClass, m.database,
+                     mz, k.replace(/^MSI_/, ''),
+                     Number.isFinite(m.precursor) ? String(m.precursor) : '',
+                     Number.isFinite(m.product) ? String(m.product) : '']
+            .filter(Boolean).join(' ').toLowerCase();
+        return terms.every(t => hay.includes(t));
+    });
+}
+
 function renderMethodTable() {
     try { renderOverlayBar(); } catch (e) {}
     const tbody = document.getElementById('method-rows');
@@ -6902,8 +6945,18 @@ function renderMethodTable() {
     const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
     if (!panel) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No active section</td></tr>'; return; }
 
+    const allKeys = Object.keys(panel.section.msiSeries || {}).filter(k => /^MSI_/i.test(k));
+    // 絞り込み (要望①)。ノンターゲットでは化合物が数千件になり、イオン像の一覧も
+    // 出さないので、この表が唯一の化合物ナビゲーションになる。
+    const filtered = filterMethodKeys(allKeys, k => panel.section.msiSeries[k],
+        (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(project, k));
+    const cntEl = document.getElementById('method-filter-count');
+    if (cntEl) cntEl.textContent = (filtered.length === allKeys.length)
+        ? (allKeys.length ? allKeys.length + ' 件' : '')
+        : (filtered.length + ' / ' + allKeys.length + ' 件');
+
     const layerKeys = sortMethodKeys(
-        Object.keys(panel.section.msiSeries || {}).filter(k => /^MSI_/i.test(k)),
+        filtered,
         k => panel.section.msiSeries[k],
         (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(project, k),
         App.methodSort && App.methodSort.key,
@@ -6912,7 +6965,9 @@ function renderMethodTable() {
     _updateMethodHeaderArrows('#method-table thead', App.methodSort);
 
     if (!layerKeys.length) {
-        tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No MSI layer in this section</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">'
+            + (allKeys.length ? '絞り込みに一致する化合物がありません' : 'No MSI layer in this section')
+            + '</td></tr>';
         return;
     }
 
@@ -7458,6 +7513,180 @@ function openModal(html) {
         // expose card to caller via window for advanced wiring
         openModal._card = card;
     });
+}
+
+// ---- TIMS ノンターゲット (parquet) の登録ウィザード -------------------------
+// サイドカー <BASE>_feature_annotations.parquet は「サンプルではない」ので、
+// 本体と取り違えないよう名前で判別して必ず除外する (仕様の明記事項)。
+const PARQUET_SIDECAR_SUFFIX = '_feature_annotations';
+function isParquetSidecarName(name) {
+    return new RegExp(PARQUET_SIDECAR_SUFFIX + '\\.parquet$', 'i').test(String(name || ''));
+}
+
+// サイドカーから化合物メタを読む。行順は本体の m/z 列順と一致する (k 行目 = k 番目)。
+// 取れなければ null を返し、呼び出し側は m/z だけで表示名を作る。
+async function readParquetSidecar(file) {
+    const blobId = 'sidecar_' + (file.name || 'x') + '_' + file.size;
+    const st = await parquetEnsureOpen(blobId, file);
+    const want = ['display_name', 'compound', 'mz', 'adduct', 'formula', 'ppm',
+                  'lipid_class', 'database', 'smiles', 'raw'];
+    const idxs = [], keys = [];
+    for (const w of want) {
+        const i = st.info.colNames.indexOf(w);
+        if (i >= 0) { idxs.push(i); keys.push(w); }
+    }
+    if (!idxs.length) return null;
+    const cols = await callParquetWorker(
+        { op: 'columns', fileId: st.fileId, blob: file, colIdxs: idxs }, [], 600000);
+    const n = cols[0] ? cols[0].length : 0;
+    const out = [];
+    for (let r = 0; r < n; r++) {
+        const row = {};
+        keys.forEach((k, c) => { row[k] = cols[c] ? cols[c][r] : null; });
+        out.push(row);
+    }
+    return out;
+}
+
+// 仕様の 3 状態を吸収して表示名とメタを作る。
+//   a) 通常のヒット   … compound に化合物名
+//   b) DB ヒットなし  … compound が文字列 "No DB hit"
+//   c) 未マッチ       … compound が空文字、他は全て空
+// ★ adduct が無い行は、サイドカーのパーサがクラス/DB/ppm を落とすため NULL になる
+//    (列名には残っている)。その場合だけ raw から拾い直す。
+function parquetFeatureMeta(row, mzFromFooter, colName) {
+    const s = (v) => (v === null || v === undefined || v === '') ? null : String(v);
+    // ★ Number(null) は 0 を返し Number.isFinite(0) は true なので、null を素で
+    //   Number() に通すと「値がある」と誤判定する。未マッチ行 (仕様の状態 c) は
+    //   mz も ppm も空なので、そのまま書くと m/z 0.0000 が表示され、ppm も 0 に
+    //   なって raw からの復元が走らなくなる。空を明示的に弾く。
+    const num = (v) => {
+        if (v === null || v === undefined || v === '') return null;
+        const n = Number(v);
+        return Number.isFinite(n) ? n : null;
+    };
+    const mzRow = row ? num(row.mz) : null;
+    const mz = (mzRow !== null) ? mzRow : (Number.isFinite(mzFromFooter) ? mzFromFooter : null);
+    const mz4 = Number.isFinite(mz) ? mz.toFixed(4) : null;
+    let display = row ? s(row.display_name) : null;
+    const compound = row ? s(row.compound) : null;
+    if (!display) display = (compound && compound !== 'No DB hit') ? (compound + '_' + mz4) : (mz4 || String(colName || ''));
+    let lipidClass = row ? s(row.lipid_class) : null;
+    let database = row ? s(row.database) : null;
+    let ppm = row ? num(row.ppm) : null;
+    const raw = row ? s(row.raw) : null;
+    // adduct 欠落でクラス/DB/ppm が落ちた行だけ raw から拾う。raw は Name 欄の全文で、
+    // パイプ区切りのフィールド数が行ごとに違うので、位置ではなく形で判定する。
+    if (raw && (!lipidClass || !database || ppm == null)) {
+        const parts = raw.split('|').map(p => p.trim()).filter(Boolean);
+        const rest = parts.slice(1).filter(p => !/^[A-Za-z_]+=/.test(p) && !/^\[M/.test(p));
+        const ppmField = rest.find(p => /^[0-9.+-]+\s*ppm$/i.test(p));
+        if (ppm == null && ppmField) { const v = parseFloat(ppmField); if (Number.isFinite(v)) ppm = v; }
+        const nonPpm = rest.filter(p => p !== ppmField);
+        if (!lipidClass && nonPpm.length >= 2) lipidClass = nonPpm[0];
+        if (!database) database = (nonPpm.length >= 2) ? nonPpm[1] : (nonPpm[0] || null);
+    }
+    return {
+        name: display,
+        base: (compound && compound !== 'No DB hit') ? compound : display,
+        // MRM 固有の項目はノンターゲットでは意味を持たないので null のまま。
+        precursor: null, product: null, ce: null, cv: null,
+        mz, adduct: row ? s(row.adduct) : null,
+        formula: row ? s(row.formula) : null,
+        smiles: row ? s(row.smiles) : null,
+        ppm, lipidClass, database,
+        identified: !!(compound && compound !== 'No DB hit'),
+        sourceFile: '',
+    };
+}
+
+async function openParquetWizard() {
+    const html = `
+        <h2>TIMS ノンターゲット (parquet) を登録</h2>
+        <form>
+          <p style="font-size:11px;color:#475569;margin-bottom:6px;">
+            本体 <code>&lt;BASE&gt;.parquet</code> と、あれば
+            <code>&lt;BASE&gt;_feature_annotations.parquet</code> を<b>まとめて選択</b>してください。<br>
+            <span style="color:#64748b;">annotation ごとに切片を自動生成します。化合物データは表示するときに読み込むので、ここでは目録だけ読みます。</span>
+          </p>
+          <label>parquet ファイル (複数選択可)
+            <input type="file" name="src" accept=".parquet" multiple required>
+          </label>
+          <div data-scan style="font-size:11px;color:#475569;min-height:16px;margin:6px 0;"></div>
+          <div data-labels style="max-height:220px;overflow:auto;border:1px solid #e5e7eb;border-radius:4px;padding:6px;display:none;"></div>
+          <p data-err style="color:#b91c1c;font-size:11px;min-height:14px;"></p>
+          <div class="modal-actions">
+            <button type="button" class="btn" data-modal-cancel>Cancel</button>
+            <button type="submit" class="btn primary" data-modal-ok disabled>登録</button>
+          </div>
+        </form>`;
+    const p = openModal(html);
+    const card = openModal._card;
+    const srcInp = card.querySelector('input[name=src]');
+    const scanEl = card.querySelector('[data-scan]');
+    const labelsEl = card.querySelector('[data-labels]');
+    const errEl = card.querySelector('[data-err]');
+    const okBtn = card.querySelector('[data-modal-ok]');
+    let state = null;
+
+    srcInp.addEventListener('change', async () => {
+        errEl.textContent = ''; labelsEl.style.display = 'none'; labelsEl.innerHTML = '';
+        okBtn.disabled = true; state = null;
+        const files = Array.from(srcInp.files || []);
+        if (!files.length) return;
+        const sidecarFile = files.find(f => isParquetSidecarName(f.name)) || null;
+        const mainFile = files.find(f => !isParquetSidecarName(f.name)) || null;
+        if (!mainFile) { errEl.textContent = '本体の parquet が選択されていません (サイドカーだけでは登録できません)。'; return; }
+        scanEl.textContent = '目録を読み込み中… (大きなファイルでは数十秒かかることがあります)';
+        try {
+            const blobId = 'reg_' + mainFile.name + '_' + mainFile.size;
+            const st = await parquetEnsureOpen(blobId, mainFile);
+            const geom = await parquetEnsureGeometry(blobId, mainFile);
+            const roles = geom.roles;
+            const sidecar = sidecarFile ? await readParquetSidecar(sidecarFile).catch(() => null) : null;
+            // m/z 列 → 化合物。サイドカーの k 行目が k 番目の m/z 列に対応する。
+            const seen = new Map();
+            let dupWarn = 0;
+            const features = roles.mzIdxs.map((colIdx, k) => {
+                const meta = parquetFeatureMeta(sidecar ? sidecar[k] : null, st.mz[k], st.info.colNames[colIdx]);
+                let key = 'MSI_' + sanitizeCompoundName(meta.name);
+                // 同名は無言で後勝ちにせず連番を付ける (未同定ピークが多いと起きうる)。
+                if (seen.has(key)) { const n = seen.get(key) + 1; seen.set(key, n); key = key + '_' + n; dupWarn++; }
+                else seen.set(key, 1);
+                const stt = st.info.stats && st.info.stats[colIdx];
+                return { key, colIdx, meta, max: stt ? stt.max : null };
+            });
+            state = { mainFile, sidecarFile, geom, info: st.info, features, dupWarn };
+            scanEl.innerHTML = '化合物 <b>' + features.length + '</b> 件 / スポット <b>'
+                + Number(st.info.numRows).toLocaleString() + '</b> / 切片候補 <b>' + geom.sections.length + '</b> 件'
+                + (sidecar ? '' : ' <span style="color:#b45309;">(サイドカーが無いので m/z のみの表示名になります)</span>');
+            labelsEl.style.display = '';
+            labelsEl.innerHTML = geom.sections.map(s => {
+                // 「どの領域 CSV にも含まれなかったスポット」は既定で外す。
+                const off = (s.label === 'Unannotated');
+                return '<label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:2px 0;">'
+                    + '<input type="checkbox" data-label value="' + String(s.label).replace(/"/g, '&quot;') + '"'
+                    + (off ? '' : ' checked') + '>'
+                    + '<span style="flex:1;">' + String(s.label).replace(/</g, '&lt;') + '</span>'
+                    + '<span style="color:#64748b;">' + s.nSpots.toLocaleString() + ' spots / '
+                    + s.W + '×' + s.H + '</span></label>';
+            }).join('');
+            okBtn.disabled = false;
+        } catch (e) {
+            console.error('parquet 目録の読み込みに失敗', e);
+            errEl.textContent = '目録を読み込めませんでした: ' + (e && e.message ? e.message : e);
+            scanEl.textContent = '';
+        }
+    });
+
+    card._collect = () => {
+        if (!state) { errEl.textContent = 'ファイルを選択してください。'; return false; }
+        const labels = Array.from(labelsEl.querySelectorAll('[data-label]'))
+            .filter(c => c.checked).map(c => c.value);
+        if (!labels.length) { errEl.textContent = '切片を 1 つ以上選択してください。'; return false; }
+        return Object.assign({ labels }, state);
+    };
+    return p;
 }
 
 // Password gate for shared projects. Resolves to the entered password
@@ -13280,6 +13509,7 @@ const App = {
     // (renderMethodTable + the App ↑↓ keydown handler) and SharePreview so
     // visible row order, keyboard nav, and the column-arrow indicator agree.
     methodSort: { key: null, dir: 'asc' },
+    methodFilter: '',      // Method 表の絞り込み文字列 (要望①)。空 = 絞り込みなし。
     // Shared thumb-row height across every section panel (px). The
     // section-internal splitter writes this on drag and re-broadcasts
     // it to each panel via the --thumb-h CSS variable.
@@ -15350,6 +15580,96 @@ const App = {
         await this._verifyPersistence('addSection', { sectionCount: expectedCount });
     },
 
+    // TIMS ノンターゲット (parquet) の登録。既存の openMsiWizard は「1 切片へ 1 ファイル」
+    // だが、parquet は 1 ファイルに全切片 (annotation) × 全化合物が入っているので、
+    // プロジェクト単位の入口を分けている。
+    async addParquetSource() {
+        if (!this.project) { showToast('先にプロジェクトを作成してください'); return; }
+        const picked = await openParquetWizard();
+        if (!picked) return;
+        const { mainFile, sidecarFile, labels, geom, info, features, dupWarn } = picked;
+
+        const progress = openPublishProgressModal(Math.max(1, labels.length), {
+            title: 'parquet を登録中…',
+            subtitle: '化合物データは表示するときに読み込みます (ここでは目録だけ登録します)。',
+            unit: 'sections',
+        });
+        try {
+            // ソースは 1 部だけ保存し、全切片・全化合物で共有する。
+            const blobId = uid('blob');
+            await ProjectStorage.putBlob({
+                id: blobId, blob: mainFile,
+                mime: mainFile.type || 'application/octet-stream',
+                filename: mainFile.name || 'data.parquet',
+            });
+            const sourceFileId = uid('msifile');
+            let done = 0;
+            for (const label of labels) {
+                const g = geom.sections.find(s => s.label === label);
+                if (!g) continue;
+                const ord = (this.project.sections || []).length + 1;
+                const sec = {
+                    id: uid('sec'),
+                    ordinal: ord,
+                    displayName: label,
+                    // kind: ノンターゲットであることの印。サムネイル帯を出さない判定と
+                    // Method 表の列切り替えがこれを見る (要望 ②/①)。
+                    meta: { specimen: {}, world_coords: {}, kind: 'nontarget', annotation: label },
+                    images: {},
+                    msiSeries: {},
+                    msiFiles: {
+                        [sourceFileId]: {
+                            id: sourceFileId,
+                            filename: mainFile.name || 'data.parquet',
+                            kind: 'parquet', blobId, registeredAt: nowIso(),
+                        },
+                    },
+                };
+                for (const f of features) {
+                    sec.msiSeries[f.key] = {
+                        kind: 'parquet',
+                        blobId,
+                        colIdx: f.colIdx,
+                        annotation: label,
+                        filename: mainFile.name || 'data.parquet',
+                        sourceFileId,
+                        compoundMeta: f.meta,
+                        // 目録の統計から取れる真の最大値。データを読まずに Method 表の
+                        // Max が埋まる。平均は列を読まないと出ないので後から入る。
+                        rawTrueMax: Number.isFinite(f.max) ? f.max : undefined,
+                        rasterW: g.W, rasterH: g.H,
+                    };
+                }
+                this.project.sections.push(sec);
+                const panel = new SectionPanel(sec, this.project);
+                this.panels.set(sec.id, panel);
+                document.getElementById('sections-grid').appendChild(panel.root);
+                progress.update(++done, labels.length);
+            }
+            document.getElementById('sections-empty').classList.add('hidden');
+            document.getElementById('section-count').textContent = this.project.sections.length + ' sections';
+            await this.queueSave(0);
+            await this._flushSave();
+            // パネルの中身 (レイヤー読み込み) は遅延読み込みに任せる。
+            for (const label of labels) {
+                const sec = this.project.sections.find(s => s.displayName === label && s.meta && s.meta.annotation === label);
+                const panel = sec && this.panels.get(sec.id);
+                if (panel) { try { await panel.loadAllLayers(); } catch (e) { console.warn('parquet panel load failed', e); } }
+            }
+            if (this.project.sections.length) this.setActiveSection(this.project.sections[0].id);
+            populateRoiList();
+            renderMethodTable();
+            let msg = labels.length + ' 切片 × ' + features.length + ' 化合物を登録しました';
+            if (dupWarn > 0) msg += ' (同名 ' + dupWarn + ' 件は連番を付けました)';
+            showToast(msg, 7000);
+        } catch (e) {
+            console.error('parquet 登録に失敗', e);
+            showToast('parquet の登録に失敗しました: ' + (e && e.message ? e.message : e), 9000);
+        } finally {
+            if (progress) progress.close();
+        }
+    },
+
     async deleteSection(id) {
         const idx = this.project.sections.findIndex(s => s.id === id);
         if (idx < 0) return;
@@ -16287,6 +16607,26 @@ const App = {
         }
         document.getElementById('btn-delete-project').addEventListener('click', () => this.deleteCurrentProject());
         document.getElementById('btn-add-section').addEventListener('click', () => this.addSection());
+        {
+            const bp = document.getElementById('btn-add-parquet');
+            if (bp) bp.addEventListener('click', () => this.addParquetSource());
+        }
+        {
+            // Method 表の絞り込み (要望①)。renderMethodTable は数千行を組み直すので、
+            // mrm.html の検索と同じく打鍵が止まってから 1 回だけ走らせる。
+            const fi = document.getElementById('method-filter');
+            if (fi) {
+                let timer = 0;
+                fi.addEventListener('input', () => {
+                    if (timer) clearTimeout(timer);
+                    timer = setTimeout(() => {
+                        timer = 0;
+                        this.methodFilter = fi.value;
+                        try { renderMethodTable(); } catch (e) {}
+                    }, 150);
+                });
+            }
+        }
         document.getElementById('btn-export-zip').addEventListener('click', () => exportProjectAsZip());
         const publishBtn = document.getElementById('btn-publish-share');
         if (publishBtn) publishBtn.addEventListener('click', () => publishProjectToShare());
