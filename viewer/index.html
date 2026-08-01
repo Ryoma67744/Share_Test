@@ -3051,12 +3051,29 @@ function _parquetWorkerBody(self, lib) {
                 if (i >= 0) { chunksByCol[i].push(cc); rgIdxByCol[i].push(r); }
             }
         }
+        // 列ごとの物理型。フッタの schema に FLOAT / DOUBLE / BYTE_ARRAY として
+        // 入っている。受け取る配列の幅をこれで決めるので、こちらで決め打ちしない。
+        // 仕様では m/z 列は既定 float32 だが「※設定により DOUBLE」とあるため、
+        // 決め打ちすると DOUBLE で書き出されたファイルを 32bit に丸めてしまう。
+        const typeByName = new Map();
+        for (const el of (meta.schema || [])) if (el && el.name && el.type) typeByName.set(el.name, el.type);
+        const colTypes = colNames.map(n => typeByName.get(n) || null);
         return {
             schema: meta.schema, version: meta.version, created_by: meta.created_by,
             metadata_length: meta.metadata_length, numRows: meta.num_rows,
-            colNames, chunksByCol, rgIdxByCol, rgRows,
+            colNames, colTypes, chunksByCol, rgIdxByCol, rgRows,
             kv: (meta.key_value_metadata || []).reduce((o, e) => (o[e.key] = e.value, o), {}),
         };
+    };
+
+    // 列の物理型から受け取り方を決める。
+    //   FLOAT              → Float32Array (元が 32bit なので完全に元通り)
+    //   DOUBLE / INT64 など → Float64Array (丸めない)
+    //   BYTE_ARRAY (文字列) → 値をそのまま (annotation。数値化すると全部 NaN)
+    const modeForType = (t) => {
+        if (t === 'BYTE_ARRAY' || t === 'FIXED_LEN_BYTE_ARRAY') return 'raw';
+        if (t === 'FLOAT') return 'f32';
+        return 'f64';
     };
 
     // 1 列ぶんの最小 FileMetaData を組み直す。schema は全列ぶん残す (2000 要素でも
@@ -3088,13 +3105,12 @@ function _parquetWorkerBody(self, lib) {
         return any ? { min, max, nulls } : null;
     };
 
-    // mode: 'f32' (既定) = 強度列。元データが float32 なので 32bit で受ける。
-    //       アプリの生強度ラスタ (msiValueRasters) も Float32Array なので幅が揃う。
-    //       'f64' = 座標列 (x/y は DOUBLE なので 64bit のまま持つ)。
-    //       'raw' = 文字列列 (annotation)。数値化すると全部 NaN になり切片の
-    //               判定ができなくなるので、値をそのまま返す。
+    // mode を省略すると、その列の物理型から自動で決める (modeForType)。
+    // 呼び出し側が決め打ちすると、DOUBLE で書き出されたファイルを 32bit に丸めて
+    // しまうため、既定は必ずファイル側の型に従う。
     // 型付き配列は転送可能なので postMessage のコピーを避けられる。
     const readColumn = async (blob, idx, colIdx, mode) => {
+        if (!mode) mode = modeForType(idx.colTypes && idx.colTypes[colIdx]);
         const file = asyncBufferFromBlob(blob);
         const name = idx.colNames[colIdx];
         let out = null;
