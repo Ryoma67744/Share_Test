@@ -10519,12 +10519,14 @@ function openPublishProgressModal(totalCount, opts) {
           <div style="margin-top:6px;height:8px;background:#e5e7eb;border-radius:4px;overflow:hidden;">
             <div data-bar style="height:100%;width:0%;background:#2563eb;transition:width 0.2s;"></div>
           </div>
+          <div data-note style="font-size:11px;color:#2563eb;margin-top:6px;min-height:14px;"></div>
         </div>${cancelHtml}`;
     const p = openModal(html);
     const card = openModal._card;
     const bar = card && card.querySelector('[data-bar]');
     const pctEl = card && card.querySelector('[data-pct]');
     const statsEl = card && card.querySelector('[data-stats]');
+    const noteEl = card && card.querySelector('[data-note]');
     // Suppress backdrop click / cancel button while uploading.
     if (card && card._back) card._back.addEventListener('click', (ev) => { ev.stopPropagation(); });
     let onCancel = null;
@@ -10539,8 +10541,17 @@ function openPublishProgressModal(totalCount, opts) {
         // 中断ボタンが押されたときに呼ばれる関数を差す。ボタンを出していない
         // ときは何も起きない (呼び出し側で分岐しなくていいように黙って無視する)。
         setCancelHandler(fn) { onCancel = fn; },
+        // 進捗バーの下に 1 行出す。アップロードが終わってから RPC が返るまでの
+        // 「何も動いていないように見える」区間を説明するために使う。
+        setNote(text) { if (noteEl) noteEl.textContent = String(text || ''); },
         update(done, total, doneBytes, totalBytes) {
-            const pct = total ? Math.round((done / total) * 100) : 0;
+            // バイト数が渡っていればそちらで % を出す。1 本が数百 MB あるときに
+            // ファイル数だと 0% → 100% しか動かず、止まって見えるため。
+            // バイトを渡さない既存の呼び出し (ZIP 書き出し / parquet 登録 / TIC)
+            // は従来どおりファイル数基準のまま。
+            const pct = (typeof doneBytes === 'number' && totalBytes > 0)
+                ? Math.round((doneBytes / totalBytes) * 100)
+                : (total ? Math.round((done / total) * 100) : 0);
             if (pctEl) pctEl.textContent = pct + '%';
             if (bar) bar.style.width = pct + '%';
             if (statsEl) {
@@ -10587,7 +10598,42 @@ function _saveCachedMasterPw(pw) {
 // Optional fallback `opts.forceFullUpload` (or `project.shareInfo.forceFullUpload`)
 // clears the cache for one publish so a recipient who's hitting "missing
 // blob" errors can be rescued by a full re-push.
+function fmtBytesMB(b) {
+    const mb = (Number(b) || 0) / (1024 * 1024);
+    return (mb >= 1024) ? (mb / 1024).toFixed(2) + ' GB' : mb.toFixed(1) + ' MB';
+}
+
+// Supabase Storage の 1 ファイル上限に当たったときのメッセージ。既定は全プランで
+// 50 MB なので、836 MB の parquet を上げようとすると必ずここに来る。生の
+// "upload failed: HTTP 413" では何をすればいいか分からないので置き換える。
+function _publishSizeError(task, size) {
+    return new Error(
+        'ファイルが Supabase Storage の 1 ファイル上限を超えています (HTTP 413)。\n'
+      + (task && task.filename ? task.filename + ' は ' : 'このファイルは ') + fmtBytesMB(size) + ' です。\n'
+      + 'Supabase Dashboard → Storage → Settings の "Upload file size limit" を'
+      + '引き上げてから再実行してください (既定 50 MB。このアプリは通常の'
+      + 'アップロードを使うので上限は 5 GB までです)。'
+    );
+}
+
+// 手動 publish と auto-publish の相互排他。どちらかが走っている間は
+// もう一方を待たせる。以前は _autoPublishInflight が auto 対 auto しか
+// 見ておらず、化合物を表示するたびに走る auto-publish (loadMsiLayer の
+// queueSave 経由) が手動 publish と衝突しうる状態だった。
+let _publishGate = null;   // Promise | null
+
 async function _publishCore(project, meta, masterPw, opts) {
+    let releaseGate;
+    _publishGate = new Promise(r => { releaseGate = r; });
+    try {
+        return await _publishCoreInner(project, meta, masterPw, opts);
+    } finally {
+        _publishGate = null;
+        try { releaseGate(); } catch (e) {}
+    }
+}
+
+async function _publishCoreInner(project, meta, masterPw, opts) {
     opts = opts || {};
     const silent = !!opts.silent;
     const onProgress = opts.onProgress || (() => {});
@@ -10595,7 +10641,8 @@ async function _publishCore(project, meta, masterPw, opts) {
 
     if (!SupabaseClient.configured()) throw new Error('supabase_not_configured');
     const sess = await SupabaseClient.requestPublishSession(masterPw, meta.slug);
-    const publishToken = sess && sess.token;
+    // let: 1 時間の TTL が大きなファイルの送信中に切れたら取り直す (下の 401/403)。
+    let publishToken = sess && sess.token;
     if (!publishToken) throw new Error('publish session token failed');
 
     // Set of full Storage paths already on the server. New paths encountered
@@ -10610,16 +10657,30 @@ async function _publishCore(project, meta, masterPw, opts) {
     // here — Stage B will verify cached paths still exist on Storage.
     const pathTasks = new Map(); // path -> Task[]
     const sectionsPayload = [];
+    // ★ パスは blobId だけで決める。切片 ID を含めていた頃は、1 本の parquet を
+    //   共有する切片が 4 枚あると「同じ 836 MB を 4 本の別パスへ」送っていた
+    //   (受信側も ref.path で重複排除するので 4 回ダウンロードしていた)。
+    //   blobId は uid('blob') で一意なので、これだけで 1 blob = 1 オブジェクトになる。
+    //
+    //   ファイル名ではなく拡張子だけを付けるのは、rename (:5953-5977) が
+    //   同じ blobId のまま filename を書き換えるため。名前をパスに入れると
+    //   リネームのたびにキャッシュが外れて 836 MB を上げ直すことになる。
+    //   rename は拡張子を継承する仕様なので、拡張子なら安定する。
+    //   拡張子は blobId ごとに最初に見たものを採用する (切片ごとに rename すると
+    //   同じ blobId でも ent.filename が食い違いうるため)。
+    const extByBlob = new Map();
+    const storageExtOf = (name) => {
+        const m = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || ''));
+        return m ? ('.' + sanitizeStorageKeySegment(m[1]).toLowerCase()) : '';
+    };
     const enqueue = (sec, storage, kindFolder, slot, k, ent) => {
         if (!ent || !ent.blobId) return;
         const filename = (ent.filename) || (k + '.bin');
-        // Sanitize only the filename segment of the Storage key — Supabase
-        // rejects non-ASCII keys (e.g. Japanese filenames) as InvalidKey. The
-        // blobId prefix keeps the key unique even if two names collapse to the
-        // same sanitized string. The original filename is preserved in `task`
-        // (→ ref.filename) for display/download.
-        const safeFilename = sanitizeStorageKeySegment(filename);
-        const path = `${meta.slug}/${sec.id}/${kindFolder}/${ent.blobId}__${safeFilename}`;
+        if (!extByBlob.has(ent.blobId)) extByBlob.set(ent.blobId, storageExtOf(filename));
+        // Supabase は非 ASCII キーを InvalidKey で弾くので、パスに載せるのは
+        // blobId (英数字と _ のみ) と正規化した拡張子だけにする。元のファイル名は
+        // task.filename → ref.filename として表示・ダウンロード名に残る。
+        const path = `${meta.slug}/blobs/${ent.blobId}${extByBlob.get(ent.blobId)}`;
         const task = { blobId: ent.blobId, kindFolder, slot, key: k, ent, sectionId: sec.id, storage, path, filename };
         let bucket = pathTasks.get(path);
         if (!bucket) { bucket = []; pathTasks.set(path, bucket); }
@@ -10650,6 +10711,10 @@ async function _publishCore(project, meta, masterPw, opts) {
             else t.storage[t.slot][t.key] = ref;
         }
     };
+
+    // 今回のパス集合に無いキャッシュ項目を落とす。削除したレイヤーのパスや、
+    // 旧スキーム (slug/<切片ID>/...) のパスがいつまでも残って肥大するのを防ぐ。
+    for (const p of [...uploadedPaths]) if (!pathTasks.has(p)) uploadedPaths.delete(p);
 
     // ---- Stage B: HEAD-verify every cached path. The cache claims they're
     // already on Storage, but real-world drift (manual deletes, bucket
@@ -10689,43 +10754,136 @@ async function _publishCore(project, meta, masterPw, opts) {
         uploadTasks.push(tasks[0]);
     }
 
-    let progress = null;
-    if (!silent && uploadTasks.length) progress = openPublishProgressModal(uploadTasks.length);
-    let doneCount = 0;
-    let doneBytes = 0;
-    let totalBytes = 0;
     // Compounds whose local blob is gone (so they can't be uploaded and would
     // silently be absent from the published doc → "No data" for recipients).
     const skippedNoBlob = [];
-    const uploadOne = async (task) => {
-        const blob = await ProjectStorage.getBlob(task.blobId);
-        if (!blob || !blob.blob) {
-            const names = (pathTasks.get(task.path) || [task]).map(t => t.key).filter(Boolean);
-            skippedNoBlob.push(...(names.length ? names : [task.path]));
+
+    // ---- Stage C-0: サイズを先に測る。
+    // 以前は uploadOne の中で totalBytes を足していたので、分母がアップロードの
+    // 進行中に増えていき「x MB / y MB」が意味を成していなかった。ここで確定させる。
+    // blob が消えているタスクもここで落とすので、モーダルの分母が実際に送る本数と
+    // 一致する。ProjectStorage.getBlob は IDB のレコードを返すだけで、Blob は
+    // 参照なので size を読むのはタダ (836 MB を読み込んだりはしない)。
+    const sizeByPath = new Map();
+    const liveTasks = [];
+    await runWithConcurrency(uploadTasks, 8, async (t) => {
+        let rec = null;
+        try { rec = await ProjectStorage.getBlob(t.blobId); }
+        catch (e) { console.warn('publish: getBlob failed', t.blobId, e); }
+        if (!rec || !rec.blob) {
+            const names = (pathTasks.get(t.path) || [t]).map(x => x.key).filter(Boolean);
+            skippedNoBlob.push(...(names.length ? names : [t.path]));
             return;
         }
-        const size = (blob.blob && blob.blob.size) || 0;
-        totalBytes += size;
+        sizeByPath.set(t.path, rec.blob.size || 0);   // rec 自体は持たない
+        liveTasks.push(t);
+    });
+    const totalBytes = [...sizeByPath.values()].reduce((a, b) => a + b, 0);
+
+    let progress = null;
+    const uploadAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    let cancelled = false;
+    if (!silent && liveTasks.length) {
+        progress = openPublishProgressModal(liveTasks.length, {
+            subtitle: '合計 ' + fmtBytesMB(totalBytes) + ' を送ります。'
+                    + '中断してもサーバ上の公開内容は変わりません。',
+            cancelLabel: '中断',
+        });
+        progress.setCancelHandler(() => {
+            cancelled = true;
+            if (uploadAbort) uploadAbort.abort();
+        });
+    }
+    let doneCount = 0;
+    let doneBytes = 0;                  // 完了したファイルの合計
+    const liveBytes = new Map();        // path -> 進行中ファイルの現時点バイト数
+    let lastPaint = 0;
+    // 進捗は path ごとに「進行中 (liveBytes) か完了済 (doneBytes) のどちらか一方」
+    // にしか入らないので二重計上しない。xhr の progress は毎秒何十回も来るため
+    // 150ms に間引く。
+    const paint = (force) => {
+        if (!progress) return;
+        const now = Date.now();
+        if (!force && now - lastPaint < 150) return;
+        lastPaint = now;
+        let cur = doneBytes;
+        for (const v of liveBytes.values()) cur += v;
+        progress.update(doneCount, liveTasks.length, cur, totalBytes);
+    };
+    const uploadOne = async (task) => {
+        const blob = await ProjectStorage.getBlob(task.blobId);
+        if (!blob || !blob.blob) return;      // Stage C-0 で拾い済み (保険)
+        const size = sizeByPath.get(task.path) || 0;
         let lastErr = null;
-        for (let attempt = 0; attempt < 3; attempt++) {
-            try {
-                await SupabaseClient.uploadBlob('atlases', task.path, blob.blob, blob.mime || (task.ent && task.ent.mime), publishToken);
-                lastErr = null; break;
-            } catch (e) {
-                lastErr = e;
-                if (attempt < 2) await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
+        try {
+            for (let attempt = 0; attempt < 3; attempt++) {
+                if (cancelled) { const e = new Error('upload aborted'); e.aborted = true; throw e; }
+                liveBytes.set(task.path, 0);   // 再試行は 0 から数え直す
+                try {
+                    await SupabaseClient.uploadBlob('atlases', task.path, blob.blob,
+                        blob.mime || (task.ent && task.ent.mime), publishToken, {
+                            signal: uploadAbort && uploadAbort.signal,
+                            onProgress: (loaded) => { liveBytes.set(task.path, Math.min(loaded, size)); paint(false); },
+                            // 本文を送り切ったあとはサーバ側の書き込み待ち。100% のまま
+                            // 数秒止まって見えるので、その旨を出せるようにしておく。
+                            onSent: () => { liveBytes.set(task.path, size); paint(true); },
+                        });
+                    lastErr = null; break;
+                } catch (e) {
+                    lastErr = e;
+                    // 中断は即抜ける (リトライすると中断が 3 倍待たされる)。
+                    if (cancelled || (e && e.aborted)) throw e;
+                    // 413 は決定論的なので再試行しても無駄。分かる言葉に置き換える。
+                    if (e && e.status === 413) throw _publishSizeError(task, size);
+                    // publish トークンの TTL は 1 時間。大きなファイルを上げている
+                    // 途中で切れると 401/403 になるので、取り直して 1 回やり直す。
+                    if (e && (e.status === 401 || e.status === 403) && attempt < 2) {
+                        try {
+                            const s2 = await SupabaseClient.requestPublishSession(masterPw, meta.slug);
+                            if (s2 && s2.token) publishToken = s2.token;
+                        } catch (e2) { console.warn('publish token refresh failed', e2); }
+                    }
+                    if (attempt < 2) await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
+                }
             }
+        } finally {
+            liveBytes.delete(task.path);   // 成功・失敗どちらでも必ず外す
         }
         if (lastErr) throw lastErr;
         const ref = { path: task.path, mime: blob.mime || (task.ent && task.ent.mime), filename: task.filename };
         writeRefToTasks(task.path, ref);
         uploadedPaths.add(task.path);
         doneCount++; doneBytes += size;
-        if (progress) progress.update(doneCount, uploadTasks.length, doneBytes, totalBytes);
-        onProgress(doneCount, uploadTasks.length);
+        paint(true);
+        onProgress(doneCount, liveTasks.length);
     };
-    try { await runWithConcurrency(uploadTasks, 4, uploadOne); }
-    finally { if (progress) progress.close(); }
+    try {
+        await runWithConcurrency(liveTasks, 4, uploadOne);
+    } catch (e) {
+        if (progress) { try { progress.close(); } catch (e2) {} progress = null; }
+        if (cancelled || (e && e.aborted)) {
+            // ★ 自動同期を止める。queueSave は _doSave 経由で
+            //   _scheduleAutoPublish を呼ぶので、これが無いと 5 秒後に
+            //   いま中断したアップロードが黙って再開してしまう。
+            //   次に手動で Publish するまで止めたままにする。
+            try { App._autoPublishPausedSlug = meta.slug; } catch (e2) {}
+            // 途中まで上げたオブジェクトは残す。次回の publish が Stage B の
+            // HEAD 検証で拾って再利用するので、再開が安く済む。
+            try {
+                project.shareInfo = project.shareInfo || {};
+                project.shareInfo.uploadedPaths = [...uploadedPaths];
+                App.queueSave();
+            } catch (e2) {}
+            const err = new Error('publish_cancelled');
+            err.cancelled = true;
+            throw err;
+        }
+        throw e;
+    }
+    // ★ progress.close() はここでは呼ばない。この後の upsert_project_doc が
+    //   5560 エントリぶんの JSON (数 MB) を送るので、モーダルを消すと
+    //   「また固まった」ように見える。RPC の finally でまとめて閉じる。
+    if (progress) progress.setNote('アップロード完了。サーバへ反映しています…');
     if (skippedNoBlob.length) {
         const uniq = [...new Set(skippedNoBlob)];
         const head = uniq.slice(0, 5).map(k => String(k).replace(/^MSI_/, '')).join(', ');
@@ -10780,23 +10938,29 @@ async function _publishCore(project, meta, masterPw, opts) {
     };
     let result;
     try {
-        result = await SupabaseClient.upsertProjectDoc(args);
-    } catch (e) {
-        const errMsg = String((e && (e.message || e.details || e.hint)) || '');
-        const isMissingFn = (e && e.code === 'PGRST202')
-            || /Could not find the function/i.test(errMsg);
-        if (!isMissingFn) throw e;
-        if (args._is_public) {
-            throw new Error(
-                'Public 共有を使うには Supabase の SQL を最新版に更新してください。' +
-                'Supabase SQL Editor で supabase/share_locks.sql の最新版を実行 (再適用) してください。'
-            );
+        try {
+            result = await SupabaseClient.upsertProjectDoc(args);
+        } catch (e) {
+            const errMsg = String((e && (e.message || e.details || e.hint)) || '');
+            const isMissingFn = (e && e.code === 'PGRST202')
+                || /Could not find the function/i.test(errMsg);
+            if (!isMissingFn) throw e;
+            if (args._is_public) {
+                throw new Error(
+                    'Public 共有を使うには Supabase の SQL を最新版に更新してください。' +
+                    'Supabase SQL Editor で supabase/share_locks.sql の最新版を実行 (再適用) してください。'
+                );
+            }
+            console.warn('upsert_project_doc(_is_public) not found — retrying with the 8-arg signature. ' +
+                'Apply supabase/share_locks.sql (the latest revision) in Supabase to enable public-link sharing.');
+            const fallbackArgs = Object.assign({}, args);
+            delete fallbackArgs._is_public;
+            result = await SupabaseClient.upsertProjectDoc(fallbackArgs);
         }
-        console.warn('upsert_project_doc(_is_public) not found — retrying with the 8-arg signature. ' +
-            'Apply supabase/share_locks.sql (the latest revision) in Supabase to enable public-link sharing.');
-        const fallbackArgs = Object.assign({}, args);
-        delete fallbackArgs._is_public;
-        result = await SupabaseClient.upsertProjectDoc(fallbackArgs);
+    } finally {
+        // アップロード完了からここまでモーダルを出したままにしている
+        // (数千化合物だと RPC 本体だけで数 MB あり、無表示だと固まって見えるため)。
+        if (progress) { try { progress.close(); } catch (e2) {} progress = null; }
     }
     if (!result || result.ok !== true) {
         throw new Error(result && result.reason ? result.reason : 'upsert_failed');
@@ -10841,6 +11005,18 @@ async function publishProjectToShare() {
         if (!masterPw) return;
     }
 
+    // 自動同期が走っている最中に手動 publish を重ねると、同じオブジェクトへの
+    // 二重アップロードと RPC の競合になる。予約済みの自動同期は取り消し、
+    // 実行中のものは終わるまで待つ。
+    if (App._autoPublishTimer) { clearTimeout(App._autoPublishTimer); App._autoPublishTimer = 0; }
+    if (_publishGate) {
+        showToast('自動同期の完了を待っています…', 4000);
+        try { await _publishGate; } catch (e) {}
+    }
+    // 手動 publish は「今アップロードしてよい」という明示の意思表示なので、
+    // 前回の中断で止めていた自動同期をここで解除する。
+    App._autoPublishPausedSlug = null;
+
     showToast('Supabase へアップロード中...', 1800);
     try {
         await _publishCore(project, meta, masterPw, { silent: false });
@@ -10866,6 +11042,13 @@ async function publishProjectToShare() {
         if (App._setSyncStatus) App._setSyncStatus('synced');
         await openShareInfoModal(project.shareInfo, { titleSuccess: true });
     } catch (e) {
+        // 中断はエラーではない。サーバ上の公開内容は一切変わっていない
+        // (upsert_project_doc を呼ぶ前に抜けている)。
+        if (e && e.cancelled) {
+            showToast('アップロードを中断しました。サーバの公開内容は変わっていません。'
+                + '自動同期は次に「Publish to share」を押すまで止めます', 9000);
+            return;
+        }
         console.error('publish failed', e);
         const msg = String((e && (e.message || e.details)) || e);
         if (/unauthorized|28000/i.test(msg)) {
@@ -13606,24 +13789,81 @@ const SupabaseClient = (() => {
         // from request_publish_session. supabase-js's storage.upload()
         // does not expose an extra-headers option, so we POST directly
         // to the Storage REST API instead.
-        async uploadBlob(bucket, path, blob, contentType, publishToken) {
-            if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error('supabase_not_configured');
+        // ★ fetch ではなく XMLHttpRequest を使う。fetch にはアップロード進捗の
+        //   イベントが無いため、836 MB の parquet を送っている間ずっと 0% のままで
+        //   「動いているのか固まっているのか」がユーザーに分からなかった。
+        //   XHR なら xhr.upload.onprogress でバイト単位の進捗が取れ、
+        //   xhr.abort() で中断もできる。
+        //   opts は省略可能なので、5 引数の既存の呼び出しはそのまま動く。
+        //   opts = { onProgress(loaded,total), onSent(), signal, stallMs }
+        uploadBlob(bucket, path, blob, contentType, publishToken, opts) {
+            const o = opts || {};
+            if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return Promise.reject(new Error('supabase_not_configured'));
             const url = SUPABASE_URL.replace(/\/+$/, '') + '/storage/v1/object/'
                       + encodeURIComponent(bucket) + '/' + path.split('/').map(encodeURIComponent).join('/');
-            const headers = {
-                'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-                'apikey': SUPABASE_ANON_KEY,
-                'Content-Type': contentType || (blob && blob.type) || 'application/octet-stream',
-                'x-upsert': 'true',
-            };
-            if (publishToken) headers['x-publish-token'] = publishToken;
-            const resp = await fetch(url, { method: 'POST', headers, body: blob });
-            if (!resp.ok) {
-                let body = '';
-                try { body = await resp.text(); } catch (e) {}
-                throw new Error('upload failed: HTTP ' + resp.status + ' ' + body);
-            }
-            return path;
+            const total = (blob && blob.size) || 0;
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                // 全体の制限時間 (xhr.timeout) は使わない — 836 MB を低速回線で
+                // 上げる正常なケースを殺してしまう。代わりに「進捗が N 秒動かなければ
+                // 諦める」失速検知にする。
+                let stallTimer = 0;
+                const arm = () => {
+                    clearTimeout(stallTimer);
+                    stallTimer = setTimeout(() => {
+                        const e = new Error('upload stalled'); e.stalled = true;
+                        try { xhr.abort(); } catch (e2) {}
+                        reject(e);
+                    }, o.stallMs || 120000);
+                };
+                const onAbort = () => { try { xhr.abort(); } catch (e) {} };
+                const cleanup = () => {
+                    clearTimeout(stallTimer);
+                    if (o.signal && o.signal.removeEventListener) {
+                        try { o.signal.removeEventListener('abort', onAbort); } catch (e) {}
+                    }
+                };
+                xhr.open('POST', url, true);
+                xhr.setRequestHeader('Authorization', 'Bearer ' + SUPABASE_ANON_KEY);
+                xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
+                xhr.setRequestHeader('Content-Type', contentType || (blob && blob.type) || 'application/octet-stream');
+                xhr.setRequestHeader('x-upsert', 'true');
+                if (publishToken) xhr.setRequestHeader('x-publish-token', publishToken);
+                if (xhr.upload) {
+                    xhr.upload.onprogress = (ev) => {
+                        arm();
+                        if (o.onProgress) o.onProgress(ev.loaded, ev.lengthComputable ? ev.total : total);
+                    };
+                    // 送信し切ったあとはサーバ側の書き込み待ち。進捗は 100% で
+                    // 止まるので、呼び出し側が「サーバ処理中」を出せるようにする。
+                    xhr.upload.onloadend = () => { if (o.onSent) o.onSent(); };
+                }
+                xhr.onload = () => {
+                    cleanup();
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        if (o.onProgress) o.onProgress(total, total);
+                        resolve(path);
+                        return;
+                    }
+                    const e = new Error('upload failed: HTTP ' + xhr.status + ' ' + (xhr.responseText || ''));
+                    e.status = xhr.status;      // 413 / 401 / 403 を呼び出し側で判別する
+                    reject(e);
+                };
+                xhr.onerror = () => {
+                    cleanup();
+                    const e = new Error('upload failed: network error'); e.status = 0; reject(e);
+                };
+                xhr.onabort = () => {
+                    cleanup();
+                    const e = new Error('upload aborted'); e.aborted = true; reject(e);
+                };
+                if (o.signal) {
+                    if (o.signal.aborted) { onAbort(); return; }
+                    o.signal.addEventListener('abort', onAbort, { once: true });
+                }
+                arm();
+                xhr.send(blob);
+            });
         },
         publicUrl(bucket, path) {
             if (!SUPABASE_URL || !path) return null;
@@ -15176,15 +15416,29 @@ const App = {
             throw lastErr;
         };
         const failed = [];
+        // ★ Storage パスで重複排除する。多数の化合物が 1 本のソースを共有するので
+        //   (parquet のノンターゲットでは 1 切片 1390 化合物が同じ 1 ファイル)、
+        //   これが無いと同じ 836 MB を化合物の数だけダウンロードして IndexedDB に
+        //   その数だけ保存してしまう。_hydrateSharedProject には同じ対策が
+        //   入っている (blobByPath) が、こちらは漏れていた。
+        const importedByPath = new Map();   // path -> { id, mime }
+        const ensureImported = async (ref) => {
+            if (importedByPath.has(ref.path)) return importedByPath.get(ref.path);
+            const blob = await fetchBlob(ref.path);
+            const mime = ref.mime || blob.type;
+            const id = uid('blob');
+            await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() });
+            const rec = { id, mime };
+            importedByPath.set(ref.path, rec);
+            return rec;
+        };
         for (let i = 0; i < project.sections.length; i++) {
             const sec = project.sections[i];
             const sp = (doc.sections[i] && doc.sections[i].storage_paths) || (doc.sections[i] && doc.sections[i].storagePaths) || {};
             for (const [key, ref] of Object.entries(sp.images || {})) {
                 try {
-                    const blob = await fetchBlob(ref.path);
-                    const blobId = uid('blob');
-                    await ProjectStorage.putBlob({ id: blobId, blob, mime: ref.mime || blob.type, filename: ref.filename || ref.path.split('/').pop() });
-                    sec.images[key] = { blobId, mime: ref.mime || blob.type, filename: ref.filename };
+                    const { id: blobId, mime } = await ensureImported(ref);
+                    sec.images[key] = { blobId, mime, filename: ref.filename };
                 } catch (e) {
                     console.warn('import image fetch failed', key, e);
                     failed.push({ kind: 'image', key, path: ref.path, error: e });
@@ -15192,9 +15446,7 @@ const App = {
             }
             for (const [key, ref] of Object.entries(sp.msiSeries || {})) {
                 try {
-                    const blob = await fetchBlob(ref.path);
-                    const blobId = uid('blob');
-                    await ProjectStorage.putBlob({ id: blobId, blob, mime: ref.mime || blob.type, filename: ref.filename || ref.path.split('/').pop() });
+                    const { id: blobId } = await ensureImported(ref);
                     sec.msiSeries[key] = Object.assign({}, ref, { blobId });
                     if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
                         sec.msiFiles[ref.sourceFileId] = { id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, blobId };
@@ -15885,9 +16137,18 @@ const App = {
         const idx = this.project.sections.findIndex(s => s.id === id);
         if (idx < 0) return;
         const sec = this.project.sections[idx];
-        const blobIds = [];
-        for (const e of Object.values(sec.images || {})) if (e && e.blobId) blobIds.push(e.blobId);
-        for (const e of Object.values(sec.msiSeries || {})) if (e && e.blobId) blobIds.push(e.blobId);
+        const blobIds = new Set();
+        for (const e of Object.values(sec.images || {})) if (e && e.blobId) blobIds.add(e.blobId);
+        for (const e of Object.values(sec.msiSeries || {})) if (e && e.blobId) blobIds.add(e.blobId);
+        // ★ 他の切片がまだ参照している blob は消さない。1 本の parquet を全切片で
+        //   共有するノンターゲットでは、これが無いと 1 切片を消しただけで
+        //   残り全部のソースが道連れになる (removeLayer には切片内の同種の
+        //   ガードが既にある)。
+        for (const other of this.project.sections) {
+            if (other === sec) continue;
+            for (const e of Object.values(other.images || {})) if (e && e.blobId) blobIds.delete(e.blobId);
+            for (const e of Object.values(other.msiSeries || {})) if (e && e.blobId) blobIds.delete(e.blobId);
+        }
         for (const bid of blobIds) await ProjectStorage.deleteBlob(bid).catch(() => {});
         this.project.sections.splice(idx, 1);
         for (const r of (this.project.rois || [])) if (r.polysBySection) delete r.polysBySection[id];
@@ -16609,6 +16870,9 @@ const App = {
         if (this.shareMode) return;                       // share recipient view: no master access
         if (!this.project || this.project.__share) return;
         if (!this.project.shareInfo || !this.project.shareInfo.slug) return;  // never published yet
+        // アップロードを中断したプロジェクトは、次に手動で Publish するまで
+        // 自動同期しない。中断した直後に自動で再開したら中断の意味が無い。
+        if (this._autoPublishPausedSlug === this.project.shareInfo.slug) return;
         if (this._autoPublishTimer) clearTimeout(this._autoPublishTimer);
         this._autoPublishTimer = setTimeout(() => {
             this._autoPublishTimer = 0;
@@ -16629,6 +16893,8 @@ const App = {
         }
 
         if (this._autoPublishInflight) return;
+        // 手動 publish が走っている間は割り込まない。5 秒後にもう一度試す。
+        if (_publishGate) { this._scheduleAutoPublish(); return; }
         this._autoPublishInflight = true;
         try {
             // Conflict detection: server's projects.updated_at vs our
