@@ -742,7 +742,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     </span>
                     <span id="method-filter-count" style="font-size:10px;color:#64748b;margin-left:4px;"></span>
                     <button type="button" id="btn-build-tic" style="font-size:11px;padding:3px 8px;border:1px solid #d1d5db;border-radius:3px;background:#fff;color:#475569;cursor:pointer;margin-left:6px;display:none;"
-                            title="全化合物を足した TIC 背景を作ります。化合物数によっては数分かかります (途中で止められます)。一度作れば保存され、次回以降は即座に表示されます">TIC を作る</button>
+                            title="全化合物を足した TIC 背景を作ります。同じ parquet を共有する切片ぶんを1回でまとめて作り、同時に Method 表の Mean / Max も全化合物ぶん埋めます。途中で止められます。一度作れば保存され、次回以降は即座に表示されます">TIC と統計を作る</button>
                     <div id="overlay-list"></div>
                 </div>
                 <div id="method-body" class="overflow-auto flex-1 min-h-0">
@@ -1093,6 +1093,10 @@ function msiRawFallbackMax(rawRange) {
 // 片方だけ変えないこと。**
 function msiMaxIntensity(ent) {
     if (ent && Number.isFinite(ent.rawTrueMax)) return { value: ent.rawTrueMax, estimated: false };
+    // statMax = parquet のフッタ統計から得た **ファイル全体** の最大値。列を 1 バイトも
+    // 読まずに埋まるので、まだ表示していない化合物でも強度で並べ替えられる。ただし
+    // 切片ごとの値ではないので概算扱いにする (列を読むと rawTrueMax が入って上書きされる)。
+    if (ent && Number.isFinite(ent.statMax)) return { value: ent.statMax, estimated: true };
     const rr = ent && ent.rawRange;
     if (Array.isArray(rr) && Number.isFinite(rr[1])) return { value: rr[1], estimated: true };
     return { value: null, estimated: false };
@@ -2104,7 +2108,13 @@ const MSI_ROBUST_PERCENTILE = 0.995;
 const MSI_DEFAULT_DISPLAY_PERCENTILE = 0.99;
 function percentileSorted(vals, p) {
     if (!vals || !vals.length) return NaN;
-    const a = Float64Array.from(vals).sort();
+    return percentileOfSorted(Float64Array.from(vals).sort(), p);
+}
+// 既にソート済みの配列から分位点を取る。呼び出し側が 1 回だけソートして
+// 複数の分位点を取れるように、添字の計算だけを切り出したもの。
+// percentileSorted と同じ式なので、どちらを通しても値は一致する。
+function percentileOfSorted(a, p) {
+    if (!a || !a.length) return NaN;
     const idx = Math.min(a.length - 1, Math.max(0, Math.round(p * (a.length - 1))));
     return a[idx];
 }
@@ -2213,21 +2223,22 @@ function computeRasterPixels(rows, range, bakeMode) {
         { dupCells, dupRows, gridFallback: gridFallback || null });
 }
 
-// 「W×H に並んだ生強度 (NaN = データ無し)」からベイク範囲・8bit 画素・統計を作る。
-// computeRasterPixels (xlsx/txt: 行の集合から格子を組む) と parquet (列を読んで
-// 格子へ散らす) の**両方がここを通る**。ベイク範囲の決め方や診断の数え方を 2 か所に
-// 書くと、同じデータなのに経路によって数値が食い違うため、必ず共有する。
-// extra には経路ごとの診断 (重複平均の件数・格子フォールバック) を渡す。
-function bakeRasterFromValues(values, W, H, range, bakeMode, extra) {
-    extra = extra || {};
+// 「W×H に並んだ生強度 (NaN = データ無し)」からベイク範囲と統計だけを出す。
+// 8bit 画素は作らない — 合成 TIC のように「範囲と統計しか要らない」経路が
+// 10 万画素 × 4 バイトの確保と書き込みを丸ごと省けるようにするため。
+//
+// ★ ソートは 1 回だけ。以前は percentileSorted を 2 回呼んでおり、その中で
+//   毎回 Float64Array.from(vals).sort() していた。1390 化合物 × 4 切片で
+//   約 1 万 1 千回ソートしていたことになる。同じ配列から 2 つの添字を取るだけなので
+//   結果は完全に一致する。**これは DESI の通常のレイヤー読み込みにも効く。**
+function deriveBakeStats(values, range, bakeMode) {
     let vmin = Infinity, vmax = -Infinity, sum = 0, n = 0;
-    const vals = [];
     for (let i = 0; i < values.length; i++) {
         const v = values[i];
         if (!Number.isFinite(v)) continue;
         if (v < vmin) vmin = v;
         if (v > vmax) vmax = v;
-        sum += v; n++; vals.push(v);
+        sum += v; n++;
     }
     const rawMean = n > 0 ? (sum / n) : null;
     // Bake range. rawRange (= [bakeLo, bakeHi]) doubles as the basis for display
@@ -2238,7 +2249,7 @@ function bakeRasterFromValues(values, W, H, range, bakeMode, extra) {
     // the Method/Stats "Max intensity" readouts. An explicit def.range wins.
     let bakeLo, bakeHi, trueMax = Number.isFinite(vmax) ? vmax : null;
     // ベイク範囲が実データから導かれたか。退化ケースだけ仮の 0..1 を使うので、
-    // そこではクリップ診断を出さない (下の clippedHigh を参照)。
+    // そこではクリップ診断を出さない (bakeRasterFromValues の clippedHigh を参照)。
     let bakeRangeFromData = true;
     // rawDispMax = 既定表示上限(データ適応)。各画素は [bakeLo, bakeHi] にベイク
     // 済みで bakeHi を超える値は既にクリップされるため、表示上限は必ず bakeHi 以下。
@@ -2252,8 +2263,8 @@ function bakeRasterFromValues(values, W, H, range, bakeMode, extra) {
         rawDispMax = bakeHi;   // 退化(全画素同値): ベイク上限
         // この 0..1 はデータから導いた範囲ではなく、ゼロ除算を避けるための仮値。
         // 全画素が同値なのでどう写しても同じ色になり、「クリップされた」という
-        // 診断は意味を持たない。下のカウントを止めないと、たとえば全画素 100 の
-        // 平坦なラスタが「上限クリップ 100%」と表示されてしまう。
+        // 診断は意味を持たない。このフラグでカウントを止めないと、たとえば
+        // 全画素 100 の平坦なラスタが「上限クリップ 100%」と表示されてしまう。
         bakeRangeFromData = false;
     } else if (bakeMode === 'full') {
         // 外れ値クリップ OFF: 真の最大値でベイクするので上位画素が潰れない。代償は
@@ -2265,13 +2276,36 @@ function bakeRasterFromValues(values, W, H, range, bakeMode, extra) {
         rawDispMax = vmax;
     } else {
         bakeLo = vmin;
-        const robust = percentileSorted(vals, MSI_ROBUST_PERCENTILE);
+        // 有限値だけを 1 本の Float64Array に詰めて 1 回だけソートし、
+        // 2 つの分位点を同じ配列から取る (percentileSorted の 2 回呼びを廃止)。
+        const sorted = new Float64Array(n);
+        for (let i = 0, k = 0; i < values.length; i++) {
+            const v = values[i];
+            if (Number.isFinite(v)) sorted[k++] = v;
+        }
+        sorted.sort();
+        const robust = percentileOfSorted(sorted, MSI_ROBUST_PERCENTILE);
         bakeHi = (Number.isFinite(robust) && robust > vmin) ? robust : vmax;
         // 表示既定上限 = この切片の分布の表示分位点(生単位)。bakeHi でクランプし、
         // 退化結果は bakeHi にフォールバック。
-        const disp = percentileSorted(vals, MSI_DEFAULT_DISPLAY_PERCENTILE);
+        const disp = percentileOfSorted(sorted, MSI_DEFAULT_DISPLAY_PERCENTILE);
         rawDispMax = (Number.isFinite(disp) && disp > bakeLo) ? Math.min(disp, bakeHi) : bakeHi;
     }
+    return { bakeLo, bakeHi, rawMean, rawTrueMax: trueMax, rawDispMax, nPixels: n, bakeRangeFromData };
+}
+
+// 「W×H に並んだ生強度 (NaN = データ無し)」からベイク範囲・8bit 画素・統計を作る。
+// computeRasterPixels (xlsx/txt: 行の集合から格子を組む) と parquet (列を読んで
+// 格子へ散らす) の**両方がここを通る**。ベイク範囲の決め方や診断の数え方を 2 か所に
+// 書くと、同じデータなのに経路によって数値が食い違うため、必ず共有する。
+// extra には経路ごとの診断 (重複平均の件数・格子フォールバック) を渡す。
+function bakeRasterFromValues(values, W, H, range, bakeMode, extra) {
+    extra = extra || {};
+    const st = deriveBakeStats(values, range, bakeMode);
+    const bakeLo = st.bakeLo, bakeHi = st.bakeHi;
+    const bakeRangeFromData = st.bakeRangeFromData;
+    const rawMean = st.rawMean, trueMax = st.rawTrueMax, rawDispMax = st.rawDispMax;
+    const n = st.nPixels;
     const pixels = new Uint8ClampedArray(W * H * 4);
     let p = 0;
     // Values above bakeHi are clamped and all become the same 255 —
@@ -2417,6 +2451,11 @@ const ROI_RAW_GRID_CACHE_MAX = 24;
 // 生強度ラスタ + デコード済み画像 + PNG 文字列で 10 万画素なら約 850 KB。
 // 16 本 = 約 14 MB/パネル。TIMS の 2000 features でもここで頭打ちになる。
 const MSI_LAYER_CACHE_MAX = 16;
+// 合成 TIC / 統計を作るときに 1 回の worker 往復でまとめて読む列数。
+// worker 側は直列に読むので parquet の I/O は減らないが、1390 回だった
+// postMessage の往復が 90 回ほどになる。大きくしすぎると転送する型付き配列が
+// 増えてピークメモリが上がるので (10 万行 × 4 B × N)、16 で頭打ちにする。
+const PARQUET_TIC_BATCH = 16;
 
 
 function _roiGridKey(section, layerKey, ent) {
@@ -3273,6 +3312,18 @@ const _pqFiles = new Map();   // blobId -> { fileId, info, geom, blob }
 
 function parquetFileState(blobId) { return _pqFiles.get(blobId) || null; }
 
+// 登録ウィザードは「まだ blobId が決まっていない」段階で開くため 'reg_<名前>_<サイズ>'
+// を仮キーにしている。putBlob で本番の blobId が決まったら、解析済みの状態を
+// そちらにも張る。これが無いと **初回表示で 280 MB のフッタを解析し直し、
+// x/y/annotation も読み直す** ことになる (worker 側は fileId キーなので開き直しは
+// 起きず、主スレッドのキャッシュだけが空振りしていた)。
+function parquetAliasFileState(fromBlobId, toBlobId) {
+    const st = _pqFiles.get(fromBlobId);
+    if (!st || fromBlobId === toBlobId) return false;
+    _pqFiles.set(toBlobId, st);
+    return true;
+}
+
 // フッタを 1 回だけ解析して索引を worker に持たせる。2 回目以降は何もしない。
 async function parquetEnsureOpen(blobId, blob) {
     let st = _pqFiles.get(blobId);
@@ -3379,6 +3430,130 @@ async function buildParquetRaster(ent, blob) {
         rawRange: r.rawRange, rawMean: r.rawMean, rawTrueMax: r.rawTrueMax,
         rawDispMax: r.rawDispMax, diag: r.diag,
     };
+}
+
+// 累積した合成 TIC を 1 枚の灰色画像にする仕上げ。DESI の自動生成
+// (_generateSyntheticTic) と parquet の一括生成 (parquetAccumulateTicAndStats)
+// の**両方がここを通る**ので、経路によって明るさが変わることがない。
+// count = その画素に寄与した層の数。0 の画素は走査外なので透明にする。
+function _ticImageFromAccum(accum, count, w, h) {
+    return new Promise((resolve) => {
+        try {
+            let maxAvg = 0;
+            for (let p = 0; p < w * h; p++) {
+                if (count[p] === 0) continue;
+                const v = accum[p] / count[p];
+                if (v > maxAvg) maxAvg = v;
+            }
+            const norm = maxAvg > 0 ? 255 / maxAvg : 0;
+            const out = document.createElement('canvas');
+            out.width = w; out.height = h;
+            const octx = get2dContext(out);
+            const outData = octx.createImageData(w, h);
+            for (let p = 0, j = 0; p < w * h; p++, j += 4) {
+                if (count[p] === 0) {
+                    outData.data[j+3] = 0;
+                } else {
+                    const g = Math.max(0, Math.min(255, Math.round(accum[p] / count[p] * norm)));
+                    outData.data[j] = g;
+                    outData.data[j+1] = g;
+                    outData.data[j+2] = g;
+                    outData.data[j+3] = 255;
+                }
+            }
+            octx.putImageData(outData, 0, 0);
+            const dataUrl = out.toDataURL('image/png');
+            const im = new Image();
+            im.onload = () => resolve(im);
+            im.onerror = () => resolve(null);
+            im.src = dataUrl;
+        } catch (e) {
+            console.warn('TIC generation failed', e);
+            resolve(null);
+        }
+    });
+}
+
+// ★ 合成 TIC と統計を「1 列 = 1 回読み」で全切片ぶん同時に作る。
+//
+// 以前は SectionPanel ごとに _generateSyntheticTic を回していたので、1 本の
+// parquet を共有する切片が 4 枚あると **同じ 1390 列を 4 回読んで**いた。
+// 列は全 annotation にまたがるので (readColumn は全行を返す)、1 回読んで
+// geom.sections の rowIdx/cellIdx で散らせば全切片ぶんが同時に埋まる。
+//
+// さらに PNG を作らない。以前は列ごとに
+//   焼く → toDataURL で PNG へ → Image にデコード → canvas に描く → getImageData
+// と往復し、その 8bit 輝度を足していたが、輝度は焼いた画素の g そのもの
+// (グレースケールで輝度係数の和が 1.0) なので、値から直接 g を作れば
+// **最終的な 8bit の TIC 画像はバイト単位で一致する**。
+//
+// targets: [{ sectionId, label, accum, count, W, H }] を呼び出し側が用意する。
+// onCol(doneCols, totalCols, phase) で進捗、shouldAbort() で中断。
+// 戻り値: 化合物ごと・切片ごとの統計 statsByKey[key][sectionId]
+async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opts) {
+    opts = opts || {};
+    const onCol = opts.onCol || (() => {});
+    const shouldAbort = opts.shouldAbort || (() => false);
+    const batch = Math.max(1, opts.batch || PARQUET_TIC_BATCH);
+    const geom = await parquetEnsureGeometry(blobId, blob);
+    const st = _pqFiles.get(blobId);
+    if (!st) throw new Error('parquet: file not opened');
+    // 切片ラベル → 累積先。geom の対応表もここで引き当てておく。
+    const slots = [];
+    for (const t of targets) {
+        const g = geom.sections.find(s => s.label === t.label)
+            || (geom.sections.length === 1 ? geom.sections[0] : null);
+        if (!g) continue;
+        slots.push({ t, g, values: new Float32Array(g.W * g.H) });
+    }
+    if (!slots.length) throw new Error('parquet: 対象の切片が見つかりません');
+    const statsByKey = new Map();
+    // 計測: 列読みと集計のどちらが支配的かを実機で見えるようにする
+    // (コード読解で決め打ちしないため)。
+    let readMs = 0, calcMs = 0;
+    for (let i = 0; i < features.length; i += batch) {
+        if (shouldAbort()) return { aborted: true, statsByKey, readMs, calcMs };
+        const chunk = features.slice(i, i + batch);
+        const t0 = Date.now();
+        // worker 往復をまとめる。worker 側は直列に読むので parquet の I/O は
+        // 減らないが、postMessage の往復ぶんは確実に減る。
+        const cols = await callParquetWorker(
+            { op: 'columns', fileId: st.fileId, blob, colIdxs: chunk.map(f => f.colIdx) },
+            [], 900000);
+        readMs += Date.now() - t0;
+        const t1 = Date.now();
+        for (let c = 0; c < chunk.length; c++) {
+            const col = cols[c];
+            if (!col) continue;
+            const perSection = {};
+            for (const s of slots) {
+                const { g, values } = s;
+                values.fill(NaN);
+                for (let k = 0; k < g.rowIdx.length; k++) values[g.cellIdx[k]] = col[g.rowIdx[k]];
+                // 画素配列は作らない — 範囲と統計しか要らない。
+                const bs = deriveBakeStats(values, undefined, undefined);
+                const lo = bs.bakeLo, span = bs.bakeHi - bs.bakeLo;
+                const accum = s.t.accum, count = s.t.count;
+                for (let p = 0; p < values.length; p++) {
+                    const v = values[p];
+                    if (!Number.isFinite(v)) continue;
+                    // 改修前と同じ式 (層ごとに正規化してから 0..255 で加算)。
+                    accum[p] += Math.round(Math.max(0, Math.min(1, (v - lo) / span)) * 255);
+                    count[p]++;
+                }
+                perSection[s.t.sectionId] = {
+                    rawRange: [bs.bakeLo, bs.bakeHi], rawMean: bs.rawMean,
+                    rawTrueMax: bs.rawTrueMax, rawDispMax: bs.rawDispMax,
+                    nPixels: bs.nPixels, gridFallback: g.gridFallback || null,
+                    rasterW: g.W, rasterH: g.H,
+                };
+            }
+            statsByKey.set(chunk[c].key, perSection);
+        }
+        calcMs += Date.now() - t1;
+        onCol(Math.min(i + chunk.length, features.length), features.length, { readMs, calcMs });
+    }
+    return { aborted: false, statsByKey, readMs, calcMs };
 }
 
 function callParquetWorker(msg, transfer, timeoutMs) {
@@ -4015,17 +4190,14 @@ class SectionPanel {
         });
     }
 
-    // 「TIC を作る」の実体。全化合物を 1 枚ずつ読んで足し、結果を切片へ保存する。
-    // 上位だけを選ぶ打ち切りは廃止した (ユーザー指定で全化合物を使う)。
-    // onProgress(done, total) で進捗を返し、shouldAbort() が true なら途中で止める。
-    async buildAndStoreTic(onProgress, shouldAbort) {
+    // 出来上がった合成 TIC をこの切片へ据える。保存しておくと次回以降は
+    // 再計算しない (数千化合物では時間がかかるため)。
+    // 生成そのものは呼び出し側 (parquet は App.buildTicAndStatsForSource、
+    // DESI は ensureTicBackdrop) が行う。
+    installTicImage(img) {
         const TIC_KEY = 'HE_STAIN_TIC';
-        const msiKeys = this.registeredMsiKeys();
-        if (msiKeys.length < 2) return { ok: false, reason: 'MSI レイヤーが 2 つ未満です' };
-        const img = await this._generateSyntheticTic(msiKeys, onProgress, shouldAbort);
-        if (!img) return { ok: false, reason: '中断したか、生成できませんでした' };
+        if (!img) return false;
         this.section.meta = this.section.meta || {};
-        // 保存しておくと次回以降は再計算しない (数千化合物では数分かかるため)。
         this.section.meta.ticDataUrl = img.src;
         this.imageSources = this.imageSources || {};
         this.imageSettings = this.imageSettings || {};
@@ -4039,82 +4211,73 @@ class SectionPanel {
         this.toggleLayer(TIC_KEY, true);
         this.setupCanvasSize();
         this.renderComposite();
-        return { ok: true, used: msiKeys.length };
+        return true;
     }
 
-    // 全化合物の輝度を足して 1 枚の灰色画像にする。遅延読み込みでは全レイヤーが
-    // 同時に手元にあるとは限らないので、**1 枚ずつ読み込んで足し込む**。累積バッファ
-    // 1 本ぶんしか増えないので、LRU が途中でレイヤーを捨てても結果は変わらない。
-    async _generateSyntheticTic(msiKeys, onProgress, shouldAbort) {
+    // DESI (xlsx/txt) の自動生成。全化合物の寄与を足して 1 枚の灰色画像にする。
+    // 遅延読み込みでは全レイヤーが同時に手元にあるとは限らないので、
+    // **1 枚ずつ読み込んで足し込む**。累積バッファ 1 本ぶんしか増えないので、
+    // LRU が途中でレイヤーを捨てても結果は変わらない。
+    //
+    // parquet (数千化合物) は列を 1 回読んで全切片へ散らす別経路を通る
+    // (App.buildTicAndStatsForSource)。こちらは化合物が数十本なので素直に回す。
+    //
+    // ★ 焼いた PNG ではなく生強度ラスタから足す。焼いた画素はグレースケール
+    //   g,g,g で輝度係数の和が 1.0 なので、輝度 = g = その層の [bakeLo,bakeHi] で
+    //   0..255 に正規化した値。値から作り直しても **最終的な 8bit の TIC は
+    //   バイト単位で一致する** (tic_speed_test.js で固定)。PNG のデコードと
+    //   キャンバス読み戻しがまるごと不要になる。
+    async _generateSyntheticTic(msiKeys) {
         // 基準寸法。ent の記録から取れるので、まだ 1 枚も読んでいなくても決まる。
         let ref = null;
         for (const k of msiKeys) { ref = this.msiRasterSize(k); if (ref) break; }
         if (!ref) return null;
         const w = ref.w, h = ref.h;
-        const accum = new Float32Array(w * h);
+        const accum = new Float64Array(w * h);
         const count = new Uint32Array(w * h);
-        const tc = document.createElement('canvas');
-        tc.width = w; tc.height = h;
-        const tctx = get2dContext(tc, { willReadFrequently: true });
+        let tctx = null;   // PNG フォールバック用 (値ラスタが無い層だけ)
         let summed = 0;
-        let processed = 0;
         for (const key of msiKeys) {
-            // 数千化合物では数分かかるので、途中で止められるようにする。
-            if (shouldAbort && shouldAbort()) return null;
             // 読めなければ黙って飛ばす (従来と同じ寛容さ)。
             if (!this.imageSources[key]) {
-                try { await this.ensureMsiLayerLoaded(key); } catch (e) { processed++; continue; }
+                try { await this.ensureMsiLayerLoaded(key); } catch (e) { continue; }
             }
-            if (onProgress) { try { onProgress(++processed, msiKeys.length); } catch (e) {} }
+            const vr = this.msiValueRasters.get(key);
+            const ent = (this.section.msiSeries || {})[key];
+            const rr = ent && ent.rawRange;
+            if (vr && vr.W === w && vr.H === h && vr.values
+                && Array.isArray(rr) && Number.isFinite(rr[0]) && rr[1] > rr[0]) {
+                const lo = rr[0], span = rr[1] - rr[0];
+                for (let p = 0; p < vr.values.length; p++) {
+                    const v = vr.values[p];
+                    if (!Number.isFinite(v)) continue;
+                    accum[p] += Math.round(Math.max(0, Math.min(1, (v - lo) / span)) * 255);
+                    count[p]++;
+                }
+                summed++;
+                continue;
+            }
+            // フォールバック: 値ラスタが無い層 (寸法不一致・古いキャッシュ) は
+            // 従来どおり焼いた PNG の輝度から足す。
             const img = this.imageSources[key];
             if (!img || !img.complete || img.naturalWidth !== w || img.naturalHeight !== h) continue;
+            if (!tctx) {
+                const tc = document.createElement('canvas');
+                tc.width = w; tc.height = h;
+                tctx = get2dContext(tc, { willReadFrequently: true });
+            }
             tctx.clearRect(0, 0, w, h);
             tctx.drawImage(img, 0, 0);
             const d = tctx.getImageData(0, 0, w, h).data;
             for (let i = 0, p = 0; i < d.length; i += 4, p++) {
                 if (d[i+3] === 0) continue;
-                const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-                accum[p] += lum;
+                accum[p] += 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
                 count[p]++;
             }
             summed++;
         }
         if (summed === 0) return null;
-        return new Promise((resolve) => {
-            try {
-                let maxAvg = 0;
-                for (let p = 0; p < w * h; p++) {
-                    if (count[p] === 0) continue;
-                    const v = accum[p] / count[p];
-                    if (v > maxAvg) maxAvg = v;
-                }
-                const norm = maxAvg > 0 ? 255 / maxAvg : 0;
-                const out = document.createElement('canvas');
-                out.width = w; out.height = h;
-                const octx = get2dContext(out);
-                const outData = octx.createImageData(w, h);
-                for (let p = 0, j = 0; p < w * h; p++, j += 4) {
-                    if (count[p] === 0) {
-                        outData.data[j+3] = 0;
-                    } else {
-                        const g = Math.max(0, Math.min(255, Math.round(accum[p] / count[p] * norm)));
-                        outData.data[j] = g;
-                        outData.data[j+1] = g;
-                        outData.data[j+2] = g;
-                        outData.data[j+3] = 255;
-                    }
-                }
-                octx.putImageData(outData, 0, 0);
-                const dataUrl = out.toDataURL('image/png');
-                const im = new Image();
-                im.onload = () => resolve(im);
-                im.onerror = () => resolve(null);
-                im.src = dataUrl;
-            } catch (e) {
-                console.warn('TIC generation failed', e);
-                resolve(null);
-            }
-        });
+        return _ticImageFromAccum(accum, count, w, h);
     }
 
     // One-time per-panel warning for genuinely anomalous MSI rasters.
@@ -7008,6 +7171,11 @@ const METHOD_COLS_NONTARGET = [
     { key: 'mz',       label: 'm/z',      align: 'right', sort: 'High↔Low' },
     { key: 'adduct',   label: 'Adduct',   align: 'left',  sort: 'A↔Z' },
     { key: 'formula',  label: 'Formula',  align: 'left',  sort: 'A↔Z' },
+    // 強度で並べ替えたい、という要望で Mean / Max を戻した。
+    // Max は登録時にフッタの統計から入るので読み込みゼロで並べられる。
+    // Mean は列を読まないと出ないので、「TIC と統計を作る」を押すまで空欄。
+    { key: 'mean',     label: 'Mean',     align: 'right', sort: 'High↔Low' },
+    { key: 'max',      label: 'Max',      align: 'right', sort: 'High↔Low' },
 ];
 const METHOD_COLS_MRM = [
     { key: 'compound',  label: 'Compound',  align: 'left',  sort: 'A↔Z' },
@@ -7101,7 +7269,18 @@ function renderMethodTable() {
         const ce  = (meta.ce  != null) ? String(meta.ce) : '—';
         const cv  = (meta.cv  != null) ? String(meta.cv) : '—';
         const rawMean = (ent.rawMean != null) ? formatRawValue(ent.rawMean) : '—';
-        const rawMax = formatRawValue(msiMaxIntensity(ent).value);
+        const maxInfo = msiMaxIntensity(ent);
+        const rawMax = formatRawValue(maxInfo.value);
+        // ノンターゲットでは Max が「目録の統計 (ファイル全体の概算)」のことがある。
+        // 「TIC と統計を作る」を押すと切片ごとの正確な値に置き換わるので、
+        // どちらなのかが分かるように印を付ける。
+        const rawMaxTxt = (maxInfo.estimated && rawMax !== '—') ? ('~' + rawMax) : rawMax;
+        const maxTitle = maxInfo.estimated
+            ? ' title="目録の統計から得た概算です (ファイル全体の最大)。「TIC と統計を作る」を押すと、この切片の正確な最大値に置き換わります"'
+            : '';
+        const meanTitle = (ent.rawMean == null)
+            ? ' title="平均は列を読まないと出ません。「TIC と統計を作る」を押すと全化合物ぶんが埋まります"'
+            : '';
         // ノンターゲット用の 3 列。いずれも compoundMeta (サイドカー / フッタ由来) に
         // 既に入っているので追加の読み込みは発生しない。
         const mzTxt      = Number.isFinite(meta.mz) ? Number(meta.mz).toFixed(4) : '—';
@@ -7139,12 +7318,14 @@ function renderMethodTable() {
                 '<input type="color" class="marker-input" value="' + (markerColor || '#ff0000') + '" tabindex="-1">' +
             '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + diagBadge + '</td>' +
-            // ノンターゲットは m/z・アダクト・分子式。MRM 固有の Fragment/CE/CV と
-            // Mean/Max、および MRM ライブラリ登録用のチェックは出さない (ユーザー指定)。
+            // ノンターゲットは m/z・アダクト・分子式 + 強度 (Mean/Max)。
+            // MRM 固有の Fragment/CE/CV と、MRM ライブラリ登録用のチェックは出さない。
             (nonTarget
               ? ('<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(mzTxt) + '</td>' +
                  '<td class="px-2 py-1 border-b border-gray-100 text-gray-700">' + safe(adductTxt) + '</td>' +
-                 '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[10px]">' + safe(formulaTxt) + '</td>')
+                 '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[10px]">' + safe(formulaTxt) + '</td>' +
+                 '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700"' + meanTitle + '>' + safe(rawMean) + '</td>' +
+                 '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700"' + maxTitle + '>' + safe(rawMaxTxt) + '</td>')
               : ('<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pre) + '</td>' +
                  '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(pro) + '</td>' +
                  '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(ce) + '</td>' +
@@ -16029,6 +16210,10 @@ const App = {
                 mime: mainFile.type || 'application/octet-stream',
                 filename: mainFile.name || 'data.parquet',
             });
+            // ウィザードが 'reg_...' の仮キーで解析済みのフッタと対応表を、
+            // 本番の blobId でも使えるようにする。これが無いと初回表示で
+            // 280 MB のフッタを解析し直すことになる。
+            parquetAliasFileState('reg_' + (mainFile.name || '') + '_' + mainFile.size, blobId);
             const sourceFileId = uid('msifile');
             let done = 0;
             for (const label of labels) {
@@ -16061,9 +16246,15 @@ const App = {
                         filename: mainFile.name || 'data.parquet',
                         sourceFileId,
                         compoundMeta: f.meta,
-                        // 目録の統計から取れる真の最大値。データを読まずに Method 表の
-                        // Max が埋まる。平均は列を読まないと出ないので後から入る。
-                        rawTrueMax: Number.isFinite(f.max) ? f.max : undefined,
+                        // 目録 (フッタ) の統計から取れる最大値。データを読まずに
+                        // Method 表の Max が埋まり、強度で並べ替えられる。
+                        // ★ rawTrueMax ではなく statMax に入れる。フッタの統計は
+                        //   row group 横断なので **ファイル全体** の最大であって
+                        //   切片ごとの値ではない。rawTrueMax に入れると、列を読んだ
+                        //   化合物だけ「切片の最大」に上書きされて意味が混ざり、
+                        //   見て回るたびに並び順が変わってしまう。
+                        //   msiMaxIntensity は statMax 由来を estimated で返す。
+                        statMax: Number.isFinite(f.max) ? f.max : undefined,
                         rasterW: g.W, rasterH: g.H,
                     };
                 }
@@ -16099,38 +16290,120 @@ const App = {
 
     // 「TIC を作る」(要望③)。全化合物を足した TIC 背景を作って切片へ保存する。
     // ノンターゲットでは化合物数ぶんの読み込みになるので明示操作にしてある。
-    async buildTicForActiveSection() {
+    // 「TIC と統計を作る」。同じ parquet を共有する切片ぶんを **1 パスで同時に**作る。
+    //
+    // 以前は活性な 1 切片だけを対象にしていたので、4 切片あればボタンを 4 回押す
+    // 必要があり、そのたびに同じ 1390 列を読み直していた。列は全 annotation に
+    // またがるので、1 回読んで対応表で散らせば全切片ぶんが同時に埋まる。
+    // 同じパスで rawMean / rawTrueMax / rawRange も全化合物ぶん埋まるので、
+    // Method 表の Mean / Max 列が揃う (要望②)。
+    async buildTicAndStatsForSource() {
         const panel = this.activeSectionId ? this.panels.get(this.activeSectionId) : null;
         if (!panel) { showToast('切片を選択してください'); return; }
-        const total = panel.registeredMsiKeys().length;
-        if (total < 2) { showToast('MSI レイヤーが 2 つ未満のため TIC は作れません'); return; }
+        const src = this._nonTargetTicTargets(panel);
+        if (!src) { showToast('parquet 由来の切片で実行してください', 5000); return; }
+        const { blobId, targets } = src;
+        if (!targets.length) { showToast('対象の切片がありません (H&E がある切片は TIC を使いません)', 6000); return; }
+        const features = src.features;
+        if (features.length < 2) { showToast('化合物が 2 つ未満のため TIC は作れません'); return; }
+
         let aborted = false;
-        const progress = openPublishProgressModal(total, {
-            title: 'TIC を作成中…',
-            subtitle: '全化合物を 1 つずつ読み込んで合計します。「中断」で途中で止められます。',
+        const progress = openPublishProgressModal(features.length, {
+            title: 'TIC と統計を作成中…',
+            subtitle: targets.length + ' 切片ぶんを同時に作ります (列は 1 回だけ読みます)。'
+                    + '「中断」で途中で止められます。',
             unit: 'compounds',
             cancelLabel: '中断',
         });
-        // 中断してもデータは壊れない (途中経過を保存せず、単に作らないだけ)。
         progress.setCancelHandler(() => { aborted = true; });
+        const t0 = Date.now();
         try {
-            const r = await panel.buildAndStoreTic(
-                (done, tot) => { try { progress.update(done, tot); } catch (e) {} },
-                () => aborted);
-            if (r.ok) {
-                await this.queueSave(0);
-                showToast('TIC を作成しました (' + r.used + ' 化合物)。次回以降は保存済みのものを使います', 7000);
-            } else if (aborted) {
-                showToast('TIC の作成を中断しました', 4000);
-            } else {
-                showToast('TIC を作成できませんでした: ' + r.reason, 7000);
+            const rec = await ProjectStorage.getBlob(blobId);
+            if (!rec || !rec.blob) throw new Error('ソースファイルがローカルにありません');
+            // 累積バッファ。10 万画素で 1 切片あたり 800 KB なので、切片が
+            // 増えても問題にならない。
+            for (const t of targets) {
+                t.accum = new Float64Array(t.W * t.H);
+                t.count = new Uint32Array(t.W * t.H);
             }
+            const r = await parquetAccumulateTicAndStats(blobId, rec.blob, features, targets, {
+                shouldAbort: () => aborted,
+                onCol: (done, total, tm) => {
+                    try {
+                        progress.update(done, total);
+                        // どちらが支配的かを実機で見えるようにする。
+                        progress.setNote('列読み ' + (tm.readMs / 1000).toFixed(1) + ' s / '
+                            + '集計 ' + (tm.calcMs / 1000).toFixed(1) + ' s');
+                    } catch (e) {}
+                },
+            });
+            if (r.aborted) { showToast('TIC の作成を中断しました', 4000); return; }
+
+            // 統計を ent へ書き戻す (全切片・全化合物ぶん)。
+            let statCells = 0;
+            for (const [key, perSection] of r.statsByKey) {
+                for (const t of targets) {
+                    const s = perSection[t.sectionId];
+                    if (!s) continue;
+                    const sec = (this.project.sections || []).find(x => x.id === t.sectionId);
+                    const ent = sec && sec.msiSeries && sec.msiSeries[key];
+                    if (!ent) continue;
+                    ent.rawRange = s.rawRange;
+                    ent.rawMean = s.rawMean;
+                    ent.rawTrueMax = s.rawTrueMax;
+                    ent.rawDispMax = s.rawDispMax;
+                    ent.rasterW = s.rasterW; ent.rasterH = s.rasterH;
+                    statCells++;
+                }
+            }
+
+            // 累積を 1 枚の灰色画像に落として各切片へ据える。
+            let made = 0;
+            for (const t of targets) {
+                const img = await _ticImageFromAccum(t.accum, t.count, t.W, t.H);
+                if (!img) continue;
+                const p = this.panels.get(t.sectionId);
+                if (p && p.installTicImage(img)) made++;
+            }
+            await this.queueSave(0);
+            this.recomputeMsiAbsScale();
+            try { renderMethodTable(); } catch (e) {}
+            const secs = ((Date.now() - t0) / 1000).toFixed(1);
+            showToast('TIC を ' + made + ' 切片ぶん作りました (' + features.length + ' 化合物 / '
+                + secs + ' 秒)。統計 ' + statCells.toLocaleString() + ' 件を更新しました。'
+                + '次回以降は保存済みのものを使います', 9000);
         } catch (e) {
             console.error('TIC 作成に失敗', e);
             showToast('TIC の作成に失敗しました: ' + (e && e.message ? e.message : e), 9000);
         } finally {
             try { progress.close(); } catch (e) {}
         }
+    },
+
+    // 活性パネルのソース (blobId) を共有するノンターゲット切片のうち、
+    // 実物の H&E を持たないものを対象にする。H&E がある切片は
+    // ensureTicBackdrop が元から TIC を使わないので外してよい。
+    _nonTargetTicTargets(panel) {
+        const anyEnt = Object.values(panel.section.msiSeries || {})
+            .find(e => e && e.kind === 'parquet' && e.blobId);
+        if (!anyEnt) return null;
+        const blobId = anyEnt.blobId;
+        const targets = [];
+        let features = [];
+        for (const sec of (this.project.sections || [])) {
+            const ents = Object.entries(sec.msiSeries || {})
+                .filter(([, e]) => e && e.kind === 'parquet' && e.blobId === blobId);
+            if (!ents.length) continue;
+            const hasHE = Object.keys(sec.images || {})
+                .some(k => /HE_STAIN/i.test(k) && k !== 'HE_STAIN_TIC');
+            if (hasHE) continue;
+            const w = ents[0][1].rasterW, h = ents[0][1].rasterH;
+            if (!Number.isFinite(w) || !Number.isFinite(h)) continue;
+            targets.push({ sectionId: sec.id, label: ents[0][1].annotation, W: w, H: h });
+            // 化合物一覧はどの切片でも同じ (登録時に全切片へ同じ features を入れている)。
+            if (!features.length) features = ents.map(([key, e]) => ({ key, colIdx: e.colIdx }));
+        }
+        return { blobId, targets, features };
     },
 
     async deleteSection(id) {
@@ -17091,7 +17364,7 @@ const App = {
         {
             // 「TIC を作る」(要望③)。ノンターゲットでは自動生成しないので明示操作。
             const bt = document.getElementById('btn-build-tic');
-            if (bt) bt.addEventListener('click', () => this.buildTicForActiveSection());
+            if (bt) bt.addEventListener('click', () => this.buildTicAndStatsForSource());
         }
         {
             // Method 表の絞り込み (要望①) と m/z 範囲 (要望②)。
