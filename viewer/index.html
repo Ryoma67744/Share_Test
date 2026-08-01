@@ -3023,20 +3023,38 @@ function _parquetWorkerBody(self, lib) {
         const colNames = meta.row_groups.length
             ? meta.row_groups[0].columns.map(c => c.meta_data.path_in_schema.join('.'))
             : [];
+        // 名前 → 列番号は Map で引く。ここを indexOf にすると
+        // (row group 数 × 列数) 回 × 列数 の線形探索になり、実運用規模
+        // (500 row group × 2000 列) では 20 億回の文字列比較になって固まる。
+        const colIndexByName = new Map(colNames.map((n, i) => [n, i]));
+        // chunksByCol[c][k] と rgIdxByCol[c][k] は対の関係。row group の番号を
+        // 一緒に持つのは、列が欠けた row group があっても行数の割り当てが
+        // ずれないようにするため (minimalMeta が rgRows をこの番号で引く)。
         const chunksByCol = colNames.map(() => []);
+        const rgIdxByCol = colNames.map(() => []);
         const rgRows = [];
-        for (const rg of meta.row_groups) {
+        for (let r = 0; r < meta.row_groups.length; r++) {
+            const rg = meta.row_groups[r];
             rgRows.push(rg.num_rows);
-            for (const cc of rg.columns) {
-                const name = cc.meta_data.path_in_schema.join('.');
-                const i = colNames.indexOf(name);
-                if (i >= 0) chunksByCol[i].push(cc);
+            for (let j = 0; j < rg.columns.length; j++) {
+                const cc = rg.columns[j];
+                // parquet は row group 内の列を schema 順に並べるので、まず同じ
+                // 位置の名前と一致するかだけ見る。一致すれば名前の文字列化
+                // (実運用で 100 万本・各 150 文字) を丸ごと省ける。
+                let i = -1;
+                const p = cc.meta_data.path_in_schema;
+                if (j < colNames.length && p.length === 1 && p[0] === colNames[j]) i = j;
+                else {
+                    const name = p.join('.');
+                    i = colIndexByName.has(name) ? colIndexByName.get(name) : -1;
+                }
+                if (i >= 0) { chunksByCol[i].push(cc); rgIdxByCol[i].push(r); }
             }
         }
         return {
             schema: meta.schema, version: meta.version, created_by: meta.created_by,
             metadata_length: meta.metadata_length, numRows: meta.num_rows,
-            colNames, chunksByCol, rgRows,
+            colNames, chunksByCol, rgIdxByCol, rgRows,
             kv: (meta.key_value_metadata || []).reduce((o, e) => (o[e.key] = e.value, o), {}),
         };
     };
@@ -3047,8 +3065,11 @@ function _parquetWorkerBody(self, lib) {
     const minimalMeta = (idx, colIdx) => ({
         version: idx.version, schema: idx.schema, num_rows: idx.numRows,
         created_by: idx.created_by, metadata_length: idx.metadata_length,
-        row_groups: idx.chunksByCol[colIdx].map((cc, i) => ({
-            columns: [cc], total_byte_size: 0n, num_rows: idx.rgRows[i],
+        // num_rows は「その chunk が属する row group の行数」。chunk の並び順では
+        // なく rgIdxByCol で引く — 列が欠けた row group があると 1 つずれるため。
+        row_groups: idx.chunksByCol[colIdx].map((cc, k) => ({
+            columns: [cc], total_byte_size: 0n,
+            num_rows: idx.rgRows[(idx.rgIdxByCol && idx.rgIdxByCol[colIdx][k]) ?? k],
         })),
     });
 
@@ -3067,18 +3088,21 @@ function _parquetWorkerBody(self, lib) {
         return any ? { min, max, nulls } : null;
     };
 
-    // raw=true のときは値をそのまま返す。annotation は文字列列なので、数値化すると
-    // 全部 NaN になって切片の判定ができなくなる。強度と座標だけ Float64Array に
-    // 詰める (転送可能なので postMessage のコピーを避けられる)。
-    const readColumn = async (blob, idx, colIdx, raw) => {
+    // mode: 'f32' (既定) = 強度列。元データが float32 なので 32bit で受ける。
+    //       アプリの生強度ラスタ (msiValueRasters) も Float32Array なので幅が揃う。
+    //       'f64' = 座標列 (x/y は DOUBLE なので 64bit のまま持つ)。
+    //       'raw' = 文字列列 (annotation)。数値化すると全部 NaN になり切片の
+    //               判定ができなくなるので、値をそのまま返す。
+    // 型付き配列は転送可能なので postMessage のコピーを避けられる。
+    const readColumn = async (blob, idx, colIdx, mode) => {
         const file = asyncBufferFromBlob(blob);
         const name = idx.colNames[colIdx];
         let out = null;
         await parquetRead({
             file, metadata: minimalMeta(idx, colIdx), columns: [name], compressors,
             onComplete: (rows) => {
-                if (raw) { out = rows.map(r => r[0]); return; }
-                out = new Float64Array(rows.length);
+                if (mode === 'raw') { out = rows.map(r => r[0]); return; }
+                out = (mode === 'f64') ? new Float64Array(rows.length) : new Float32Array(rows.length);
                 for (let i = 0; i < rows.length; i++) {
                     const v = rows[i][0];
                     out[i] = (v === null || v === undefined) ? NaN : Number(v);
@@ -3116,16 +3140,18 @@ function _parquetWorkerBody(self, lib) {
             } else if (op === 'column') {
                 const idx = opened.get(fileId);
                 if (!idx) throw new Error('parquet: file not opened');
-                const vals = await readColumn(e.data.blob, idx, e.data.colIdx, e.data.raw);
+                const vals = await readColumn(e.data.blob, idx, e.data.colIdx, e.data.mode);
                 done(vals, (vals && vals.buffer) ? [vals.buffer] : []);
             } else if (op === 'columns') {
                 // 複数列をまとめて (x / y / annotation の 3 列など)。
-                // rawIdxs に挙げた列だけ値をそのまま返す (annotation = 文字列)。
+                // modes は colIdxs と同じ並びで 'f32' | 'f64' | 'raw' を指定する。
                 const idx = opened.get(fileId);
                 if (!idx) throw new Error('parquet: file not opened');
-                const rawSet = new Set(e.data.rawIdxs || []);
+                const modes = e.data.modes || [];
                 const outs = [];
-                for (const ci of e.data.colIdxs) outs.push(await readColumn(e.data.blob, idx, ci, rawSet.has(ci)));
+                for (let k = 0; k < e.data.colIdxs.length; k++) {
+                    outs.push(await readColumn(e.data.blob, idx, e.data.colIdxs[k], modes[k]));
+                }
                 done(outs, outs.filter(o => o && o.buffer).map(o => o.buffer));
             } else if (op === 'close') {
                 opened.delete(fileId);
