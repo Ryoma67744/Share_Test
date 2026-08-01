@@ -2970,6 +2970,241 @@ async function inspectXlsxColumnsAuto(file, buf, sheetName, headerRow1based) {
 }
 
 // =============================================================
+// parquet reader (TIMS ノンターゲット)
+// =============================================================
+// SCiLS 由来の変換済み parquet を読む。既存の xlsx/txt 経路とは完全に別系統で、
+// クラシック worker (importScripts + UMD) には一切手を触れない。
+//
+// なぜ別 worker なのか:
+//   hyparquet / hyparquet-compressors は **ESM 専用** (package.json の
+//   "type":"module"、UMD/IIFE バンドル無し) なので importScripts では読めない。
+//   → モジュール worker (`new Worker(url, {type:'module'})`) を別に立てる。
+//   CDN は依存を解決した `+esm` バンドルを使う。生の src/index.js を指すと
+//   hyparquet-compressors の bare specifier (fzstd / hysnappy) で失敗する。
+//
+// なぜ ZSTD の伸長器を渡すのか:
+//   hyparquet が組み込みで解けるのは UNCOMPRESSED と SNAPPY だけ。実データは
+//   ZSTD なので、渡さないと `parquet unsupported compression codec: ZSTD` になる。
+const PARQUET_LIBS = {
+    hyparquet:   'https://cdn.jsdelivr.net/npm/hyparquet@1.27.1/+esm',
+    compressors: 'https://cdn.jsdelivr.net/npm/hyparquet-compressors@1.1.1/+esm',
+};
+
+let _pqWorker = null;
+let _pqWorkerBroken = false;
+let _pqSeq = 0;
+const _pqPending = new Map();
+
+function parquetWorkerSupported() {
+    return typeof Worker !== 'undefined' && typeof Blob !== 'undefined'
+        && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+}
+
+// worker 本体。import した関数を受け取る形にして、文字列化してもスコープが
+// 壊れないようにする (既存の parse worker と同じ「関数を toString で運ぶ」方式)。
+function _parquetWorkerBody(self, lib) {
+    const { parquetMetadataAsync, parquetRead, compressors } = lib;
+    // 開いたファイルの索引。fileId -> { schema, numRows, colNames, chunksByCol, ... }
+    const opened = new Map();
+
+    // Blob を hyparquet の AsyncBuffer に見せる。slice は要求された範囲だけを
+    // 読むので、2 GB のファイルでも全体をメモリに載せない。
+    const asyncBufferFromBlob = (blob) => ({
+        byteLength: blob.size,
+        slice: async (start, end) =>
+            await blob.slice(start, end === undefined ? blob.size : end).arrayBuffer(),
+    });
+
+    // 巨大な metadata から「列ごとの chunk 一覧」だけを抜き出す。
+    // 元の row_groups[].columns[] は (row group 数 × 列数) 個あり、実データでは
+    // 100 万エントリ・280 MB に達する。列ごとに割り直せば 1 列あたり row group 数
+    // ぶんで済み、必要なときにその列だけ組み直せる。
+    const buildIndex = (meta) => {
+        const colNames = meta.row_groups.length
+            ? meta.row_groups[0].columns.map(c => c.meta_data.path_in_schema.join('.'))
+            : [];
+        const chunksByCol = colNames.map(() => []);
+        const rgRows = [];
+        for (const rg of meta.row_groups) {
+            rgRows.push(rg.num_rows);
+            for (const cc of rg.columns) {
+                const name = cc.meta_data.path_in_schema.join('.');
+                const i = colNames.indexOf(name);
+                if (i >= 0) chunksByCol[i].push(cc);
+            }
+        }
+        return {
+            schema: meta.schema, version: meta.version, created_by: meta.created_by,
+            metadata_length: meta.metadata_length, numRows: meta.num_rows,
+            colNames, chunksByCol, rgRows,
+            kv: (meta.key_value_metadata || []).reduce((o, e) => (o[e.key] = e.value, o), {}),
+        };
+    };
+
+    // 1 列ぶんの最小 FileMetaData を組み直す。schema は全列ぶん残す (2000 要素でも
+    // 小さい)。捨てるのは row_groups[].columns[] の巨大な配列の方。
+    // ※ この形で全メタデータ読みと完全一致することを合成 parquet で実測済み。
+    const minimalMeta = (idx, colIdx) => ({
+        version: idx.version, schema: idx.schema, num_rows: idx.numRows,
+        created_by: idx.created_by, metadata_length: idx.metadata_length,
+        row_groups: idx.chunksByCol[colIdx].map((cc, i) => ({
+            columns: [cc], total_byte_size: 0n, num_rows: idx.rgRows[i],
+        })),
+    });
+
+    // row group 横断で統計を集約。データを 1 バイトも読まずに真の min/max が出る。
+    const aggStats = (chunks) => {
+        let min = Infinity, max = -Infinity, nulls = 0, any = false;
+        for (const cc of chunks) {
+            const s = cc.meta_data && cc.meta_data.statistics;
+            if (!s) continue;
+            const lo = Number(s.min_value !== undefined ? s.min_value : s.min);
+            const hi = Number(s.max_value !== undefined ? s.max_value : s.max);
+            if (Number.isFinite(lo)) { if (lo < min) min = lo; any = true; }
+            if (Number.isFinite(hi)) { if (hi > max) max = hi; any = true; }
+            if (s.null_count !== undefined && s.null_count !== null) nulls += Number(s.null_count);
+        }
+        return any ? { min, max, nulls } : null;
+    };
+
+    // raw=true のときは値をそのまま返す。annotation は文字列列なので、数値化すると
+    // 全部 NaN になって切片の判定ができなくなる。強度と座標だけ Float64Array に
+    // 詰める (転送可能なので postMessage のコピーを避けられる)。
+    const readColumn = async (blob, idx, colIdx, raw) => {
+        const file = asyncBufferFromBlob(blob);
+        const name = idx.colNames[colIdx];
+        let out = null;
+        await parquetRead({
+            file, metadata: minimalMeta(idx, colIdx), columns: [name], compressors,
+            onComplete: (rows) => {
+                if (raw) { out = rows.map(r => r[0]); return; }
+                out = new Float64Array(rows.length);
+                for (let i = 0; i < rows.length; i++) {
+                    const v = rows[i][0];
+                    out[i] = (v === null || v === undefined) ? NaN : Number(v);
+                }
+            },
+        });
+        return out;
+    };
+
+    self.onmessage = async (e) => {
+        const { id, op, fileId } = e.data || {};
+        const done = (result, transfer) => self.postMessage({ id, ok: true, result }, transfer || []);
+        const failed = (err) => self.postMessage({ id, ok: false, error: String((err && err.message) || err) });
+        try {
+            if (op === 'open') {
+                // フッタを 1 回だけ解析して索引にする。実データではここが数百 MB。
+                const meta = await parquetMetadataAsync(asyncBufferFromBlob(e.data.blob));
+                const idx = buildIndex(meta);
+                opened.set(fileId, idx);
+                // 主スレッドへ返すのは「保存できる形」。BigInt はそのまま構造化
+                // クローンで運べる (JSON にすると落ちるので JSON を挟まないこと)。
+                done({
+                    numRows: idx.numRows, colNames: idx.colNames, kv: idx.kv,
+                    stats: idx.chunksByCol.map(aggStats),
+                });
+            } else if (op === 'restore') {
+                // 保存しておいた索引を worker に戻す (フッタの再解析を避ける)。
+                opened.set(fileId, e.data.index);
+                done(true);
+            } else if (op === 'index') {
+                // 永続化用に索引そのものを取り出す。
+                const idx = opened.get(fileId);
+                if (!idx) throw new Error('parquet: file not opened');
+                done(idx);
+            } else if (op === 'column') {
+                const idx = opened.get(fileId);
+                if (!idx) throw new Error('parquet: file not opened');
+                const vals = await readColumn(e.data.blob, idx, e.data.colIdx, e.data.raw);
+                done(vals, (vals && vals.buffer) ? [vals.buffer] : []);
+            } else if (op === 'columns') {
+                // 複数列をまとめて (x / y / annotation の 3 列など)。
+                // rawIdxs に挙げた列だけ値をそのまま返す (annotation = 文字列)。
+                const idx = opened.get(fileId);
+                if (!idx) throw new Error('parquet: file not opened');
+                const rawSet = new Set(e.data.rawIdxs || []);
+                const outs = [];
+                for (const ci of e.data.colIdxs) outs.push(await readColumn(e.data.blob, idx, ci, rawSet.has(ci)));
+                done(outs, outs.filter(o => o && o.buffer).map(o => o.buffer));
+            } else if (op === 'close') {
+                opened.delete(fileId);
+                done(true);
+            } else {
+                throw new Error('parquet: unknown op ' + op);
+            }
+        } catch (err) { failed(err); }
+    };
+}
+
+function _buildParquetWorkerSource() {
+    return [
+        'import { parquetMetadataAsync, parquetRead } from ' + JSON.stringify(PARQUET_LIBS.hyparquet) + ';',
+        'import { compressors } from ' + JSON.stringify(PARQUET_LIBS.compressors) + ';',
+        _parquetWorkerBody.toString(),
+        '_parquetWorkerBody(self, { parquetMetadataAsync, parquetRead, compressors });',
+    ].join('\n\n');
+}
+
+function _getParquetWorker() {
+    if (_pqWorkerBroken) return null;
+    if (_pqWorker) return _pqWorker;
+    if (!parquetWorkerSupported()) { _pqWorkerBroken = true; return null; }
+    try {
+        const url = URL.createObjectURL(new Blob([_buildParquetWorkerSource()], { type: 'text/javascript' }));
+        const w = new Worker(url, { type: 'module' });
+        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
+        w.onmessage = (e) => {
+            const d = e.data || {};
+            const pend = _pqPending.get(d.id);
+            if (!pend) return;
+            if (d.ok) pend.resolve(d.result);
+            else pend.reject(new Error(d.error || 'parquet worker error'));
+        };
+        w.onerror = (ev) => {
+            // ここに来る主因は CDN からモジュールを取得できないこと。xlsx/txt と違って
+            // メインスレッドの代替実装が無いので、握りつぶさずに理由を残す。
+            console.warn('parquet worker error', ev && (ev.message || ev));
+            _pqWorkerBroken = true;
+            const pendings = Array.from(_pqPending.values());
+            _pqPending.clear();
+            pendings.forEach(p => {
+                try { p.reject(new Error('parquet worker が起動できませんでした (CDN からライブラリを取得できない可能性があります)')); } catch (_) {}
+            });
+            try { w.terminate(); } catch (_) {}
+            _pqWorker = null;
+        };
+        _pqWorker = w;
+        return _pqWorker;
+    } catch (e) {
+        console.warn('parquet worker init failed', e);
+        _pqWorkerBroken = true;
+        return null;
+    }
+}
+
+function callParquetWorker(msg, transfer, timeoutMs) {
+    return new Promise((resolve, reject) => {
+        const w = _getParquetWorker();
+        if (!w) { reject(new Error('parquet worker unavailable')); return; }
+        const id = ++_pqSeq;
+        let timer = null;
+        _pqPending.set(id, {
+            resolve: (v) => { if (timer) clearTimeout(timer); _pqPending.delete(id); resolve(v); },
+            reject:  (e) => { if (timer) clearTimeout(timer); _pqPending.delete(id); reject(e); },
+        });
+        if (timeoutMs) {
+            timer = setTimeout(() => {
+                const p = _pqPending.get(id);
+                if (p) { _pqPending.delete(id); p.reject(new Error('parquet worker timeout')); }
+            }, timeoutMs);
+        }
+        try { w.postMessage(Object.assign({ id }, msg), transfer || []); }
+        catch (e) { const p = _pqPending.get(id); if (p) { _pqPending.delete(id); p.reject(e); } }
+    });
+}
+
+// =============================================================
 // SectionPanel - one tissue-section panel (canvas + thumbs + UI)
 // =============================================================
 class SectionPanel {
