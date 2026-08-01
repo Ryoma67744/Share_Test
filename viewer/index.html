@@ -3235,6 +3235,128 @@ function _getParquetWorker() {
     }
 }
 
+// ---- parquet を「1 化合物 = 1 レイヤー」に落とし込む -------------------------
+// 1 つの parquet には全切片 (annotation) × 全化合物 (m/z 列) が入っている。
+// アプリ側は「切片ごとに msiSeries を持つ」構造なので、間に対応表が要る。
+//
+// ★ 切片の行は連続していない。行順は「y 昇順 → x 昇順」で固定なので、切片が
+//   スライド上で横に並んでいると同じ y 帯で行が交互に現れる。したがって
+//   rowStart/rowEnd では切り出せず、行番号 → (切片, 格子位置) の対応表が要る。
+//
+// 対応表は保存せず、ファイルごとにセッション内でキャッシュする。作るのに要る
+// のは x/y/annotation の 3 列だけ (数 MB) なので、開き直しても安い。
+const _pqFiles = new Map();   // blobId -> { fileId, info, geom, blob }
+
+function parquetFileState(blobId) { return _pqFiles.get(blobId) || null; }
+
+// フッタを 1 回だけ解析して索引を worker に持たせる。2 回目以降は何もしない。
+async function parquetEnsureOpen(blobId, blob) {
+    let st = _pqFiles.get(blobId);
+    if (st && st.info) return st;
+    const fileId = 'pq_' + blobId;
+    const info = await callParquetWorker({ op: 'open', fileId, blob }, [], 600000);
+    // mz_sorted は %.10g なので末尾ゼロが落ちる (列名 794.5450 に対し 794.545)。
+    // 文字列で突き合わせず、必ず数値にしてから使う。列順と 1:1 なので、本来は
+    // 位置対応で足り、数値は検算と表示用。
+    const mz = String((info.kv && info.kv.mz_sorted) || '')
+        .split(',').map(s => Number(s)).filter(Number.isFinite);
+    st = { fileId, info, mz, blob, geom: null };
+    _pqFiles.set(blobId, st);
+    return st;
+}
+
+// m/z 列の範囲。仕様で列順は id, x, y, <m/z 群>, annotation に固定されている。
+// 列名はパースしない (3 パターンが混在し、区切りの数も一定でないため)。
+function parquetColumnRoles(colNames) {
+    const idIdx = colNames.indexOf('id');
+    const xIdx = colNames.indexOf('x');
+    const yIdx = colNames.indexOf('y');
+    const annIdx = colNames.indexOf('annotation');
+    // m/z 列 = id/x/y/annotation を除いた残り。位置で決め打ちせず差集合を取るのは、
+    // 将来 id が無いファイルや列が増えたファイルでも壊れないようにするため。
+    const skip = new Set([idIdx, xIdx, yIdx, annIdx].filter(i => i >= 0));
+    const mzIdxs = [];
+    for (let i = 0; i < colNames.length; i++) if (!skip.has(i)) mzIdxs.push(i);
+    return { idIdx, xIdx, yIdx, annIdx, mzIdxs };
+}
+
+// x/y/annotation を 1 回読み、切片ごとの格子と「行番号 → 格子位置」を作る。
+async function parquetEnsureGeometry(blobId, blob) {
+    const st = await parquetEnsureOpen(blobId, blob);
+    if (st.geom) return st.geom;
+    const roles = parquetColumnRoles(st.info.colNames);
+    if (roles.xIdx < 0 || roles.yIdx < 0) throw new Error('parquet: x/y 列が見つかりません');
+    const idxs = [roles.xIdx, roles.yIdx];
+    if (roles.annIdx >= 0) idxs.push(roles.annIdx);
+    const cols = await callParquetWorker(
+        { op: 'columns', fileId: st.fileId, blob, colIdxs: idxs }, [], 600000);
+    const xs = cols[0], ys = cols[1];
+    // annotation 列が無いファイルは全行を 1 切片として扱う。
+    const ann = (roles.annIdx >= 0 && cols[2]) ? cols[2] : null;
+    const N = xs.length;
+    const byLabel = new Map();
+    for (let i = 0; i < N; i++) {
+        const label = ann ? String(ann[i]) : '(all)';
+        let g = byLabel.get(label);
+        if (!g) { g = { label, rows: [] }; byLabel.set(label, g); }
+        g.rows.push(i);
+    }
+    const sections = [];
+    for (const g of byLabel.values()) {
+        // 既存の格子構築をそのまま使う (ピッチ検出・フォールバックの判断を
+        // DESI と共有する)。buildMsiGrid は x/y しか見ないので v は要らない。
+        const pts = g.rows.map(i => ({ x: xs[i], y: ys[i] }));
+        const { xIndex, yIndex, W, H, gridFallback } = buildMsiGrid(pts);
+        const rowIdx = new Int32Array(g.rows.length);
+        const cellIdx = new Int32Array(g.rows.length);
+        let m = 0;
+        for (let k = 0; k < g.rows.length; k++) {
+            const i = g.rows[k];
+            const ci = xIndex.get(xs[i]), ri = yIndex.get(ys[i]);
+            if (ci == null || ri == null) continue;
+            rowIdx[m] = i; cellIdx[m] = ri * W + ci; m++;
+        }
+        sections.push({
+            label: g.label, W, H, gridFallback: gridFallback || null,
+            nSpots: g.rows.length,
+            rowIdx: rowIdx.subarray(0, m), cellIdx: cellIdx.subarray(0, m),
+        });
+    }
+    // 並びを安定させる (登録ダイアログの表示順とセクション番号が毎回同じになる)。
+    sections.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
+    st.geom = { roles, sections };
+    return st.geom;
+}
+
+// 1 化合物 × 1 切片ぶんのラスタを作る。返す形は computeRasterPixels と同じなので、
+// 呼び出し側 (loadMsiLayer) は xlsx/txt と区別せずに扱える。
+async function buildParquetRaster(ent, blob) {
+    const geom = await parquetEnsureGeometry(ent.blobId, blob);
+    const st = _pqFiles.get(ent.blobId);
+    const sec = geom.sections.find(s => s.label === ent.annotation)
+        || (geom.sections.length === 1 ? geom.sections[0] : null);
+    if (!sec) throw new Error('parquet: 切片 "' + ent.annotation + '" が見つかりません');
+    const col = await callParquetWorker(
+        { op: 'column', fileId: st.fileId, blob, colIdx: ent.colIdx }, [], 600000);
+    if (!col) throw new Error('parquet: 列を読めませんでした');
+    // 格子へ散らす。触れなかったセルは NaN のまま = データ無し (走査外)。
+    const values = new Float32Array(sec.W * sec.H).fill(NaN);
+    for (let k = 0; k < sec.rowIdx.length; k++) values[sec.cellIdx[k]] = col[sec.rowIdx[k]];
+    // ベイクは DESI と同じ関数を通す。経路によって Range や Max が食い違わない。
+    const r = bakeRasterFromValues(values, sec.W, sec.H, ent.range, ent.bakeMode,
+        { gridFallback: sec.gridFallback });
+    const canvas = document.createElement('canvas');
+    canvas.width = r.width; canvas.height = r.height;
+    get2dContext(canvas, { willReadFrequently: true })
+        .putImageData(new ImageData(r.pixels, r.width, r.height), 0, 0);
+    return {
+        dataUrl: canvas.toDataURL('image/png'),
+        values: r.values, width: r.width, height: r.height,
+        rawRange: r.rawRange, rawMean: r.rawMean, rawTrueMax: r.rawTrueMax,
+        rawDispMax: r.rawDispMax, diag: r.diag,
+    };
+}
+
 function callParquetWorker(msg, transfer, timeoutMs) {
     return new Promise((resolve, reject) => {
         const w = _getParquetWorker();
@@ -3650,16 +3772,24 @@ class SectionPanel {
         // xlsx/txt); fall back to the identical main-thread parser on any
         // worker failure or when workers aren't supported.
         let result = null;
-        if (parseWorkerAvailable()) {
-            try {
-                const op = (ent.kind === 'txt') ? 'txt-raster' : 'xlsx-raster';
-                result = await callParseWorker(op, { blob: rec.blob, def: ent }, 120000);
-            } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
-        }
-        if (!result) {
-            const buf = await rec.blob.arrayBuffer();
-            if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
-            else result = await buildPngFromXlsxArrayBuffer(buf, ent);
+        if (ent.kind === 'parquet') {
+            // parquet は列指向なので、この化合物の 1 列だけを読む。ファイル全体を
+            // 読み直す xlsx/txt とは経路が別で、メインスレッドの代替実装も無い
+            // (専用のモジュール worker が唯一の入口)。失敗したら握りつぶさずに
+            // 投げて、呼び出し側 (ensureMsiLayerLoaded) が警告を出す。
+            result = await buildParquetRaster(ent, rec.blob);
+        } else {
+            if (parseWorkerAvailable()) {
+                try {
+                    const op = (ent.kind === 'txt') ? 'txt-raster' : 'xlsx-raster';
+                    result = await callParseWorker(op, { blob: rec.blob, def: ent }, 120000);
+                } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
+            }
+            if (!result) {
+                const buf = await rec.blob.arrayBuffer();
+                if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
+                else result = await buildPngFromXlsxArrayBuffer(buf, ent);
+            }
         }
         const dataUrl = (result && typeof result === 'object') ? result.dataUrl : result;
         const rawRange = (result && typeof result === 'object' && Array.isArray(result.rawRange)) ? result.rawRange : null;
