@@ -2374,6 +2374,16 @@ const _roiRawGridCache = new Map();
 // 上限つき LRU。1 グリッドは W*H*8 バイト (200x200 で 320KB)。TIMS の 2000 features
 // のようなケースで全レイヤーを抱え込まないための歯止め。
 const ROI_RAW_GRID_CACHE_MAX = 24;
+// パネル 1 枚が同時に抱える MSI レイヤーの上限。1 レイヤーあたり
+// 生強度ラスタ + デコード済み画像 + PNG 文字列で 10 万画素なら約 850 KB。
+// 16 本 = 約 14 MB/パネル。TIMS の 2000 features でもここで頭打ちになる。
+const MSI_LAYER_CACHE_MAX = 16;
+// 合成 TIC に足し込む化合物の数。TIC は全化合物の合計なので遅延読み込みと相性が
+// 悪く、素直にやると化合物数ぶんの読み込みが要る。強度の強い上位だけを足しても
+// 解剖参照としての見た目はほぼ変わらない (強度分布は裾が重く、上位が総和を支配する)
+// ため、上位 N 本で打ち切る。N 以下の切片 (DESI の実運用) は全化合物を足すので
+// 従来と完全に同じ絵になる。
+const TIC_SYNTH_TOP_N = 200;
 
 function _roiGridKey(section, layerKey, ent) {
     return String(section && section.id) + '|' + layerKey + '|' + String((ent && ent.blobId) || '');
@@ -2976,6 +2986,15 @@ class SectionPanel {
         // ※ 段階 A では PNG と両方を保持するので一時的にメモリが 2 倍になる。
         //    段階 B で MSI の imageSources / imageDataUrls を落として元に戻る。
         this.msiValueRasters = new Map();
+        // 遅延読み込みの補助。_msiLru は「読み込んである MSI レイヤーを古い順に
+        // 並べた集合」、_msiLoadInFlight は同一キーへの同時要求をまとめる Promise、
+        // _thumbDirty は「焼き直しが必要だが、まだ画面に出ていないサムネイル」。
+        this._msiLru = new Set();
+        this._msiLoadInFlight = new Map();
+        this._thumbDirty = new Set();
+        this._thumbObserver = null;
+        this._thumbPaint = new Map();
+        this._pendingDrawLoad = null;
         this.visibleLayers = new Set();
         this.msiThumbRefs = new Map();
         this.layerPopover = null;
@@ -3099,10 +3118,26 @@ class SectionPanel {
 
     // ---- Layer loading ----
     async loadAllLayers() {
+        // HE/IF は 1 切片に数枚しかないので従来どおり全部読む。MSI は数千になりうるので
+        // 「最初に画面へ出すもの」だけ読む。何を出すかは visibleLayers で決まるが、その
+        // 復元は従来この後だった (= 全部読んでから決めていた) ので、先に前倒しする。
         const tasks = [];
         for (const [key, ent] of Object.entries(this.section.images || {})) tasks.push(this.loadImageLayer(key, ent));
-        for (const [key, ent] of Object.entries(this.section.msiSeries || {})) tasks.push(this.loadMsiLayer(key, ent));
         await Promise.all(tasks);
+
+        const registeredMsi = this.registeredMsiKeys();
+        const persistedVis = (this.section.meta && this.section.meta.visibleLayers) || null;
+        const wantMsi = new Set();
+        if (Array.isArray(persistedVis)) {
+            for (const k of persistedVis) if (/^MSI_/i.test(k) && registeredMsi.includes(k)) wantMsi.add(k);
+        }
+        // 既定 (初回) は先頭 1 本だけ。従来の「先頭 MSI を表示」と同じ絵になる。
+        if (!wantMsi.size && registeredMsi.length) wantMsi.add(registeredMsi[0]);
+        // Compound モードのフォーカスがこの切片にあるなら、それも先に要る。
+        if (typeof App !== 'undefined' && App && App.focusCompoundKey
+            && registeredMsi.includes(App.focusCompoundKey)) wantMsi.add(App.focusCompoundKey);
+        for (const k of wantMsi) await this.ensureMsiLayerLoaded(k);
+
         await this.analyzeAndInitSettings();
         await this.ensureTicBackdrop();
         this.renderEmptyOverlay();
@@ -3112,16 +3147,17 @@ class SectionPanel {
         // Restore the user's last visibility choice for this section, then
         // fall back to a "HE + first MSI" default so the histology backdrop is
         // never lost across reloads / first-time loads of a project.
-        const persistedVis = (this.section.meta && this.section.meta.visibleLayers) || null;
         if (Array.isArray(persistedVis)) {
             for (const k of persistedVis) {
-                if (this.imageSources[k]) this.visibleLayers.add(k);
+                // 判定を imageSources (読み込み済み) から在庫へ移す。未読込でも
+                // 登録されていれば表示対象にしてよい — 描画側が必要になった時点で読む。
+                if (this.imageSources[k] || registeredMsi.includes(k)) this.visibleLayers.add(k);
             }
         }
         if (this.visibleLayers.size === 0) {
             // Default: first MSI + every registered HE/IF. HE is always
             // wanted as a backdrop alongside the MSI heatmap.
-            const msiKeys = Object.keys(this.section.msiSeries || {});
+            const msiKeys = registeredMsi;
             const heKeys  = Object.keys(this.section.images || {})
                                   .filter(k => /HE_STAIN|IF_STAIN/i.test(k));
             if (msiKeys.length) this.toggleLayer(msiKeys[0], true);
@@ -3161,6 +3197,153 @@ class SectionPanel {
         if (msi) return msi;
         const img = Object.keys(this.section.images || {})[0];
         return img || null;
+    }
+
+    // ---- レイヤーの「在庫」と「読み込み済み」の分離 --------------------------
+    // imageSources は本来「いま読み込んであるもの」だが、遅延読み込みを入れるまでは
+    // 起動時に全レイヤーを読んでいたので「登録されているもの」と一致していた。その
+    // ため在庫の列挙に imageSources を使っている箇所が多数ある。ここを境界にして、
+    // 在庫は section.images / section.msiSeries から引く。
+    registeredMsiKeys() {
+        return Object.keys(this.section.msiSeries || {}).filter(k => /^MSI_/i.test(k));
+    }
+    // 登録済みの全レイヤーキー。合成 TIC (HE_STAIN_TIC) は section.images に
+    // 意図的に書かれない (ensureTicBackdrop のコメント参照) ので imageSources から拾う。
+    registeredLayerKeys() {
+        const out = [];
+        const seen = new Set();
+        const push = (k) => { if (k && !seen.has(k)) { seen.add(k); out.push(k); } };
+        for (const k of Object.keys(this.section.images || {})) push(k);
+        for (const k of Object.keys(this.imageSources)) if (!/^MSI_/i.test(k)) push(k);
+        for (const k of this.registeredMsiKeys()) push(k);
+        return out;
+    }
+    // ラスタの画素寸法。読み込み済みなら実物から、未読込なら ent の記録から返す。
+    // これがないと「1 枚も読み込んでいない切片」のキャンバスサイズが決まらない。
+    msiRasterSize(key) {
+        const img = this.imageSources[key];
+        if (img && img.naturalWidth > 0) return { w: img.naturalWidth, h: img.naturalHeight };
+        const ent = (this.section.msiSeries || {})[key];
+        if (ent && Number.isFinite(ent.rasterW) && Number.isFinite(ent.rasterH)
+            && ent.rasterW > 0 && ent.rasterH > 0) return { w: ent.rasterW, h: ent.rasterH };
+        return null;
+    }
+
+    // 表示に必要になった MSI レイヤーだけを読み込む。同じキーへの同時要求は 1 本の
+    // Promise にまとめる (サムネイルの可視化と本描画が同時に要求しうるため)。
+    ensureMsiLayerLoaded(key) {
+        if (!key || !/^MSI_/i.test(key)) return Promise.resolve(false);
+        if (this.imageSources[key]) { this._touchMsiLru(key); return Promise.resolve(true); }
+        const ent = (this.section.msiSeries || {})[key];
+        if (!ent || !ent.blobId) return Promise.resolve(false);
+        const inflight = this._msiLoadInFlight.get(key);
+        if (inflight) return inflight;
+        const p = (async () => {
+            try {
+                await this.loadMsiLayer(key, ent);
+                if (!this.imageSources[key]) return false;
+                // renderComposite は imageSettings の無いレイヤーを描画対象から
+                // 外すので、読み込んだ直後にここで作らないとイオン像が出ない。
+                this._initLayerSettings(key);
+                this._touchMsiLru(key);
+                return true;
+            } catch (e) {
+                console.warn('MSI レイヤーの遅延読み込みに失敗', key, e);
+                return false;
+            } finally {
+                this._msiLoadInFlight.delete(key);
+            }
+        })();
+        this._msiLoadInFlight.set(key, p);
+        return p;
+    }
+
+    // サムネイルが画面に入ったら、そのレイヤーを読み込んで焼く。
+    // IntersectionObserver が無い環境 (古いブラウザ) では素直に即読みへ倒す。
+    _observeThumb(key, box) {
+        const paint = () => {
+            if (!this._thumbDirty.has(key)) return;
+            this._thumbDirty.delete(key);
+            this.ensureMsiLayerLoaded(key).then((ok) => {
+                if (!ok) { this._thumbDirty.add(key); return; }
+                try { this.renderMsiThumbnail(key); } catch (e) {}
+            });
+        };
+        if (typeof IntersectionObserver !== 'function') { paint(); return; }
+        if (!this._thumbObserver) {
+            this._thumbObserver = new IntersectionObserver((entries) => {
+                for (const e of entries) {
+                    if (!e.isIntersecting) continue;
+                    const k = e.target && e.target.dataset && e.target.dataset.thumbKey;
+                    if (!k) continue;
+                    this._thumbObserver.unobserve(e.target);
+                    const fn = this._thumbPaint && this._thumbPaint.get(k);
+                    if (fn) { this._thumbPaint.delete(k); fn(); }
+                }
+            // rootMargin: 画面に入る少し手前で読み始めて、スクロール時に空白が
+            // 見えている時間を短くする。
+            }, { root: this.dom.thumbs || null, rootMargin: '200px' });
+        }
+        this._thumbPaint = this._thumbPaint || new Map();
+        box.dataset.thumbKey = key;
+        this._thumbPaint.set(key, paint);
+        this._thumbObserver.observe(box);
+    }
+
+    // 配色変更などで全サムネイルを焼き直す。読み込み済みはその場で、未読込は
+    // 「汚れている」印だけ付けて、次に画面へ入ったときに焼く。
+    markAllThumbsDirty() {
+        for (const key of this.msiThumbRefs.keys()) {
+            if (this.imageSources[key]) { try { this.renderMsiThumbnail(key); } catch (e) {} }
+            else this._thumbDirty.add(key);
+        }
+    }
+
+    // 描画対象のうち未読込の MSI を裏で読み、読み終わったら 1 回だけ描き直す。
+    // 描画そのものは待たせない (読めているレイヤーで先に描く) ので、切替やスクロールが
+    // 引っかからない。同じ描画サイクルで何度呼ばれても再描画は 1 回にまとめる。
+    _ensureDrawableLoaded(keys) {
+        const missing = [];
+        for (const k of (keys || [])) {
+            if (!/^MSI_/i.test(k) || this.imageSources[k]) continue;
+            const ent = (this.section.msiSeries || {})[k];
+            if (ent && ent.blobId) missing.push(k);
+        }
+        if (!missing.length) return;
+        if (this._pendingDrawLoad) return;          // 進行中のぶんが終わったらまとめて描き直す
+        this._pendingDrawLoad = Promise.all(missing.map(k => this.ensureMsiLayerLoaded(k)))
+            .then((results) => {
+                this._pendingDrawLoad = null;
+                if (!results.some(Boolean)) return;  // 1 枚も増えていないなら描き直さない (無限ループ防止)
+                try { this.renderComposite(); } catch (e) {}
+            })
+            .catch(() => { this._pendingDrawLoad = null; });
+    }
+
+    // 読み込み済み MSI ラスタの LRU。ROI 値グリッドの _roiRawGridCache と同じ考え方で、
+    // 上限を超えたぶんを古い順に捨てる。表示中・フォーカス中・アクティブは捨てない。
+    _touchMsiLru(key) {
+        this._msiLru.delete(key);
+        this._msiLru.add(key);          // Set は挿入順を保つので末尾 = 最新
+        this._evictMsiRasters();
+    }
+    _evictMsiRasters() {
+        if (this._msiLru.size <= MSI_LAYER_CACHE_MAX) return;
+        const keep = new Set(this.visibleLayers);
+        if (typeof App !== 'undefined' && App && App.focusCompoundKey) keep.add(App.focusCompoundKey);
+        if (this.activeMsiKey) keep.add(this.activeMsiKey);
+        for (const key of [...this._msiLru]) {
+            if (this._msiLru.size <= MSI_LAYER_CACHE_MAX) break;
+            if (keep.has(key)) continue;
+            this._msiLru.delete(key);
+            delete this.imageSources[key];
+            delete this.imageDataUrls[key];
+            this.msiValueRasters.delete(key);
+            // imageSettings は残す: 捨てると再読込までの間 renderComposite が
+            // このレイヤーを描画対象外にしてしまう。中身は寸法から作り直せる。
+            // 焼き済みのサムネイル (msiThumbRefs の <img>) も data URL なので生き残る。
+            this._thumbDirty.add(key);   // 配色変更などで焼き直しが要るとき用
+        }
     }
 
     async loadImageLayer(key, ent) {
@@ -3213,15 +3396,25 @@ class SectionPanel {
         // intensity Mean/Max in the original scale rather than 0-255 luminance.
         // Legacy projects (registered before these fields existed) had blank
         // Mean/Max in the table; flag missing-on-disk so we IDB-save once.
+        // rasterW/rasterH: ラスタの画素寸法。レイヤーを読み込まなくてもキャンバスの
+        // 幾何・スケールバー・寸法不一致の判定ができるように ent に持たせる。
+        // 遅延読み込み(表示中のレイヤーしか読まない)にすると、これが無いと
+        // 「1 枚も読み込んでいない切片のキャンバスサイズが決まらない」ため必須。
+        // 旧プロジェクトには無いので、初回読み込み時にバックフィルする。
+        const rasterW = (result && typeof result === 'object' && Number.isFinite(result.width)) ? result.width : null;
+        const rasterH = (result && typeof result === 'object' && Number.isFinite(result.height)) ? result.height : null;
         if (this.section.msiSeries && this.section.msiSeries[key]) {
             const entRef = this.section.msiSeries[key];
-            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean) || !Number.isFinite(entRef.rawTrueMax) || !Number.isFinite(entRef.rawDispMax) || !entRef.diag;
+            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean) || !Number.isFinite(entRef.rawTrueMax) || !Number.isFinite(entRef.rawDispMax) || !entRef.diag
+                || !Number.isFinite(entRef.rasterW) || !Number.isFinite(entRef.rasterH);
             if (rawRange) entRef.rawRange = rawRange;
             if (rawMean != null) entRef.rawMean = rawMean;
             if (rawTrueMax != null) entRef.rawTrueMax = rawTrueMax;
             if (rawDispMax != null) entRef.rawDispMax = rawDispMax;
             if (diag) entRef.diag = diag;
-            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null || rawDispMax != null || diag) && App && App.queueSave) App.queueSave();
+            if (rasterW != null) entRef.rasterW = rasterW;
+            if (rasterH != null) entRef.rasterH = rasterH;
+            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null || rawDispMax != null || diag || rasterW != null) && App && App.queueSave) App.queueSave();
         }
         await this.attachImage(key, dataUrl);
     }
@@ -3237,46 +3430,52 @@ class SectionPanel {
         });
     }
 
-    async analyzeAndInitSettings() {
-        for (const key of Object.keys(this.imageSources)) {
-            const img = this.imageSources[key];
-            const persistedDisp = (this.section.meta && this.section.meta.layerDisplay && this.section.meta.layerDisplay[key]) || null;
-            const persistedGray = !!(persistedDisp && persistedDisp.grayscale);
-            // applyOpacity defaults: HE/IF off (always opaque), everything else on.
-            // Persisted boolean wins regardless of layer type.
-            const isHeLikeKey = /HE_STAIN|IF_STAIN/i.test(key);
-            const persistedApply = (persistedDisp && typeof persistedDisp.applyOpacity === 'boolean')
-                ? persistedDisp.applyOpacity
-                : !isHeLikeKey;
-            if (!img || !img.complete || img.naturalWidth === 0) {
-                this.imageSettings[key] = { opacity: 1.0, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255, grayscale: persistedGray, applyOpacity: persistedApply };
-                continue;
-            }
-            const c = document.createElement('canvas');
-            c.width = img.naturalWidth; c.height = img.naturalHeight;
-            const ctx = get2dContext(c, { willReadFrequently: true });
-            ctx.drawImage(img, 0, 0);
-            const d = ctx.getImageData(0, 0, c.width, c.height).data;
-            let mn = 255, mx = 0;
-            const isMsi = /^MSI_/i.test(key);
-            for (let i = 0; i < d.length; i += 4) {
-                if (isMsi && d[i + 3] === 0) continue;
-                const l = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
-                if (l < mn) mn = l;
-                if (l > mx) mx = l;
-            }
-            // actualMin/actualMax capture the observed raster luminance range.
-            // MSI display is driven by App.getMsiWindow (per-MRM window over the
-            // in-scope sections, see msiWindowEval), NOT by these per-section
-            // vmin/vmax — so vmin/vmax are pinned to 0-255 (unused for MSI) and
-            // the Master / common-window stretch is skipped below.
-            // Guard against degenerate cases (fully transparent MSI, decode
-            // failure leaving mn=255/mx=0).
-            if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn > mx) { mn = 0; mx = 255; }
-            const dispVmin = isMsi ? 0 : mn;
-            const dispVmax = isMsi ? 255 : mx;
-            this.imageSettings[key] = { opacity: 1.0, vmin: dispVmin, vmax: dispVmax, actualMin: mn, actualMax: mx, grayscale: persistedGray, applyOpacity: persistedApply };
+    // 1 レイヤーぶんの表示設定を作る。遅延読み込みでは 1 枚ずつ後から読み込まれるので、
+    // 全レイヤーを走査する analyzeAndInitSettings とは別に単体で呼べる必要がある。
+    // (renderComposite は imageSettings が無いレイヤーを描画対象から外すため、
+    //  読み込んだ直後にこれを呼ばないとイオン像が出ない。)
+    _initLayerSettings(key) {
+        const img = this.imageSources[key];
+        const persistedDisp = (this.section.meta && this.section.meta.layerDisplay && this.section.meta.layerDisplay[key]) || null;
+        const persistedGray = !!(persistedDisp && persistedDisp.grayscale);
+        // applyOpacity defaults: HE/IF off (always opaque), everything else on.
+        // Persisted boolean wins regardless of layer type.
+        const isHeLikeKey = /HE_STAIN|IF_STAIN/i.test(key);
+        const persistedApply = (persistedDisp && typeof persistedDisp.applyOpacity === 'boolean')
+            ? persistedDisp.applyOpacity
+            : !isHeLikeKey;
+        if (!img || !img.complete || img.naturalWidth === 0) {
+            this.imageSettings[key] = { opacity: 1.0, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255, grayscale: persistedGray, applyOpacity: persistedApply };
+            return;
         }
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        const ctx = get2dContext(c, { willReadFrequently: true });
+        ctx.drawImage(img, 0, 0);
+        const d = ctx.getImageData(0, 0, c.width, c.height).data;
+        let mn = 255, mx = 0;
+        const isMsi = /^MSI_/i.test(key);
+        for (let i = 0; i < d.length; i += 4) {
+            if (isMsi && d[i + 3] === 0) continue;
+            const l = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+            if (l < mn) mn = l;
+            if (l > mx) mx = l;
+        }
+        // actualMin/actualMax capture the observed raster luminance range.
+        // MSI display is driven by App.getMsiWindow (per-MRM window over the
+        // in-scope sections, see msiWindowEval), NOT by these per-section
+        // vmin/vmax — so vmin/vmax are pinned to 0-255 (unused for MSI) and
+        // the Master / common-window stretch is skipped below.
+        // Guard against degenerate cases (fully transparent MSI, decode
+        // failure leaving mn=255/mx=0).
+        if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn > mx) { mn = 0; mx = 255; }
+        const dispVmin = isMsi ? 0 : mn;
+        const dispVmax = isMsi ? 255 : mx;
+        this.imageSettings[key] = { opacity: 1.0, vmin: dispVmin, vmax: dispVmax, actualMin: mn, actualMax: mx, grayscale: persistedGray, applyOpacity: persistedApply };
+    }
+
+    async analyzeAndInitSettings() {
+        for (const key of Object.keys(this.imageSources)) this._initLayerSettings(key);
         // Master Range inheritance: when section.meta.layerDisplay[key] has a
         // saved vmin/vmax (written by Master through applyRangeRaw and shipped
         // via _publishCore), use it as the Viewer's initial Range. actualMin /
@@ -3311,10 +3510,17 @@ class SectionPanel {
             const hasHE = Object.keys(this.section.images || {})
                 .some(k => /HE_STAIN/i.test(k) && k !== TIC_KEY);
             if (hasHE) return;
-            const msiKeys = Object.keys(this.section.msiSeries || {})
-                .filter(k => /^MSI_/i.test(k));
-            if (msiKeys.length < 2) return;
+            const allMsi = this.registeredMsiKeys();
+            if (allMsi.length < 2) return;
             if (this.imageSources && this.imageSources[TIC_KEY]) return;   // already injected
+            // 合成 TIC は全化合物の合計なので、遅延読み込みと相性が悪い唯一の処理。
+            // 強度の強い上位だけを足す (下記 _ticContributorKeys)。1 枚ずつ読んで
+            // 足す (_generateSyntheticTic 側) のでメモリは増えない。
+            const msiKeys = this._ticContributorKeys(allMsi);
+            if (msiKeys.length < allMsi.length) {
+                console.info('[tic] 強度上位 ' + msiKeys.length + ' 化合物で合成 TIC を作ります (全 '
+                    + allMsi.length + ')');
+            }
             const ticImg = await this._generateSyntheticTic(msiKeys);
             if (!ticImg) return;
             this.imageSources = this.imageSources || {};
@@ -3352,37 +3558,65 @@ class SectionPanel {
         }
     }
 
-    _generateSyntheticTic(msiKeys) {
+    // 合成 TIC に足し込む化合物を、強度の強い順に上位 TIC_SYNTH_TOP_N 本選ぶ。
+    //
+    // 並べる基準は rawMean (その層の全画素の平均強度)。TIC は総和なので、ある層の
+    // 寄与は「平均強度 × 画素数」であり、同じ切片なら画素数は共通なので平均で並べる
+    // のが総和で並べるのと同じになる。rawTrueMax (ピーク) で並べてはいけない —
+    // 1 画素だけ強くて他が空の層が上位に来てしまい、TIC への寄与と一致しない。
+    //
+    // rawMean はレイヤー登録時に ent へ保存されるので、**データを 1 バイトも読まずに**
+    // 順位が決まる。古いプロジェクトで欠けている層は末尾に回す (全体が N 以下なら
+    // どのみち全部使うので影響しない)。
+    _ticContributorKeys(msiKeys) {
+        if (msiKeys.length <= TIC_SYNTH_TOP_N) return msiKeys;
+        const series = this.section.msiSeries || {};
+        const score = (k) => {
+            const ent = series[k];
+            return (ent && Number.isFinite(ent.rawMean)) ? ent.rawMean : -Infinity;
+        };
+        // キーで tie-break して、同じデータなら毎回同じ TIC になるようにする。
+        return msiKeys.slice()
+            .sort((a, b) => (score(b) - score(a)) || (a < b ? -1 : a > b ? 1 : 0))
+            .slice(0, TIC_SYNTH_TOP_N);
+    }
+
+    // 全化合物の輝度を足して 1 枚の灰色画像にする。遅延読み込みでは全レイヤーが
+    // 同時に手元にあるとは限らないので、**1 枚ずつ読み込んで足し込む**。累積バッファ
+    // 1 本ぶんしか増えないので、LRU が途中でレイヤーを捨てても結果は変わらない。
+    async _generateSyntheticTic(msiKeys) {
+        // 基準寸法。ent の記録から取れるので、まだ 1 枚も読んでいなくても決まる。
+        let ref = null;
+        for (const k of msiKeys) { ref = this.msiRasterSize(k); if (ref) break; }
+        if (!ref) return null;
+        const w = ref.w, h = ref.h;
+        const accum = new Float32Array(w * h);
+        const count = new Uint32Array(w * h);
+        const tc = document.createElement('canvas');
+        tc.width = w; tc.height = h;
+        const tctx = get2dContext(tc, { willReadFrequently: true });
+        let summed = 0;
+        for (const key of msiKeys) {
+            // 読めなければ黙って飛ばす (従来と同じ寛容さ)。
+            if (!this.imageSources[key]) {
+                try { await this.ensureMsiLayerLoaded(key); } catch (e) { continue; }
+            }
+            const img = this.imageSources[key];
+            if (!img || !img.complete || img.naturalWidth !== w || img.naturalHeight !== h) continue;
+            tctx.clearRect(0, 0, w, h);
+            tctx.drawImage(img, 0, 0);
+            const d = tctx.getImageData(0, 0, w, h).data;
+            for (let i = 0, p = 0; i < d.length; i += 4, p++) {
+                if (d[i+3] === 0) continue;
+                const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
+                accum[p] += lum;
+                count[p]++;
+            }
+            summed++;
+        }
+        if (summed === 0) return null;
         return new Promise((resolve) => {
             try {
-                let refImg = null;
-                for (const k of msiKeys) {
-                    const im = this.imageSources && this.imageSources[k];
-                    if (im && im.complete && im.naturalWidth > 0) { refImg = im; break; }
-                }
-                if (!refImg) { resolve(null); return; }
-                const w = refImg.naturalWidth, h = refImg.naturalHeight;
-                const accum = new Float32Array(w * h);
-                const count = new Uint32Array(w * h);
-                const tc = document.createElement('canvas');
-                tc.width = w; tc.height = h;
-                const tctx = get2dContext(tc, { willReadFrequently: true });
-                let summed = 0;
-                for (const key of msiKeys) {
-                    const img = this.imageSources[key];
-                    if (!img || !img.complete || img.naturalWidth !== w || img.naturalHeight !== h) continue;
-                    tctx.clearRect(0, 0, w, h);
-                    tctx.drawImage(img, 0, 0);
-                    const d = tctx.getImageData(0, 0, w, h).data;
-                    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
-                        if (d[i+3] === 0) continue;
-                        const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-                        accum[p] += lum;
-                        count[p]++;
-                    }
-                    summed++;
-                }
-                if (summed === 0) { resolve(null); return; }
                 let maxAvg = 0;
                 for (let p = 0; p < w * h; p++) {
                     if (count[p] === 0) continue;
@@ -3450,8 +3684,10 @@ class SectionPanel {
     getMsiRefSize() {
         const refKey = this._pickRefMsiKey();
         if (refKey) {
-            const r = this.imageSources[refKey];
-            if (r && r.naturalWidth > 0) return { w: r.naturalWidth, h: r.naturalHeight };
+            // 未読込でも ent.rasterW/H から返せる (HE→MSI アフィンの基準サイズが
+            // 遅延読み込みのタイミングでぶれないようにするため)。
+            const r = this.msiRasterSize(refKey);
+            if (r) return r;
         }
         const heKeys = Object.keys(this.imageSources).filter(k => /HE_STAIN|IF_STAIN/i.test(k));
         if (heKeys.length) {
@@ -3477,14 +3713,19 @@ class SectionPanel {
     // switches between compounds from different source files). Otherwise
     // fall back to the first registered MSI which preserves Free-mode
     // behavior.
+    // 基準にする MSI レイヤー。キャンバスの幾何を決めるのに使うので、遅延読み込みで
+    // まだ 1 枚も読めていない状態でも「登録されている先頭」を返す必要がある
+    // (msiRasterSize が ent.rasterW/H から寸法を復元できる)。
     _pickRefMsiKey() {
         if (typeof App !== 'undefined' && App && App.viewMode === 'compound'
             && App.focusCompoundKey
-            && this.imageSources[App.focusCompoundKey]
-            && /^MSI_/i.test(App.focusCompoundKey)) {
+            && /^MSI_/i.test(App.focusCompoundKey)
+            && this.msiRasterSize(App.focusCompoundKey)) {
             return App.focusCompoundKey;
         }
-        return Object.keys(this.imageSources).find(k => /^MSI_/i.test(k)) || null;
+        const loaded = Object.keys(this.imageSources).find(k => /^MSI_/i.test(k));
+        if (loaded) return loaded;
+        return this.registeredMsiKeys().find(k => this.msiRasterSize(k)) || null;
     }
 
     _refSourceFileId() {
@@ -3537,17 +3778,22 @@ class SectionPanel {
         const heKey  = Object.keys(this.imageSources).find(k => /HE_STAIN|IF_STAIN/i.test(k));
         const refKey = msiKey || heKey || Object.keys(this.imageSources)[0];
         if (!refKey) return;
-        const refImg = this.imageSources[refKey];
-        if (!refImg || !refImg.complete || refImg.naturalWidth === 0) return;
         const refIsMsi = !!msiKey && refKey === msiKey;
+        // MSI は未読込でも ent の記録から寸法が取れる。HE/IF は従来どおり実物から
+        // (常に読み込んであるので問題ない)。
+        const refSize = refIsMsi ? this.msiRasterSize(refKey) : (() => {
+            const im = this.imageSources[refKey];
+            return (im && im.complete && im.naturalWidth > 0) ? { w: im.naturalWidth, h: im.naturalHeight } : null;
+        })();
+        if (!refSize) return;
 
-        let w = refImg.naturalWidth, h = refImg.naturalHeight;
+        let w = refSize.w, h = refSize.h;
         if (refIsMsi) { const t = w; w = h; h = t; }
         let scale = 1;
         if (refIsMsi && heKey) {
             const heImg = this.imageSources[heKey];
             if (heImg && heImg.naturalWidth > 0) {
-                const ratio = Math.max(heImg.naturalWidth / refImg.naturalWidth, heImg.naturalHeight / refImg.naturalHeight);
+                const ratio = Math.max(heImg.naturalWidth / refSize.w, heImg.naturalHeight / refSize.h);
                 scale = Math.max(1, Math.min(8, Math.ceil(ratio)));
             }
         } else if (refIsMsi && App.msiSmoothing === 'linear') {
@@ -3560,7 +3806,7 @@ class SectionPanel {
             // size (sx = croi.height/ref.w …) so they follow automatically.
             const host = this.dom.host;
             const target = Math.max(host ? host.clientWidth : 0, host ? host.clientHeight : 0) || 600;
-            const ratio = target / Math.max(refImg.naturalWidth, refImg.naturalHeight);
+            const ratio = target / Math.max(refSize.w, refSize.h);
             scale = Math.max(1, Math.min(8, Math.ceil(ratio)));
         }
         w = Math.round(w * scale); h = Math.round(h * scale);
@@ -3644,7 +3890,10 @@ class SectionPanel {
         // routed through the rotate-into-MSI-frame T-branch regardless of HE
         // orientation. Keying on imageSources (not visibleLayers) keeps canvas
         // geometry stable across MSI visibility toggles.
-        const hasMsiRef = Object.keys(this.imageSources).some(k => /^MSI_/i.test(k));
+        // 在庫で判定する。読み込み済みで見ると、遅延読み込み中に MSI 無し扱いになって
+        // キャンバスの向きが一瞬変わってしまう。
+        const hasMsiRef = this.registeredMsiKeys().length > 0
+            || Object.keys(this.imageSources).some(k => /^MSI_/i.test(k));
 
         // In Compound mode the focus compound is the only MSI layer drawn,
         // regardless of per-section visibility flags. HE/IF stays under
@@ -3668,16 +3917,22 @@ class SectionPanel {
         // HE_STAIN_TIC and IF_STAIN; explicit sort keeps the order stable.
         heLikeKeys.sort((a, b) => (a === 'HE_STAIN_TIC' ? -1 : 0) - (b === 'HE_STAIN_TIC' ? -1 : 0));
         let layersToDraw = [...heLikeKeys, ...others, ...msiKeys];
-        if (compoundFocus && this.imageSources[compoundFocus] && !layersToDraw.includes(compoundFocus)) {
+        if (compoundFocus && !layersToDraw.includes(compoundFocus)
+            && (this.imageSources[compoundFocus] || this.registeredMsiKeys().includes(compoundFocus))) {
             layersToDraw.push(compoundFocus);
         }
         if (overlay) {
             // Overlay overrides the visible-layer set: draw only the overlay's
             // member MSI layers (plus the HE/IF backdrop when bg === 'he').
+            // 未読込のメンバーもここでは残す — 下の遅延読み込みが拾って読み直す。
             const members = (overlay.layers || []).map(l => l && l.key)
-                .filter(k => k && this.imageSources[k] && this.imageSettings[k]);
+                .filter(k => k && (this.imageSources[k] || this.registeredMsiKeys().includes(k)));
             layersToDraw = overlayBlack ? members : [...heLikeKeys, ...members];
         }
+        // 遅延読み込み: 描くべきなのにまだ読み込んでいない MSI があれば、裏で読んで
+        // 読み終わったら描き直す。今回の描画はそのまま (読めているものだけ) 進める
+        // ので、レイヤー切替やスクロールがブロックされない。
+        this._ensureDrawableLoaded(layersToDraw);
         // ③ ROI-only display: when enabled, MSI layers are clipped to the
         // active ROI's polygon for this section. Built in canvas coords with the
         // same mapping drawAllRois uses (flip handled by the surrounding
@@ -3877,9 +4132,11 @@ class SectionPanel {
         const bar = this.dom && this.dom.scalebar; if (!bar) return;
         const wc = this.section.meta && this.section.meta.world_coords;
         const um = wc && wc.msi_um_per_px;
-        const msiKey = Object.keys(this.imageSources).find(k => /^MSI_/i.test(k));
-        const msiImg = msiKey ? this.imageSources[msiKey] : null;
-        if (!um || !Number.isFinite(um.x) || !Number.isFinite(um.y) || !msiImg || !msiImg.naturalWidth) {
+        // 寸法だけ要るので、読み込み済みでなくても ent の記録から取れる
+        // (遅延読み込み中にスケールバーが消えないようにする)。
+        const msiKey = this._pickRefMsiKey();
+        const msiSize = msiKey ? this.msiRasterSize(msiKey) : null;
+        if (!um || !Number.isFinite(um.x) || !Number.isFinite(um.y) || !msiSize) {
             bar.style.display = 'none';
             return;
         }
@@ -3891,7 +4148,7 @@ class SectionPanel {
         // covers the MSI's natural-height axis. cssW / msi.naturalHeight is the
         // number of CSS px per MSI px before user zoom.
         const vt = this._ensureViewerTransform();
-        const screenPxPerMsiPx = (cssW / msiImg.naturalHeight) * (Number(vt.scale) || 1);
+        const screenPxPerMsiPx = (cssW / msiSize.h) * (Number(vt.scale) || 1);
         const umPerMsiPx = (Number(um.x) + Number(um.y)) / 2;
         if (!(umPerMsiPx > 0)) { bar.style.display = 'none'; return; }
         const screenPxPerUm = screenPxPerMsiPx / umPerMsiPx;
@@ -4144,7 +4401,7 @@ class SectionPanel {
     rebuildLayerBar() {
         const bar = this.dom.layerBar;
         bar.innerHTML = '';
-        const allKeys = Object.keys(this.imageSources);
+        const allKeys = this.registeredLayerKeys();
         if (!allKeys.length) return;
 
         // Bucket layers by source file id (or HE/IF / legacy bucket).
@@ -4570,6 +4827,13 @@ class SectionPanel {
         delete this.imageSources[key];
         delete this.imageSettings[key];
         delete this.imageDataUrls[key];
+        // 遅延読み込みの付帯状態も落とす。残すと LRU が存在しないレイヤーを数えたり、
+        // 「未読込だから読み込め」と要求し続けたりする。
+        this._msiLru.delete(key);
+        this._thumbDirty.delete(key);
+        this._msiLoadInFlight.delete(key);
+        this._thumbPaint.delete(key);
+        this.msiValueRasters.delete(key);
         this.visibleLayers.delete(key);
         this._persistVisibleLayers();
         this.msiThumbRefs.delete(key);
@@ -5039,13 +5303,18 @@ class SectionPanel {
     // ---- Thumbnails ----
     populateThumbnails() {
         const host = this.dom.thumbs;
+        // 作り直す前に監視を切る。古い <img> を監視したままだと、破棄済みの
+        // 要素を掴み続けてリークする。
+        if (this._thumbObserver) { try { this._thumbObserver.disconnect(); } catch (e) {} }
+        this._thumbObserver = null;
+        this._thumbPaint.clear();
         host.innerHTML = '';
         this.msiThumbRefs.clear();
         // Track thumb cells per layer key so refreshMarkerOutline can paint
         // the cell outline without re-running populateThumbnails.
         if (!this.dom.thumbCells) this.dom.thumbCells = new Map();
         else this.dom.thumbCells.clear();
-        const allKeys = Object.keys(this.imageSources);
+        const allKeys = this.registeredLayerKeys();
         if (!allKeys.length) return;
 
         // Mirror the layer-bar grouping: HE/IF first, then each MSI source file,
@@ -5106,7 +5375,10 @@ class SectionPanel {
             }, true);
             const im = document.createElement('img');
             im.alt = formatDisplayName(key);
-            im.src = this.imageDataUrls[key];
+            // 未読込の MSI には src が無い。画面に入ったところで読み込んで焼くので
+            // (下の _observeThumb)、ここでは空のままにしておく。読み込み済み・
+            // HE/IF・合成 TIC は従来どおり即座に src が入る。
+            if (this.imageDataUrls[key]) im.src = this.imageDataUrls[key];
             const isMsi = /^MSI_/i.test(key);
             // The synthetic TIC lives in MSI raster space (same naturalW/H
             // and same orientation as the underlying MSI), so its thumbnail
@@ -5133,9 +5405,17 @@ class SectionPanel {
             cell.appendChild(cap);
             if (isMsi) {
                 this.msiThumbRefs.set(key, im);
-                const onLoad = () => { im.removeEventListener('load', onLoad); this.renderMsiThumbnail(key); };
-                if (im.complete && im.naturalWidth) this.renderMsiThumbnail(key);
-                else im.addEventListener('load', onLoad);
+                if (this.imageSources[key]) {
+                    // 読み込み済み: 従来どおり即座に焼く。
+                    const onLoad = () => { im.removeEventListener('load', onLoad); this.renderMsiThumbnail(key); };
+                    if (im.complete && im.naturalWidth) this.renderMsiThumbnail(key);
+                    else im.addEventListener('load', onLoad);
+                } else {
+                    // 未読込: 画面に入るまで何もしない。2000 化合物あっても、
+                    // スクロールして見えたぶんしか読み込まれない。
+                    this._thumbDirty.add(key);
+                    this._observeThumb(key, box);
+                }
             }
             this.dom.thumbCells.set(key, cell);
             const ent2 = (this.section.msiSeries || {})[key];
@@ -5369,10 +5649,22 @@ class SectionPanel {
             }
         }
         await this.loadMsiLayer(key, ent);
+        this._initLayerSettings(key);
+        this._touchMsiLru(key);
+        // 一括登録 (1 ファイルから N 化合物) では、化合物ごとに全レイヤー走査を
+        // 2 つ回していたので O(N^2) になっていた。opts.deferBulkRefresh が立って
+        // いる間はこれらを飛ばし、呼び出し側が最後に 1 回だけ finishBulkAdd() を
+        // 呼ぶ。単発の登録 (既定) は従来どおりその場で全部やる。
+        if (opts.deferBulkRefresh) return;
+        await this.finishBulkAdd(key);
+    }
+
+    // 一括登録の締め。addMsiLayer が deferBulkRefresh で飛ばした更新をまとめて行う。
+    async finishBulkAdd(lastKey) {
         await this.analyzeAndInitSettings();
         App.recomputeMsiAbsScale();
         try { Toolbar.refreshOutlierClip(); } catch (e) {}
-        this.toggleLayer(key, true);
+        if (lastKey) this.toggleLayer(lastKey, true);
         this.populateThumbnails();
         this.renderEmptyOverlay();
         this.setupCanvasSize();
@@ -8537,6 +8829,7 @@ const Wizards = {
                 if (r.kind === 'xlsx') {
                     const sourceFileId = uid('msifile');
                     let sharedBlobId = null;
+                    let lastKey = null;
                     for (const pick of r.picks) {
                         const layerKey = 'MSI_' + sanitizeCompoundName(pick.name);
                         const split = splitCeCv(pick.name);
@@ -8556,13 +8849,16 @@ const Wizards = {
                             col_x: r.col_x,
                             col_y: r.col_y,
                             col_v: pick.col,
-                        }, { sourceFileId, compoundMeta, sharedBlobId, displayBaseName: r.displayName });
+                        }, { sourceFileId, compoundMeta, sharedBlobId, displayBaseName: r.displayName, deferBulkRefresh: true });
                         if (!sharedBlobId) sharedBlobId = panel.section.msiSeries[layerKey].blobId;
+                        lastKey = layerKey;
                     }
+                    await panel.finishBulkAdd(lastKey);
                     showToast('Registered ' + r.picks.length + ' MSI layer(s)');
                 } else if (r.kind === 'txt-analyte') {
                     const sourceFileId = uid('msifile');
                     let sharedBlobId = null;
+                    let lastKey = null;
                     for (const pick of r.picks) {
                         const editedBase = pick.layer.replace(/^MSI_/, '');
                         const layerKey = 'MSI_' + sanitizeCompoundName(editedBase);
@@ -8581,9 +8877,11 @@ const Wizards = {
                             kind: 'txt',
                             compound_index: pick.index,
                             dataStartLine: r.dataStartLine,
-                        }, { sourceFileId, compoundMeta, sharedBlobId, displayBaseName: r.displayName });
+                        }, { sourceFileId, compoundMeta, sharedBlobId, displayBaseName: r.displayName, deferBulkRefresh: true });
                         if (!sharedBlobId) sharedBlobId = panel.section.msiSeries[layerKey].blobId;
+                        lastKey = layerKey;
                     }
+                    await panel.finishBulkAdd(lastKey);
                     showToast('Registered ' + r.picks.length + ' MSI layer(s)');
                 } else {
                     const sourceFileId = uid('msifile');
@@ -12174,8 +12472,9 @@ const Toolbar = {
         } else {
             key = panel.activeMsiKey || panel.fallbackActiveMsiKey() || null;
             if (!key) {
-                const msiKeys = Object.keys(panel.imageSources || {}).filter(k => /^MSI_/i.test(k));
-                key = msiKeys[0] || null;
+                // 在庫から選ぶ。読み込み済みだけ見ていると、遅延読み込みで
+                // まだ 1 枚も読めていない切片で Range 編集が使えなくなる。
+                key = panel.registeredMsiKeys()[0] || null;
             }
         }
         if (!key) return null;
@@ -12840,6 +13139,20 @@ const App = {
                 panel.visibleLayers.delete(oldKey);
                 panel.visibleLayers.add(newKey);
             }
+            // 遅延読み込みの付帯状態も付け替える。生強度ラスタを移し忘れると
+            // 改名しただけで 8bit フォールバック描画に落ちる。
+            if (panel.msiValueRasters && panel.msiValueRasters.has(oldKey)) {
+                panel.msiValueRasters.set(newKey, panel.msiValueRasters.get(oldKey));
+                panel.msiValueRasters.delete(oldKey);
+            }
+            if (panel._msiLru && panel._msiLru.has(oldKey)) {
+                panel._msiLru.delete(oldKey);
+                panel._msiLru.add(newKey);
+            }
+            if (panel._thumbDirty && panel._thumbDirty.has(oldKey)) {
+                panel._thumbDirty.delete(oldKey);
+                panel._thumbDirty.add(newKey);
+            }
         }
 
         if (this.focusCompoundKey === oldKey) {
@@ -13291,9 +13604,7 @@ const App = {
         for (const panel of this.panels.values()) {
             try {
                 panel.renderComposite();
-                if (panel.msiThumbRefs) {
-                    for (const key of panel.msiThumbRefs.keys()) panel.renderMsiThumbnail(key);
-                }
+                panel.markAllThumbsDirty();
             } catch (e) { console.warn('repaintAllMsi render failed', e); }
         }
         try { Toolbar.refreshRange(); } catch (e) {}
@@ -13387,11 +13698,9 @@ const App = {
     _rerenderOtsu() {
         for (const p of this.panels.values()) {
             try { p.renderComposite(); } catch (e) {}
-            try {
-                for (const k of Object.keys(p.imageSources || {})) {
-                    if (/^MSI_/i.test(k)) { try { p.renderMsiThumbnail(k); } catch (e) {} }
-                }
-            } catch (e) {}
+            // 読み込み済みはその場で焼き直し、未読込は印だけ付けて次に画面へ
+            // 入ったときに焼く (遅延読み込みのため全レイヤーは手元にない)。
+            try { p.markAllThumbsDirty(); } catch (e) {}
         }
     },
     // 背景除去トグル。ON 時は表示中(全)切片のマスクを確保してから再描画。
@@ -14344,19 +14653,21 @@ const App = {
             // Keep a resolved focus even when its raster is still pending — the
             // loop below loads it. Testing loadedMsi here would throw the hit away
             // and re-introduce the wrong-compound bug the lookup above just fixed.
+            // 遅延読み込みでは loadedMsi が「最初の 1 本」まで縮むので、そこが空でも
+            // 読み込める候補 (loadableMsi) から選べるようにしておく。
             if (!this.focusCompoundKey || !loadableMsi.has(this.focusCompoundKey))
-                this.focusCompoundKey = loadedMsi.values().next().value || null;
+                this.focusCompoundKey = loadedMsi.values().next().value
+                    || loadableMsi.values().next().value || null;
             const fk = this.focusCompoundKey;
             for (const p of this.panels.values()) {
                 try {
-                    const ent = fk && p.section.msiSeries && p.section.msiSeries[fk];
                     // 1) Ensure the focus raster is loaded for THIS panel.
-                    if (fk && ent && ent.blobId && !p.imageSources[fk]) {
-                        await p.loadMsiLayer(fk, ent);
-                    }
-                    // 2) Ensure imageSettings[fk] exists — loadMsiLayer does NOT
-                    //    init settings, and renderComposite SKIPS layers without
-                    //    settings (this was why self-healed panels stayed HE-only).
+                    //    ensureMsiLayerLoaded は読み込みに加えて imageSettings の
+                    //    初期化と LRU への登録もやる (loadMsiLayer 単体はやらない)。
+                    if (fk) await p.ensureMsiLayerLoaded(fk);
+                    // 2) 保険: 何らかの理由で設定が無ければ作る。renderComposite は
+                    //    設定の無いレイヤーを描画対象から外すため (自己修復パネルが
+                    //    HE だけになっていた原因)。
                     if (fk && p.imageSources[fk] && !p.imageSettings[fk]) {
                         await p.analyzeAndInitSettings();
                     }
