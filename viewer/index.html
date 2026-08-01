@@ -2165,31 +2165,40 @@ function computeRasterPixels(rows, range, bakeMode) {
         grid[ri][ci] = (Number.isFinite(old) ? old : 0) + r.v;
         cnt[ri][ci] = (cnt[ri][ci] || 0) + 1;
     }
-    let vmin = Infinity, vmax = -Infinity;
-    let sum = 0, n = 0;
-    const vals = [];
     // Rows sharing one (x,y) are summed above and averaged below. That is a real
     // change to the data, so count how often it happened (dupCells = grid cells fed
     // by >1 row, dupRows = the surplus rows folded in) instead of doing it silently.
     let dupCells = 0, dupRows = 0;
     // values = 重複平均まで済ませた生強度を W*H に並べたもの (NaN = データ無し)。
-    // 描画は本来これを直接カラーマップに通せば足りる。8bit の pixels は
-    // Math.round(nn*255) で潰した表示用コピーで、renderComposite は描画のたびに
-    // msiWindowEval で生値へ逆変換し直している。値ラスタを返しておけば、その
-    // 逆変換 (と、それに伴う量子化・クリップの損失) を将来まるごと外せる。
+    // ベイク範囲・8bit 画素・統計はここから先の bakeRasterFromValues が作る
+    // (parquet 経路と共有するため)。
     const values = new Float32Array(W * H).fill(NaN);
     for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
         if (cnt[i][j] > 0) {
             if (cnt[i][j] > 1) { dupCells++; dupRows += cnt[i][j] - 1; }
             grid[i][j] /= cnt[i][j];
-            const v = grid[i][j];
-            values[i * W + j] = v;
-            if (v < vmin) vmin = v;
-            if (v > vmax) vmax = v;
-            sum += v;
-            n++;
-            vals.push(v);
+            values[i * W + j] = grid[i][j];
         }
+    }
+    return bakeRasterFromValues(values, W, H, range, bakeMode,
+        { dupCells, dupRows, gridFallback: gridFallback || null });
+}
+
+// 「W×H に並んだ生強度 (NaN = データ無し)」からベイク範囲・8bit 画素・統計を作る。
+// computeRasterPixels (xlsx/txt: 行の集合から格子を組む) と parquet (列を読んで
+// 格子へ散らす) の**両方がここを通る**。ベイク範囲の決め方や診断の数え方を 2 か所に
+// 書くと、同じデータなのに経路によって数値が食い違うため、必ず共有する。
+// extra には経路ごとの診断 (重複平均の件数・格子フォールバック) を渡す。
+function bakeRasterFromValues(values, W, H, range, bakeMode, extra) {
+    extra = extra || {};
+    let vmin = Infinity, vmax = -Infinity, sum = 0, n = 0;
+    const vals = [];
+    for (let i = 0; i < values.length; i++) {
+        const v = values[i];
+        if (!Number.isFinite(v)) continue;
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+        sum += v; n++; vals.push(v);
     }
     const rawMean = n > 0 ? (sum / n) : null;
     // Bake range. rawRange (= [bakeLo, bakeHi]) doubles as the basis for display
@@ -2245,8 +2254,8 @@ function computeRasterPixels(rows, range, bakeMode) {
     // used to be reported here was therefore always 0 — the badge could never
     // fire. Old projects may still carry it in a saved `diag`; nothing reads it.
     let clippedHigh = 0;
-    for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
-        const v = grid[i][j];
+    for (let k = 0; k < values.length; k++) {
+        const v = values[k];
         if (!Number.isFinite(v)) { pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; }
         else {
             if (bakeRangeFromData && v > bakeHi) clippedHigh++;
@@ -2255,7 +2264,8 @@ function computeRasterPixels(rows, range, bakeMode) {
             pixels[p++] = g; pixels[p++] = g; pixels[p++] = g; pixels[p++] = 255;
         }
     }
-    const diag = { dupCells, dupRows, clippedHigh, gridFallback: gridFallback || null, nPixels: n,
+    const diag = { dupCells: extra.dupCells || 0, dupRows: extra.dupRows || 0, clippedHigh,
+                   gridFallback: extra.gridFallback || null, nPixels: n,
                    bakeMode: (bakeMode === 'full') ? 'full' : 'robust' };
     return { width: W, height: H, pixels, values, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax, rawDispMax, diag };
 }
@@ -2885,7 +2895,7 @@ function _buildParseWorkerSource() {
     const fns = [
         a1ColToIndex, indexToA1Col, percentileSorted, buildMsiGrid, labToSrgb,
         get2dContext, _mkCanvas, _canvasToDataUrl, _encodePixelsToDataUrl,
-        computeRasterPixels, parseXlsxToRows, parseTxtToRows,
+        bakeRasterFromValues, computeRasterPixels, parseXlsxToRows, parseTxtToRows,
         decodeJpegInTiffToDataUrl, decodeTiffArrayBufferToDataUrl, inspectXlsxColumns,
         _parseWorkerOnMessage,
     ];
