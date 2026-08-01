@@ -2490,18 +2490,39 @@ async function _ensureRoiRawGrid(section, layerKey) {
 
     const srcKey = ent.sourceFileId || ent.blobId;
     const entries = [{ layerKey, ent }];
-    for (const k of Object.keys(series)) {
-        if (k === layerKey || !/^MSI_/i.test(k)) continue;
-        const e = series[k];
-        if (!e || e.blobId !== ent.blobId) continue;
-        if ((e.sourceFileId || e.blobId) !== srcKey) continue;
-        if (entries.length >= ROI_RAW_GRID_CACHE_MAX) break;
-        entries.push({ layerKey: k, ent: e });
+    // parquet は列ごとに独立した読みなので、周辺レイヤーをまとめて温めても得がない
+    // (むしろ余計な列を読むだけ)。xlsx/txt は 1 回のパースで全列が取れるので束ねる。
+    if (ent.kind !== 'parquet') {
+        for (const k of Object.keys(series)) {
+            if (k === layerKey || !/^MSI_/i.test(k)) continue;
+            const e = series[k];
+            if (!e || e.blobId !== ent.blobId) continue;
+            if ((e.sourceFileId || e.blobId) !== srcKey) continue;
+            if (entries.length >= ROI_RAW_GRID_CACHE_MAX) break;
+            entries.push({ layerKey: k, ent: e });
+        }
     }
 
     let rec = null;
     try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
     if (!rec || !rec.blob) return null;
+
+    // ★ parquet は列指向なので、この化合物の 1 列だけを読む。
+    //   ここを通さないと extractSourceMatrixForExport の xlsx 経路へ落ち、
+    //   836 MB を丸ごと ArrayBuffer に展開して XLSX.read に食わせることになる
+    //   (タブが固まる。要望③「ROI は DESI と同一機能」が成立しなくなる)。
+    if (ent.kind === 'parquet') {
+        try {
+            const grid = await parquetRoiGrid(ent, rec.blob);
+            if (!grid) return null;
+            _roiGridCacheSet(wantKey, grid);
+            return grid;
+        } catch (e) {
+            console.warn('[roi] parquet column read failed', layerKey, e);
+            return null;
+        }
+    }
+
     let m = null;
     try { m = extractSourceMatrixForExport(await rec.blob.arrayBuffer(), ent, entries); }
     catch (e) { console.warn('[roi] source parse failed', layerKey, e); m = null; }
@@ -2557,18 +2578,33 @@ async function computeSectionOtsuMasks(sec, project, opts) {
     }
     const bySource = {};
     const unavailable = [];
+    // 「なぜ作れなかったか」。以前は握り潰していたので、ユーザーには
+    // 何も起きていないように見えていた。
+    const reasons = {};
     let totOrig = 0, totKept = 0, totRem = 0;
     for (const [srcKey, grp] of bySourceGrp) {
+        // ★ parquet はここを通さない。この下は「ソース全体を ArrayBuffer に
+        //   展開して xlsx として解釈する」経路なので、836 MB のファイルだと
+        //   タブが固まる (しかも blobContentSig でもう 1 回展開する)。
+        //   parquet の Otsu は「TIC と統計を作る」の 1 パスで一緒に作る
+        //   — どのみち全化合物の合計が要るので、読み直す意味がない。
+        if (grp.repr && grp.repr.kind === 'parquet') {
+            unavailable.push(srcKey);
+            reasons[srcKey] = 'needs-tic-pass';
+            continue;
+        }
         let rec = null;
         try { rec = await ProjectStorage.getBlob(grp.blobId); } catch (e) { rec = null; }
-        if (!rec || !rec.blob) { unavailable.push(srcKey); continue; }
+        if (!rec || !rec.blob) { unavailable.push(srcKey); reasons[srcKey] = 'no-blob'; continue; }
         let m = null, sig = null;
         try {
             const buf = await rec.blob.arrayBuffer();
             m = extractSourceMatrixForExport(buf, grp.repr, grp.entries);
-        } catch (e) { m = null; }
+        } catch (e) { console.warn('[otsu] source parse failed', srcKey, e); m = null; }
         try { sig = await blobContentSig(rec.blob); } catch (e) { sig = null; }
-        if (!m || !m.positions || !m.positions.length) { unavailable.push(srcKey); continue; }
+        if (!m || !m.positions || !m.positions.length) {
+            unavailable.push(srcKey); reasons[srcKey] = 'parse-failed'; continue;
+        }
         const N = m.positions.length;
         // TIC = 各ピクセルの全チャネル合計 (R colSums(counts) と同じ)
         const tic = new Float64Array(N);
@@ -2576,64 +2612,85 @@ async function computeSectionOtsuMasks(sec, project, opts) {
             const v = col.values;
             for (let i = 0; i < N; i++) { const x = v[i]; if (Number.isFinite(x)) tic[i] += x; }
         }
-        // log10(TIC+1) 分布 (Otsu 計算・ヒストグラム表示・強度スライダーに共用)
-        const logTic = new Float64Array(N);
-        let lmn = Infinity, lmx = -Infinity;
-        for (let i = 0; i < N; i++) {
-            const t = tic[i] > 0 ? tic[i] : 0;
-            const lv = useLog ? Math.log10(t + 1) : t;
-            logTic[i] = lv; if (lv < lmn) lmn = lv; if (lv > lmx) lmx = lv;
-        }
-        const autoRes = computeOtsuThreshold(logTic, OTSU_NBINS);
-        const autoThresholdLog = autoRes.threshold;
-        // ヒストグラム(256bin) — Analysis の強度スライダー UI 用に保存(小サイズ)
-        const HB = OTSU_NBINS;
-        let histMin = lmn, histMax = lmx;
-        const histCounts = new Array(HB).fill(0);
-        if (histMax > histMin) {
-            const w = (histMax - histMin) / HB;
-            for (let i = 0; i < N; i++) { let b = Math.floor((logTic[i] - histMin) / w); if (b < 0) b = 0; else if (b >= HB) b = HB - 1; histCounts[b]++; }
-        } else { histMin = lmn - 0.5; histMax = lmn + 0.5; histCounts[Math.floor(HB / 2)] = N; }
-        // 有効閾値 = 手動指定 or 自動Otsu + 強度オフセット(log10 単位。正=強く除去)
-        const strength = Number(opts.strength) || 0;
-        let effLog, thresholdOriginal, isManual = false;
-        if (opts.manualThreshold != null && Number.isFinite(Number(opts.manualThreshold))) {
-            isManual = true;
-            thresholdOriginal = Number(opts.manualThreshold);
-            effLog = useLog ? Math.log10((thresholdOriginal > 0 ? thresholdOriginal : 0) + 1) : thresholdOriginal;
-        } else {
-            effLog = autoThresholdLog + strength;
-            thresholdOriginal = useLog ? (Math.pow(10, effLog) - 1) : effLog;
-        }
-        // keep grid (描画ラスタと同じ buildMsiGrid 座標系で W×H に写像) + gridIdx(キャッシュ用)
+        // 位置 → 格子 (描画ラスタと同じ buildMsiGrid 座標系)
         const { xIndex, yIndex, W, H } = buildMsiGrid(m.positions);
         const gridIdx = new Int32Array(N).fill(-1);
-        const keep = new Uint8Array(W * H);
-        let nKept = 0;
         for (let i = 0; i < N; i++) {
             const p = m.positions[i];
             const ci = xIndex.get(p.x), ri = yIndex.get(p.y);
             if (ci == null || ri == null) continue;
-            const gi = ri * W + ci; gridIdx[i] = gi;
-            if (logTic[i] > effLog) { if (!keep[gi]) { keep[gi] = 1; nKept++; } }
+            gridIdx[i] = ri * W + ci;
         }
-        const nRemoved = N - nKept;
+        const rec2 = buildOtsuRecordFromTic(tic, gridIdx, W, H, opts, useLog);
         // 強度スライダー高速化用のセッションキャッシュ(生 TIC は保存しない)
         if (sec && sec.id != null) {
-            _otsuTicCache.set(sec.id + '|' + srcKey + '|' + (sig || ''), { W, H, gridIdx, logTic, autoThresholdLog });
+            _otsuTicCache.set(sec.id + '|' + srcKey + '|' + (sig || ''),
+                { W, H, gridIdx, logTic: rec2.logTic, autoThresholdLog: rec2.autoThresholdLog });
         }
-        bySource[srcKey] = {
+        bySource[srcKey] = Object.assign(rec2.record, {
+            signature: sig,
+            layerKeys: grp.entries.map(e => e.layerKey),
+        });
+        totOrig += rec2.record.nOriginal; totKept += rec2.record.nKept; totRem += rec2.record.nRemoved;
+        try { if (typeof _yieldUi === 'function') await _yieldUi(); } catch (e) {}
+    }
+    return { bySource, unavailable, reasons, nOriginal: totOrig, nKept: totKept, nRemoved: totRem };
+}
+
+// 「スポットごとの TIC」と「スポット → 格子」から Otsu の記録を組む。
+// xlsx/txt (computeSectionOtsuMasks) と parquet (App.buildTicAndStatsForSource) の
+// **両方がここを通る**。閾値・ヒストグラム・keep の作り方を 2 か所に書くと、
+// 同じデータなのに経路によって除去結果が変わるので必ず共有すること。
+//   tic     : Float64Array(N)  スポットごとの全チャネル合計
+//   gridIdx : Int32Array(N)    そのスポットの格子位置 (-1 = 格子に載らない)
+function buildOtsuRecordFromTic(tic, gridIdx, W, H, opts, useLog) {
+    opts = opts || {};
+    const N = tic.length;
+    // log10(TIC+1) 分布 (Otsu 計算・ヒストグラム表示・強度スライダーに共用)
+    const logTic = new Float64Array(N);
+    let lmn = Infinity, lmx = -Infinity;
+    for (let i = 0; i < N; i++) {
+        const t = tic[i] > 0 ? tic[i] : 0;
+        const lv = useLog ? Math.log10(t + 1) : t;
+        logTic[i] = lv; if (lv < lmn) lmn = lv; if (lv > lmx) lmx = lv;
+    }
+    const autoThresholdLog = computeOtsuThreshold(logTic, OTSU_NBINS).threshold;
+    // ヒストグラム(256bin) — Analysis の強度スライダー UI 用に保存(小サイズ)
+    const HB = OTSU_NBINS;
+    let histMin = lmn, histMax = lmx;
+    const histCounts = new Array(HB).fill(0);
+    if (histMax > histMin) {
+        const w = (histMax - histMin) / HB;
+        for (let i = 0; i < N; i++) { let b = Math.floor((logTic[i] - histMin) / w); if (b < 0) b = 0; else if (b >= HB) b = HB - 1; histCounts[b]++; }
+    } else { histMin = lmn - 0.5; histMax = lmn + 0.5; histCounts[Math.floor(HB / 2)] = N; }
+    // 有効閾値 = 手動指定 or 自動Otsu + 強度オフセット(log10 単位。正=強く除去)
+    const strength = Number(opts.strength) || 0;
+    let effLog, thresholdOriginal, isManual = false;
+    if (opts.manualThreshold != null && Number.isFinite(Number(opts.manualThreshold))) {
+        isManual = true;
+        thresholdOriginal = Number(opts.manualThreshold);
+        effLog = useLog ? Math.log10((thresholdOriginal > 0 ? thresholdOriginal : 0) + 1) : thresholdOriginal;
+    } else {
+        effLog = autoThresholdLog + strength;
+        thresholdOriginal = useLog ? (Math.pow(10, effLog) - 1) : effLog;
+    }
+    const keep = new Uint8Array(W * H);
+    let nKept = 0;
+    for (let i = 0; i < N; i++) {
+        const gi = gridIdx[i];
+        if (gi < 0) continue;
+        if (logTic[i] > effLog) { if (!keep[gi]) { keep[gi] = 1; nKept++; } }
+    }
+    return {
+        logTic, autoThresholdLog,
+        record: {
             W, H, keepB64: packBitsToB64(keep),
             thresholdOriginal, autoThresholdLog, effLog,
             histCounts, histMin, histMax,
-            signature: sig, nOriginal: N, nKept, nRemoved,
-            layerKeys: grp.entries.map(e => e.layerKey),
-            manual: isManual,
-        };
-        totOrig += N; totKept += nKept; totRem += nRemoved;
-        try { if (typeof _yieldUi === 'function') await _yieldUi(); } catch (e) {}
-    }
-    return { bySource, unavailable, nOriginal: totOrig, nKept: totKept, nRemoved: totRem };
+            signature: null, nOriginal: N, nKept, nRemoved: N - nKept,
+            layerKeys: [], manual: isManual,
+        },
+    };
 }
 
 // 描画用(同期): あるレイヤーに対応する keep grid を返す。背景除去 OFF や
@@ -3403,20 +3460,46 @@ async function parquetEnsureGeometry(blobId, blob) {
     return st.geom;
 }
 
-// 1 化合物 × 1 切片ぶんのラスタを作る。返す形は computeRasterPixels と同じなので、
-// 呼び出し側 (loadMsiLayer) は xlsx/txt と区別せずに扱える。
-async function buildParquetRaster(ent, blob) {
+// ent が指す切片の幾何 (行→格子の対応表) を引く。buildParquetRaster と
+// parquetRoiGrid が同じ選び方をするように 1 か所にまとめてある。
+async function parquetSectionGeom(ent, blob) {
     const geom = await parquetEnsureGeometry(ent.blobId, blob);
-    const st = _pqFiles.get(ent.blobId);
     const sec = geom.sections.find(s => s.label === ent.annotation)
         || (geom.sections.length === 1 ? geom.sections[0] : null);
     if (!sec) throw new Error('parquet: 切片 "' + ent.annotation + '" が見つかりません');
+    return { geom, sec, st: _pqFiles.get(ent.blobId) };
+}
+
+// 1 列を読んで、その切片の格子へ散らす。**この 1 行が表示ラスタと ROI 統計の
+// 唯一の共通点**なので、buildParquetRaster と parquetRoiGrid は必ずこれを通す。
+// (別々に書くと #186 で潰した「ROI と rawMean で幾何がずれる」が再発する)
+function scatterParquetColumn(col, sec, Arr) {
+    const values = new (Arr || Float32Array)(sec.W * sec.H).fill(NaN);
+    for (let k = 0; k < sec.rowIdx.length; k++) values[sec.cellIdx[k]] = col[sec.rowIdx[k]];
+    return values;
+}
+
+// ROI 統計用の生強度グリッド。1 化合物 = 1 列なので、836 MB のファイルから
+// 読むのは約 0.3 MB の 1 列だけ。xlsx/txt のようにファイル全体を展開しない。
+async function parquetRoiGrid(ent, blob) {
+    const { sec, st } = await parquetSectionGeom(ent, blob);
+    const col = await callParquetWorker(
+        { op: 'column', fileId: st.fileId, blob, colIdx: ent.colIdx }, [], 600000);
+    if (!col) return null;
+    // ROI 統計は Float64 で持つ (DESI 経路の _ensureRoiRawGrid と同じ精度)。
+    return { W: sec.W, H: sec.H, values: scatterParquetColumn(col, sec, Float64Array) };
+}
+
+// 1 化合物 × 1 切片ぶんのラスタを作る。返す形は computeRasterPixels と同じなので、
+// 呼び出し側 (loadMsiLayer) は xlsx/txt と区別せずに扱える。
+async function buildParquetRaster(ent, blob) {
+    const { sec, st } = await parquetSectionGeom(ent, blob);
     const col = await callParquetWorker(
         { op: 'column', fileId: st.fileId, blob, colIdx: ent.colIdx }, [], 600000);
     if (!col) throw new Error('parquet: 列を読めませんでした');
-    // 格子へ散らす。触れなかったセルは NaN のまま = データ無し (走査外)。
-    const values = new Float32Array(sec.W * sec.H).fill(NaN);
-    for (let k = 0; k < sec.rowIdx.length; k++) values[sec.cellIdx[k]] = col[sec.rowIdx[k]];
+    // 格子へ散らす (ROI 統計と同じ関数を通す)。触れなかったセルは NaN のまま
+    // = データ無し (走査外)。
+    const values = scatterParquetColumn(col, sec, Float32Array);
     // ベイクは DESI と同じ関数を通す。経路によって Range や Max が食い違わない。
     const r = bakeRasterFromValues(values, sec.W, sec.H, ent.range, ent.bakeMode,
         { gridFallback: sec.gridFallback });
@@ -3504,7 +3587,10 @@ async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opt
         const g = geom.sections.find(s => s.label === t.label)
             || (geom.sections.length === 1 ? geom.sections[0] : null);
         if (!g) continue;
-        slots.push({ t, g, values: new Float32Array(g.W * g.H) });
+        // ticRaw = 生強度の素の合計 (Otsu 用)。TIC 画像の accum は層ごとに
+        // 正規化してから足すので別物。どのみち全列を読むので、ここで一緒に
+        // 貯めておけば背景除去のために読み直さずに済む。
+        slots.push({ t, g, values: new Float32Array(g.W * g.H), ticRaw: new Float64Array(g.W * g.H) });
     }
     if (!slots.length) throw new Error('parquet: 対象の切片が見つかりません');
     const statsByKey = new Map();
@@ -3533,10 +3619,11 @@ async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opt
                 // 画素配列は作らない — 範囲と統計しか要らない。
                 const bs = deriveBakeStats(values, undefined, undefined);
                 const lo = bs.bakeLo, span = bs.bakeHi - bs.bakeLo;
-                const accum = s.t.accum, count = s.t.count;
+                const accum = s.t.accum, count = s.t.count, ticRaw = s.ticRaw;
                 for (let p = 0; p < values.length; p++) {
                     const v = values[p];
                     if (!Number.isFinite(v)) continue;
+                    ticRaw[p] += v;     // 背景除去(Otsu)用の素の合計
                     // 改修前と同じ式 (層ごとに正規化してから 0..255 で加算)。
                     accum[p] += Math.round(Math.max(0, Math.min(1, (v - lo) / span)) * 255);
                     count[p]++;
@@ -3553,7 +3640,10 @@ async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opt
         calcMs += Date.now() - t1;
         onCol(Math.min(i + chunk.length, features.length), features.length, { readMs, calcMs });
     }
-    return { aborted: false, statsByKey, readMs, calcMs };
+    // 貯めた素の合計を切片ごとに返す。呼び出し側が Otsu の記録を組む。
+    const ticBySection = new Map();
+    for (const s of slots) ticBySection.set(s.t.sectionId, { ticRaw: s.ticRaw, g: s.g });
+    return { aborted: false, statsByKey, ticBySection, readMs, calcMs };
 }
 
 function callParquetWorker(msg, transfer, timeoutMs) {
@@ -10173,6 +10263,12 @@ async function buildSampleCsvGroups(sec, project, otsuMode) {
 
     const parsed = [];
     for (const grp of bySource.values()) {
+        // ★ parquet は CSV にしない。1390 化合物 × 10 万スポットだと 1 切片で
+        //   数百 MB〜1 GB のテキストになり、そもそも書き出せない。しかも
+        //   extractSourceMatrixForExport は xlsx 経路なので、836 MB を丸ごと
+        //   展開してから失敗する。ソースは parquet 本体を ZIP に同梱するので
+        //   (exportProjectAsZip の Source/)、データが失われることはない。
+        if (grp.repr && grp.repr.kind === 'parquet') continue;
         const rec = await ProjectStorage.getBlob(grp.blobId);
         if (!rec) continue;
         let m = null;
@@ -10276,6 +10372,9 @@ async function exportProjectAsZip() {
         // reused across sections is written once ("one full + per-section crops").
         const fullByHash = new Map();
         const usedFullPaths = new Set();
+        // parquet ソースは blobId で重複排除する (content hash は取らない —
+        // 836 MB の SHA-256 に意味のある時間をかけないため)。
+        const parquetSrcPaths = new Map();   // blobId -> 'Source/...'
 
         for (const sec of (project.sections || [])) {
             const S = sampleNameById.get(sec.id);
@@ -10324,8 +10423,42 @@ async function exportProjectAsZip() {
             }
 
             // msiFiles metadata (no blobs; import re-derives blobId from the CSV).
+            // ただし parquet だけは例外で、本体を Source/ に同梱する (下)。
             for (const [fid, frec] of Object.entries(sec.msiFiles || {})) {
                 secEntry.msiFilesMeta[fid] = { kind: frec.kind, filename: frec.filename, registeredAt: frec.registeredAt };
+            }
+
+            // ★ parquet ソースは CSV にできない (1390 列 × 10 万行) ので、本体を
+            //   そのまま同梱する。blobId で重複排除するので、同じ parquet を
+            //   共有する切片が何枚あってもファイルは 1 部。
+            //   これが無いと ZIP に MSI のデータが 1 つも入らない。
+            for (const [fid, frec] of Object.entries(sec.msiFiles || {})) {
+                if (!frec || frec.kind !== 'parquet' || !frec.blobId) continue;
+                let sp = parquetSrcPaths.get(frec.blobId);
+                if (!sp) {
+                    const prec = await ProjectStorage.getBlob(frec.blobId);
+                    if (!prec || !prec.blob) continue;
+                    const base = sanitizeStorageKeySegment(frec.filename || 'source.parquet');
+                    sp = 'Source/' + frec.blobId + '__' + base;
+                    zip.file(sp, prec.blob);
+                    parquetSrcPaths.set(frec.blobId, sp);
+                }
+                secEntry.msiFilesMeta[fid].sourcePath = sp;
+                secEntry.msiFilesMeta[fid].blobId = frec.blobId;
+            }
+            // parquet レイヤーは CSV に出ないので、復元に要る情報を manifest へ。
+            for (const [k, ent] of Object.entries(sec.msiSeries || {})) {
+                if (!ent || ent.kind !== 'parquet') continue;
+                secEntry.parquetSeries = secEntry.parquetSeries || {};
+                secEntry.parquetSeries[k] = {
+                    sourceFileId: ent.sourceFileId || null, colIdx: ent.colIdx,
+                    annotation: ent.annotation, filename: ent.filename,
+                    compoundMeta: ent.compoundMeta || null,
+                    statMax: ent.statMax, rasterW: ent.rasterW, rasterH: ent.rasterH,
+                    rawRange: ent.rawRange, rawMean: ent.rawMean,
+                    rawTrueMax: ent.rawTrueMax, rawDispMax: ent.rawDispMax,
+                    bakeMode: (ent.bakeMode === 'full') ? 'full' : undefined,
+                };
             }
 
             // Data/: per-sample combined CSV(s).
@@ -13342,11 +13475,38 @@ async function importZipFile(file) {
                     };
                 }
             }
-            // msiFiles metadata, attaching the CSV blob that carries each fid.
+            // ★ parquet レイヤーは CSV に出ていないので、同梱した本体から戻す。
+            //   ensureBlobRoot は path でキャッシュするので、同じ parquet を
+            //   共有する切片が何枚あっても IDB の blob は 1 部で済む。
+            const pqBlobByFid = new Map();
             for (const [fid, frec] of Object.entries(sEnt.msiFilesMeta || {})) {
-                let blobId = null;
-                for (const grp of (sEnt.data || [])) {
-                    if ((grp.compounds || []).some(c => c.sourceFileId === fid)) { blobId = pathToBlobId.get(grp.path) || null; break; }
+                if (!frec || frec.kind !== 'parquet' || !frec.sourcePath) continue;
+                const bid = await ensureBlobRoot(frec.sourcePath, 'application/octet-stream',
+                    frec.filename || 'data.parquet');
+                if (bid) pqBlobByFid.set(fid, bid);
+            }
+            for (const [layerKey, p] of Object.entries(sEnt.parquetSeries || {})) {
+                const bid = pqBlobByFid.get(p.sourceFileId);
+                if (!bid) continue;
+                newSec.msiSeries[layerKey] = {
+                    kind: 'parquet', blobId: bid,
+                    colIdx: p.colIdx, annotation: p.annotation,
+                    filename: p.filename, sourceFileId: p.sourceFileId || null,
+                    compoundMeta: p.compoundMeta || null,
+                    statMax: p.statMax, rasterW: p.rasterW, rasterH: p.rasterH,
+                    rawRange: p.rawRange, rawMean: p.rawMean,
+                    rawTrueMax: p.rawTrueMax, rawDispMax: p.rawDispMax,
+                    bakeMode: (p.bakeMode === 'full') ? 'full' : undefined,
+                };
+            }
+            // msiFiles metadata, attaching the CSV blob that carries each fid
+            // (parquet は上で確保した本体の blob を使う)。
+            for (const [fid, frec] of Object.entries(sEnt.msiFilesMeta || {})) {
+                let blobId = pqBlobByFid.get(fid) || null;
+                if (!blobId) {
+                    for (const grp of (sEnt.data || [])) {
+                        if ((grp.compounds || []).some(c => c.sourceFileId === fid)) { blobId = pathToBlobId.get(grp.path) || null; break; }
+                    }
                 }
                 newSec.msiFiles[fid] = Object.assign({}, frec, { id: fid }, blobId ? { blobId } : {});
             }
@@ -16340,12 +16500,15 @@ const App = {
             if (r.aborted) { showToast('TIC の作成を中断しました', 4000); return; }
 
             // 統計を ent へ書き戻す (全切片・全化合物ぶん)。
+            // sectionId → section を 1 回だけ引く (毎回 find すると
+            // 化合物数 × 切片数 × 切片数 の走査になる)。
+            const secById = new Map((this.project.sections || []).map(s => [s.id, s]));
             let statCells = 0;
             for (const [key, perSection] of r.statsByKey) {
                 for (const t of targets) {
                     const s = perSection[t.sectionId];
                     if (!s) continue;
-                    const sec = (this.project.sections || []).find(x => x.id === t.sectionId);
+                    const sec = secById.get(t.sectionId);
                     const ent = sec && sec.msiSeries && sec.msiSeries[key];
                     if (!ent) continue;
                     ent.rawRange = s.rawRange;
@@ -16355,6 +16518,47 @@ const App = {
                     ent.rasterW = s.rasterW; ent.rasterH = s.rasterH;
                     statCells++;
                 }
+            }
+
+            // ★ 背景除去(Otsu) も同じパスの成果で作る。Otsu は全化合物の合計が
+            //   要るので、読み直すと同じ時間がもう 1 回かかる。しかも parquet を
+            //   computeSectionOtsuMasks に通すと 836 MB を展開してしまう。
+            //   閾値・ヒストグラム・keep の作り方は DESI と同じ関数を通す。
+            let otsuMade = 0;
+            for (const t of targets) {
+                const tb = r.ticBySection && r.ticBySection.get(t.sectionId);
+                const sec = secById.get(t.sectionId);
+                if (!tb || !sec) continue;
+                const g = tb.g;
+                // 格子に載ったスポットだけを「1 スポット」として扱う
+                // (parquet は行 → セルが 1:1 なので位置空間と等価)。
+                const n = g.cellIdx.length;
+                const tic = new Float64Array(n);
+                const gridIdx = new Int32Array(n);
+                for (let k = 0; k < n; k++) { gridIdx[k] = g.cellIdx[k]; tic[k] = tb.ticRaw[g.cellIdx[k]]; }
+                const built = buildOtsuRecordFromTic(tic, gridIdx, g.W, g.H,
+                    { strength: this.otsuStrength || 0, manualThreshold: this.otsuManualThreshold }, true);
+                // 836 MB のハッシュは取らない。ソースと列構成が変わらない限り
+                // 同じ値になればよいので、blobId + 列数 + 行数で十分。
+                const sig = 'pq:' + blobId + ':' + features.length + ':' + n;
+                const srcKey = (features.length && sec.msiSeries[features[0].key]
+                    && (sec.msiSeries[features[0].key].sourceFileId || blobId)) || blobId;
+                sec.meta = sec.meta || {};
+                sec.meta.otsu = {
+                    bySource: { [srcKey]: Object.assign(built.record, {
+                        signature: sig, layerKeys: features.map(f => f.key),
+                    }) },
+                    nOriginal: built.record.nOriginal, nKept: built.record.nKept,
+                    nRemoved: built.record.nRemoved,
+                    computedAt: nowIso(), strength: this.otsuStrength || 0,
+                };
+                // 強度スライダーを即座に効かせるためのセッションキャッシュ。
+                try {
+                    _otsuTicCache.set(sec.id + '|' + srcKey + '|' + sig,
+                        { W: g.W, H: g.H, gridIdx, logTic: built.logTic,
+                          autoThresholdLog: built.autoThresholdLog });
+                } catch (e) {}
+                otsuMade++;
             }
 
             // 累積を 1 枚の灰色画像に落として各切片へ据える。
@@ -16370,7 +16574,8 @@ const App = {
             try { renderMethodTable(); } catch (e) {}
             const secs = ((Date.now() - t0) / 1000).toFixed(1);
             showToast('TIC を ' + made + ' 切片ぶん作りました (' + features.length + ' 化合物 / '
-                + secs + ' 秒)。統計 ' + statCells.toLocaleString() + ' 件を更新しました。'
+                + secs + ' 秒)。統計 ' + statCells.toLocaleString() + ' 件と、'
+                + '背景除去(Otsu) ' + otsuMade + ' 切片ぶんを更新しました。'
                 + '次回以降は保存済みのものを使います', 9000);
         } catch (e) {
             console.error('TIC 作成に失敗', e);
