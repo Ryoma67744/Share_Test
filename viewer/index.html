@@ -2165,31 +2165,40 @@ function computeRasterPixels(rows, range, bakeMode) {
         grid[ri][ci] = (Number.isFinite(old) ? old : 0) + r.v;
         cnt[ri][ci] = (cnt[ri][ci] || 0) + 1;
     }
-    let vmin = Infinity, vmax = -Infinity;
-    let sum = 0, n = 0;
-    const vals = [];
     // Rows sharing one (x,y) are summed above and averaged below. That is a real
     // change to the data, so count how often it happened (dupCells = grid cells fed
     // by >1 row, dupRows = the surplus rows folded in) instead of doing it silently.
     let dupCells = 0, dupRows = 0;
     // values = 重複平均まで済ませた生強度を W*H に並べたもの (NaN = データ無し)。
-    // 描画は本来これを直接カラーマップに通せば足りる。8bit の pixels は
-    // Math.round(nn*255) で潰した表示用コピーで、renderComposite は描画のたびに
-    // msiWindowEval で生値へ逆変換し直している。値ラスタを返しておけば、その
-    // 逆変換 (と、それに伴う量子化・クリップの損失) を将来まるごと外せる。
+    // ベイク範囲・8bit 画素・統計はここから先の bakeRasterFromValues が作る
+    // (parquet 経路と共有するため)。
     const values = new Float32Array(W * H).fill(NaN);
     for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
         if (cnt[i][j] > 0) {
             if (cnt[i][j] > 1) { dupCells++; dupRows += cnt[i][j] - 1; }
             grid[i][j] /= cnt[i][j];
-            const v = grid[i][j];
-            values[i * W + j] = v;
-            if (v < vmin) vmin = v;
-            if (v > vmax) vmax = v;
-            sum += v;
-            n++;
-            vals.push(v);
+            values[i * W + j] = grid[i][j];
         }
+    }
+    return bakeRasterFromValues(values, W, H, range, bakeMode,
+        { dupCells, dupRows, gridFallback: gridFallback || null });
+}
+
+// 「W×H に並んだ生強度 (NaN = データ無し)」からベイク範囲・8bit 画素・統計を作る。
+// computeRasterPixels (xlsx/txt: 行の集合から格子を組む) と parquet (列を読んで
+// 格子へ散らす) の**両方がここを通る**。ベイク範囲の決め方や診断の数え方を 2 か所に
+// 書くと、同じデータなのに経路によって数値が食い違うため、必ず共有する。
+// extra には経路ごとの診断 (重複平均の件数・格子フォールバック) を渡す。
+function bakeRasterFromValues(values, W, H, range, bakeMode, extra) {
+    extra = extra || {};
+    let vmin = Infinity, vmax = -Infinity, sum = 0, n = 0;
+    const vals = [];
+    for (let i = 0; i < values.length; i++) {
+        const v = values[i];
+        if (!Number.isFinite(v)) continue;
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+        sum += v; n++; vals.push(v);
     }
     const rawMean = n > 0 ? (sum / n) : null;
     // Bake range. rawRange (= [bakeLo, bakeHi]) doubles as the basis for display
@@ -2245,8 +2254,8 @@ function computeRasterPixels(rows, range, bakeMode) {
     // used to be reported here was therefore always 0 — the badge could never
     // fire. Old projects may still carry it in a saved `diag`; nothing reads it.
     let clippedHigh = 0;
-    for (let i = 0; i < H; i++) for (let j = 0; j < W; j++) {
-        const v = grid[i][j];
+    for (let k = 0; k < values.length; k++) {
+        const v = values[k];
         if (!Number.isFinite(v)) { pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; pixels[p++] = 0; }
         else {
             if (bakeRangeFromData && v > bakeHi) clippedHigh++;
@@ -2255,7 +2264,8 @@ function computeRasterPixels(rows, range, bakeMode) {
             pixels[p++] = g; pixels[p++] = g; pixels[p++] = g; pixels[p++] = 255;
         }
     }
-    const diag = { dupCells, dupRows, clippedHigh, gridFallback: gridFallback || null, nPixels: n,
+    const diag = { dupCells: extra.dupCells || 0, dupRows: extra.dupRows || 0, clippedHigh,
+                   gridFallback: extra.gridFallback || null, nPixels: n,
                    bakeMode: (bakeMode === 'full') ? 'full' : 'robust' };
     return { width: W, height: H, pixels, values, rawRange: [bakeLo, bakeHi], rawMean, rawTrueMax: trueMax, rawDispMax, diag };
 }
@@ -2885,7 +2895,7 @@ function _buildParseWorkerSource() {
     const fns = [
         a1ColToIndex, indexToA1Col, percentileSorted, buildMsiGrid, labToSrgb,
         get2dContext, _mkCanvas, _canvasToDataUrl, _encodePixelsToDataUrl,
-        computeRasterPixels, parseXlsxToRows, parseTxtToRows,
+        bakeRasterFromValues, computeRasterPixels, parseXlsxToRows, parseTxtToRows,
         decodeJpegInTiffToDataUrl, decodeTiffArrayBufferToDataUrl, inspectXlsxColumns,
         _parseWorkerOnMessage,
     ];
@@ -3223,6 +3233,128 @@ function _getParquetWorker() {
         _pqWorkerBroken = true;
         return null;
     }
+}
+
+// ---- parquet を「1 化合物 = 1 レイヤー」に落とし込む -------------------------
+// 1 つの parquet には全切片 (annotation) × 全化合物 (m/z 列) が入っている。
+// アプリ側は「切片ごとに msiSeries を持つ」構造なので、間に対応表が要る。
+//
+// ★ 切片の行は連続していない。行順は「y 昇順 → x 昇順」で固定なので、切片が
+//   スライド上で横に並んでいると同じ y 帯で行が交互に現れる。したがって
+//   rowStart/rowEnd では切り出せず、行番号 → (切片, 格子位置) の対応表が要る。
+//
+// 対応表は保存せず、ファイルごとにセッション内でキャッシュする。作るのに要る
+// のは x/y/annotation の 3 列だけ (数 MB) なので、開き直しても安い。
+const _pqFiles = new Map();   // blobId -> { fileId, info, geom, blob }
+
+function parquetFileState(blobId) { return _pqFiles.get(blobId) || null; }
+
+// フッタを 1 回だけ解析して索引を worker に持たせる。2 回目以降は何もしない。
+async function parquetEnsureOpen(blobId, blob) {
+    let st = _pqFiles.get(blobId);
+    if (st && st.info) return st;
+    const fileId = 'pq_' + blobId;
+    const info = await callParquetWorker({ op: 'open', fileId, blob }, [], 600000);
+    // mz_sorted は %.10g なので末尾ゼロが落ちる (列名 794.5450 に対し 794.545)。
+    // 文字列で突き合わせず、必ず数値にしてから使う。列順と 1:1 なので、本来は
+    // 位置対応で足り、数値は検算と表示用。
+    const mz = String((info.kv && info.kv.mz_sorted) || '')
+        .split(',').map(s => Number(s)).filter(Number.isFinite);
+    st = { fileId, info, mz, blob, geom: null };
+    _pqFiles.set(blobId, st);
+    return st;
+}
+
+// m/z 列の範囲。仕様で列順は id, x, y, <m/z 群>, annotation に固定されている。
+// 列名はパースしない (3 パターンが混在し、区切りの数も一定でないため)。
+function parquetColumnRoles(colNames) {
+    const idIdx = colNames.indexOf('id');
+    const xIdx = colNames.indexOf('x');
+    const yIdx = colNames.indexOf('y');
+    const annIdx = colNames.indexOf('annotation');
+    // m/z 列 = id/x/y/annotation を除いた残り。位置で決め打ちせず差集合を取るのは、
+    // 将来 id が無いファイルや列が増えたファイルでも壊れないようにするため。
+    const skip = new Set([idIdx, xIdx, yIdx, annIdx].filter(i => i >= 0));
+    const mzIdxs = [];
+    for (let i = 0; i < colNames.length; i++) if (!skip.has(i)) mzIdxs.push(i);
+    return { idIdx, xIdx, yIdx, annIdx, mzIdxs };
+}
+
+// x/y/annotation を 1 回読み、切片ごとの格子と「行番号 → 格子位置」を作る。
+async function parquetEnsureGeometry(blobId, blob) {
+    const st = await parquetEnsureOpen(blobId, blob);
+    if (st.geom) return st.geom;
+    const roles = parquetColumnRoles(st.info.colNames);
+    if (roles.xIdx < 0 || roles.yIdx < 0) throw new Error('parquet: x/y 列が見つかりません');
+    const idxs = [roles.xIdx, roles.yIdx];
+    if (roles.annIdx >= 0) idxs.push(roles.annIdx);
+    const cols = await callParquetWorker(
+        { op: 'columns', fileId: st.fileId, blob, colIdxs: idxs }, [], 600000);
+    const xs = cols[0], ys = cols[1];
+    // annotation 列が無いファイルは全行を 1 切片として扱う。
+    const ann = (roles.annIdx >= 0 && cols[2]) ? cols[2] : null;
+    const N = xs.length;
+    const byLabel = new Map();
+    for (let i = 0; i < N; i++) {
+        const label = ann ? String(ann[i]) : '(all)';
+        let g = byLabel.get(label);
+        if (!g) { g = { label, rows: [] }; byLabel.set(label, g); }
+        g.rows.push(i);
+    }
+    const sections = [];
+    for (const g of byLabel.values()) {
+        // 既存の格子構築をそのまま使う (ピッチ検出・フォールバックの判断を
+        // DESI と共有する)。buildMsiGrid は x/y しか見ないので v は要らない。
+        const pts = g.rows.map(i => ({ x: xs[i], y: ys[i] }));
+        const { xIndex, yIndex, W, H, gridFallback } = buildMsiGrid(pts);
+        const rowIdx = new Int32Array(g.rows.length);
+        const cellIdx = new Int32Array(g.rows.length);
+        let m = 0;
+        for (let k = 0; k < g.rows.length; k++) {
+            const i = g.rows[k];
+            const ci = xIndex.get(xs[i]), ri = yIndex.get(ys[i]);
+            if (ci == null || ri == null) continue;
+            rowIdx[m] = i; cellIdx[m] = ri * W + ci; m++;
+        }
+        sections.push({
+            label: g.label, W, H, gridFallback: gridFallback || null,
+            nSpots: g.rows.length,
+            rowIdx: rowIdx.subarray(0, m), cellIdx: cellIdx.subarray(0, m),
+        });
+    }
+    // 並びを安定させる (登録ダイアログの表示順とセクション番号が毎回同じになる)。
+    sections.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
+    st.geom = { roles, sections };
+    return st.geom;
+}
+
+// 1 化合物 × 1 切片ぶんのラスタを作る。返す形は computeRasterPixels と同じなので、
+// 呼び出し側 (loadMsiLayer) は xlsx/txt と区別せずに扱える。
+async function buildParquetRaster(ent, blob) {
+    const geom = await parquetEnsureGeometry(ent.blobId, blob);
+    const st = _pqFiles.get(ent.blobId);
+    const sec = geom.sections.find(s => s.label === ent.annotation)
+        || (geom.sections.length === 1 ? geom.sections[0] : null);
+    if (!sec) throw new Error('parquet: 切片 "' + ent.annotation + '" が見つかりません');
+    const col = await callParquetWorker(
+        { op: 'column', fileId: st.fileId, blob, colIdx: ent.colIdx }, [], 600000);
+    if (!col) throw new Error('parquet: 列を読めませんでした');
+    // 格子へ散らす。触れなかったセルは NaN のまま = データ無し (走査外)。
+    const values = new Float32Array(sec.W * sec.H).fill(NaN);
+    for (let k = 0; k < sec.rowIdx.length; k++) values[sec.cellIdx[k]] = col[sec.rowIdx[k]];
+    // ベイクは DESI と同じ関数を通す。経路によって Range や Max が食い違わない。
+    const r = bakeRasterFromValues(values, sec.W, sec.H, ent.range, ent.bakeMode,
+        { gridFallback: sec.gridFallback });
+    const canvas = document.createElement('canvas');
+    canvas.width = r.width; canvas.height = r.height;
+    get2dContext(canvas, { willReadFrequently: true })
+        .putImageData(new ImageData(r.pixels, r.width, r.height), 0, 0);
+    return {
+        dataUrl: canvas.toDataURL('image/png'),
+        values: r.values, width: r.width, height: r.height,
+        rawRange: r.rawRange, rawMean: r.rawMean, rawTrueMax: r.rawTrueMax,
+        rawDispMax: r.rawDispMax, diag: r.diag,
+    };
 }
 
 function callParquetWorker(msg, transfer, timeoutMs) {
@@ -3640,16 +3772,24 @@ class SectionPanel {
         // xlsx/txt); fall back to the identical main-thread parser on any
         // worker failure or when workers aren't supported.
         let result = null;
-        if (parseWorkerAvailable()) {
-            try {
-                const op = (ent.kind === 'txt') ? 'txt-raster' : 'xlsx-raster';
-                result = await callParseWorker(op, { blob: rec.blob, def: ent }, 120000);
-            } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
-        }
-        if (!result) {
-            const buf = await rec.blob.arrayBuffer();
-            if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
-            else result = await buildPngFromXlsxArrayBuffer(buf, ent);
+        if (ent.kind === 'parquet') {
+            // parquet は列指向なので、この化合物の 1 列だけを読む。ファイル全体を
+            // 読み直す xlsx/txt とは経路が別で、メインスレッドの代替実装も無い
+            // (専用のモジュール worker が唯一の入口)。失敗したら握りつぶさずに
+            // 投げて、呼び出し側 (ensureMsiLayerLoaded) が警告を出す。
+            result = await buildParquetRaster(ent, rec.blob);
+        } else {
+            if (parseWorkerAvailable()) {
+                try {
+                    const op = (ent.kind === 'txt') ? 'txt-raster' : 'xlsx-raster';
+                    result = await callParseWorker(op, { blob: rec.blob, def: ent }, 120000);
+                } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
+            }
+            if (!result) {
+                const buf = await rec.blob.arrayBuffer();
+                if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
+                else result = await buildPngFromXlsxArrayBuffer(buf, ent);
+            }
         }
         const dataUrl = (result && typeof result === 'object') ? result.dataUrl : result;
         const rawRange = (result && typeof result === 'object' && Array.isArray(result.rawRange)) ? result.rawRange : null;
