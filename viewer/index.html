@@ -3393,8 +3393,15 @@ function _parquetWorkerBody(self, lib) {
     //
     // 形は asyncBufferFromBlob と完全に同じ ({ byteLength, slice }) なので、
     // 下流 (parquetMetadataAsync / parquetRead) は違いを知らない。
+    // URL ごとに測った長さを覚えておく。
+    // 呼び出し側 (ent.sourceBytes) は誰も埋めていないので、これが無いと
+    // **列を 1 本読むたびに HEAD が 1 往復**していた。長さは変わらないので
+    // 1 プロセス 1 回でよい。
+    const urlByteLength = new Map();
+
     const asyncBufferFromUrl = async (url, knownLength) => {
         let byteLength = Number(knownLength);
+        if (!Number.isFinite(byteLength) || byteLength <= 0) byteLength = urlByteLength.get(url) || 0;
         if (!Number.isFinite(byteLength) || byteLength <= 0) {
             const head = await fetch(url, { method: 'HEAD' });
             if (!head.ok) throw new Error('parquet: HEAD ' + head.status + ' for ' + url);
@@ -3402,6 +3409,7 @@ function _parquetWorkerBody(self, lib) {
             if (!Number.isFinite(byteLength) || byteLength <= 0) {
                 throw new Error('parquet: content-length を取得できません (' + url + ')');
             }
+            urlByteLength.set(url, byteLength);
         }
         return {
             byteLength,
@@ -4911,8 +4919,17 @@ class SectionPanel {
         const rasterH = (result && typeof result === 'object' && Number.isFinite(result.height)) ? result.height : null;
         if (this.section.msiSeries && this.section.msiSeries[key]) {
             const entRef = this.section.msiSeries[key];
-            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean) || !Number.isFinite(entRef.rawTrueMax) || !Number.isFinite(entRef.rawDispMax) || !entRef.diag
-                || !Number.isFinite(entRef.rasterW) || !Number.isFinite(entRef.rasterH);
+            // ★ 「欠けていたか」ではなく「実際に変わったか」で判断する。
+            //
+            //   従来は wasMissing (= 派生値のどれかが未設定) だけを見て
+            //   _bumpMethodSeries() を呼んでいた。ところが共有側の parquet は
+            //   master が「TIC と統計を作る」を実行していなければ rawMean も
+            //   diag も入らないので、**化合物を開くたびに毎回 true** になる。
+            //   その結果、次の切り替えで Method 表の署名が食い違い、1390 件の
+            //   絞り込み + 並べ替え + 表の作り直しが毎回走っていた。
+            //   実際にセルの中身が変わったときだけ捨てる。
+            const beforeSave = _msiDerivedSig(entRef);
+            const beforeCell = _msiCellSig(entRef);
             if (rawRange) entRef.rawRange = rawRange;
             if (rawMean != null) entRef.rawMean = rawMean;
             if (rawTrueMax != null) entRef.rawTrueMax = rawTrueMax;
@@ -4924,10 +4941,10 @@ class SectionPanel {
             // 保存を 30 秒ためる queueSaveDerived を通す。従来の queueSave() だと
             // 化合物を 1 つ開くたびにプロジェクト全体 (数 MB) の書き込みと、その
             // 5 秒後の publish RPC が走っていた (1390 化合物なら 1390 回)。
-            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null || rawDispMax != null || diag || rasterW != null) && App && App.queueSaveDerived) App.queueSaveDerived();
+            if (_msiDerivedSig(entRef) !== beforeSave && App && App.queueSaveDerived) App.queueSaveDerived();
             // rawMean / rawTrueMax / diag は Method 表のセルであり、Mean/Max は
-            // 並べ替えキーでもある。メモを捨てないと表が古い値のままになる。
-            if (wasMissing) _bumpMethodSeries();
+            // 並べ替えキーでもある。値が変わったときはメモを捨てる。
+            if (_msiCellSig(entRef) !== beforeCell) _bumpMethodSeries();
         }
         await this.attachImage(key, dataUrl);
     }
@@ -4961,30 +4978,38 @@ class SectionPanel {
             this.imageSettings[key] = { opacity: 1.0, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255, grayscale: persistedGray, applyOpacity: persistedApply };
             return;
         }
+        const isMsi = /^MSI_/i.test(key);
+        // ★ MSI では輝度スキャンをまるごと省く。
+        //
+        //   下の dispVmin/dispVmax は MSI では 0/255 固定で、mn/mx は使わない
+        //   (表示は App.getMsiWindow の窓が決める — msiWindowEval)。残る
+        //   actualMin/actualMax も **このファイル内に読み手が 1 つも無い**。
+        //   つまり MSI では canvas 生成 + drawImage + getImageData + 全画素
+        //   ループが丸ごと捨て仕事だった。化合物を 1 回切り替えるたびに
+        //   パネル 4 枚ぶん走っていたので、そのぶん操作が引っかかっていた。
+        //   HE/IF は mn/mx を実際に vmin/vmax として使うので従来どおり測る。
+        if (isMsi) {
+            this.imageSettings[key] = {
+                opacity: 1.0, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255,
+                grayscale: persistedGray, applyOpacity: persistedApply,
+            };
+            return;
+        }
         const c = document.createElement('canvas');
         c.width = img.naturalWidth; c.height = img.naturalHeight;
         const ctx = get2dContext(c, { willReadFrequently: true });
         ctx.drawImage(img, 0, 0);
         const d = ctx.getImageData(0, 0, c.width, c.height).data;
         let mn = 255, mx = 0;
-        const isMsi = /^MSI_/i.test(key);
         for (let i = 0; i < d.length; i += 4) {
-            if (isMsi && d[i + 3] === 0) continue;
             const l = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
             if (l < mn) mn = l;
             if (l > mx) mx = l;
         }
         // actualMin/actualMax capture the observed raster luminance range.
-        // MSI display is driven by App.getMsiWindow (per-MRM window over the
-        // in-scope sections, see msiWindowEval), NOT by these per-section
-        // vmin/vmax — so vmin/vmax are pinned to 0-255 (unused for MSI) and
-        // the Master / common-window stretch is skipped below.
-        // Guard against degenerate cases (fully transparent MSI, decode
-        // failure leaving mn=255/mx=0).
+        // Guard against degenerate cases (decode failure leaving mn=255/mx=0).
         if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn > mx) { mn = 0; mx = 255; }
-        const dispVmin = isMsi ? 0 : mn;
-        const dispVmax = isMsi ? 255 : mx;
-        this.imageSettings[key] = { opacity: 1.0, vmin: dispVmin, vmax: dispVmax, actualMin: mn, actualMax: mx, grayscale: persistedGray, applyOpacity: persistedApply };
+        this.imageSettings[key] = { opacity: 1.0, vmin: mn, vmax: mx, actualMin: mn, actualMax: mx, grayscale: persistedGray, applyOpacity: persistedApply };
     }
 
     async analyzeAndInitSettings() {
@@ -5298,11 +5323,14 @@ class SectionPanel {
     }
 
     // ---- Canvas sizing ----
+    // 返り値は「末尾の renderComposite まで到達したか」。呼び出し側 (フォーカス
+    // 切り替え) は、到達していないときだけ自分で描く。以前は無条件に
+    // renderComposite を続けて呼んでいたので、1 回の切り替えで 2 回描いていた。
     setupCanvasSize() {
         const msiKey = this._pickRefMsiKey();
         const heKey  = Object.keys(this.imageSources).find(k => /HE_STAIN|IF_STAIN/i.test(k));
         const refKey = msiKey || heKey || Object.keys(this.imageSources)[0];
-        if (!refKey) return;
+        if (!refKey) return false;
         const refIsMsi = !!msiKey && refKey === msiKey;
         // MSI は未読込でも ent の記録から寸法が取れる。HE/IF は従来どおり実物から
         // (常に読み込んであるので問題ない)。
@@ -5310,7 +5338,7 @@ class SectionPanel {
             const im = this.imageSources[refKey];
             return (im && im.complete && im.naturalWidth > 0) ? { w: im.naturalWidth, h: im.naturalHeight } : null;
         })();
-        if (!refSize) return;
+        if (!refSize) return false;
 
         let w = refSize.w, h = refSize.h;
         if (refIsMsi) { const t = w; w = h; h = t; }
@@ -5335,7 +5363,15 @@ class SectionPanel {
             scale = Math.max(1, Math.min(8, Math.ceil(ratio)));
         }
         w = Math.round(w * scale); h = Math.round(h * scale);
-        [this.dom.cdisp, this.dom.croi].forEach(c => { c.width = w; c.height = h; });
+        // ★ 同じ寸法なら代入しない。canvas.width への代入は、値が変わらなくても
+        //   バッキングストアを作り直して中身を消す。ノンターゲットの切片は
+        //   どの化合物でも格子が同じなので、従来は化合物を切り替えるたびに
+        //   「同じ寸法で作り直して真っ白にする」を 4 パネル × 2 枚ぶんやっていた。
+        //   HE も自動 TIC 背景も無いので、次の像が読めるまで画面が白くなる。
+        for (const c of [this.dom.cdisp, this.dom.croi]) {
+            if (c.width !== w) c.width = w;
+            if (c.height !== h) c.height = h;
+        }
 
         const cw = this.dom.host.clientWidth;
         const ch = this.dom.host.clientHeight;
@@ -5356,6 +5392,7 @@ class SectionPanel {
         }
         this.renderComposite();
         this.drawAllRois();
+        return true;
     }
 
     // ---- Composite renderer ----
@@ -8171,6 +8208,25 @@ const GRID_FALLBACK_REASON = {
 // clips outliers above the robust ceiling, averages rows that share one (x,y), and
 // can fall back to gap-collapsing ordinal grid indexing — all of which change what
 // the image shows. Returns '' when nothing was altered, so clean layers stay clean.
+// loadMsiLayer が書き戻す派生値の署名。2 つに分ける理由:
+//   *DerivedSig … 保存すべき値が変わったか (rasterW/H を含む。表には出ない)
+//   *CellSig    … Method 表のセル / 並べ替えキーが変わったか
+// 「欠けていたか」ではなく「変わったか」で判断するために使う (loadMsiLayer 参照)。
+function _msiDerivedSig(e) {
+    if (!e) return '';
+    return _msiCellSig(e) + '|' + e.rawDispMax + '|' + e.rasterW + '|' + e.rasterH;
+}
+function _msiCellSig(e) {
+    if (!e) return '';
+    const d = e.diag;
+    return (Array.isArray(e.rawRange) ? e.rawRange.join(',') : '')
+        + '|' + e.rawMean + '|' + e.rawTrueMax + '|' + e.statMax
+        // diag は表のバッジ。出す/出さないを決める項目だけ見る (diagBadgeHtml と同じ)。
+        + '|' + (d ? [d.clippedHigh, d.dupCells, d.dupRows, d.nPixels,
+                      d.gridFallback && d.gridFallback.x, d.gridFallback && d.gridFallback.y,
+                      d.bakeMode].join(',') : '');
+}
+
 function diagBadgeHtml(diag) {
     if (!diag || typeof diag !== 'object') return '';
     const notes = [];
@@ -15295,7 +15351,7 @@ const Toolbar = {
     togglePickerMenu() { this._menuOpen ? this.closePickerMenu() : this.openPickerMenu(); },
     openPickerMenu() {
         if (!this.pickerMenu) return;
-        this.refreshSectionPicker();
+        this.refreshSectionPicker(true);   // 開く直前にここで作る
         this.pickerMenu.classList.remove('hidden');
         this._menuOpen = true;
     },
@@ -15327,12 +15383,17 @@ const Toolbar = {
 
     _drawThumbInto(canvas, panel) {
         if (!canvas) return;
+        const url = this._thumbDataUrlFor(panel);
+        // ★ 同じ絵なら描き直さない。ここは化合物を 1 回切り替えるたびに
+        //   最大 5 回 × (切片数 + 1) 呼ばれていて、そのたびに <img> を作って
+        //   フル解像度の data URL をデコードさせていた。32×32 の飾りのために。
+        if (canvas._thumbUrl === url) return;
+        canvas._thumbUrl = url;
         const ctx = get2dContext(canvas);
         ctx.imageSmoothingEnabled = false;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.fillStyle = '#1f2937';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        const url = this._thumbDataUrlFor(panel);
         if (!url) return;
         const img = new Image();
         img.onload = () => {
@@ -15348,7 +15409,15 @@ const Toolbar = {
         img.src = url;
     },
 
-    refreshSectionPicker() {
+    // ★ メニューの中身は「開いているとき」だけ作る。
+    //
+    //   ここは Toolbar.refreshAll と refreshRangeEditor から呼ばれるので、
+    //   化合物を 1 回切り替えるだけで最大 5 回走る。そのたびに
+    //   pickerMenu.innerHTML = '' で DOM を全部捨てて作り直し、切片ごとに
+    //   canvas + <img> を作ってフル解像度の data URL をデコードさせていた
+    //   — メニューが閉じたままでも。openPickerMenu は開く直前にここを
+    //   force で呼ぶので、閉じている間に作っておく必要は無い。
+    refreshSectionPicker(force) {
         if (!this.pickerBtn) return;
         const project = App.project;
         const sections = (project && project.sections) || [];
@@ -15356,9 +15425,11 @@ const Toolbar = {
         const activePanel = this.activePanel();
         const activeSection = activePanel ? activePanel.section : null;
         if (this.pickerLabel) this.pickerLabel.textContent = activeSection ? (activeSection.displayName || ('Section ' + (activeSection.ordinal || ''))) : '—';
+        // ボタン脇のサムネイルは常に見えているので、こちらは毎回 (中身が
+        // 変わらなければ _drawThumbInto が自分で早抜けする)。
         if (this.pickerThumb) this._drawThumbInto(this.pickerThumb, activePanel);
 
-        if (this.pickerMenu) {
+        if (this.pickerMenu && (force || this._menuOpen)) {
             this.pickerMenu.innerHTML = '';
 
             // Cluster sections by condition (display-only) so same-condition
@@ -15967,7 +16038,8 @@ const App = {
     setActiveOverlay(def) {
         this.activeOverlay = def || null;
         for (const p of this.panels.values()) {
-            try { p.setupCanvasSize(); p.renderComposite(); } catch (e) {}
+            // setupCanvasSize は最後まで進めば自分で描く (二重描画を避ける)。
+            try { if (!p.setupCanvasSize()) p.renderComposite(); } catch (e) {}
         }
         // オーバーレイのチップ列は renderMethodTable の先頭で描き直されていた。
         // ここを _refreshMethodRowState に変えたので、明示的に呼ぶ。
@@ -15979,7 +16051,8 @@ const App = {
         if (!this.activeOverlay) return;
         this.activeOverlay = null;
         for (const p of this.panels.values()) {
-            try { p.setupCanvasSize(); p.renderComposite(); } catch (e) {}
+            // setupCanvasSize は最後まで進めば自分で描く (二重描画を避ける)。
+            try { if (!p.setupCanvasSize()) p.renderComposite(); } catch (e) {}
         }
         try { renderOverlayBar(); } catch (e) {}   // 同上
         _refreshMethodRowState();   // 同上
@@ -15997,8 +16070,11 @@ const App = {
                 // grid (per-source T_he_to_msi). Without this the canvas
                 // would stay sized for the previous focus and the per-
                 // source T would be applied to a mismatched cdisp.
-                p.setupCanvasSize();
-                p.renderComposite();
+                //
+                // setupCanvasSize は最後まで進めば自分で renderComposite する。
+                // 参照レイヤーが決まらず途中で抜けたときだけ、こちらで描く
+                // (以前は無条件に続けて呼んでいたので毎回 2 回描いていた)。
+                if (!p.setupCanvasSize()) p.renderComposite();
             } catch (e) { console.warn('setFocusCompoundKey render failed', p.section && p.section.id, e); }
         }
         // フォーカス行が変わるだけ。1390 行を組み直さずクラスだけ貼り替える
@@ -16292,7 +16368,18 @@ const App = {
     //
     // Tally how the project's MSI layers are currently baked. Reads
     // project.sections (not this.panels) so it is valid before panels load.
+    // ★ 数え直すのは中身が変わったときだけ。
+    //
+    //   ここは 4 切片 × 1390 化合物 = 5,560 回の反復 + Object.entries の配列生成を
+    //   していて、Toolbar.refreshAll 経由で **化合物を切り替えるたび**に走っていた。
+    //   チェックボックス 1 個の状態を決めるために。
+    //   無効化の鍵は 2 つ: レイヤー集合が変わる (_methodSeriesVersion) と、
+    //   bakeMode 自体が書き換わる (_bakeModeVersion。書き込みは setMsiBakeMode と
+    //   setMsiOutlierClipAll の 2 か所だけ)。
     _countBakeModes() {
+        const sig = (this.project ? (this.project.id || '') : '-')
+            + '|' + _methodSeriesVersion + '|' + (this._bakeModeVersion || 0);
+        if (this._bakeModeMemo && this._bakeModeMemo.sig === sig) return this._bakeModeMemo.counts;
         let robust = 0, full = 0;
         for (const sec of ((this.project && this.project.sections) || [])) {
             for (const [k, e] of Object.entries((sec && sec.msiSeries) || {})) {
@@ -16300,7 +16387,13 @@ const App = {
                 if (e.bakeMode === 'full') full++; else robust++;
             }
         }
-        return { robust, full };
+        const counts = { robust, full };
+        this._bakeModeMemo = { sig, counts };
+        return counts;
+    },
+    _bumpBakeModeVersion() {
+        this._bakeModeVersion = (this._bakeModeVersion || 0) + 1;
+        this._bakeModeMemo = null;
     },
     // The project's effective outlier-clip mode: 'full' only when EVERY layer is
     // unclipped, else the 'robust' default. Used so a newly added compound joins
@@ -16353,6 +16446,7 @@ const App = {
             ent.bakeMode = target;
             jobs.push({ panel, key: msiKey, ent });
         }
+        this._bumpBakeModeVersion();
         if (!jobs.length) return;
         showToast(target === 'full' ? '外れ値クリップ OFF — 再ベイク中…' : '外れ値クリップ ON — 再ベイク中…');
         await this._rebakeJobs(jobs, target === 'full'
@@ -16389,6 +16483,7 @@ const App = {
                 jobs.push({ panel, key, ent });
             }
         }
+        this._bumpBakeModeVersion();
         if (!jobs.length) {
             try {
                 showToast(fresh
@@ -19032,6 +19127,23 @@ const App = {
     // loss like the Section-2 incident becomes impossible.
     async _doSave() {
         if (!this.project) return false;
+        // ★ 共有プロジェクトはローカルに書かない。
+        //
+        //   正は「サーバ側の共有ドキュメント」で、開くたびに
+        //   _hydrateSharedProject が組み直す。hydrate 自体は putProject を
+        //   呼んでおらず、__share のレコードを読み戻す経路もどこにも無い
+        //   (書けばローカルのプロジェクト一覧に紛れ込むだけ)。
+        //   にもかかわらず、化合物をクリックすると toggleLayer →
+        //   _persistVisibleLayers → queueSave と伝わって、TIMS では
+        //   msiSeries 5,560 件を含むプロジェクト全体の structured clone が
+        //   400 ms 後にメインスレッドで走っていた。連続で切り替えたときの
+        //   引っかかりの一因。
+        if (this.project.__share) {
+            this._derivedDirty = false;
+            if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+            this._publishDirty = false;
+            return true;
+        }
         // Coalesce concurrent saves: the in-flight save already captures
         // the latest project state at call time, so a second invocation
         // can just wait for it.
