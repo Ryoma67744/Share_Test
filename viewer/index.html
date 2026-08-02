@@ -212,7 +212,8 @@ body.preview #panel-analysis { display:none !important; }
 .sec-canvas-cell.active .canvas-label { background:rgba(37,99,235,0.85); }
 #method-rows .marker-swatch { width:14px; height:14px; border-radius:50%; border:1px solid #cbd5e1; cursor:pointer; padding:0; vertical-align:middle; }
 #method-rows .marker-swatch:hover { border-color:#1d4ed8; }
-#method-rows .marker-input { width:0; height:0; opacity:0; pointer-events:none; position:absolute; }
+/* 色ピッカーは表の外に 1 個だけ置いて使い回す (_openSharedMarkerInput)。
+   行ごとに持たせると 1390 個の <input type="color"> になる。 */
 .splitter { background:transparent; flex-shrink:0; }
 .splitter:hover, .splitter.dragging { background:#60a5fa; }
 .splitter-h { width:6px; cursor:col-resize; align-self:stretch; }
@@ -1341,6 +1342,34 @@ function sortMethodKeys(layerKeys, getEntry, getMeta, sortKey, sortDir) {
     const valueOf = (k) => {
         const ent = getEntry(k) || {};
         const meta = getMeta(k, ent) || {};
+        return _sortValueFrom(k, ent, meta, sortKey);
+    };
+    // Schwartzian 変換: 比較関数の中で valueOf を呼ぶと、n log n 回 =
+    // 1390 件で約 15,000 回 × 2 (a と b) の getMeta / findCompoundMeta が走る。
+    // findCompoundMeta は全切片を走査するので、これが表の再構築より重かった。
+    // キーごとに 1 回だけ値を取り出して添えてから並べ替える。
+    const decorated = base.map((k, i) => ({ k, i, v: valueOf(k) }));
+    decorated.sort((da, db) => {
+        const va = da.v, vb = db.v;
+        const aN = (va == null) || (typeof va === 'number' && !Number.isFinite(va));
+        const bN = (vb == null) || (typeof vb === 'number' && !Number.isFinite(vb));
+        // 値なしは dir によらず必ず末尾。同順位は元の並び (legacy 順) を保つ:
+        // Array.sort の安定性に頼らず添字で明示する (decorated を作った時点で
+        // base の順序は確定しているので、i の昇順 = 従来の安定ソートと同じ)。
+        if (aN && bN) return da.i - db.i;
+        if (aN) return 1;
+        if (bN) return -1;
+        const cmp = (typeof va === 'string') ? va.localeCompare(vb) : (va - vb);
+        if (cmp !== 0) return sortDir === 'asc' ? cmp : -cmp;
+        return da.i - db.i;
+    });
+    return decorated.map(d => d.k);
+}
+
+// sortMethodKeys の列ごとの値取り出し。Schwartzian 変換で 1 キー 1 回だけ呼ぶ。
+function _sortValueFrom(k, ent, meta, sortKey) {
+    const num = v => (v == null || v === '') ? null : Number(v);
+    {
         switch (sortKey) {
             case 'compound':  return String(meta.base || formatDisplayName(k)).toLowerCase();
             case 'precursor': return num(meta.precursor);
@@ -1355,18 +1384,7 @@ function sortMethodKeys(layerKeys, getEntry, getMeta, sortKey, sortDir) {
             case 'formula':   return meta.formula ? String(meta.formula).toLowerCase() : null;
         }
         return null;
-    };
-
-    return base.sort((a, b) => {
-        const va = valueOf(a), vb = valueOf(b);
-        const aN = (va == null) || (typeof va === 'number' && !Number.isFinite(va));
-        const bN = (vb == null) || (typeof vb === 'number' && !Number.isFinite(vb));
-        if (aN && bN) return 0;
-        if (aN) return 1;
-        if (bN) return -1;
-        const cmp = (typeof va === 'string') ? va.localeCompare(vb) : (va - vb);
-        return sortDir === 'asc' ? cmp : -cmp;
-    });
+    }
 }
 
 // Toggle aria-sort on the matching column header so the CSS arrow updates.
@@ -2094,6 +2112,23 @@ function monoLut(hex) {
     return lut;
 }
 
+// ---- 同一性スタンプ (renderComposite の LUT キャッシュ用) -------------------
+// Image / Float32Array のレコード / Uint8Array の keep グリッドは「中身を比べる
+// と高いが、作り直されたら必ず別オブジェクトになる」種類の入力なので、参照が
+// 変わったかどうかだけを見たい。オブジェクトに一度だけ非列挙の連番を書き込み、
+// それを署名の一部にする。WeakMap でも書けるが、署名を 1 本の文字列にしたいので
+// 連番の方が扱いやすい。書き込めない相手 (凍結オブジェクト) は毎回別 ID を返す
+// = キャッシュが効かないだけで、誤ってヒットすることは無い。
+let _identSeq = 0;
+function identStamp(o) {
+    if (!o) return '0';
+    if (o.__identId) return o.__identId;
+    const id = 'i' + (++_identSeq);
+    try { Object.defineProperty(o, '__identId', { value: id, enumerable: false }); }
+    catch (e) { return 'x' + (++_identSeq); }   // 書けない → 毎回ミスさせる
+    return id;
+}
+
 // Display ceiling percentile for MSI rasters. Using the raw max as the absolute
 // ceiling lets a single hot pixel (or one high-signal section) crush all tissue
 // to the colormap floor; a high percentile clips those outliers so tissue stays
@@ -2451,6 +2486,13 @@ const ROI_RAW_GRID_CACHE_MAX = 24;
 // 生強度ラスタ + デコード済み画像 + PNG 文字列で 10 万画素なら約 850 KB。
 // 16 本 = 約 14 MB/パネル。TIMS の 2000 features でもここで頭打ちになる。
 const MSI_LAYER_CACHE_MAX = 16;
+// renderComposite が焼いた「窓 + カラーマップ適用済みキャンバス」の保持上限
+// (パネルごと)。1 枚 = W*H*4 バイト (10 万画素で約 400 KB)。24 枚で約 9.6 MB。
+// 実際には _evictMsiRasters が画像を捨てるときに同じキーをここからも落とすので、
+// 保持数は「読み込み済みレイヤー数」= MSI_LAYER_CACHE_MAX 前後に張り付き、この
+// 上限が効くことはまず無い。暴走時の最終防波堤として置いてある。
+// (キーはレイヤーキーのみなので、同じ層の配色違いを 2 枚持つことはできない。)
+const MSI_LUT_CACHE_MAX = 24;
 // 合成 TIC / 統計を作るときに 1 回の worker 往復でまとめて読む列数。
 // worker 側は直列に読むので parquet の I/O は減らないが、1390 回だった
 // postMessage の往復が 90 回ほどになる。大きくしすぎると転送する型付き配列が
@@ -2490,18 +2532,39 @@ async function _ensureRoiRawGrid(section, layerKey) {
 
     const srcKey = ent.sourceFileId || ent.blobId;
     const entries = [{ layerKey, ent }];
-    for (const k of Object.keys(series)) {
-        if (k === layerKey || !/^MSI_/i.test(k)) continue;
-        const e = series[k];
-        if (!e || e.blobId !== ent.blobId) continue;
-        if ((e.sourceFileId || e.blobId) !== srcKey) continue;
-        if (entries.length >= ROI_RAW_GRID_CACHE_MAX) break;
-        entries.push({ layerKey: k, ent: e });
+    // parquet は列ごとに独立した読みなので、周辺レイヤーをまとめて温めても得がない
+    // (むしろ余計な列を読むだけ)。xlsx/txt は 1 回のパースで全列が取れるので束ねる。
+    if (ent.kind !== 'parquet') {
+        for (const k of Object.keys(series)) {
+            if (k === layerKey || !/^MSI_/i.test(k)) continue;
+            const e = series[k];
+            if (!e || e.blobId !== ent.blobId) continue;
+            if ((e.sourceFileId || e.blobId) !== srcKey) continue;
+            if (entries.length >= ROI_RAW_GRID_CACHE_MAX) break;
+            entries.push({ layerKey: k, ent: e });
+        }
     }
 
     let rec = null;
     try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
     if (!rec || !rec.blob) return null;
+
+    // ★ parquet は列指向なので、この化合物の 1 列だけを読む。
+    //   ここを通さないと extractSourceMatrixForExport の xlsx 経路へ落ち、
+    //   836 MB を丸ごと ArrayBuffer に展開して XLSX.read に食わせることになる
+    //   (タブが固まる。要望③「ROI は DESI と同一機能」が成立しなくなる)。
+    if (ent.kind === 'parquet') {
+        try {
+            const grid = await parquetRoiGrid(ent, rec.blob);
+            if (!grid) return null;
+            _roiGridCacheSet(wantKey, grid);
+            return grid;
+        } catch (e) {
+            console.warn('[roi] parquet column read failed', layerKey, e);
+            return null;
+        }
+    }
+
     let m = null;
     try { m = extractSourceMatrixForExport(await rec.blob.arrayBuffer(), ent, entries); }
     catch (e) { console.warn('[roi] source parse failed', layerKey, e); m = null; }
@@ -2557,18 +2620,33 @@ async function computeSectionOtsuMasks(sec, project, opts) {
     }
     const bySource = {};
     const unavailable = [];
+    // 「なぜ作れなかったか」。以前は握り潰していたので、ユーザーには
+    // 何も起きていないように見えていた。
+    const reasons = {};
     let totOrig = 0, totKept = 0, totRem = 0;
     for (const [srcKey, grp] of bySourceGrp) {
+        // ★ parquet はここを通さない。この下は「ソース全体を ArrayBuffer に
+        //   展開して xlsx として解釈する」経路なので、836 MB のファイルだと
+        //   タブが固まる (しかも blobContentSig でもう 1 回展開する)。
+        //   parquet の Otsu は「TIC と統計を作る」の 1 パスで一緒に作る
+        //   — どのみち全化合物の合計が要るので、読み直す意味がない。
+        if (grp.repr && grp.repr.kind === 'parquet') {
+            unavailable.push(srcKey);
+            reasons[srcKey] = 'needs-tic-pass';
+            continue;
+        }
         let rec = null;
         try { rec = await ProjectStorage.getBlob(grp.blobId); } catch (e) { rec = null; }
-        if (!rec || !rec.blob) { unavailable.push(srcKey); continue; }
+        if (!rec || !rec.blob) { unavailable.push(srcKey); reasons[srcKey] = 'no-blob'; continue; }
         let m = null, sig = null;
         try {
             const buf = await rec.blob.arrayBuffer();
             m = extractSourceMatrixForExport(buf, grp.repr, grp.entries);
-        } catch (e) { m = null; }
+        } catch (e) { console.warn('[otsu] source parse failed', srcKey, e); m = null; }
         try { sig = await blobContentSig(rec.blob); } catch (e) { sig = null; }
-        if (!m || !m.positions || !m.positions.length) { unavailable.push(srcKey); continue; }
+        if (!m || !m.positions || !m.positions.length) {
+            unavailable.push(srcKey); reasons[srcKey] = 'parse-failed'; continue;
+        }
         const N = m.positions.length;
         // TIC = 各ピクセルの全チャネル合計 (R colSums(counts) と同じ)
         const tic = new Float64Array(N);
@@ -2576,64 +2654,85 @@ async function computeSectionOtsuMasks(sec, project, opts) {
             const v = col.values;
             for (let i = 0; i < N; i++) { const x = v[i]; if (Number.isFinite(x)) tic[i] += x; }
         }
-        // log10(TIC+1) 分布 (Otsu 計算・ヒストグラム表示・強度スライダーに共用)
-        const logTic = new Float64Array(N);
-        let lmn = Infinity, lmx = -Infinity;
-        for (let i = 0; i < N; i++) {
-            const t = tic[i] > 0 ? tic[i] : 0;
-            const lv = useLog ? Math.log10(t + 1) : t;
-            logTic[i] = lv; if (lv < lmn) lmn = lv; if (lv > lmx) lmx = lv;
-        }
-        const autoRes = computeOtsuThreshold(logTic, OTSU_NBINS);
-        const autoThresholdLog = autoRes.threshold;
-        // ヒストグラム(256bin) — Analysis の強度スライダー UI 用に保存(小サイズ)
-        const HB = OTSU_NBINS;
-        let histMin = lmn, histMax = lmx;
-        const histCounts = new Array(HB).fill(0);
-        if (histMax > histMin) {
-            const w = (histMax - histMin) / HB;
-            for (let i = 0; i < N; i++) { let b = Math.floor((logTic[i] - histMin) / w); if (b < 0) b = 0; else if (b >= HB) b = HB - 1; histCounts[b]++; }
-        } else { histMin = lmn - 0.5; histMax = lmn + 0.5; histCounts[Math.floor(HB / 2)] = N; }
-        // 有効閾値 = 手動指定 or 自動Otsu + 強度オフセット(log10 単位。正=強く除去)
-        const strength = Number(opts.strength) || 0;
-        let effLog, thresholdOriginal, isManual = false;
-        if (opts.manualThreshold != null && Number.isFinite(Number(opts.manualThreshold))) {
-            isManual = true;
-            thresholdOriginal = Number(opts.manualThreshold);
-            effLog = useLog ? Math.log10((thresholdOriginal > 0 ? thresholdOriginal : 0) + 1) : thresholdOriginal;
-        } else {
-            effLog = autoThresholdLog + strength;
-            thresholdOriginal = useLog ? (Math.pow(10, effLog) - 1) : effLog;
-        }
-        // keep grid (描画ラスタと同じ buildMsiGrid 座標系で W×H に写像) + gridIdx(キャッシュ用)
+        // 位置 → 格子 (描画ラスタと同じ buildMsiGrid 座標系)
         const { xIndex, yIndex, W, H } = buildMsiGrid(m.positions);
         const gridIdx = new Int32Array(N).fill(-1);
-        const keep = new Uint8Array(W * H);
-        let nKept = 0;
         for (let i = 0; i < N; i++) {
             const p = m.positions[i];
             const ci = xIndex.get(p.x), ri = yIndex.get(p.y);
             if (ci == null || ri == null) continue;
-            const gi = ri * W + ci; gridIdx[i] = gi;
-            if (logTic[i] > effLog) { if (!keep[gi]) { keep[gi] = 1; nKept++; } }
+            gridIdx[i] = ri * W + ci;
         }
-        const nRemoved = N - nKept;
+        const rec2 = buildOtsuRecordFromTic(tic, gridIdx, W, H, opts, useLog);
         // 強度スライダー高速化用のセッションキャッシュ(生 TIC は保存しない)
         if (sec && sec.id != null) {
-            _otsuTicCache.set(sec.id + '|' + srcKey + '|' + (sig || ''), { W, H, gridIdx, logTic, autoThresholdLog });
+            _otsuTicCache.set(sec.id + '|' + srcKey + '|' + (sig || ''),
+                { W, H, gridIdx, logTic: rec2.logTic, autoThresholdLog: rec2.autoThresholdLog });
         }
-        bySource[srcKey] = {
+        bySource[srcKey] = Object.assign(rec2.record, {
+            signature: sig,
+            layerKeys: grp.entries.map(e => e.layerKey),
+        });
+        totOrig += rec2.record.nOriginal; totKept += rec2.record.nKept; totRem += rec2.record.nRemoved;
+        try { if (typeof _yieldUi === 'function') await _yieldUi(); } catch (e) {}
+    }
+    return { bySource, unavailable, reasons, nOriginal: totOrig, nKept: totKept, nRemoved: totRem };
+}
+
+// 「スポットごとの TIC」と「スポット → 格子」から Otsu の記録を組む。
+// xlsx/txt (computeSectionOtsuMasks) と parquet (App.buildTicAndStatsForSource) の
+// **両方がここを通る**。閾値・ヒストグラム・keep の作り方を 2 か所に書くと、
+// 同じデータなのに経路によって除去結果が変わるので必ず共有すること。
+//   tic     : Float64Array(N)  スポットごとの全チャネル合計
+//   gridIdx : Int32Array(N)    そのスポットの格子位置 (-1 = 格子に載らない)
+function buildOtsuRecordFromTic(tic, gridIdx, W, H, opts, useLog) {
+    opts = opts || {};
+    const N = tic.length;
+    // log10(TIC+1) 分布 (Otsu 計算・ヒストグラム表示・強度スライダーに共用)
+    const logTic = new Float64Array(N);
+    let lmn = Infinity, lmx = -Infinity;
+    for (let i = 0; i < N; i++) {
+        const t = tic[i] > 0 ? tic[i] : 0;
+        const lv = useLog ? Math.log10(t + 1) : t;
+        logTic[i] = lv; if (lv < lmn) lmn = lv; if (lv > lmx) lmx = lv;
+    }
+    const autoThresholdLog = computeOtsuThreshold(logTic, OTSU_NBINS).threshold;
+    // ヒストグラム(256bin) — Analysis の強度スライダー UI 用に保存(小サイズ)
+    const HB = OTSU_NBINS;
+    let histMin = lmn, histMax = lmx;
+    const histCounts = new Array(HB).fill(0);
+    if (histMax > histMin) {
+        const w = (histMax - histMin) / HB;
+        for (let i = 0; i < N; i++) { let b = Math.floor((logTic[i] - histMin) / w); if (b < 0) b = 0; else if (b >= HB) b = HB - 1; histCounts[b]++; }
+    } else { histMin = lmn - 0.5; histMax = lmn + 0.5; histCounts[Math.floor(HB / 2)] = N; }
+    // 有効閾値 = 手動指定 or 自動Otsu + 強度オフセット(log10 単位。正=強く除去)
+    const strength = Number(opts.strength) || 0;
+    let effLog, thresholdOriginal, isManual = false;
+    if (opts.manualThreshold != null && Number.isFinite(Number(opts.manualThreshold))) {
+        isManual = true;
+        thresholdOriginal = Number(opts.manualThreshold);
+        effLog = useLog ? Math.log10((thresholdOriginal > 0 ? thresholdOriginal : 0) + 1) : thresholdOriginal;
+    } else {
+        effLog = autoThresholdLog + strength;
+        thresholdOriginal = useLog ? (Math.pow(10, effLog) - 1) : effLog;
+    }
+    const keep = new Uint8Array(W * H);
+    let nKept = 0;
+    for (let i = 0; i < N; i++) {
+        const gi = gridIdx[i];
+        if (gi < 0) continue;
+        if (logTic[i] > effLog) { if (!keep[gi]) { keep[gi] = 1; nKept++; } }
+    }
+    return {
+        logTic, autoThresholdLog,
+        record: {
             W, H, keepB64: packBitsToB64(keep),
             thresholdOriginal, autoThresholdLog, effLog,
             histCounts, histMin, histMax,
-            signature: sig, nOriginal: N, nKept, nRemoved,
-            layerKeys: grp.entries.map(e => e.layerKey),
-            manual: isManual,
-        };
-        totOrig += N; totKept += nKept; totRem += nRemoved;
-        try { if (typeof _yieldUi === 'function') await _yieldUi(); } catch (e) {}
-    }
-    return { bySource, unavailable, nOriginal: totOrig, nKept: totKept, nRemoved: totRem };
+            signature: null, nOriginal: N, nKept, nRemoved: N - nKept,
+            layerKeys: [], manual: isManual,
+        },
+    };
 }
 
 // 描画用(同期): あるレイヤーに対応する keep grid を返す。背景除去 OFF や
@@ -3403,20 +3502,46 @@ async function parquetEnsureGeometry(blobId, blob) {
     return st.geom;
 }
 
-// 1 化合物 × 1 切片ぶんのラスタを作る。返す形は computeRasterPixels と同じなので、
-// 呼び出し側 (loadMsiLayer) は xlsx/txt と区別せずに扱える。
-async function buildParquetRaster(ent, blob) {
+// ent が指す切片の幾何 (行→格子の対応表) を引く。buildParquetRaster と
+// parquetRoiGrid が同じ選び方をするように 1 か所にまとめてある。
+async function parquetSectionGeom(ent, blob) {
     const geom = await parquetEnsureGeometry(ent.blobId, blob);
-    const st = _pqFiles.get(ent.blobId);
     const sec = geom.sections.find(s => s.label === ent.annotation)
         || (geom.sections.length === 1 ? geom.sections[0] : null);
     if (!sec) throw new Error('parquet: 切片 "' + ent.annotation + '" が見つかりません');
+    return { geom, sec, st: _pqFiles.get(ent.blobId) };
+}
+
+// 1 列を読んで、その切片の格子へ散らす。**この 1 行が表示ラスタと ROI 統計の
+// 唯一の共通点**なので、buildParquetRaster と parquetRoiGrid は必ずこれを通す。
+// (別々に書くと #186 で潰した「ROI と rawMean で幾何がずれる」が再発する)
+function scatterParquetColumn(col, sec, Arr) {
+    const values = new (Arr || Float32Array)(sec.W * sec.H).fill(NaN);
+    for (let k = 0; k < sec.rowIdx.length; k++) values[sec.cellIdx[k]] = col[sec.rowIdx[k]];
+    return values;
+}
+
+// ROI 統計用の生強度グリッド。1 化合物 = 1 列なので、836 MB のファイルから
+// 読むのは約 0.3 MB の 1 列だけ。xlsx/txt のようにファイル全体を展開しない。
+async function parquetRoiGrid(ent, blob) {
+    const { sec, st } = await parquetSectionGeom(ent, blob);
+    const col = await callParquetWorker(
+        { op: 'column', fileId: st.fileId, blob, colIdx: ent.colIdx }, [], 600000);
+    if (!col) return null;
+    // ROI 統計は Float64 で持つ (DESI 経路の _ensureRoiRawGrid と同じ精度)。
+    return { W: sec.W, H: sec.H, values: scatterParquetColumn(col, sec, Float64Array) };
+}
+
+// 1 化合物 × 1 切片ぶんのラスタを作る。返す形は computeRasterPixels と同じなので、
+// 呼び出し側 (loadMsiLayer) は xlsx/txt と区別せずに扱える。
+async function buildParquetRaster(ent, blob) {
+    const { sec, st } = await parquetSectionGeom(ent, blob);
     const col = await callParquetWorker(
         { op: 'column', fileId: st.fileId, blob, colIdx: ent.colIdx }, [], 600000);
     if (!col) throw new Error('parquet: 列を読めませんでした');
-    // 格子へ散らす。触れなかったセルは NaN のまま = データ無し (走査外)。
-    const values = new Float32Array(sec.W * sec.H).fill(NaN);
-    for (let k = 0; k < sec.rowIdx.length; k++) values[sec.cellIdx[k]] = col[sec.rowIdx[k]];
+    // 格子へ散らす (ROI 統計と同じ関数を通す)。触れなかったセルは NaN のまま
+    // = データ無し (走査外)。
+    const values = scatterParquetColumn(col, sec, Float32Array);
     // ベイクは DESI と同じ関数を通す。経路によって Range や Max が食い違わない。
     const r = bakeRasterFromValues(values, sec.W, sec.H, ent.range, ent.bakeMode,
         { gridFallback: sec.gridFallback });
@@ -3504,7 +3629,10 @@ async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opt
         const g = geom.sections.find(s => s.label === t.label)
             || (geom.sections.length === 1 ? geom.sections[0] : null);
         if (!g) continue;
-        slots.push({ t, g, values: new Float32Array(g.W * g.H) });
+        // ticRaw = 生強度の素の合計 (Otsu 用)。TIC 画像の accum は層ごとに
+        // 正規化してから足すので別物。どのみち全列を読むので、ここで一緒に
+        // 貯めておけば背景除去のために読み直さずに済む。
+        slots.push({ t, g, values: new Float32Array(g.W * g.H), ticRaw: new Float64Array(g.W * g.H) });
     }
     if (!slots.length) throw new Error('parquet: 対象の切片が見つかりません');
     const statsByKey = new Map();
@@ -3533,10 +3661,19 @@ async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opt
                 // 画素配列は作らない — 範囲と統計しか要らない。
                 const bs = deriveBakeStats(values, undefined, undefined);
                 const lo = bs.bakeLo, span = bs.bakeHi - bs.bakeLo;
-                const accum = s.t.accum, count = s.t.count;
+                const accum = s.t.accum, count = s.t.count, ticRaw = s.ticRaw;
+                // clippedHigh は bakeRasterFromValues と同じ条件で数える。この
+                // ループは既に全画素を走るので追加コストは比較 1 回ぶんだけ。
+                // これを埋めないと ent.diag が作れず、loadMsiLayer の wasMissing
+                // 判定 (`|| !entRef.diag`) が永久に true のままになる。
+                const countClip = bs.bakeRangeFromData;
+                const hi = bs.bakeHi;
+                let clippedHigh = 0;
                 for (let p = 0; p < values.length; p++) {
                     const v = values[p];
                     if (!Number.isFinite(v)) continue;
+                    if (countClip && v > hi) clippedHigh++;
+                    ticRaw[p] += v;     // 背景除去(Otsu)用の素の合計
                     // 改修前と同じ式 (層ごとに正規化してから 0..255 で加算)。
                     accum[p] += Math.round(Math.max(0, Math.min(1, (v - lo) / span)) * 255);
                     count[p]++;
@@ -3546,6 +3683,12 @@ async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opt
                     rawTrueMax: bs.rawTrueMax, rawDispMax: bs.rawDispMax,
                     nPixels: bs.nPixels, gridFallback: g.gridFallback || null,
                     rasterW: g.W, rasterH: g.H,
+                    // parquet は行 → セルが 1:1 なので重複セルは原理的に発生しない
+                    // (buildParquetRaster と同じ前提)。格子は parquetEnsureGeometry
+                    // が確定させているので gridFallback はその値をそのまま使う。
+                    diag: { dupCells: 0, dupRows: 0, clippedHigh,
+                            gridFallback: g.gridFallback || null, nPixels: bs.nPixels,
+                            bakeMode: 'robust' },
                 };
             }
             statsByKey.set(chunk[c].key, perSection);
@@ -3553,7 +3696,10 @@ async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opt
         calcMs += Date.now() - t1;
         onCol(Math.min(i + chunk.length, features.length), features.length, { readMs, calcMs });
     }
-    return { aborted: false, statsByKey, readMs, calcMs };
+    // 貯めた素の合計を切片ごとに返す。呼び出し側が Otsu の記録を組む。
+    const ticBySection = new Map();
+    for (const s of slots) ticBySection.set(s.t.sectionId, { ticRaw: s.ticRaw, g: s.g });
+    return { aborted: false, statsByKey, ticBySection, readMs, calcMs };
 }
 
 function callParquetWorker(msg, transfer, timeoutMs) {
@@ -3722,6 +3868,8 @@ class SectionPanel {
 
     destroy() {
         if (this.dom && this.dom.root && this.dom.root.parentElement) this.dom.root.parentElement.removeChild(this.dom.root);
+        if (this._thumbObserver) { try { this._thumbObserver.disconnect(); } catch (e) {} this._thumbObserver = null; }
+        try { this.releaseCaches(); } catch (e) {}
     }
 
     // ---- Layer loading ----
@@ -3900,10 +4048,29 @@ class SectionPanel {
 
     // 配色変更などで全サムネイルを焼き直す。読み込み済みはその場で、未読込は
     // 「汚れている」印だけ付けて、次に画面へ入ったときに焼く。
+    // パネルを捨てるときに焼き済みキャンバスも明示的に手放す。GC 任せでも
+    // 回収はされるが、退避を確定的にしておく。
+    releaseCaches() {
+        if (this._msiLutCache) this._msiLutCache.clear();
+        this.msiValueRasters.clear();
+        this.imageSources = {};
+        this.imageDataUrls = {};
+    }
+
     markAllThumbsDirty() {
         for (const key of this.msiThumbRefs.keys()) {
             if (this.imageSources[key]) { try { this.renderMsiThumbnail(key); } catch (e) {} }
-            else this._thumbDirty.add(key);
+            else {
+                // 未読込 / LRU で退避済み。印を付けるだけでは足りない —
+                // _thumbDirty を消化するのは _observeThumb が仕込む paint だけで、
+                // その paint は「初回に画面へ入った時点」で unobserve され
+                // _thumbPaint からも消えている。付け直さないと、いったん退避した
+                // サムネイルは配色を変えても永久に古い色のまま残る。
+                this._thumbDirty.add(key);
+                const cell = this.dom.thumbCells && this.dom.thumbCells.get(key);
+                const box = cell && cell.querySelector ? (cell.querySelector('[data-thumb-key]') || cell) : null;
+                if (box) { try { this._observeThumb(key, box); } catch (e) {} }
+            }
         }
     }
 
@@ -3947,6 +4114,7 @@ class SectionPanel {
             delete this.imageSources[key];
             delete this.imageDataUrls[key];
             this.msiValueRasters.delete(key);
+            if (this._msiLutCache) this._msiLutCache.delete(key);   // 焼き済みキャンバスも一緒に返す
             // imageSettings は残す: 捨てると再読込までの間 renderComposite が
             // このレイヤーを描画対象外にしてしまう。中身は寸法から作り直せる。
             // 焼き済みのサムネイル (msiThumbRefs の <img>) も data URL なので生き残る。
@@ -4030,7 +4198,14 @@ class SectionPanel {
             if (diag) entRef.diag = diag;
             if (rasterW != null) entRef.rasterW = rasterW;
             if (rasterH != null) entRef.rasterH = rasterH;
-            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null || rawDispMax != null || diag || rasterW != null) && App && App.queueSave) App.queueSave();
+            // ここで書き戻すのは全部「blob を読み直せば復元できる派生値」なので、
+            // 保存を 30 秒ためる queueSaveDerived を通す。従来の queueSave() だと
+            // 化合物を 1 つ開くたびにプロジェクト全体 (数 MB) の書き込みと、その
+            // 5 秒後の publish RPC が走っていた (1390 化合物なら 1390 回)。
+            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null || rawDispMax != null || diag || rasterW != null) && App && App.queueSaveDerived) App.queueSaveDerived();
+            // rawMean / rawTrueMax / diag は Method 表のセルであり、Mean/Max は
+            // 並べ替えキーでもある。メモを捨てないと表が古い値のままになる。
+            if (wasMissing) _bumpMethodSeries();
         }
         await this.attachImage(key, dataUrl);
     }
@@ -4610,29 +4785,68 @@ class SectionPanel {
             // match the source TIFF (Photoshop / Image-J).
             let drawSource;
             if (isMsiLayer) {
+                // Per-section display window (raw units, HDI style): rrC is this
+                // layer's raw range; winC defaults to that range (auto-scale) or
+                // the user's manual min/max. msiWindowEval maps each pixel into it.
+                const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
+                const winC = App.getMsiWindow(key, rrC, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
+                const ovColor = overlay ? (overlayColor[key] || '#ffffff') : null;
+                const lut = overlay ? monoLut(ovColor) : getActiveColormap();
+                const bg = overlay ? [0, 0, 0] : getColormapBackground();
+                // 背景除去(Otsu): keep grid が 0 のピクセルは背景として backdrop に
+                // 落とす(out-of-grid と同じ扱い)。全イオン像で同一マスクを共有する。
+                const keepGrid = otsuKeepGridForLayer(this.section, key);
+                const vrCache = this.msiValueRasters && this.msiValueRasters.get(key);
+                // ---- 焼き済みキャンバスのキャッシュ ----------------------------
+                // 下の 10 万画素ループの出力は、ここに並べた入力だけで決まる。
+                // Method 行を 1 回クリックすると renderComposite はパネル数 ×
+                // レイヤー数ぶん走るので、同じ絵を何度も焼き直していた。
+                //
+                // 値で入れるもの / 参照の同一性で入れるものを取り違えないこと:
+                //  - winC は getMsiWindow が毎回新しいオブジェクトを返すので値で入れる。
+                //    'same' スケールでは getMsiAbsMax が全パネルを走査するライブ計算
+                //    なので、他パネルの変化はこの min/max に必ず現れる → 自動的に正しい。
+                //  - rrC も配列が使い回されうるので値で入れる。
+                //  - getColormapBackground() は毎回新しい [0,0,0] を返すので、
+                //    参照ではなくカラーマップ名 (bg を一意に決める) を入れる。
+                //  - オーバーレイ定義は色ピッカーでその場で書き換えられるので、
+                //    定義の参照ではなく解決済みの色文字列を入れる。
+                //  - img / 値ラスタ / keep グリッドは作り直されたら必ず別オブジェクト
+                //    になるので、同一性スタンプで足りる。
+                //
+                // 意図的に入れていないもの (= ここが効く): settings.opacity は
+                // ctx.globalAlpha、settings.grayscale は HE 系の分岐、msiSmoothing は
+                // imageSmoothingEnabled。どれも色付きキャンバスの中身に影響しない。
+                // 透明度スライダーのドラッグが合成だけで済むようになる。
+                const lutSig = identStamp(img) + '|' + img.naturalWidth + 'x' + img.naturalHeight
+                    + '|' + identStamp(vrCache)
+                    + '|' + (rrC ? (rrC[0] + ',' + rrC[1]) : '-')
+                    + '|' + (winC ? (winC.min + ',' + winC.max) : '-')
+                    + '|' + (overlay ? ('o' + ovColor) : ('c' + _activeColormapName))
+                    + '|' + (App.otsuBgRemove ? '1' : '0')
+                    + '|' + identStamp(keepGrid && keepGrid.keep);
+                this._msiLutCache = this._msiLutCache || new Map();
+                const cached = this._msiLutCache.get(key);
+                if (cached && cached.sig === lutSig) {
+                    // LRU: 使ったものを末尾へ回す
+                    this._msiLutCache.delete(key);
+                    this._msiLutCache.set(key, cached);
+                    drawSource = cached.canvas;
+                }
+                if (!drawSource) {
                 const tc = document.createElement('canvas');
                 tc.width = img.naturalWidth; tc.height = img.naturalHeight;
                 const tctx = get2dContext(tc, { willReadFrequently: true });
                 tctx.drawImage(img, 0, 0);
                 const data = tctx.getImageData(0, 0, tc.width, tc.height);
                 const d = data.data;
-                // Per-section display window (raw units, HDI style): rrC is this
-                // layer's raw range; winC defaults to that range (auto-scale) or
-                // the user's manual min/max. msiWindowEval maps each pixel into it.
-                const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
-                const winC = App.getMsiWindow(key, rrC, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
-                const lut = overlay ? monoLut(overlayColor[key] || '#ffffff') : getActiveColormap();
-                const bg = overlay ? [0, 0, 0] : getColormapBackground();
-                // 背景除去(Otsu): keep grid が 0 のピクセルは背景として backdrop に
-                // 落とす(out-of-grid と同じ扱い)。全イオン像で同一マスクを共有する。
-                const keepGrid = otsuKeepGridForLayer(this.section, key);
                 const useKeep = keepGrid && keepGrid.W === tc.width && keepGrid.H === tc.height;
                 // 生強度ラスタ (段階A で保持) があれば 8bit PNG への往復を挟まず、値を
                 // そのまま窓へ写して色にする。8bit は 1 LSB = (rawRange の幅)/255 の
                 // 粗さがあり、Range を低信号側へ寄せると数階調に潰れていた。
                 // 寸法が食い違うとき (キャッシュ画像の差し替え等) だけ従来経路に落ちる。
                 // 「データ無し」の判定は従来どおり alpha === 0 のままなので幾何は不変。
-                const vrC = this.msiValueRasters && this.msiValueRasters.get(key);
+                const vrC = vrCache;
                 const useValsC = !!(vrC && vrC.W === tc.width && vrC.H === tc.height);
                 const fbC = msiRawFallbackMax(rrC);
                 for (let i = 0; i < d.length; i += 4) {
@@ -4659,6 +4873,17 @@ class SectionPanel {
                 }
                 tctx.putImageData(data, 0, 0);
                 drawSource = tc;
+                // 焼き上がりを署名つきで保存。上限を超えたぶんは挿入順(= 使った
+                // 順)の先頭から捨てる。10 万画素 × 4 B ≒ 400 KB/枚なので
+                // MSI_LUT_CACHE_MAX 枚でも数 MB に収まる。
+                this._msiLutCache.delete(key);
+                this._msiLutCache.set(key, { sig: lutSig, canvas: tc });
+                while (this._msiLutCache.size > MSI_LUT_CACHE_MAX) {
+                    const oldest = this._msiLutCache.keys().next().value;
+                    if (oldest === undefined) break;
+                    this._msiLutCache.delete(oldest);
+                }
+                }
             } else if (isHeLike && settings.grayscale) {
                 // BT.601 luma so RGB collapses to a single channel; alpha
                 // preserved so any masked HE areas stay transparent.
@@ -5176,7 +5401,8 @@ class SectionPanel {
         this.refreshThumbHighlights();
         this.refreshRangeEditor();
         this.refreshActiveOutline();
-        if (App.activeSectionId === this.section.id) renderMethodTable();
+        // 変わるのは行の active クラスだけ。表を組み直す必要は無い。
+        if (App.activeSectionId === this.section.id) _refreshMethodRowState();
     }
 
     // User-driven layer click: bare click = solo (show only this), modifier = additive toggle.
@@ -5215,7 +5441,7 @@ class SectionPanel {
         this.refreshThumbHighlights();
         this.refreshRangeEditor();
         this.refreshActiveOutline();
-        if (App.activeSectionId === this.section.id) renderMethodTable();
+        if (App.activeSectionId === this.section.id) _refreshMethodRowState();   // active クラスのみ
     }
 
     fallbackActiveMsiKey() {
@@ -5314,7 +5540,9 @@ class SectionPanel {
                 if (p.msiThumbRefs && p.msiThumbRefs.has(key)) p.renderMsiThumbnail(key);
             } catch (e) {}
         }
-        if (App.activeSectionId === this.section.id) renderMethodTable();
+        // Range (表示窓) は Method 表のどのセルにも出ない (Mean/Max は ent の
+        // 統計から出す)。クラスの貼り直しだけで足りる。
+        if (App.activeSectionId === this.section.id) _refreshMethodRowState();
         Toolbar.refreshRange();
     }
 
@@ -5331,7 +5559,7 @@ class SectionPanel {
                 if (p.msiThumbRefs && p.msiThumbRefs.has(key)) p.renderMsiThumbnail(key);
             } catch (e) {}
         }
-        if (App.activeSectionId === this.section.id) renderMethodTable();
+        if (App.activeSectionId === this.section.id) _refreshMethodRowState();   // 上と同じ理由
         Toolbar.refreshRange();
     }
 
@@ -5462,6 +5690,7 @@ class SectionPanel {
         this._msiLoadInFlight.delete(key);
         this._thumbPaint.delete(key);
         this.msiValueRasters.delete(key);
+        if (this._msiLutCache) this._msiLutCache.delete(key);
         this.visibleLayers.delete(key);
         this._persistVisibleLayers();
         this.msiThumbRefs.delete(key);
@@ -5474,6 +5703,7 @@ class SectionPanel {
         this.setupCanvasSize();
         this.refreshRangeEditor();
         this.refreshActiveOutline();
+        _bumpMethodSeries();   // 行が 1 つ消えたのでメモを捨てる
         if (App.activeSectionId === this.section.id) renderMethodTable();
         // This molecule may have lost its global-max holder; rescale others.
         App.recomputeMsiAbsScale();
@@ -5631,7 +5861,7 @@ class SectionPanel {
         if (this.msiThumbRefs && this.msiThumbRefs.has(msiKey)) this.renderMsiThumbnail(msiKey);
         if (App.activeSectionId === this.section.id && this.effectiveActiveMsiKey() === msiKey) {
             Toolbar.refreshRange();
-            renderMethodTable();
+            _refreshMethodRowState();   // Range は Method 表のセルに出ない
         }
         App.queueSave();
     }
@@ -5909,7 +6139,7 @@ class SectionPanel {
                 this._persistRangeToMeta(key, settings.vmin, settings.vmax);
                 this.renderComposite();
                 if (this.msiThumbRefs.has(key)) this.renderMsiThumbnail(key);
-                if (App.activeSectionId === this.section.id) { Toolbar.refreshRange(); renderMethodTable(); }
+                if (App.activeSectionId === this.section.id) { Toolbar.refreshRange(); _refreshMethodRowState(); }
                 App.queueSave();
                 const outMin = rawRangeR ? lumToRaw(settings.vmin, rawRangeR) : settings.vmin;
                 const outMax = rawRangeR ? lumToRaw(settings.vmax, rawRangeR) : settings.vmax;
@@ -6281,6 +6511,7 @@ class SectionPanel {
         delete ent.src;
         this.section.msiSeries = this.section.msiSeries || {};
         this.section.msiSeries[key] = ent;
+        _bumpMethodSeries();   // 行が 1 つ増える
         if (opts.sourceFileId) {
             this.section.msiFiles = this.section.msiFiles || {};
             if (!this.section.msiFiles[opts.sourceFileId]) {
@@ -6664,14 +6895,16 @@ async function renderAnalysisChart(gen) {
     const host = document.getElementById('graph-container');
     const project = App.project;
     const roi = (project.rois || []).find(r => r.id === App.activeRoiId);
-    if (!roi) { host.innerHTML = '<p class="text-gray-400 text-xs">Select a ROI</p>'; renderMethodTable(); return; }
+    // ROI チャートは Method 表のどのセルにも影響しない (ent の統計も焦点も
+    // 変えない)。ROI やグラフ選択を触るたびに 1390 行を組み直していたので外す。
+    if (!roi) { host.innerHTML = '<p class="text-gray-400 text-xs">Select a ROI</p>'; return; }
     const ch1 = document.getElementById('graph-select-1').value;
     const ch2 = document.getElementById('graph-select-2').value;
     const ch3 = document.getElementById('graph-select-3').value;
     const channels = [ch1];
     if (ch2 && ch2 !== 'none' && !channels.includes(ch2)) channels.push(ch2);
     if (ch3 && ch3 !== 'none' && !channels.includes(ch3)) channels.push(ch3);
-    if (!channels[0]) { host.innerHTML = '<p class="text-gray-400 text-xs">No MSI layer to plot</p>'; renderMethodTable(); return; }
+    if (!channels[0]) { host.innerHTML = '<p class="text-gray-400 text-xs">No MSI layer to plot</p>'; return; }
 
     const sectionsWithRoi = (project.sections || []).filter(s => roi.polysBySection && roi.polysBySection[s.id] && roi.polysBySection[s.id].length);
     if (!sectionsWithRoi.length) { host.innerHTML = '<p class="text-gray-400 text-xs">This ROI is not drawn on any section yet</p>'; return; }
@@ -6726,7 +6959,6 @@ async function renderAnalysisChart(gen) {
     }
     drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi, unavailable);
     document.getElementById('analysis-scope').textContent = sectionsWithRoi.length + ' section(s)';
-    renderMethodTable();
 }
 
 // ---- 背景除去(Otsu) の Analysis 表示: TIC ヒストグラム + 強度スライダー ----
@@ -6779,7 +7011,10 @@ function renderOtsuAnalysis() {
     if (!otsu || !otsu.applied || !otsu.bySource || !Object.keys(otsu.bySource).length) {
         host.innerHTML = '<p class="text-gray-400 text-xs">背景除去(Otsu)を計算中…</p>';
         App.ensureSectionOtsu(sec).then(() => {
-            try { App.queueSave(); } catch (e) {}
+            // 解析パネルを「開いただけ」で走る計算なので、保存は派生扱いにする
+            // (マスクは元データから必ず再計算できる)。実編集ではないので
+            // ここで公開まで走らせる必要もない。
+            try { App.queueSaveDerived(); } catch (e) {}
             if (App.analysisMode === 'otsu') renderOtsuAnalysis();
         }).catch(e => { console.warn('[otsu] ensure for analysis failed', e); host.innerHTML = '<p class="text-gray-400 text-xs">計算に失敗しました(元データを確認)</p>'; });
         return;
@@ -6790,7 +7025,7 @@ function renderOtsuAnalysis() {
         // 旧バージョンで作られたヒストグラム無しのマスク → その場で再計算。
         host.innerHTML = '<p class="text-gray-400 text-xs">背景除去(Otsu)を計算中…</p>';
         App.ensureSectionOtsu(sec, { force: true }).then(() => {
-            try { App.queueSave(); } catch (e) {}
+            try { App.queueSaveDerived(); } catch (e) {}   // 上と同じ理由 (旧記録の修復)
             if (App.analysisMode === 'otsu') renderOtsuAnalysis();
         }).catch(e => { console.warn('[otsu] recompute for analysis failed', e); host.innerHTML = '<p class="text-gray-400 text-xs">計算に失敗しました(元データを確認)</p>'; });
         return;
@@ -7158,6 +7393,48 @@ function filterMethodKeys(keys, getEntry, getMeta) {
     });
 }
 
+// 「Method 表にいま見えているキー列」を 1 箇所で決めて、条件が変わるまで使い回す。
+//
+// 絞り込み → 並べ替えは 1390 件で数万回の getMeta / findCompoundMeta を伴う。
+// renderMethodTable は 20 箇所近くから呼ばれ、↑↓ キーのナビゲーションも
+// 同じ並びを必要とするので、毎回作り直すのは純粋な無駄だった。
+//
+// 無効化はレイヤー集合や統計が変わったときの _bumpMethodSeries() に集約する。
+// **書き込み側でこれを呼び忘れると表が古いまま**になるので、呼ぶ箇所は
+// テストで固定してある。
+let _methodSeriesVersion = 0;
+let _methodKeysMemo = null;
+// いま tbody に出ている内容の署名。_refreshMethodRowState が「貼り直しで足りるか
+// 組み直しが要るか」を判断するのに使う。null = まだ何も出していない。
+let _methodRenderedSig = null;
+function _bumpMethodSeries() { _methodSeriesVersion++; _methodKeysMemo = null; }
+
+function methodVisibleKeys(panel, project) {
+    const sec = panel.section;
+    const series = sec.msiSeries || {};
+    const allKeys = Object.keys(series).filter(k => /^MSI_/i.test(k));
+    const sig = [
+        sec.id, _methodSeriesVersion,
+        // 行数も署名に混ぜる。_bumpMethodSeries() を呼び忘れた経路があっても
+        // 「化合物が増えた / 減った」だけは必ず検出できる保険。1390 件の
+        // Object.keys + 正規表現は、並べ替え (約 15,000 回の比較) より十分安い。
+        allKeys.length,
+        (App.methodSort && App.methodSort.key) || '', (App.methodSort && App.methodSort.dir) || '',
+        String(App.methodFilter || ''),
+        Number.isFinite(App.methodMzMin) ? App.methodMzMin : '',
+        Number.isFinite(App.methodMzMax) ? App.methodMzMax : '',
+    ].join('|');
+    if (_methodKeysMemo && _methodKeysMemo.sig === sig) return _methodKeysMemo;
+
+    const getEntry = k => series[k];
+    const getMeta = (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(project, k);
+    const filtered = filterMethodKeys(allKeys, getEntry, getMeta);
+    const keys = sortMethodKeys(filtered, getEntry, getMeta,
+        App.methodSort && App.methodSort.key, App.methodSort && App.methodSort.dir);
+    _methodKeysMemo = { sig, keys, total: allKeys.length };
+    return _methodKeysMemo;
+}
+
 // Method 表の列構成。ノンターゲット (parquet) では MRM 固有の
 // Fragment / CE / CV が常に空欄になるので、m/z・アダクト・分子式に差し替える。
 // 「選択を管理へ登録」(MRM ライブラリ登録) も意味を持たないので隠す。
@@ -7222,42 +7499,40 @@ function renderMethodTable() {
     const tbody = document.getElementById('method-rows');
     if (!tbody) return;
     const project = App.project;
-    if (!project) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No project</td></tr>'; return; }
+    if (!project) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No project</td></tr>'; _methodRenderedSig = null; return; }
     const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
-    if (!panel) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No active section</td></tr>'; return; }
+    if (!panel) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No active section</td></tr>'; _methodRenderedSig = null; return; }
 
     // 列構成は切片の種別で決まる (ノンターゲットは MRM 固有の列を出さない)。
     const nonTarget = methodTableIsNonTarget(panel);
     _renderMethodHead(nonTarget);
     const nCols = methodColumnCount(nonTarget);
 
-    const allKeys = Object.keys(panel.section.msiSeries || {}).filter(k => /^MSI_/i.test(k));
-    // 絞り込み (要望①)。ノンターゲットでは化合物が数千件になり、イオン像の一覧も
-    // 出さないので、この表が唯一の化合物ナビゲーションになる。
-    const filtered = filterMethodKeys(allKeys, k => panel.section.msiSeries[k],
-        (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(project, k));
+    // 絞り込み (要望①) と並べ替えは methodVisibleKeys に集約してメモ化する。
+    // ↑↓ キーのナビゲーションも同じものを使うので、表に見えている並びと
+    // キーボードの巡回順が構造的に一致する。
+    const memo = methodVisibleKeys(panel, project);
+    const layerKeys = memo.keys;
     const cntEl = document.getElementById('method-filter-count');
-    if (cntEl) cntEl.textContent = (filtered.length === allKeys.length)
-        ? (allKeys.length ? allKeys.length + ' 件' : '')
-        : (filtered.length + ' / ' + allKeys.length + ' 件');
-
-    const layerKeys = sortMethodKeys(
-        filtered,
-        k => panel.section.msiSeries[k],
-        (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(project, k),
-        App.methodSort && App.methodSort.key,
-        App.methodSort && App.methodSort.dir
-    );
+    if (cntEl) cntEl.textContent = (layerKeys.length === memo.total)
+        ? (memo.total ? memo.total + ' 件' : '')
+        : (layerKeys.length + ' / ' + memo.total + ' 件');
     _updateMethodHeaderArrows('#method-table thead', App.methodSort);
 
     if (!layerKeys.length) {
         tbody.innerHTML = '<tr><td colspan="' + nCols + '" class="px-2 py-2 text-center text-gray-400">'
-            + (allKeys.length ? '絞り込みに一致する化合物がありません' : 'No MSI layer in this section')
+            + (memo.total ? '絞り込みに一致する化合物がありません' : 'No MSI layer in this section')
             + '</td></tr>';
+        _methodRenderedSig = memo.sig;   // 「0 件」も正しく出し切った状態
         return;
     }
 
+    _methodRenderedSig = memo.sig;
     tbody.innerHTML = '';
+    _bindMethodRowDelegation(tbody);
+    // 行は DocumentFragment に組んでから 1 回で挿入する。1390 行を tbody へ
+    // 直接 append すると、そのたびにレイアウトが無効化される。
+    const frag = document.createDocumentFragment();
     const safe = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
     for (const layerKey of layerKeys) {
@@ -7313,9 +7588,10 @@ function renderMethodTable() {
             : 'background:transparent;';
 
         const cellHtml = '' +
+            // <input type="color"> は 1390 行ぶん作ると DOM が重いので、
+            // 表の外に 1 個だけ置いたものを使い回す (_sharedMarkerInput)。
             '<td class="px-1 py-1 border-b border-gray-100 text-center" data-cell="marker">' +
                 '<button type="button" class="marker-swatch" title="Set marker colour" style="' + markerSwatchStyle + '"></button>' +
-                '<input type="color" class="marker-input" value="' + (markerColor || '#ff0000') + '" tabindex="-1">' +
             '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + diagBadge + '</td>' +
             // ノンターゲットは m/z・アダクト・分子式 + 強度 (Mean/Max)。
@@ -7336,74 +7612,13 @@ function renderMethodTable() {
                     '<input type="checkbox" class="method-select" data-layer-key="' + safe(layerKey) + '" title="MRM管理へ登録">' +
                  '</td>'));
         tr.innerHTML = cellHtml;
-
-        const swatch = tr.querySelector('.marker-swatch');
-        const colorInput = tr.querySelector('.marker-input');
-        swatch.addEventListener('click', (ev) => {
-            ev.stopPropagation();
-            // Right click (or shift) clears the marker.
-            if (ev.shiftKey || ev.button === 2) {
-                applyMarkerColor(panel, layerKey, null);
-                return;
-            }
-            colorInput.click();
-        });
-        swatch.addEventListener('contextmenu', (ev) => {
-            ev.preventDefault(); ev.stopPropagation();
-            applyMarkerColor(panel, layerKey, null);
-        });
-        colorInput.addEventListener('input', (ev) => {
-            applyMarkerColor(panel, layerKey, ev.target.value);
-        });
-        colorInput.addEventListener('click', (ev) => ev.stopPropagation());
-
-        // Selection checkbox (MRM-library register) must not trigger the row's
-        // compound-switch / layer-click behaviour.
-        const selectCb = tr.querySelector('.method-select');
-        if (selectCb) selectCb.addEventListener('click', (ev) => ev.stopPropagation());
-
-        tr.addEventListener('click', (ev) => {
-            if (ev.target && (ev.target.classList.contains('marker-swatch') || ev.target.classList.contains('marker-input') || ev.target.classList.contains('method-select'))) return;
-            // In Compound mode, the Method table is the compound switcher: a
-            // click promotes that row to the focus compound and every section
-            // re-renders with that single MSI layer.
-            if (App.viewMode === 'compound') {
-                App.setFocusCompoundKey(layerKey);
-                // Make sure the layer is visible in every panel (otherwise
-                // focus would still be hidden by the per-section visibility flag).
-                for (const p of App.panels.values()) {
-                    if (p.imageSources[layerKey] && !p.visibleLayers.has(layerKey)) {
-                        p.toggleLayer(layerKey, true);
-                    }
-                }
-                return;
-            }
-            const p = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
-            if (p) p.handleLayerClick(layerKey, ev);
-        });
-
-        // Master-only inline rename. Share-mode hides the dblclick path via
-        // CSS cursor + early-return below; in master we prompt for the new
-        // base name (CE/CV will be re-derived from the trailing _<int>_<int>
-        // pattern by splitCeCv).
-        const compoundCell = tr.querySelector('[data-compound-cell]');
-        if (compoundCell) {
-            compoundCell.addEventListener('dblclick', (ev) => {
-                ev.preventDefault(); ev.stopPropagation();
-                if (document.body.classList.contains('share-mode')) return;
-                const ent = panel.section.msiSeries && panel.section.msiSeries[layerKey];
-                const meta = ent && ent.compoundMeta;
-                const cur = (meta && (meta.name || meta.base)) || formatDisplayName(layerKey);
-                const next = prompt('新しいコンパウンド名 (CE/CV を含めるなら "Foo_45_14" の形)', cur);
-                if (next == null) return;
-                const trimmed = String(next).trim();
-                if (!trimmed || trimmed === cur) return;
-                App.renameCompound(layerKey, trimmed);
-            });
-        }
-
-        tbody.appendChild(tr);
+        // リスナーは行に付けない。1390 行 × 7 個 ≒ 8300 個のリスナーになり、
+        // 表を組み直すたびに全部作り直していた。クリック / ダブルクリック /
+        // 右クリックは tbody 1 箇所で受けて data-layer-key から行を特定する
+        // (_bindMethodRowDelegation)。
+        frag.appendChild(tr);
     }
+    tbody.appendChild(frag);
 
     // Stock-take embed: bring the 評価対象 row into view. The Method table
     // scrolls inside #method-body, and the requested compound is often well
@@ -7419,6 +7634,116 @@ function renderMethodTable() {
     }
 }
 
+// Method 表の行イベントをまとめて受ける (委譲)。tbody を組み直しても
+// リスナーは 1 組のままなので、1390 行 × 7 個の付け外しが消える。
+// 行の特定は tr.dataset.layerKey で行う。
+function _bindMethodRowDelegation(tbody) {
+    if (tbody._methodDelegationBound) return;
+    tbody._methodDelegationBound = true;
+
+    const rowOf = (t) => (t && t.closest) ? t.closest('tr.method-row') : null;
+    const keyOf = (t) => { const tr = rowOf(t); return tr && tr.dataset ? tr.dataset.layerKey : null; };
+
+    tbody.addEventListener('click', (ev) => {
+        const t = ev.target;
+        const layerKey = keyOf(t);
+        if (!layerKey) return;
+        const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
+        if (!panel) return;
+
+        if (t.classList && t.classList.contains('marker-swatch')) {
+            ev.stopPropagation();
+            // Right click (or shift) clears the marker.
+            if (ev.shiftKey || ev.button === 2) { applyMarkerColor(panel, layerKey, null); return; }
+            _openSharedMarkerInput(panel, layerKey);
+            return;
+        }
+        // 選択チェックは行のクリック動作 (化合物切替 / レイヤー操作) を起こさない。
+        if (t.classList && t.classList.contains('method-select')) return;
+
+        // In Compound mode, the Method table is the compound switcher: a
+        // click promotes that row to the focus compound and every section
+        // re-renders with that single MSI layer.
+        if (App.viewMode === 'compound') {
+            App.setFocusCompoundKey(layerKey);
+            // Make sure the layer is visible in every panel (otherwise
+            // focus would still be hidden by the per-section visibility flag).
+            for (const p of App.panels.values()) {
+                if (p.imageSources[layerKey] && !p.visibleLayers.has(layerKey)) {
+                    p.toggleLayer(layerKey, true);
+                }
+            }
+            return;
+        }
+        panel.handleLayerClick(layerKey, ev);
+    });
+
+    tbody.addEventListener('contextmenu', (ev) => {
+        const t = ev.target;
+        if (!(t.classList && t.classList.contains('marker-swatch'))) return;
+        const layerKey = keyOf(t);
+        if (!layerKey) return;
+        const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
+        if (!panel) return;
+        ev.preventDefault(); ev.stopPropagation();
+        applyMarkerColor(panel, layerKey, null);
+    });
+
+    // Master-only inline rename. Share-mode returns early; in master we prompt
+    // for the new base name (CE/CV will be re-derived from the trailing
+    // _<int>_<int> pattern by splitCeCv).
+    tbody.addEventListener('dblclick', (ev) => {
+        const t = ev.target;
+        const cell = (t && t.closest) ? t.closest('[data-compound-cell]') : null;
+        if (!cell) return;
+        const layerKey = keyOf(t);
+        if (!layerKey) return;
+        ev.preventDefault(); ev.stopPropagation();
+        if (document.body.classList.contains('share-mode')) return;
+        const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
+        if (!panel) return;
+        const ent = panel.section.msiSeries && panel.section.msiSeries[layerKey];
+        const meta = ent && ent.compoundMeta;
+        const cur = (meta && (meta.name || meta.base)) || formatDisplayName(layerKey);
+        const next = prompt('新しいコンパウンド名 (CE/CV を含めるなら "Foo_45_14" の形)', cur);
+        if (next == null) return;
+        const trimmed = String(next).trim();
+        if (!trimmed || trimmed === cur) return;
+        App.renameCompound(layerKey, trimmed);
+    });
+}
+
+// 表の外に 1 個だけ置く色ピッカー。行ごとに <input type="color"> を持つと
+// 1390 個の DOM ノードになるので、押されたスウォッチに合わせて使い回す。
+let _sharedMarkerInput = null;
+function _openSharedMarkerInput(panel, layerKey) {
+    if (!_sharedMarkerInput) {
+        const inp = document.createElement('input');
+        inp.type = 'color';
+        // 画面外へ置く (display:none だと一部ブラウザで click() が効かない)。
+        inp.style.cssText = 'position:fixed;left:-9999px;top:0;width:0;height:0;opacity:0;';
+        inp.tabIndex = -1;
+        inp.addEventListener('input', (ev) => {
+            const tgt = _sharedMarkerInput._target;
+            if (!tgt) return;
+            // パネルが作り直されていたら書き込まない。この入力は document.body に
+            // 残り続けるので、_target が古いパネル (= 古い project 一式) を
+            // 掴んだままになるのを避ける意味もある。
+            const live = App.panels && App.panels.get(tgt.sectionId);
+            if (!live || live !== tgt.panel) { _sharedMarkerInput._target = null; return; }
+            applyMarkerColor(tgt.panel, tgt.layerKey, ev.target.value);
+        });
+        // ピッカーを閉じたら参照を手放す (パネル / project を掴み続けない)。
+        inp.addEventListener('change', () => { _sharedMarkerInput._target = null; });
+        document.body.appendChild(inp);
+        _sharedMarkerInput = inp;
+    }
+    const ent = panel.section.msiSeries && panel.section.msiSeries[layerKey];
+    _sharedMarkerInput.value = (ent && ent.markerColor) || '#ff0000';
+    _sharedMarkerInput._target = { panel, layerKey, sectionId: panel.section.id };
+    _sharedMarkerInput.click();
+}
+
 // Persist a marker colour on a single MSI layer and refresh the bits of UI
 // (Method table, thumbnail outline, Section panel outline) that rely on it.
 function applyMarkerColor(panel, layerKey, color) {
@@ -7428,8 +7753,69 @@ function applyMarkerColor(panel, layerKey, color) {
     else delete ent.markerColor;
     panel.refreshMarkerOutline(layerKey);
     panel.rebuildLayerBar();
-    renderMethodTable();
+    // 表全体ではなく該当スウォッチ 1 個だけ塗り替える。色ピッカーはドラッグ中
+    // input を連射するので、1 目盛りごとに 1390 行を組み直していた。
+    // markerColor は並び順にも絞り込みにも効かないので、メモも触らなくてよい。
+    _restampMarkerSwatch(layerKey, color);
     App.queueSave();
+}
+
+function _restampMarkerSwatch(layerKey, color) {
+    const tbody = document.getElementById('method-rows');
+    if (!tbody) return;
+    // セレクタは組まない。sanitizeCompoundName はほとんどの文字を残すので、
+    // 化合物名に " が入ると壊れた属性セレクタになって例外が飛ぶ
+    // (CSS.escape が無い環境もある)。dataset を直接見れば安全。
+    let tr = null;
+    for (const row of tbody.querySelectorAll('tr.method-row')) {
+        if (row.dataset && row.dataset.layerKey === layerKey) { tr = row; break; }
+    }
+    const sw = tr && tr.querySelector('.marker-swatch');
+    if (!sw) return;
+    sw.style.cssText = color
+        ? ('background:' + color + ';border-color:' + color + ';')
+        : 'background:transparent;';
+}
+
+// 行の状態クラス (active / focus) だけを貼り直す。実測棚卸しの
+// eval-target / eval-pending はプレビュー起動時に確定するので触らない。
+// フォーカス化合物やアクティブレイヤーが変わっただけなら、セルの中身は
+// 1 つも変わらないので表を組み直す必要が無い。
+function _restampMethodRows() {
+    const tbody = document.getElementById('method-rows');
+    if (!tbody) return false;
+    const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
+    if (!panel) return false;
+    const rows = tbody.querySelectorAll('tr.method-row');
+    if (!rows.length) return false;
+    for (const tr of rows) {
+        const layerKey = tr.dataset && tr.dataset.layerKey;
+        if (!layerKey) continue;
+        const isFocus = (App.viewMode === 'compound' && App.focusCompoundKey === layerKey);
+        const isActive = isFocus || (panel.activeMsiKey === layerKey) || panel.visibleLayers.has(layerKey);
+        tr.classList.toggle('focus', isFocus);
+        tr.classList.toggle('active', isActive);
+    }
+    return true;
+}
+
+// フォーカス / アクティブが変わっただけの場面で呼ぶ。
+//
+// ★ 「本当にクラスだけで済むのか」を推測してはいけない。呼び出し元の中には、
+//    ついでにセルの中身や行の集合まで変えているものがある (レイヤー追加、
+//    遅延読み込みでの Mean/Max/⚠加工 の初回埋め、切片の削除など)。
+//    そこで、いま画面に出ている内容の署名 (_methodRenderedSig) と、これから
+//    出るべき内容の署名を突き合わせ、違えば必ず組み直す。署名には行数・
+//    _methodSeriesVersion・切片 ID・並べ替え・絞り込みが入っているので、
+//    「行が増えた / 統計が埋まった / 切片が変わった」はすべてここで捕まる。
+function _refreshMethodRowState() {
+    const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
+    if (panel && App.project) {
+        let sig = null;
+        try { sig = methodVisibleKeys(panel, App.project).sig; } catch (e) {}
+        if (sig !== null && sig !== _methodRenderedSig) { try { renderMethodTable(); } catch (e) {} return; }
+    }
+    if (!_restampMethodRows()) { try { renderMethodTable(); } catch (e) {} }
 }
 
 // --- MRM library: register selected Method rows ----------------------------
@@ -7646,7 +8032,7 @@ function openOverlayModal(existing) {
             target = res;
         }
         App.queueSave();
-        App.setActiveOverlay(target);   // also re-renders + refreshes the bar via renderMethodTable
+        App.setActiveOverlay(target);   // re-renders the panels and refreshes the chip bar
     });
 }
 
@@ -10173,6 +10559,12 @@ async function buildSampleCsvGroups(sec, project, otsuMode) {
 
     const parsed = [];
     for (const grp of bySource.values()) {
+        // ★ parquet は CSV にしない。1390 化合物 × 10 万スポットだと 1 切片で
+        //   数百 MB〜1 GB のテキストになり、そもそも書き出せない。しかも
+        //   extractSourceMatrixForExport は xlsx 経路なので、836 MB を丸ごと
+        //   展開してから失敗する。ソースは parquet 本体を ZIP に同梱するので
+        //   (exportProjectAsZip の Source/)、データが失われることはない。
+        if (grp.repr && grp.repr.kind === 'parquet') continue;
         const rec = await ProjectStorage.getBlob(grp.blobId);
         if (!rec) continue;
         let m = null;
@@ -10276,6 +10668,9 @@ async function exportProjectAsZip() {
         // reused across sections is written once ("one full + per-section crops").
         const fullByHash = new Map();
         const usedFullPaths = new Set();
+        // parquet ソースは blobId で重複排除する (content hash は取らない —
+        // 836 MB の SHA-256 に意味のある時間をかけないため)。
+        const parquetSrcPaths = new Map();   // blobId -> 'Source/...'
 
         for (const sec of (project.sections || [])) {
             const S = sampleNameById.get(sec.id);
@@ -10324,8 +10719,42 @@ async function exportProjectAsZip() {
             }
 
             // msiFiles metadata (no blobs; import re-derives blobId from the CSV).
+            // ただし parquet だけは例外で、本体を Source/ に同梱する (下)。
             for (const [fid, frec] of Object.entries(sec.msiFiles || {})) {
                 secEntry.msiFilesMeta[fid] = { kind: frec.kind, filename: frec.filename, registeredAt: frec.registeredAt };
+            }
+
+            // ★ parquet ソースは CSV にできない (1390 列 × 10 万行) ので、本体を
+            //   そのまま同梱する。blobId で重複排除するので、同じ parquet を
+            //   共有する切片が何枚あってもファイルは 1 部。
+            //   これが無いと ZIP に MSI のデータが 1 つも入らない。
+            for (const [fid, frec] of Object.entries(sec.msiFiles || {})) {
+                if (!frec || frec.kind !== 'parquet' || !frec.blobId) continue;
+                let sp = parquetSrcPaths.get(frec.blobId);
+                if (!sp) {
+                    const prec = await ProjectStorage.getBlob(frec.blobId);
+                    if (!prec || !prec.blob) continue;
+                    const base = sanitizeStorageKeySegment(frec.filename || 'source.parquet');
+                    sp = 'Source/' + frec.blobId + '__' + base;
+                    zip.file(sp, prec.blob);
+                    parquetSrcPaths.set(frec.blobId, sp);
+                }
+                secEntry.msiFilesMeta[fid].sourcePath = sp;
+                secEntry.msiFilesMeta[fid].blobId = frec.blobId;
+            }
+            // parquet レイヤーは CSV に出ないので、復元に要る情報を manifest へ。
+            for (const [k, ent] of Object.entries(sec.msiSeries || {})) {
+                if (!ent || ent.kind !== 'parquet') continue;
+                secEntry.parquetSeries = secEntry.parquetSeries || {};
+                secEntry.parquetSeries[k] = {
+                    sourceFileId: ent.sourceFileId || null, colIdx: ent.colIdx,
+                    annotation: ent.annotation, filename: ent.filename,
+                    compoundMeta: ent.compoundMeta || null,
+                    statMax: ent.statMax, rasterW: ent.rasterW, rasterH: ent.rasterH,
+                    rawRange: ent.rawRange, rawMean: ent.rawMean,
+                    rawTrueMax: ent.rawTrueMax, rawDispMax: ent.rawDispMax,
+                    bakeMode: (ent.bakeMode === 'full') ? 'full' : undefined,
+                };
             }
 
             // Data/: per-sample combined CSV(s).
@@ -11199,6 +11628,7 @@ async function publishProjectToShare() {
     App._autoPublishPausedSlug = null;
 
     showToast('Supabase へアップロード中...', 1800);
+    const epochAtStart = App._publishEpoch || 0;
     try {
         await _publishCore(project, meta, masterPw, { silent: false });
         _saveCachedMasterPw(masterPw);
@@ -11220,7 +11650,19 @@ async function publishProjectToShare() {
             }
         } catch (e) { console.warn('persist/verify shareInfo failed', e); }
         App.refreshShareInfoButton();
-        if (App._setSyncStatus) App._setSyncStatus('synced');
+        // 手動 publish で送り終えたので、直前の queueSave(0) が立てた
+        // _publishDirty と、それが仕込んだ 5 秒タイマーを取り消す。
+        // 放置すると同じ内容をもう 1 回 auto-publish してしまう。
+        // ただし ★ アップロード中に入った編集は別。ペイロードはアップロードの
+        // 前に固めているので、その後の編集はまだサーバに無い。世代が動いて
+        // いたら立てたままにして、5 秒タイマーもそのまま生かす。
+        // (直前の queueSave(0) 自体も世代を進めるので、それを基準に取る)
+        if ((App._publishEpoch || 0) === epochAtStart + 1) {
+            App._publishDirty = false;
+            delete project.__publishPending;
+            if (App._autoPublishTimer) { clearTimeout(App._autoPublishTimer); App._autoPublishTimer = 0; }
+        }
+        if (App._setSyncStatus) App._setSyncStatus(App._publishDirty ? 'local-saved' : 'synced');
         await openShareInfoModal(project.shareInfo, { titleSuccess: true });
     } catch (e) {
         // 中断はエラーではない。サーバ上の公開内容は一切変わっていない
@@ -11624,7 +12066,12 @@ const SharePreview = {
         this._previewOrgan = null;
         this._hiddenSectionIds = null;
         App.activeSectionScope = null;   // stop scoping the main view's window
+        // サムネイルの焼き直しは 1 枚ずつ同期の toDataURL() なので、配色が
+        // 実際に変わったときだけにする (_savedColormap は開くたびに必ず入るので、
+        // 「戻した結果いまと同じ」なら焼き直す必要が無い)。
+        let cmChanged = false;
         if (this._savedColormap) {
+            cmChanged = (this._savedColormap !== _activeColormapName);
             setActiveColormap(this._savedColormap);
             this._savedColormap = null;
             // Keep the main-view toolbar dropdown in sync with the
@@ -11637,7 +12084,7 @@ const SharePreview = {
         // _restoreOpacity, visibility by _restoreVisibility).
         if (App && App.panels) {
             for (const p of App.panels.values()) {
-                try { p.renderComposite(); } catch (e) {}
+                try { p.renderComposite(); if (cmChanged) p.markAllThumbsDirty(); } catch (e) {}
             }
         }
         if (this._opacityRaf) {
@@ -13342,11 +13789,38 @@ async function importZipFile(file) {
                     };
                 }
             }
-            // msiFiles metadata, attaching the CSV blob that carries each fid.
+            // ★ parquet レイヤーは CSV に出ていないので、同梱した本体から戻す。
+            //   ensureBlobRoot は path でキャッシュするので、同じ parquet を
+            //   共有する切片が何枚あっても IDB の blob は 1 部で済む。
+            const pqBlobByFid = new Map();
             for (const [fid, frec] of Object.entries(sEnt.msiFilesMeta || {})) {
-                let blobId = null;
-                for (const grp of (sEnt.data || [])) {
-                    if ((grp.compounds || []).some(c => c.sourceFileId === fid)) { blobId = pathToBlobId.get(grp.path) || null; break; }
+                if (!frec || frec.kind !== 'parquet' || !frec.sourcePath) continue;
+                const bid = await ensureBlobRoot(frec.sourcePath, 'application/octet-stream',
+                    frec.filename || 'data.parquet');
+                if (bid) pqBlobByFid.set(fid, bid);
+            }
+            for (const [layerKey, p] of Object.entries(sEnt.parquetSeries || {})) {
+                const bid = pqBlobByFid.get(p.sourceFileId);
+                if (!bid) continue;
+                newSec.msiSeries[layerKey] = {
+                    kind: 'parquet', blobId: bid,
+                    colIdx: p.colIdx, annotation: p.annotation,
+                    filename: p.filename, sourceFileId: p.sourceFileId || null,
+                    compoundMeta: p.compoundMeta || null,
+                    statMax: p.statMax, rasterW: p.rasterW, rasterH: p.rasterH,
+                    rawRange: p.rawRange, rawMean: p.rawMean,
+                    rawTrueMax: p.rawTrueMax, rawDispMax: p.rawDispMax,
+                    bakeMode: (p.bakeMode === 'full') ? 'full' : undefined,
+                };
+            }
+            // msiFiles metadata, attaching the CSV blob that carries each fid
+            // (parquet は上で確保した本体の blob を使う)。
+            for (const [fid, frec] of Object.entries(sEnt.msiFilesMeta || {})) {
+                let blobId = pqBlobByFid.get(fid) || null;
+                if (!blobId) {
+                    for (const grp of (sEnt.data || [])) {
+                        if ((grp.compounds || []).some(c => c.sourceFileId === fid)) { blobId = pathToBlobId.get(grp.path) || null; break; }
+                    }
                 }
                 newSec.msiFiles[fid] = Object.assign({}, frec, { id: fid }, blobId ? { blobId } : {});
             }
@@ -13573,7 +14047,10 @@ const Toolbar = {
                 setActiveColormap(name);
                 if (App.panels) {
                     for (const p of App.panels.values()) {
-                        try { p.renderComposite(); } catch (e) {}
+                        // サムネイルも焼き直す。ここが renderComposite だけだったため
+                        // 配色を変えてもイオン像サムネイルだけ前の配色のまま残っていた
+                        // (repaintAllMsi は両方呼んでいる。そちらに合わせる)。
+                        try { p.renderComposite(); p.markAllThumbsDirty(); } catch (e) {}
                     }
                 }
                 if (App.shareMode) {
@@ -14222,6 +14699,11 @@ const App = {
                                // 正=強く除去(多く消す)、負=弱く(残す)。
     analysisMode: 'otsu',      // Analysis パネルの初期表示: 'otsu' 背景除去 / 'roi' 強度チャート
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
+    // --- 保存 / 自動公開の状態 ------------------------------------------------
+    _publishDirty: false,      // 共有へ送るべき実編集があるか。queueSave で立ち、
+                               // publish 成功で降りる。_scheduleAutoPublish の条件。
+    _derivedDirty: false,      // 再計算可能な派生統計だけが未保存か (queueSaveDerived)
+    _derivedSaveTimer: 0,      // その 30 秒トレーリングタイマー
     // --- MRM 実測棚卸し preview embed (all null/false outside preview=1) ------
     _previewMode: false,
     _focusParam: null,
@@ -14275,7 +14757,10 @@ const App = {
         for (const p of this.panels.values()) {
             try { p.setupCanvasSize(); p.renderComposite(); } catch (e) {}
         }
-        try { renderMethodTable(); } catch (e) {}
+        // オーバーレイのチップ列は renderMethodTable の先頭で描き直されていた。
+        // ここを _refreshMethodRowState に変えたので、明示的に呼ぶ。
+        try { renderOverlayBar(); } catch (e) {}
+        _refreshMethodRowState();   // 行の中身は変わらない (active/focus のみ)
         if (typeof Toolbar !== 'undefined' && Toolbar.refreshAll) Toolbar.refreshAll();
     },
     clearActiveOverlay() {
@@ -14284,7 +14769,8 @@ const App = {
         for (const p of this.panels.values()) {
             try { p.setupCanvasSize(); p.renderComposite(); } catch (e) {}
         }
-        try { renderMethodTable(); } catch (e) {}
+        try { renderOverlayBar(); } catch (e) {}   // 同上
+        _refreshMethodRowState();   // 同上
         if (typeof Toolbar !== 'undefined' && Toolbar.refreshAll) Toolbar.refreshAll();
     },
 
@@ -14303,7 +14789,11 @@ const App = {
                 p.renderComposite();
             } catch (e) { console.warn('setFocusCompoundKey render failed', p.section && p.section.id, e); }
         }
-        renderMethodTable();
+        // フォーカス行が変わるだけ。1390 行を組み直さずクラスだけ貼り替える
+        // (↑↓ キーの連打がそのまま表の全再構築になっていた)。
+        // ただし activeOverlay を null にしているので、チップの点灯は消す。
+        try { renderOverlayBar(); } catch (e) {}
+        _refreshMethodRowState();
         Toolbar.refreshAll();
     },
 
@@ -14396,6 +14886,13 @@ const App = {
                 panel._thumbDirty.delete(oldKey);
                 panel._thumbDirty.add(newKey);
             }
+            // 焼き済み LUT キャンバスも付け替える。中身は名前に依存しないので
+            // 署名ごとそのまま移せる (移さないと 1 回焼き直すだけで実害は無いが、
+            // 改名のたびに全表示レイヤーを焼き直すのは無駄)。
+            if (panel._msiLutCache && panel._msiLutCache.has(oldKey)) {
+                panel._msiLutCache.set(newKey, panel._msiLutCache.get(oldKey));
+                panel._msiLutCache.delete(oldKey);
+            }
         }
 
         if (this.focusCompoundKey === oldKey) {
@@ -14409,6 +14906,7 @@ const App = {
                 p.renderComposite();
             } catch (e) {}
         }
+        _bumpMethodSeries();   // キーが変わったのでメモを捨てる
         renderMethodTable();
         Toolbar.refreshAll();
         this.queueSave();
@@ -14619,6 +15117,7 @@ const App = {
         try { this.recomputeMsiAbsScale(); } catch (e) {}
         try { Toolbar.refreshRange(); } catch (e) {}
         try { Toolbar.refreshOutlierClip(); } catch (e) {}
+        _bumpMethodSeries();   // rawDispMax / diag が動く (Max 列と ⚠加工 バッジ)
         try { renderMethodTable(); } catch (e) {}
         // ROI 統計はソース由来なので数値自体は動かないが、⚠加工 バッジなど周辺表示が
         // 変わる。キャッシュヒットで再パースは走らないので実質ゼロコスト。
@@ -14792,15 +15291,22 @@ const App = {
     recomputeMsiAbsScale() {
         this.msiAbsMax = this.msiAbsMax || {};
         const next = {};
+        // 1 パス目で「どのパネルがどのキーを持つか」も記録しておく。以前は
+        // 変化キーの判定後にもう一度全パネル × 全キー (4 切片 × 1390 = 5560) を
+        // 走っていたが、その情報はここで既に手元にある。
+        const keysByPanel = new Map();
         for (const panel of this.panels.values()) {
             if (!this._organInScope(panel.section)) continue;
+            const own = [];
             for (const [key, ent] of Object.entries(panel.section.msiSeries || {})) {
+                own.push(key);
                 const rr = ent && ent.rawRange;
                 if (!rr || !Number.isFinite(rr[1])) continue;
                 // getMsiAbsMax と同じ適応上限基準で変化検出(再描画トリガ漏れ防止)。
                 const dm = Number.isFinite(ent.rawDispMax) ? ent.rawDispMax : rr[1];
                 if (!(next[key] >= dm)) next[key] = dm;
             }
+            keysByPanel.set(panel, own);
         }
         const changed = new Set();
         const allKeys = new Set([...Object.keys(next), ...Object.keys(this.msiAbsMax)]);
@@ -14811,7 +15317,7 @@ const App = {
         if (!changed.size) return;
         for (const panel of this.panels.values()) {
             let touched = false;
-            for (const key of Object.keys(panel.section.msiSeries || {})) {
+            for (const key of (keysByPanel.get(panel) || [])) {
                 if (changed.has(key)) { touched = true; break; }
             }
             if (!touched) continue;
@@ -14851,7 +15357,9 @@ const App = {
             } catch (e) { console.warn('repaintAllMsi render failed', e); }
         }
         try { Toolbar.refreshRange(); } catch (e) {}
-        try { renderMethodTable(); } catch (e) {}
+        // スケールモード / 平滑化 / 臓器フィルタの変更で呼ばれるが、Method 表の
+        // セルはどれもこれらに依存しない。クラスの貼り直しだけにする。
+        _refreshMethodRowState();
     },
     // Switch MSI intensity scale ('same' | 'individual') and repaint everything.
     setMsiScaleMode(mode) {
@@ -15986,6 +16494,11 @@ const App = {
     },
 
     renderEmpty() {
+        // プロジェクトを閉じたので、保存待ち / 公開待ちの状態も畳む。
+        this._derivedDirty = false;
+        if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+        this._publishDirty = false;
+        if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
         document.getElementById('sections-grid').innerHTML = '';
         document.getElementById('sections-empty').classList.remove('hidden');
         document.getElementById('section-count').textContent = '0 sections';
@@ -16014,9 +16527,24 @@ const App = {
         // and force re-auth for the new slug.
         this._stopMasterCollabPoll();
         this._collabSession = null;
+        // ★ 切り替えの前に、いま開いているプロジェクトの派生統計を書き切る。
+        //   _doSave は this.project を見るので、フラッシュせずに差し替えると
+        //   30 秒タイマーが「別のプロジェクト」を書いてしまい、こちらの統計は
+        //   黙って捨てられる (再計算はできるが、無駄な書き込みが 1 回増える)。
+        // 実編集の保留分も先に書き切る。400 ms タイマーが this.project の
+        // 差し替え中に焼けると、どちらのプロジェクトを書いたのか曖昧になる。
+        try { await this._flushSave(); } catch (e) { console.warn('flush on switch failed', e); }
+        try { await this._flushDerivedSaveAsync(); } catch (e) { console.warn('derived flush on switch failed', e); }
+        // 公開待ちのフラグとタイマーもプロジェクト単位。持ち越すと、切り替えた先の
+        // プロジェクトを「変更が無いのに」公開してしまう。開き直したときは
+        // project.__publishPending から復元するので、ここで消しても失われない。
+        this._publishDirty = false;
+        if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
         const project = await ProjectStorage.getProject(id);
         if (!project) { localStorage.removeItem('desi:lastProjectId'); this.renderEmpty(); return; }
         this.project = project;
+        // 前回のセッションで公開しきれなかった編集があればここで拾い直す。
+        this._publishDirty = !!project.__publishPending;
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         this.project.anatomyPalette = this.project.anatomyPalette || DEFAULT_ANATOMY_PALETTE;
         this.project.sections = this.project.sections || [];
@@ -16266,6 +16794,7 @@ const App = {
             }
             document.getElementById('sections-empty').classList.add('hidden');
             document.getElementById('section-count').textContent = this.project.sections.length + ' sections';
+            _bumpMethodSeries();   // 化合物の行がまるごと増える
             await this.queueSave(0);
             await this._flushSave();
             // パネルの中身 (レイヤー読み込み) は遅延読み込みに任せる。
@@ -16340,12 +16869,15 @@ const App = {
             if (r.aborted) { showToast('TIC の作成を中断しました', 4000); return; }
 
             // 統計を ent へ書き戻す (全切片・全化合物ぶん)。
+            // sectionId → section を 1 回だけ引く (毎回 find すると
+            // 化合物数 × 切片数 × 切片数 の走査になる)。
+            const secById = new Map((this.project.sections || []).map(s => [s.id, s]));
             let statCells = 0;
             for (const [key, perSection] of r.statsByKey) {
                 for (const t of targets) {
                     const s = perSection[t.sectionId];
                     if (!s) continue;
-                    const sec = (this.project.sections || []).find(x => x.id === t.sectionId);
+                    const sec = secById.get(t.sectionId);
                     const ent = sec && sec.msiSeries && sec.msiSeries[key];
                     if (!ent) continue;
                     ent.rawRange = s.rawRange;
@@ -16353,9 +16885,63 @@ const App = {
                     ent.rawTrueMax = s.rawTrueMax;
                     ent.rawDispMax = s.rawDispMax;
                     ent.rasterW = s.rasterW; ent.rasterH = s.rasterH;
+                    // ★ diag も必ず埋める。loadMsiLayer:wasMissing は
+                    //   `|| !entRef.diag` を含むので、ここを空けたままだと
+                    //   統計を作ったあとも化合物を初めて開くたびに
+                    //   「プロジェクト全体 (数 MB) の保存」が走り続ける。
+                    if (s.diag) ent.diag = s.diag;
                     statCells++;
                 }
             }
+
+            // ★ 背景除去(Otsu) も同じパスの成果で作る。Otsu は全化合物の合計が
+            //   要るので、読み直すと同じ時間がもう 1 回かかる。しかも parquet を
+            //   computeSectionOtsuMasks に通すと 836 MB を展開してしまう。
+            //   閾値・ヒストグラム・keep の作り方は DESI と同じ関数を通す。
+            let otsuMade = 0;
+            for (const t of targets) {
+                const tb = r.ticBySection && r.ticBySection.get(t.sectionId);
+                const sec = secById.get(t.sectionId);
+                if (!tb || !sec) continue;
+                const g = tb.g;
+                // 格子に載ったスポットだけを「1 スポット」として扱う
+                // (parquet は行 → セルが 1:1 なので位置空間と等価)。
+                const n = g.cellIdx.length;
+                const tic = new Float64Array(n);
+                const gridIdx = new Int32Array(n);
+                for (let k = 0; k < n; k++) { gridIdx[k] = g.cellIdx[k]; tic[k] = tb.ticRaw[g.cellIdx[k]]; }
+                const built = buildOtsuRecordFromTic(tic, gridIdx, g.W, g.H,
+                    { strength: this.otsuStrength || 0, manualThreshold: this.otsuManualThreshold }, true);
+                // 836 MB のハッシュは取らない。ソースと列構成が変わらない限り
+                // 同じ値になればよいので、blobId + 列数 + 行数で十分。
+                const sig = 'pq:' + blobId + ':' + features.length + ':' + n;
+                const srcKey = (features.length && sec.msiSeries[features[0].key]
+                    && (sec.msiSeries[features[0].key].sourceFileId || blobId)) || blobId;
+                sec.meta = sec.meta || {};
+                sec.meta.otsu = {
+                    bySource: { [srcKey]: Object.assign(built.record, {
+                        signature: sig, layerKeys: features.map(f => f.key),
+                    }) },
+                    nOriginal: built.record.nOriginal, nKept: built.record.nKept,
+                    nRemoved: built.record.nRemoved,
+                    computedAt: nowIso(), strength: this.otsuStrength || 0,
+                };
+                // 強度スライダーを即座に効かせるためのセッションキャッシュ。
+                try {
+                    _otsuTicCache.set(sec.id + '|' + srcKey + '|' + sig,
+                        { W: g.W, H: g.H, gridIdx, logTic: built.logTic,
+                          autoThresholdLog: built.autoThresholdLog });
+                } catch (e) {}
+                otsuMade++;
+            }
+            // ★ 描画側の keep グリッド復号キャッシュを必ず捨てる。
+            //   キャッシュのキーは section.id + srcKey + rec.signature だが、
+            //   上の sig は blobId + 列数 + 行数から作る決定的な値なので、
+            //   2 回目以降 (強度を変えたあとに作り直した等) は「署名が同じで
+            //   中身が違う」状態になり、古い keep が描画に使われてしまう。
+            //   setOtsuStrength が _rethresholdSectionFromCache のあとに
+            //   clear() しているのと同じ理由。
+            if (otsuMade) _otsuKeepDecodeCache.clear();
 
             // 累積を 1 枚の灰色画像に落として各切片へ据える。
             let made = 0;
@@ -16367,10 +16953,12 @@ const App = {
             }
             await this.queueSave(0);
             this.recomputeMsiAbsScale();
+            _bumpMethodSeries();   // Mean/Max/⚠加工 が全化合物ぶん埋まる (並べ替えキーでもある)
             try { renderMethodTable(); } catch (e) {}
             const secs = ((Date.now() - t0) / 1000).toFixed(1);
             showToast('TIC を ' + made + ' 切片ぶん作りました (' + features.length + ' 化合物 / '
-                + secs + ' 秒)。統計 ' + statCells.toLocaleString() + ' 件を更新しました。'
+                + secs + ' 秒)。統計 ' + statCells.toLocaleString() + ' 件と、'
+                + '背景除去(Otsu) ' + otsuMade + ' 切片ぶんを更新しました。'
                 + '次回以降は保存済みのものを使います', 9000);
         } catch (e) {
             console.error('TIC 作成に失敗', e);
@@ -16998,11 +17586,68 @@ const App = {
     // routine without scheduling another timer.
     queueSave(delay) {
         if (!this.project) return;
+        // 実編集はすべてここを通る。共有へ送るべき変更があったことを記録し、
+        // auto-publish の発火条件にする (_scheduleAutoPublish)。派生統計だけの
+        // 書き戻しは queueSaveDerived を通るので、このフラグは立たない。
+        //
+        // ★ プロジェクト側にも印を残す。改修前は「化合物を 1 つ開くだけで
+        //   auto-publish が走る」という副作用が、たまたま『ローカルがサーバより
+        //   進んだまま』を毎セッション解消していた。その副作用を消したので、
+        //   印を永続化しないと「5 秒タイマーが焼ける前にタブを閉じた編集」が
+        //   二度と公開されないまま "✓ Synced" と表示され続ける。
+        //   putProject は project をそのまま書くので 1 フィールドで足りる
+        //   (publish のペイロードは _sections / _meta を個別に組むので混ざらない)。
+        this._publishDirty = true;
+        // 世代番号。真偽値だと「元から true のまま編集が入った」が区別できず、
+        // アップロード中の編集を取りこぼす。
+        this._publishEpoch = (this._publishEpoch || 0) + 1;
+        if (this.project.shareInfo && this.project.shareInfo.slug) this.project.__publishPending = true;
         if (this.saveTimer) clearTimeout(this.saveTimer);
         this.saveTimer = setTimeout(() => {
             this.saveTimer = 0;
             this._doSave().catch(e => console.warn('queueSave _doSave threw', e));
         }, (delay === undefined) ? 400 : delay);
+    },
+
+    // 派生データ (blob から再計算できる統計) だけが変わったときの保存。
+    //
+    // loadMsiLayer が書き戻す rawRange / rawMean / rawTrueMax / rawDispMax /
+    // diag / rasterW / rasterH は、すべてソースを読み直せば復元できる。にも
+    // かかわらず従来はここでも queueSave() を呼んでいたため、化合物を 1 つ
+    // クリックするたびに「プロジェクト全体の structured clone (数 MB)」と
+    // 「5 秒後の publish RPC (数 MB)」が走っていた。1390 化合物を見て回ると
+    // それが 1390 回。
+    //
+    // そこで派生の書き戻しは 30 秒ためて 1 回だけ書く。タブを離れるとき
+    // (visibilitychange / pagehide) にも flush するので、実質失われない。
+    // 失ったとしても次にその層を開いたときに計算し直されるだけ。
+    queueSaveDerived() {
+        if (!this.project) return;
+        this._derivedDirty = true;
+        if (this._derivedSaveTimer) return;   // 既にタイマーが動いていれば延長しない
+        this._derivedSaveTimer = setTimeout(() => {
+            this._derivedSaveTimer = 0;
+            this._flushDerivedSave();
+        }, 30000);
+    },
+
+    _flushDerivedSave() {
+        if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+        if (!this._derivedDirty || !this.project) return;
+        this._derivedDirty = false;
+        // 書けなかったら印を戻す。捨ててしまうと (再計算はできるとはいえ)
+        // 次にその層を開くまで統計が欠けたままになる。
+        this._doSave()
+            .then(ok => { if (!ok) this._derivedDirty = true; })
+            .catch(e => { this._derivedDirty = true; console.warn('derived save threw', e); });
+    },
+
+    // プロジェクトを切り替える前など、書き終わりを待ちたい場面用。
+    _flushDerivedSaveAsync() {
+        if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+        if (!this._derivedDirty || !this.project) return Promise.resolve(false);
+        this._derivedDirty = false;
+        return this._doSave().then(ok => { if (!ok) this._derivedDirty = true; return ok; });
     },
 
     // Real save with up-to-3 retry on transient failures. Quota errors do
@@ -17020,8 +17665,25 @@ const App = {
             for (let attempt = 0; attempt < 3; attempt++) {
                 try {
                     await ProjectStorage.putProject(this.project);
-                    await this.refreshProjectPicker();
-                    this._setSyncStatus('local-saved');
+                    // putProject はプロジェクト全体を書くので、ためていた派生
+                    // 統計もこの 1 回で一緒に永続化される。
+                    this._derivedDirty = false;
+                    if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+                    // ここでは refreshProjectPicker を呼ばない。
+                    // listProjects() は IndexedDB の全プロジェクトを丸ごと復元して
+                    // <option> の 2 文字列しか使わないため、保存のたびに走らせると
+                    // 1 クリックあたり数 MB のデシリアライズになる。ピッカーの表示が
+                    // 変わりうるのは「作成 / 削除 / 名前変更」だけなので、その 3 箇所
+                    // (createNewProject → openProject / deleteCurrentProject /
+                    //  #project-name-input の change) で明示的に呼ぶ。
+                    // 副作用として、保存のたびに updatedAt 降順へ並べ替わる挙動は
+                    // 止まる (順序を読むコードは無く、次に開いたとき並び直る)。
+                    // 'local-saved' は「IDB へ書いた。5 秒後に公開する」という意味。
+                    // 派生統計だけを書いたときは公開は走らないので、この表示に
+                    // すると "💾 Local 保存中" のまま戻らず、しかもその状態は
+                    // クリックで強制再同期 (数 MB のアップロード) を起こす。
+                    this._setSyncStatus(this._publishDirty ? 'local-saved'
+                        : (this._syncState === 'synced' ? 'synced' : 'local-saved'));
                     this._scheduleAutoPublish();
                     return true;
                 } catch (e) {
@@ -17044,6 +17706,10 @@ const App = {
     // finish. Used by critical mutations to make sure the IDB write
     // completes before verify-after-write reads back.
     async _flushSave() {
+        // ためてある派生統計もここで書き切る。_flushSave の呼び出し元はすべて
+        // 「書いてから IDB を読み直して検証する」形なので、派生を残したままだと
+        // いずれ古い値を読むことになる。
+        if (this._derivedDirty) { try { await this._flushDerivedSaveAsync(); } catch (e) {} }
         if (this.saveTimer) {
             clearTimeout(this.saveTimer);
             this.saveTimer = 0;
@@ -17146,6 +17812,12 @@ const App = {
         // アップロードを中断したプロジェクトは、次に手動で Publish するまで
         // 自動同期しない。中断した直後に自動で再開したら中断の意味が無い。
         if (this._autoPublishPausedSlug === this.project.shareInfo.slug) return;
+        // ★ 内容依存のガード。従来のガードは 4 つとも構造的 (共有モードか /
+        //   slug があるか) で、「そもそも共有へ送るべき変更があったか」を
+        //   一切見ていなかった。そのため化合物を 1 つ表示しただけで走る派生
+        //   統計の保存でも 5 秒後に数 MB の RPC が飛んでいた。
+        //   _publishDirty は queueSave (= 実編集) でだけ立つ。
+        if (!this._publishDirty) return;
         if (this._autoPublishTimer) clearTimeout(this._autoPublishTimer);
         this._autoPublishTimer = setTimeout(() => {
             this._autoPublishTimer = 0;
@@ -17167,7 +17839,10 @@ const App = {
 
         if (this._autoPublishInflight) return;
         // 手動 publish が走っている間は割り込まない。5 秒後にもう一度試す。
-        if (_publishGate) { this._scheduleAutoPublish(); return; }
+        // ★ _scheduleAutoPublish は _publishDirty で弾くので、ユーザーが明示的に
+        //   「強制再同期」した場合 (変更が無いのに送りたい場合) は印を立ててから
+        //   仕込み直す。立てないと再スケジュールが黙って捨てられる。
+        if (_publishGate) { this._publishDirty = true; this._scheduleAutoPublish(); return; }
         this._autoPublishInflight = true;
         try {
             // Conflict detection: server's projects.updated_at vs our
@@ -17179,6 +17854,8 @@ const App = {
             }
 
             this._setSyncStatus('uploading', 0, 0);
+            // アップロード中に入った編集を取りこぼさないための基準 (世代番号)。
+            const epochAtStart = this._publishEpoch || 0;
             const meta = {
                 slug: project.shareInfo.slug,
                 isPublic: !!project.shareInfo.isPublic,
@@ -17189,8 +17866,17 @@ const App = {
                 silent: true,
                 onProgress: (done, total) => this._setSyncStatus('uploading', done, total),
             });
+            // 送り終えたのでフラグを降ろす。失敗した場合は立てたままにして
+            // 次の保存で再挑戦させる (catch 側では触らない)。
+            // ★ アップロード中に入った編集まで「送った」ことにしないこと。
+            //   ペイロードは _publishCore に入る前のスナップショットなので、
+            //   その後の編集はまだサーバに無い。世代が動いていたら立てたままにする。
+            if ((this._publishEpoch || 0) === epochAtStart) {
+                this._publishDirty = false;
+                delete project.__publishPending;
+            }
             try { await ProjectStorage.putProject(project); } catch (e) {}
-            this._setSyncStatus('synced');
+            this._setSyncStatus(this._publishDirty ? 'local-saved' : 'synced');
         } catch (e) {
             console.warn('auto-publish failed', e);
             const msg = String((e && (e.message || e.details)) || e);
@@ -17277,6 +17963,10 @@ const App = {
     // Click on sync indicator: state-aware recovery actions.
     async _handleSyncStatusClick() {
         const state = this._syncState;
+        // これはユーザーが明示的に「今すぐ同期して」と押した操作。内容が
+        // 変わっていなくても送る (それが強制再同期の目的) ので、内容依存の
+        // ガード (_scheduleAutoPublish の _publishDirty 判定) を通す印を立てる。
+        this._publishDirty = true;
         if (state === 'error') {
             // Save error: try the local IDB write again first. Only after
             // it succeeds does the auto-publish make sense.
@@ -17323,6 +18013,7 @@ const App = {
                     this.project.shareInfo.lastSyncedAt = nowIso();
                     try { await ProjectStorage.putProject(this.project); } catch (e) {}
                 }
+                this._publishDirty = true;   // 明示的な上書き指示。内容ガードを通す
                 this.autoPublishProject().catch(e => console.warn('overwrite failed', e));
             }
             return;
@@ -17340,6 +18031,10 @@ const App = {
             if (!this.project) return;
             this.project.displayName = e.target.value.trim() || '(untitled)';
             this.queueSave(0);
+            // ピッカーのラベルはここでしか変わらない。_doSave が保存のたびに
+            // 全プロジェクトを読み直していた頃はその副作用で更新されていたが、
+            // それを外したので名前変更のときだけ明示的に呼ぶ。
+            this.refreshProjectPicker().catch(err => console.warn('refreshProjectPicker failed', err));
         });
         document.getElementById('btn-new-project').addEventListener('click', async () => {
             const data = await openNewProjectFormModal();
@@ -17444,6 +18139,14 @@ const App = {
             if (this.drawing.mode) this.cancelDrawing();
             else this.startDrawing(null);
         });
+        // ためてある派生統計を、タブを離れるタイミングで 1 回だけ書き出す。
+        // beforeunload では非同期の IndexedDB 書き込みが間に合わないことが
+        // あるので、確実に走る visibilitychange(hidden) を主経路にする。
+        // 取りこぼしても失うのは再計算可能な派生値だけ (実編集は queueSave 側)。
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'hidden') this._flushDerivedSave();
+        });
+        window.addEventListener('pagehide', () => { this._flushDerivedSave(); });
         // Best-effort lock cleanup on tab close so stale locks don't strand
         // other viewers for the full 30 s heartbeat window. Also warn the
         // user if we still have a pending IDB save or an unresolved save
@@ -17488,16 +18191,11 @@ const App = {
             if (this.viewMode !== 'compound') return;
             const panel = this.activeSectionId ? this.panels.get(this.activeSectionId) : null;
             if (!panel) return;
-            // Same sort the Method table uses (sortMethodKeys helper) so
-            // keyboard order matches the visible row order — including any
-            // user-chosen column sort from clicking a Method <th>.
-            const layerKeys = sortMethodKeys(
-                Object.keys(panel.section.msiSeries || {}).filter(k => /^MSI_/i.test(k)),
-                k => panel.section.msiSeries[k],
-                (k, ent) => (ent && ent.compoundMeta) || findCompoundMeta(this.project, k),
-                this.methodSort && this.methodSort.key,
-                this.methodSort && this.methodSort.dir
-            );
+            // Method 表と同じ「見えているキー列」をそのまま使う (methodVisibleKeys)。
+            // 従来はここで 1390 件を毎回ソートし直していたうえ、絞り込み
+            // (filterMethodKeys) を通していなかったので、**表に出ていない化合物へ
+            // 矢印キーで飛べてしまっていた**。共有した時点で両方とも直る。
+            const layerKeys = methodVisibleKeys(panel, this.project).keys;
             if (!layerKeys.length) return;
             const cur = this.focusCompoundKey;
             const idx = layerKeys.indexOf(cur);
