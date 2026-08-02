@@ -279,6 +279,60 @@ select count(*) from public.projects where is_public;    -- 公開 link 数
 
 ---
 
+## v2026-08-02.5: 待ち時間を消すための SQL 更新 (**再適用が必要**)
+
+**この 3 ファイルを SQL Editor で再実行してください (すべて冪等)。**
+
+| ファイル | 追加されるもの | 再適用 |
+| --- | --- | --- |
+| `share_locks.sql` | `list_projects_v2(_master_pw)` | **必要** |
+| `mrm_library.sql` | `register_from_result_batch(_master_pw, _rows)` / `mrm_compounds_serial_idx` / `mrm_compounds_name_norm_idx` | **必要** |
+| `mrm_reconcile.sql` | コメントのみの変更 (関数も索引も不変) | 不要 |
+
+### 何が変わるか
+
+- **`list_projects_v2`** — 既存の `list_projects(_owner_password)` は `crypt()` を
+  相関サブクエリに置いていたため、**プロジェクト 1 件につき bcrypt(cost 12) が 1 回**
+  走っていました (100 件で 25〜40 秒)。v2 は lab 共通の master パスワードを 1 回だけ
+  検証します。旧関数は消していないので、古いクライアントはそのまま動きます。
+  - **認可の形が変わります**: 「サーバから一覧取得」は admin パスワードではなく
+    **master パスワード**を聞くようになります。他の管理系 RPC
+    (`delete_project_doc` / `upsert_project_doc` など) と同じ形で、管理画面の
+    ログインゲート自体も既に `verify_master_pw` へ移行済みです。
+  - **一覧が増えることがあります**: 旧 `list_projects` は admin 資格情報の行が
+    ある project しか返しませんでした。`upsert_project_doc` は admin パスワードを
+    渡したときにしかその行を作らないので、**公開リンクのみの project や
+    admin パスワード無しで publish した project は今まで一覧に出ていません**でした。
+    v2 は全件返すので、それらが「サーバのみ」として現れます。消えたわけでも
+    増えたわけでもなく、見えるようになっただけです。
+- **`register_from_result_batch`** — Method 表からの「選択を管理へ登録」は
+  1 化合物 = 1 RPC の直列実行で、**RPC ごとに bcrypt** が走っていました
+  (1390 化合物で 8〜15 分)。バッチは検証 1 回で同じ登録を行います。
+  1 行が失敗しても残りは登録され、行ごとの結果が返ります。
+- **`mrm_compounds_name_norm_idx`** — 実測棚卸し (`list_measured_compounds`) が
+  「登録済み / 無視 / 新規」を判定するとき、測定された化合物名 1 件ごとに
+  `mrm_compounds` を全走査していました。式インデックスで解消します。
+  - ★ 索引の式は本文中の正規化式と**バイト単位で同じ**である必要があります。
+    正規化を変える場合は `mrm_library.sql` / `mrm_reconcile.sql` /
+    `project_compound_search.sql` の 3 つを揃えてください。
+
+### 適用しなかった場合
+
+**壊れません。** フロントは新しい RPC が無いこと (`PGRST202`) を検出して、
+従来どおりの経路へ黙って落ちます。速くならないだけです。
+(コンソールに「Apply supabase/... to make this fast」と出ます。)
+
+### 確認
+
+```sql
+select public.list_projects_v2('&lt;master pw&gt;');            -- 一覧が返る
+select public.register_from_result_batch('&lt;master pw&gt;', '[]'::jsonb);  -- {"ok":0,"failed":0,...}
+select indexname from pg_indexes
+ where tablename = 'mrm_compounds';                        -- name_norm / serial の索引がある
+```
+
+---
+
 ## Master 用: 別 PC からの取り込み (`?import=<slug>`)
 
 別 PC から server-only project を `Open (master)` すると、viewer は `?import=<slug>` で起動します。

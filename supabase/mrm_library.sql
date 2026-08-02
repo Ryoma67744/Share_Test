@@ -29,6 +29,20 @@ create table if not exists public.mrm_compounds (
     updated_at  timestamptz not null default now()
 );
 create index if not exists mrm_compounds_tags_idx on public.mrm_compounds using gin (tags);
+-- Normalised-name index. mrm_reconcile.sql's list_measured_compounds decides
+-- registered / ignored / new with, once per distinct measured compound name:
+--     exists (select 1 from public.mrm_compounds c
+--              where regexp_replace(lower(c.name), '[^a-z0-9]+', '', 'g') = a.name_norm)
+-- Without this that is a sequential scan of the whole library per group —
+-- (distinct measured names) x (library rows) regexp_replace evaluations, and a
+-- single non-target project contributes ~1390 distinct names on its own.
+-- ★ The expression must stay BYTE-IDENTICAL to the one in the query or the
+--   planner will not use the index. If the normalisation ever changes, change
+--   it here AND in mrm_reconcile.sql AND in project_compound_search.sql.
+-- lower(text) and regexp_replace(text,text,text,text) are both IMMUTABLE, so
+-- this is indexable.
+create index if not exists mrm_compounds_name_norm_idx
+    on public.mrm_compounds ((regexp_replace(lower(name), '[^a-z0-9]+', '', 'g')));
 
 create table if not exists public.mrm_transitions (
     id             uuid primary key default gen_random_uuid(),
@@ -73,6 +87,10 @@ revoke all on public.mrm_usages      from anon, authenticated;
 --     compound (consolidated in the management UI). Auto-assigned on create,
 --     editable so two name variants can be set to the same number.
 alter table public.mrm_compounds add column if not exists serial_no integer;
+-- max(serial_no) is taken on every register_from_result and once per batch;
+-- without this it is a sequential scan of the whole table. Kept next to the
+-- column so pasting just this section into the editor still works.
+create index if not exists mrm_compounds_serial_idx on public.mrm_compounds(serial_no);
 -- Backfill rows with a null serial_no, continuing past any existing max so we
 -- never collide. No-op once every row has a number (idempotent).
 update public.mrm_compounds c
@@ -486,6 +504,155 @@ begin
 end
 $$;
 
+-- ---- 6a2. register_from_result_batch: the same thing, N rows, ONE bcrypt --
+-- The viewer's "選択を管理へ登録" used to call register_from_result once per
+-- checked row, serially. Each call re-verifies the master password, and
+-- _verify_master_pw is bcrypt(cost 12) — roughly 0.3 s of server CPU. For a
+-- non-target TIMS project that is 1390 bcrypts (8-15 minutes) to insert a few
+-- thousand small rows.
+--
+-- This does the identical per-row work, but verifies once. The three steps
+-- below are copied from register_from_result unchanged: same conflict
+-- targets, same coalesce direction, usages always appended. Keep them in
+-- sync — register_from_result stays as the single-row entry point (and as
+-- the fallback for clients running against an older schema).
+--
+-- Two deliberate differences from a naive loop:
+--   * serial_no is seeded ONCE and incremented in a local counter. The
+--     single-row function does `(select max(serial_no)+1 ...)`, which inside
+--     a 1390-iteration loop is 1390 scans of a growing table.
+--   * a row that raises does NOT abort the batch. The client loop tolerated
+--     individual failures (it counted them and carried on), so the batch has
+--     to as well, otherwise one malformed compound loses the other 1389.
+--     Per-row outcomes come back so the caller can report them.
+--
+-- _rows is a jsonb array; each element uses the same key names as the
+-- single-row function's parameters minus the leading underscore:
+--   { name, tags[], polarity, precursor, product, ce, cv, role,
+--     project_slug, project_name, sample_name, sample_types[] }
+create or replace function public.register_from_result_batch(
+    _master_pw text,
+    _rows      jsonb
+) returns jsonb
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_row     jsonb;
+    v_cid     uuid;
+    v_tid     uuid;
+    v_uid     uuid;
+    v_serial  integer;
+    v_isnew   boolean;
+    v_name    text;
+    v_out     jsonb := '[]'::jsonb;
+    v_ok      int := 0;
+    v_fail    int := 0;
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    if _rows is null or jsonb_typeof(_rows) <> 'array' then
+        raise exception 'rows must be a jsonb array';
+    end if;
+
+    -- serial_no is seeded once and held for the whole call, which widens the
+    -- read-modify-write race the single-row function has for ~1 statement into
+    -- one that lasts the whole batch. There is no unique constraint on
+    -- serial_no, and the management UI treats "same serial_no" as "same
+    -- logical compound" (mrm.html), so two concurrent batches handing out the
+    -- same numbers would visibly merge unrelated compounds. Serialise the
+    -- assignment; the lock is released at transaction end.
+    perform pg_advisory_xact_lock(hashtext('public.mrm_compounds.serial_no'));
+    select coalesce(max(serial_no), 0) into v_serial from public.mrm_compounds;
+
+    for v_row in select * from jsonb_array_elements(_rows)
+    loop
+        begin
+            v_name := trim(coalesce(v_row->>'name', ''));
+            if length(v_name) = 0 then
+                raise exception 'name required';
+            end if;
+            -- Only a genuinely new compound consumes a number. The single-row
+            -- function recomputes max()+1 per call, so a re-register leaves no
+            -- gap; bumping unconditionally here would drift the counter far
+            -- past the table's real max when re-registering known compounds.
+            -- (name is UNIQUE, so this is one index probe.)
+            select not exists (select 1 from public.mrm_compounds where name = v_name) into v_isnew;
+            if v_isnew then v_serial := v_serial + 1; end if;
+
+            -- 1. compound (identical to register_from_result step 1; on the
+            --    conflict path serial_no is not in the DO UPDATE list, so the
+            --    value passed here is ignored and the existing number stands)
+            insert into public.mrm_compounds(name, tags, polarity, serial_no, check_level, shelf)
+                 values (v_name,
+                         coalesce((select array_agg(x) from jsonb_array_elements_text(
+                                     case when jsonb_typeof(v_row->'tags') = 'array'
+                                          then v_row->'tags' else '[]'::jsonb end) x), '{}'),
+                         nullif(v_row->>'polarity', ''),
+                         v_serial, 'unchecked', 'main')
+            on conflict (name) do update
+                 set tags       = public._mrm_array_union(mrm_compounds.tags, excluded.tags),
+                     polarity   = coalesce(mrm_compounds.polarity, excluded.polarity),
+                     updated_at = now()
+            returning id into v_cid;
+
+            -- 2. transition (identical to step 2)
+            insert into public.mrm_transitions(compound_id, precursor, product, ce, cv, role)
+                 values (v_cid,
+                         (nullif(v_row->>'precursor', ''))::numeric,
+                         (nullif(v_row->>'product', ''))::numeric,
+                         (nullif(v_row->>'ce', ''))::numeric,
+                         (nullif(v_row->>'cv', ''))::numeric,
+                         nullif(v_row->>'role', ''))
+            on conflict (compound_id, precursor, product, ce, cv) do update
+                 set role = coalesce(mrm_transitions.role, excluded.role)
+            returning id into v_tid;
+
+            -- 3. usage (identical to step 3 — always appended)
+            insert into public.mrm_usages(transition_id, project_slug, project_name, sample_name, sample_types, source)
+                 values (v_tid,
+                         nullif(v_row->>'project_slug', ''),
+                         nullif(v_row->>'project_name', ''),
+                         nullif(v_row->>'sample_name', ''),
+                         coalesce((select array_agg(x) from jsonb_array_elements_text(
+                                     case when jsonb_typeof(v_row->'sample_types') = 'array'
+                                          then v_row->'sample_types' else '[]'::jsonb end) x), '{}'),
+                         'from-result')
+            returning id into v_uid;
+
+            v_ok := v_ok + 1;
+            v_out := v_out || jsonb_build_object('ok', true, 'name', v_name,
+                                                 'compound_id', v_cid,
+                                                 'transition_id', v_tid,
+                                                 'usage_id', v_uid);
+        exception when others then
+            -- The row's own subtransaction rolls back; the batch continues.
+            -- Re-seed from max(): the rolled-back insert did NOT persist the
+            -- number we handed out, so the counter is now ahead of reality.
+            -- (Re-seeding always lands on a free number, since every serial
+            -- that actually persisted is <= max.)
+            v_fail := v_fail + 1;
+            -- Keep the SQLSTATE: `when others` also catches transient classes
+            -- (40001 serialization failure, 40P01 deadlock) that a caller may
+            -- want to retry, and they are indistinguishable from a permanent
+            -- data error by message alone.
+            v_out := v_out || jsonb_build_object('ok', false,
+                                                 'name', coalesce(v_row->>'name', ''),
+                                                 'sqlstate', SQLSTATE,
+                                                 'error', SQLERRM);
+            select coalesce(max(serial_no), 0) into v_serial from public.mrm_compounds;
+        end;
+    end loop;
+
+    -- ok_count, not ok: each element of `results` uses 'ok' as a boolean, and
+    -- register_from_result returns 'ok': true. A batch where every row failed
+    -- would otherwise return a falsy 'ok' under the same name as a success flag.
+    return jsonb_build_object('ok_count', v_ok, 'failed', v_fail, 'results', v_out);
+end
+$$;
+
+grant execute on function public.register_from_result_batch(text, jsonb) to anon, authenticated;
+
 -- ---- 6b. Instrument .exp template storage ------------------
 -- Single-row table holding the MassLynx ".exp" template text. The instrument
 -- is fixed lab-wide, so one template is reused for every export; only the
@@ -837,6 +1004,7 @@ grant execute on function public.get_exp_template_ro(text)  to anon, authenticat
 -- drop function if exists public.set_exp_template(text, text);
 -- drop table if exists public.mrm_exp_template;
 -- drop function if exists public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text, text[]);
+-- drop function if exists public.register_from_result_batch(text, jsonb);
 -- drop function if exists public.record_usage(text, uuid, text, text, text, text, text[]);
 -- drop function if exists public.delete_transition(text, uuid);
 -- drop function if exists public.update_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text);
