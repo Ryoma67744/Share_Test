@@ -222,6 +222,19 @@ export async function getRoiStats(slug, opts = {}) {
   return { slug: p.slug, results };
 }
 
+// `compound` is a SUBSTRING match, so several layers can match one query. An
+// EXACT name/key match wins; otherwise the caller has to disambiguate. Returning
+// candidates[0] would be the same class of bug rows.js fixes: a plausible number
+// for the wrong compound, with nothing to signal it. With 1390 non-target
+// compounds, "PC" matches hundreds and the first is not an answer.
+// Exported so selftest.js can exercise it without the network.
+export function narrowCompoundCandidates(candidates, compound) {
+  if (candidates.length <= 1) return candidates;
+  const want = normName(compound);
+  const exact = candidates.filter((c) => normName(c.key || c.k) === want || normName(c.name) === want);
+  return exact.length ? exact : candidates;
+}
+
 // ---- Tool: get_matrix (raw {x,y,value}; kept out of the conversation) ----
 export async function getMatrix(slug, opts = {}) {
   const { compound, section, roi } = opts;
@@ -235,18 +248,28 @@ export async function getMatrix(slug, opts = {}) {
   for (const s of p.sections) {
     if (section && !(matchStr(section, s.name) || String(section) === String(s.id))) continue;
     for (const [k, def] of Object.entries(s.msiSeries)) {
-      if (matchStr(compound, k) || matchStr(compound, compoundInfo(k, def).name)) candidates.push({ s, k, def });
+      const name = compoundInfo(k, def).name;
+      if (matchStr(compound, k) || matchStr(compound, name)) candidates.push({ s, k, def, name });
     }
   }
   if (!candidates.length) throw new Error('no matching compound' + (section ? '/section' : '') + '. Call get_project to see names.');
-  if (candidates.length > 1 && !section) {
+
+  const chosen = narrowCompoundCandidates(candidates, compound);
+  if (chosen.length > 1) {
+    const OPTION_CAP = 50;   // this list goes into the conversation; keep it readable
     return {
-      note: 'Multiple sections have this compound; specify `section`.',
-      options: candidates.map((c) => ({ section: c.s.name, compound: compoundInfo(c.k, c.def).name })),
+      note: (section
+        ? 'Several compounds match `compound` in this section; pass an exact name.'
+        : 'Several sections/compounds match; specify `section` and/or an exact compound name.') +
+        (chosen.length > OPTION_CAP ? ' Showing the first ' + OPTION_CAP + ' of ' + chosen.length + '.' : ''),
+      matching: chosen.length,
+      options: chosen.slice(0, OPTION_CAP).map((c) => ({
+        section: c.s.name, compound: compoundInfo(c.k, c.def).name, compound_key: c.k,
+      })),
     };
   }
 
-  const { s, k, def } = candidates[0];
+  const { s, k, def } = chosen[0];
   // Same loader as getRoiStats, so both tools see identical rows for a given
   // compound (and both gain the parquet path for free).
   let rows = await loadRowsForDef(def, newRowCache());

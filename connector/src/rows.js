@@ -53,13 +53,43 @@ export function parseCacheKey(def) {
   return String((def && def.path) || '') + ' ' + stableKey(def);
 }
 
+// Both tiers are bounded. The old code cached parsed rows for every path it
+// touched and let the downloaded buffer go straight to garbage after parsing; a
+// naive unbounded byte cache would instead pin one ArrayBuffer per file for the
+// whole call — 25 xlsx files is hundreds of MB on the small host this runs on.
+//
+// The caps are small on purpose. Their only job is "many compounds out of the
+// file(s) I am reading right now"; a miss costs a re-read, never a wrong answer,
+// because correctness lives in the KEY, not in the retention.
+const MAX_CACHED_FILES = 2;
+const MAX_CACHED_ROWSETS = 4;
+
+// Insertion-order LRU: re-inserting on hit moves the entry to the back, so the
+// first key is always the least recently used.
+function lruGet(map, key) {
+  if (!map.has(key)) return undefined;
+  const v = map.get(key);
+  map.delete(key);
+  map.set(key, v);
+  return v;
+}
+function lruSet(map, key, value, cap) {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > cap) {
+    const oldest = map.keys().next().value;
+    if (oldest === key) break;
+    map.delete(oldest);
+  }
+}
+
 // `opts.fetchBytes` (whole-object GET, xlsx/txt) and `opts.fetchImpl` (Range
 // requests, parquet) exist so selftest.js can drive this module with no network.
 // Production leaves both unset and uses the real read-only fetchers.
 export function newRowCache(opts) {
   return {
-    bytes: new Map(),   // path -> Promise<ArrayBuffer>
-    rows: new Map(),    // parseCacheKey(def) -> Promise<rows>
+    bytes: new Map(),   // path -> Promise<ArrayBuffer>          (cap MAX_CACHED_FILES)
+    rows: new Map(),    // parseCacheKey(def) -> Promise<rows>   (cap MAX_CACHED_ROWSETS)
     fetchBytes: (opts && opts.fetchBytes) || fetchStorageObject,
     fetchImpl: (opts && opts.fetchImpl) || null,
     fetchCount: 0,      // whole-object downloads issued (asserted by selftest)
@@ -67,11 +97,11 @@ export function newRowCache(opts) {
 }
 
 function bytesFor(path, cache) {
-  const hit = cache.bytes.get(path);
+  const hit = lruGet(cache.bytes, path);
   if (hit) return hit;
   cache.fetchCount++;
   const p = Promise.resolve(cache.fetchBytes(path));
-  cache.bytes.set(path, p);
+  lruSet(cache.bytes, path, p, MAX_CACHED_FILES);
   // Don't cache a failure: a transient network error would otherwise poison the
   // path for the rest of the call.
   p.catch(() => { if (cache.bytes.get(path) === p) cache.bytes.delete(path); });
@@ -84,7 +114,7 @@ export async function loadRowsForDef(def, cache) {
   const path = def && def.path;
   if (!path) throw new Error('this compound has no storage path on the server (not published?)');
   const key = parseCacheKey(def);
-  const hit = cache.rows.get(key);
+  const hit = lruGet(cache.rows, key);
   if (hit) return hit;
   const p = (async () => {
     // parquet is loaded on demand: only TIMS projects pull in hyparquet, and
@@ -96,7 +126,7 @@ export async function loadRowsForDef(def, cache) {
     }
     return parseMsiRows(await bytesFor(path, cache), def);
   })();
-  cache.rows.set(key, p);
+  lruSet(cache.rows, key, p, MAX_CACHED_ROWSETS);
   p.catch(() => { if (cache.rows.get(key) === p) cache.rows.delete(key); });
   return p;
 }

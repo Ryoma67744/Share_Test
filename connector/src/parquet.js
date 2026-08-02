@@ -7,6 +7,9 @@ import { storageObjectUrl } from './supabase.js';
 //
 // Ported from the viewer's parquet worker (viewer/index.html, _parquetWorkerBody)
 // so the connector returns THE SAME NUMBERS the app shows. Keep the two in sync.
+// That includes the LIBRARY VERSION: the viewer pins hyparquet 1.27.1 /
+// hyparquet-compressors 1.1.1 from the CDN, so package.json must resolve to the
+// same ones. `npm run selftest` diffs the two readers and fails if they drift.
 //
 // Why not just fetchStorageObject()? The published TIMS file is one 836 MB
 // parquet shared by 1390 compounds × 4 sections. Downloading it whole would

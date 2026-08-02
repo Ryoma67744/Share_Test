@@ -11,6 +11,7 @@ import {
 } from './msi.js';
 import { buildExp } from './exp.js';
 import { newRowCache, loadRowsForDef, parseCacheKey } from './rows.js';
+import { narrowCompoundCandidates } from './tools.js';
 
 let failures = 0;
 function check(name, cond, detail) {
@@ -163,6 +164,50 @@ console.log('multi-compound-per-file (rows.js cache)');
   let noPathErr = null;
   try { await loadRowsForDef({ kind: 'txt' }, cache); } catch (e) { noPathErr = e; }
   check('missing path throws', !!noPathErr && /storage path/.test(String(noPathErr.message)));
+
+  // ★ Both tiers are bounded. The old code let the downloaded buffer go to
+  // garbage right after parsing; an unbounded byte cache would pin one whole
+  // file per path for the length of the call (get_roi_stats visits up to 25).
+  const many = newRowCache({ fetchBytes: async () => abuf });
+  for (let f = 0; f < 12; f++) {
+    for (let ci = 0; ci < 3; ci++) {
+      await loadRowsForDef({ path: 'proj/blobs/file_' + f + '.txt', kind: 'txt', compound_index: ci, dataStartLine: 4 }, many);
+    }
+  }
+  check('★ byte cache stays bounded (36 reads across 12 files)', many.bytes.size <= 2, many.bytes.size);
+  check('★ row cache stays bounded', many.rows.size <= 4, many.rows.size);
+  check('a file is still downloaded once while it is being read',
+    many.fetchCount === 12, many.fetchCount);
+  // Values must stay correct across evictions — a miss re-reads, never mixes up.
+  const reread = stats((await loadRowsForDef(
+    { path: 'proj/blobs/file_0.txt', kind: 'txt', compound_index: 2, dataStartLine: 4 }, many)).map((r) => r.v));
+  check('★ evicted entries re-read to the SAME value', approx(reread.mean, 2500), reread.mean);
+}
+
+// get_matrix's `compound` is a substring match, so "PC" can hit hundreds of
+// non-target layers. Picking candidates[0] would be the same silent-wrong-answer
+// shape rows.js fixes.
+console.log('narrowCompoundCandidates (get_matrix disambiguation)');
+{
+  const c = (k, name, sec) => ({ k, name, s: { name: sec || 'S1' } });
+  const many = [c('MSI_PC_34_1', 'PC(34:1)'), c('MSI_PC_36_2', 'PC(36:2)'), c('MSI_PCX', 'PC(38:4)')];
+  check('one candidate passes through', narrowCompoundCandidates([many[0]], 'PC').length === 1);
+  check('★ a substring hitting several stays ambiguous',
+    narrowCompoundCandidates(many, 'PC').length === 3);
+  check('★ an exact name wins over the substring',
+    narrowCompoundCandidates(many, 'PC(34:1)').length === 1 &&
+    narrowCompoundCandidates(many, 'PC(34:1)')[0].k === 'MSI_PC_34_1');
+  check('an exact key also wins',
+    narrowCompoundCandidates(many, 'MSI_PC_36_2').length === 1 &&
+    narrowCompoundCandidates(many, 'MSI_PC_36_2')[0].k === 'MSI_PC_36_2');
+  check('normalisation absorbs case and separators',
+    narrowCompoundCandidates(many, 'pc 34 1').length === 1);
+  // The same compound on 4 sections must NOT be silently resolved to section 1.
+  const acrossSections = ['01', '02', '03', '04'].map((s) => c('MSI_PC_34_1', 'PC(34:1)', s));
+  check('★ the same compound on 4 sections stays ambiguous (pick a section)',
+    narrowCompoundCandidates(acrossSections, 'PC(34:1)').length === 4);
+  check('distinct compounds are never merged',
+    narrowCompoundCandidates(many, 'PC(99:9)').length === 3);
 }
 
 console.log('parseCacheKey');
