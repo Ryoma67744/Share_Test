@@ -124,8 +124,10 @@
 // ===========================================================================
 const ProjectStorage = (() => {
     const DB_NAME = 'desi-projects';
-    // v3: added the `project_index` store. MUST match viewer/index.html.
-    const DB_VERSION = 3;
+    // v3: added the `project_index` store.
+    // v4: added the `pq_index` store (parquet footer index; viewer only writes it).
+    // MUST match viewer/index.html.
+    const DB_VERSION = 4;
     let dbPromise = null;
     function open() {
         if (dbPromise) return dbPromise;
@@ -138,6 +140,9 @@ const ProjectStorage = (() => {
                 // Small per-project summary rows; see listSummaries(). Left
                 // empty here — it is backfilled lazily on first read.
                 if (!db.objectStoreNames.contains('project_index')) db.createObjectStore('project_index', { keyPath: 'id' });
+                // Created here too so this page can open the database at v4
+                // without racing the viewer. This page never reads or writes it.
+                if (!db.objectStoreNames.contains('pq_index')) db.createObjectStore('pq_index', { keyPath: 'id' });
             };
             req.onblocked = () => {
                 try { alert('別のタブでこのアプリが開いています。\nそのタブを閉じるか再読み込みしてください (データベースの更新待ちです)。'); } catch (e) {}
