@@ -16624,13 +16624,12 @@ const App = {
             App.msiSmoothing = (projectMeta && projectMeta.msiSmoothing === 'linear') ? 'linear' : 'none';
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
-            // 背景除去(Otsu) の復元。_openProjectCore には元からあったのにこの共有
-            // ハイドレート経路だけ抜けており、master が ON で公開しても受信者は常に
-            // OFF で開いていた。優先順位は colormap と同じ (publish 値が既定、この
-            // タブで受信者が動かしていれば sessionStorage が勝つ)。受信者の操作は
-            // setOtsuBgRemove が sessionStorage 止まりにするので、ここで変わるのは
-            // 「最初に開いたときの既定値」だけ。
-            let bgr = !!(projectMeta && projectMeta.otsuBgRemove);
+            // 背景除去(Otsu) は ★ 常に OFF で開く (ユーザー確定)。
+            // publish された otsuBgRemove は復元しない — master 側と同じ扱い。
+            // ただし「この受信者がこのタブで自分で ON にした」場合は、その操作を
+            // 尊重してリロードをまたいで保つ (sessionStorage 止まりなので、
+            // タブを閉じれば忘れる)。
+            let bgr = false;
             const sv = slug ? sessionStorage.getItem('desi:share:otsu:' + slug) : null;
             if (sv != null) bgr = (sv === '1');
             this.otsuBgRemove = bgr;
@@ -16645,9 +16644,8 @@ const App = {
         document.getElementById('section-count').textContent = project.sections.length + ' sections';
         document.getElementById('sections-empty').classList.toggle('hidden', project.sections.length > 0);
         await this.rebuildSectionPanels();
-        // 復元した背景除去が ON なら、_openProjectCore と同じくパネル構築後に
-        // マスクを確保して再描画する (computeSectionOtsuMasks はソースから計算する
-        // ので、下のレイヤー読み込みを待つ必要はない)。
+        // ON で開くのは「この受信者がこのタブで自分で ON にした」ときだけ
+        // (publish 値では ON にしない — 常に OFF で開く)。
         if (this.otsuBgRemove) { this.setOtsuBgRemove(true).catch(e => console.warn('[otsu] share restore failed', e)); }
         // --- Share fix: only the first section showed the focus MSI ---
         // The master/local open flow (_openProjectCore, ~:11600) initialises the
@@ -16870,9 +16868,15 @@ const App = {
             App.msiSmoothing = (project.meta && project.meta.msiSmoothing === 'linear') ? 'linear' : 'none';
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
-            // 背景除去(Otsu) トグルの復元(master は project.meta、共有相手は session)。
-            let bgr = !!(project.meta && project.meta.otsuBgRemove);
+            // ★ 背景除去(Otsu) は常に OFF で開く (ユーザー確定)。
+            //   project.meta.otsuBgRemove は書き込み自体は残している (publish の
+            //   ペイロードにも載る) が、開くときには読まない。ON のまま開くと、
+            //   まだマスクの無い切片で重い計算が勝手に走るため。
+            //   保存値を復元したい場合は、この 1 行を
+            //   `let bgr = !!(project.meta && project.meta.otsuBgRemove);` に戻せばよい。
+            let bgr = false;
             if (this.shareMode) {
+                // 受信者がこのタブで自分で切り替えた場合だけは尊重する。
                 const sv = sessionStorage.getItem('desi:share:otsu:' + (this.shareMode.slug || ''));
                 if (sv != null) bgr = (sv === '1');
             }
@@ -16888,8 +16892,8 @@ const App = {
         document.getElementById('project-name-input').value = project.displayName || '';
         document.getElementById('sections-empty').classList.toggle('hidden', this.project.sections.length > 0);
         await this.rebuildSectionPanels();
-        // 保存済みの背景除去トグルが ON なら、パネル構築後にマスクを確保して再描画
-        // (通常読込は非計算のまま。ON プロジェクトのみ、必要な切片だけバックグラウンド計算)。
+        // 常に OFF で開くので master 経路ではここは走らない。共有側で受信者が
+        // 自分で ON にしていた場合のみ、パネル構築後にマスクを確保して再描画する。
         if (this.otsuBgRemove) { this.setOtsuBgRemove(true).catch(e => console.warn('[otsu] restore failed', e)); }
         // In Compound mode pick a sane default focus compound if none persists
         // or the persisted one no longer exists in this project.
