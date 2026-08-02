@@ -46,6 +46,7 @@ const TOOLS = [
         section: { type: 'string', description: 'optional: section name or id' },
         roi: { type: 'string', description: 'optional: ROI name (substring match)' },
         compound: { type: 'string', description: 'optional: compound name or key (substring match)' },
+        max_compounds: { type: 'number', description: 'optional: cap on (section, compound) pairs computed (default 25). Each pair is a separate read; TIMS non-target projects have thousands.' },
       },
       required: ['slug'],
     },

@@ -45,7 +45,8 @@
           { "name": "slug", "in": "path", "required": true, "schema": { "type": "string" } },
           { "name": "section", "in": "query", "required": false, "schema": { "type": "string" }, "description": "section name or id" },
           { "name": "roi", "in": "query", "required": false, "schema": { "type": "string" }, "description": "ROI name (substring match)" },
-          { "name": "compound", "in": "query", "required": false, "schema": { "type": "string" }, "description": "compound name or key (substring match)" }
+          { "name": "compound", "in": "query", "required": false, "schema": { "type": "string" }, "description": "compound name or key (substring match)" },
+          { "name": "max_compounds", "in": "query", "required": false, "schema": { "type": "number" }, "description": "cap on (section, compound) pairs computed (default 25). Each pair is a separate read; TIMS non-target projects have thousands." }
         ],
         "responses": { "200": { "description": "OK" } }
       }

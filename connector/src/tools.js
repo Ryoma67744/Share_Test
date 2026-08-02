@@ -3,12 +3,13 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { config, projectPassword } from './config.js';
 import {
-  listProjectCatalog, getReadToken, getProjectDoc, listRois, fetchStorageObject,
+  listProjectCatalog, getReadToken, getProjectDoc, listRois,
   listMrmLibrary, getExpTemplate, searchProjectsByCompound,
 } from './supabase.js';
 import {
-  parseMsiRows, buildMsiGrid, extractRoiValues, stats, pointInPolygon,
+  buildMsiGrid, extractRoiValues, stats, pointInPolygon,
 } from './msi.js';
+import { newRowCache, loadRowsForDef } from './rows.js';
 import { buildExp } from './exp.js';
 
 // =============================================================================
@@ -111,16 +112,6 @@ async function loadProject(slug) {
   };
 }
 
-async function parseRowsForDef(def, cache) {
-  const path = def && def.path;
-  if (!path) throw new Error('this compound has no storage path on the server (not published?)');
-  if (cache.has(path)) return cache.get(path);
-  const buf = await fetchStorageObject(path);
-  const rows = parseMsiRows(buf, def);
-  cache.set(path, rows);
-  return rows;
-}
-
 // ---- Tool: list_projects -------------------------------------------------
 export async function listProjects() {
   const cat = await listProjectCatalog();
@@ -167,36 +158,66 @@ export async function listCompounds(slug) {
 }
 
 // ---- Tool: get_roi_stats (raw-value statistics inside ROIs) --------------
+// Each (section, compound) pair costs one real read — a file download for
+// xlsx/txt, a column read for parquet. A TIMS project has 1390 compounds × 4
+// sections, so an unfiltered call would be 5560 reads. Bound the work and SAY
+// what was left out: silently returning the first 25 would read as "that's all
+// there is".
+const ROI_STATS_MAX_PAIRS = 25;
+
 export async function getRoiStats(slug, opts = {}) {
   const { section, roi, compound } = opts;
+  const limit = Number.isFinite(opts.max_compounds)
+    ? Math.max(1, Math.floor(opts.max_compounds)) : ROI_STATS_MAX_PAIRS;
   const p = await loadProject(slug);
-  const cache = new Map();
+  // Two-tier: bytes per file, parsed rows per compound. Keying by file alone
+  // used to hand every compound in a multi-compound file the first one's
+  // numbers — see rows.js.
+  const cache = newRowCache();
   const results = [];
   const sections = p.sections.filter((s) => !section || matchStr(section, s.name) || String(section) === String(s.id));
+
+  // Plan the whole job first so the caller can be told the true total.
+  const plan = [];
   for (const s of sections) {
     const compEntries = Object.entries(s.msiSeries).filter(([k, def]) =>
       !compound || matchStr(compound, k) || matchStr(compound, compoundInfo(k, def).name));
     const roiList = s.rois.filter((r) => matchStr(roi, r.name));
     if (!compEntries.length || !roiList.length) continue;
-    for (const [k, def] of compEntries) {
-      let rows;
-      try { rows = await parseRowsForDef(def, cache); }
-      catch (e) { results.push({ section: s.name, compound: compoundInfo(k, def).name, error: String(e.message || e) }); continue; }
-      const grid = buildMsiGrid(rows);
-      for (const r of roiList) {
-        const vals = extractRoiValues(rows, r.poly, grid);
-        results.push({
-          section: s.name,
-          roi: r.name,
-          compound: compoundInfo(k, def).name,
-          compound_key: k,
-          stats: stats(vals),
-        });
-      }
+    for (const [k, def] of compEntries) plan.push({ s, k, def, roiList });
+  }
+  const todo = plan.slice(0, limit);
+
+  for (const { s, k, def, roiList } of todo) {
+    let rows;
+    try { rows = await loadRowsForDef(def, cache); }
+    catch (e) { results.push({ section: s.name, compound: compoundInfo(k, def).name, error: String(e.message || e) }); continue; }
+    const grid = buildMsiGrid(rows);
+    for (const r of roiList) {
+      const vals = extractRoiValues(rows, r.poly, grid);
+      results.push({
+        section: s.name,
+        roi: r.name,
+        compound: compoundInfo(k, def).name,
+        compound_key: k,
+        stats: stats(vals),
+      });
     }
   }
   if (!results.length) {
     return { slug: p.slug, results: [], note: 'No matching section/ROI/compound. Call get_project to see available names.' };
+  }
+  if (plan.length > todo.length) {
+    return {
+      slug: p.slug,
+      results,
+      truncated: true,
+      computed_pairs: todo.length,
+      matching_pairs: plan.length,
+      note: 'Only the first ' + todo.length + ' of ' + plan.length +
+        ' matching (section, compound) pairs were computed — each one is a separate read. ' +
+        'Narrow with `compound` / `section`, or raise `max_compounds`.',
+    };
   }
   return { slug: p.slug, results };
 }
@@ -226,8 +247,9 @@ export async function getMatrix(slug, opts = {}) {
   }
 
   const { s, k, def } = candidates[0];
-  const buf = await fetchStorageObject(def.path);
-  let rows = parseMsiRows(buf, def);
+  // Same loader as getRoiStats, so both tools see identical rows for a given
+  // compound (and both gain the parquet path for free).
+  let rows = await loadRowsForDef(def, newRowCache());
   let roiName = null;
   if (roi) {
     const r = s.rois.find((rr) => matchStr(roi, rr.name));

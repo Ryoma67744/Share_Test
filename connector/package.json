@@ -17,6 +17,11 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.4.0",
+    "hyparquet": "^1.27.1",
+    "hyparquet-compressors": "^1.1.1",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "hyparquet-writer": "^0.16.4"
   }
 }

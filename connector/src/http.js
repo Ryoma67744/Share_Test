@@ -84,6 +84,9 @@ const server = createServer(async (req, res) => {
         section: q.get('section') || undefined,
         roi: q.get('roi') || undefined,
         compound: q.get('compound') || undefined,
+        // Each (section, compound) pair is a separate read; the response says so
+        // when it truncates.
+        max_compounds: q.get('max_compounds') != null ? Number(q.get('max_compounds')) : undefined,
       }));
     }
     if ((m = /^\/projects\/([^/]+)\/matrix$/.exec(path))) {
