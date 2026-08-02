@@ -15638,6 +15638,22 @@ const App = {
             strength: this.otsuStrength || 0,
         });
         const hasAny = res && res.bySource && Object.keys(res.bySource).length > 0;
+        // ★ 作れなかったのに、既に使える記録があるなら絶対に上書きしない。
+        //   ここが無条件の代入だったため、背景除去を ON にする / 解析パネルを
+        //   開くだけで「TIC と統計を作る」が数分かけて作った keepB64 が消え、
+        //   しかも呼び出し側の queueSave() でその空の状態が保存されていた。
+        //   parquet は computeSectionOtsuMasks で意図的に弾かれる (836 MB を
+        //   展開しないため) ので、この経路は必ず空を返す。
+        if (!hasAny) {
+            const prev = sec.meta && sec.meta.otsu;
+            if (prev && prev.bySource && Object.keys(prev.bySource).length) {
+                return {
+                    computed: false, skipped: true, unavailable: true,
+                    reasons: (res && res.reasons) || {},
+                    summary: prev,
+                };
+            }
+        }
         sec.meta = sec.meta || {};
         sec.meta.otsu = {
             applied: !!hasAny,
@@ -15653,6 +15669,9 @@ const App = {
             computed: hasAny,
             skipped: false,
             unavailable: !hasAny && res && res.unavailable && res.unavailable.length > 0,
+            // computeSectionOtsuMasks は理由を返しているのに捨てていた。
+            // parquet の 'needs-tic-pass' が「元データ無し」と表示される原因。
+            reasons: (res && res.reasons) || {},
             summary: sec.meta.otsu,
         };
     },
@@ -15680,16 +15699,27 @@ const App = {
             const need = secs.filter(s => !this._otsuIsFresh(s));
             if (need.length) {
                 try { showToast('背景除去(Otsu)を計算中… (' + need.length + ' 切片)'); } catch (e) {}
-                let ok = 0, un = 0;
+                let ok = 0, un = 0, needTic = 0;
                 for (const sec of need) {
                     try {
                         const r = await this.ensureSectionOtsu(sec);
-                        if (r.computed) ok++; else if (r.unavailable) un++;
+                        if (r.computed) ok++;
+                        else if (r.unavailable) {
+                            un++;
+                            // parquet は「元データが無い」のではなく「まだ
+                            // TIC パスを走らせていない」だけ。理由を見て出し分ける。
+                            const rs = r.reasons || {};
+                            if (Object.keys(rs).some(k => rs[k] === 'needs-tic-pass')) needTic++;
+                        }
                     } catch (e) { console.warn('[otsu] ensure failed', e); }
                 }
                 try { this.queueSave(); } catch (e) {}
                 try {
-                    showToast('背景除去: ' + ok + ' 切片に適用' + (un ? ' / ' + un + ' 切片は元データ無しでスキップ' : ''));
+                    showToast('背景除去: ' + ok + ' 切片に適用' + (un
+                        ? (' / ' + un + ' 切片はスキップ'
+                           + (needTic ? ' (' + needTic + ' 切片は「TIC と統計を作る」を先に実行してください)'
+                                      : ' (元データ無し)'))
+                        : ''), needTic ? 7000 : undefined);
                 } catch (e) {}
             }
         }
@@ -15700,14 +15730,18 @@ const App = {
         opts = opts || {};
         const secs = (this.project && this.project.sections) || [];
         if (!secs.length) { try { showToast('切片がありません'); } catch (e) {} return; }
-        let applied = 0, skipped = 0, unavailable = 0;
+        let applied = 0, skipped = 0, unavailable = 0, needTic = 0;
         try { showToast('背景除去(Otsu)を全切片に適用中…'); } catch (e) {}
         for (const sec of secs) {
             if (!opts.force && this._otsuIsFresh(sec)) { skipped++; continue; }
             try {
                 const r = await this.ensureSectionOtsu(sec, { force: !!opts.force });
                 if (r.computed) applied++;
-                else if (r.unavailable) unavailable++;
+                else if (r.unavailable) {
+                    unavailable++;
+                    const rs = r.reasons || {};
+                    if (Object.keys(rs).some(k => rs[k] === 'needs-tic-pass')) needTic++;
+                }
                 else skipped++;
             } catch (e) { console.warn('[otsu] bulk apply failed', e); unavailable++; }
         }
@@ -15721,7 +15755,11 @@ const App = {
         if (tb) tb.checked = this.otsuBgRemove;
         try {
             showToast('背景除去 一括適用: 適用 ' + applied + ' / スキップ(処理済み) ' + skipped +
-                (unavailable ? ' / 元データ無し ' + unavailable : ''));
+                (unavailable
+                    ? (' / 未処理 ' + unavailable
+                       + (needTic ? ' (' + needTic + ' 切片は「TIC と統計を作る」を先に実行してください)'
+                                  : ' (元データ無し)'))
+                    : ''), needTic ? 7000 : undefined);
         } catch (e) {}
     },
     // 強度スライダーの高速反映: TIC キャッシュから keep を再構築(再パース不要)。
@@ -17182,6 +17220,15 @@ const App = {
                     && (sec.msiSeries[features[0].key].sourceFileId || blobId)) || blobId;
                 sec.meta = sec.meta || {};
                 sec.meta.otsu = {
+                    // ★ applied は「このマスクは使える」の印。_otsuIsFresh が
+                    //   これを見ており (無いと常に「未計算」判定 → 再計算に回り、
+                    //   parquet はそこで弾かれてマスクが失われていた)、
+                    //   setOtsuStrength も applied が偽の切片を飛ばすので、
+                    //   これが無いと強度スライダーも効かない。
+                    //   形は ensureSectionOtsu の書き込みに合わせる。
+                    applied: true,
+                    manual: (this.otsuManualThreshold != null),
+                    unavailable: [],
                     bySource: { [srcKey]: Object.assign(built.record, {
                         signature: sig, layerKeys: features.map(f => f.key),
                     }) },
