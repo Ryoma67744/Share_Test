@@ -106,10 +106,18 @@ export async function searchProjectsByCompound(query, includePrivate = true) {
   });
 }
 
+// Public URL of a Storage object. Split out from fetchStorageObject because
+// parquet is read with HTTP Range requests (parquet.js) instead of being
+// downloaded whole — an 836 MB TIMS file cannot be pulled into memory on the
+// small host this connector runs on.
+export function storageObjectUrl(path) {
+  return config.supabaseUrl + '/storage/v1/object/public/atlases/' + encodeURI(path);
+}
+
 // GET a public Storage object (the 'atlases' bucket is public-read). Path
 // segments are already ASCII-sanitized at publish time. Returns an ArrayBuffer.
 export async function fetchStorageObject(path) {
-  const url = config.supabaseUrl + '/storage/v1/object/public/atlases/' + encodeURI(path);
+  const url = storageObjectUrl(path);
   const res = await fetch(url);
   if (!res.ok) throw new Error('storage GET failed: HTTP ' + res.status + ' for ' + path);
   return res.arrayBuffer();

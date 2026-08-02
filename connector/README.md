@@ -64,7 +64,9 @@ npm run selftest
 - `list_projects` … 読めるプロジェクト一覧。
 - `get_project(slug)` … 要約（メモ・化合物・ROI）。重い解析なし。
 - `list_compounds(slug)` … 化合物一覧（precursor/product m/z 付き）。
-- `get_roi_stats(slug, {section?, roi?, compound?})` … ROI内の**生強度の統計**（平均/中央値/最大/最小/四分位/n/sd）。
+- `get_roi_stats(slug, {section?, roi?, compound?, max_compounds?})` … ROI内の**生強度の統計**（平均/中央値/最大/最小/四分位/n/sd）。
+  - **1 ファイルに複数化合物が入る形式**（DESI の Analyte txt、TIMS の parquet）でも、化合物ごとに正しく読み分ける。ファイルのダウンロードは 1 回だけ。
+  - `(切片 × 化合物)` の組は 1 組ごとに実測データを 1 回読むので、既定で **25 組**まで。打ち切ったときは `truncated` / `matching_pairs` / `note` で**何件残したかを明示**する（黙って先頭だけ返さない）。`compound` / `section` で絞るか `max_compounds` を上げる。
 - `get_matrix(slug, {compound, section, roi?, max_rows?, downsample?, to_file?})` … 生の `{x,y,value}`。大きい場合は `downsample`/`max_rows` で調整、または `to_file:true` で**フルCSVをローカルファイルに書き出し**（会話に載せず、AIのコード実行ツールで読み込ませる）。
 - `search_mrm({q?, tag?, polarity?, include_unvalidated?})` … **登録MRMライブラリ**（化合物＋transition: precursor / product / CE / CV, tags, polarity, 使用履歴）を検索。無引数で**検証済み全件**。※これは MRM 管理アプリのレジストリ（`mrm_compounds`/`mrm_transitions`）で、上の project 化合物（MSI レイヤ）とは**別データ**。要 `MRM_READ_PW`。
   - **棚 (shelf) による既定の絞り込み**: ライブラリは `検証済みライブラリ`(`main`) と `使用実績アーカイブ`(`archive` = 使用歴はあるが CE/CV 未最適化) に分かれている。既定では **`main` のみ**返し、除外件数を `archived_excluded` と `note` で報告する。`include_unvalidated: true` を**明示指定**したときだけ `archive` も含む（`true` のみ有効、`"yes"` 等の文字列では有効化しない）。各行は `shelf` / `check_level` / `validated` を持つので区別できる。
@@ -81,6 +83,7 @@ npm run selftest
 ## しくみ（内部）
 - サーバの**読み取り専用RPC**（`unlock_public_project` / `unlock_project` / `get_project_doc` / `list_rois`）と、**公開ストレージ**からの取得のみを使います。
 - MSI の数値化は、Webアプリ本体と**同一のパースロジック**を移植しているので、数値が一致します。
+- 対応形式は **xlsx / txt（Analyte）/ parquet（TIMS ノンターゲット）**。parquet は列指向なので、**HTTP Range で必要な列だけ**読みます（836 MB のファイルでも実際に読むのは 1 化合物あたり数百 KB。全体をダウンロードしません）。読み出しはビューア本体のワーカーと**ビット一致**することを `npm run selftest` で確認しています。
 - ROI内の値は、生の行を `buildMsiGrid` でピクセル格子に対応づけ、`pointInPolygon` で内側だけ集めた**生強度**です（表示用の0–255輝度ではありません）。
 
 ## ChatGPT で使う（カスタムGPT Action・ホスト版）
@@ -125,6 +128,7 @@ curl -H "Authorization: Bearer あなたのAPIキー" https://あなたのURL/pr
 ## 内部のしくみ
 - サーバの**読み取り専用RPC**（`unlock_public_project` / `unlock_project` / `get_project_doc` / `list_rois`）と、**公開ストレージ**からの取得のみを使います。
 - MSI の数値化は、Webアプリ本体と**同一のパースロジック**を移植しているので、数値が一致します。
+- 対応形式は **xlsx / txt（Analyte）/ parquet（TIMS ノンターゲット）**。parquet は列指向なので、**HTTP Range で必要な列だけ**読みます（836 MB のファイルでも実際に読むのは 1 化合物あたり数百 KB。全体をダウンロードしません）。読み出しはビューア本体のワーカーと**ビット一致**することを `npm run selftest` で確認しています。
 - ROI内の値は、生の行を `buildMsiGrid` でピクセル格子に対応づけ、`pointInPolygon` で内側だけ集めた**生強度**です（表示用の0–255輝度ではありません）。
 - 構成: `src/server.js`(Claude用MCP) と `src/http.js`(ChatGPT用HTTP) は**同じコア** `src/tools.js` を共有します。
 

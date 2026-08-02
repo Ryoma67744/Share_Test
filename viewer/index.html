@@ -7469,29 +7469,52 @@ function populateRoiList() {
     }
 }
 
+// ★ グラフ用プルダウンの中身は「開かれたとき」に作る。
+//
+// 以前は setupGraphSelector が 3 つの <select> をプロジェクトを開いた瞬間に
+// 全部埋めていた。ノンターゲットでは 1390 化合物 × 4 切片 = 5,560 件 × 3 =
+// **16,680 個の <option>** になり、ほとんど開かれないのに毎回作っていた。
+// 既定で選ばれる 3 件だけを置いておき、実際に触られた <select> だけを埋める。
+const _graphSelectFillers = new Map();   // select の id -> 全件を埋める関数
+
+function _bindGraphSelectLazyFill(el) {
+    if (el.dataset.graphLazyBound === '1') return;
+    el.dataset.graphLazyBound = '1';
+    // pointerdown = クリック/タップ、focus と keydown = キーボード操作。
+    // いずれも既定動作より前に走るので、リストが開いたときには全件そろっている。
+    const fill = () => {
+        const f = _graphSelectFillers.get(el.id);
+        if (f) { try { f(); } catch (e) { console.warn('[graph] option fill failed', e); } }
+    };
+    el.addEventListener('pointerdown', fill);
+    el.addEventListener('focus', fill);
+    el.addEventListener('keydown', fill);
+}
+
 function setupGraphSelector() {
     const project = App.project;
     const groups = collectGroupedCompoundOptions(project);
+    // 平坦なキー列は groups から直接作る。以前は buildOptions(false) の副作用で
+    // 埋まっていたので、HTML を作らないと既定の 3 件が決められなかった。
+    // 並び順は groups が整列済みなので従来と同じ。
     const flatKeys = [];
+    const optByKey = new Map();
+    for (const g of groups) {
+        for (const opt of g.options) { flatKeys.push(opt.key); optByKey.set(opt.key, opt); }
+    }
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const optionHtml = (opt) => '<option value="' + esc(opt.key) + '">' + esc(opt.label) + '</option>';
     const buildOptions = (includeNone) => {
         const parts = [];
         if (includeNone) parts.push('<option value="none">-</option>');
         for (const g of groups) {
-            const grpLabel = g.label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-            parts.push('<optgroup label="' + grpLabel + '">');
-            for (const opt of g.options) {
-                const lbl = opt.label.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-                const val = opt.key.replace(/"/g, '&quot;');
-                parts.push('<option value="' + val + '">' + lbl + '</option>');
-                if (!includeNone) flatKeys.push(opt.key);
-            }
+            parts.push('<optgroup label="' + esc(g.label) + '">');
+            for (const opt of g.options) parts.push(optionHtml(opt));
             parts.push('</optgroup>');
         }
         return parts.join('');
     };
-    document.getElementById('graph-select-1').innerHTML = buildOptions(false);
-    document.getElementById('graph-select-2').innerHTML = buildOptions(true);
-    document.getElementById('graph-select-3').innerHTML = buildOptions(true);
     // Prefer keys that carry real metadata (precursor m/z) so the default
     // selection is informative rather than pointing at legacy migrated layers.
     const hasPrecursor = (k) => {
@@ -7503,9 +7526,31 @@ function setupGraphSelector() {
         const bp = hasPrecursor(b) ? 0 : 1;
         return ap - bp;
     });
-    if (ranked[0]) document.getElementById('graph-select-1').value = ranked[0];
-    if (ranked[1]) document.getElementById('graph-select-2').value = ranked[1];
-    if (ranked[2]) document.getElementById('graph-select-3').value = ranked[2];
+    const prime = (id, includeNone, key) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        // 既定で選ばれる 1 件 (と select-2/3 の「-」) だけを置く。これが無いと
+        // グラフの初期表示が変わってしまう。
+        const opt = key ? optByKey.get(key) : null;
+        const parts = [];
+        if (includeNone) parts.push('<option value="none">-</option>');
+        if (opt) parts.push(optionHtml(opt));
+        el.innerHTML = parts.join('');
+        if (opt) el.value = key;
+        _graphSelectFillers.set(id, () => {
+            if (el.dataset.graphFilled === '1') return;
+            const keep = el.value;              // 埋め直しで選択を失わない
+            el.innerHTML = buildOptions(includeNone);
+            el.dataset.graphFilled = '1';
+            if (keep) el.value = keep;
+        });
+        // プロジェクトを開き直したら作り直す。
+        delete el.dataset.graphFilled;
+        _bindGraphSelectLazyFill(el);
+    };
+    prime('graph-select-1', false, ranked[0]);
+    prime('graph-select-2', true, ranked[1]);
+    prime('graph-select-3', true, ranked[2]);
     try { populateOtsuSectionSelect(); } catch (e) {}
 }
 
@@ -17504,7 +17549,13 @@ const App = {
         document.getElementById('project-name-input').value = '';
         document.getElementById('roi-list').innerHTML = '<p class="text-gray-500">No project loaded.</p>';
         document.getElementById('graph-container').innerHTML = '<p class="text-gray-400 text-xs">No project</p>';
-        ['graph-select-1', 'graph-select-2', 'graph-select-3'].forEach(id => document.getElementById(id).innerHTML = '');
+        ['graph-select-1', 'graph-select-2', 'graph-select-3'].forEach(id => {
+            const el = document.getElementById(id);
+            el.innerHTML = '';
+            // 遅延生成の後始末。閉じたプロジェクトの化合物を後から埋め戻さない。
+            delete el.dataset.graphFilled;
+            _graphSelectFillers.delete(id);
+        });
         const tbody = document.getElementById('method-rows');
         if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No project</td></tr>';
         renderMemoForm();
