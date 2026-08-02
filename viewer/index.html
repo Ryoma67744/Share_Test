@@ -3960,7 +3960,9 @@ async function parquetEnsureOpen(blobId, src) {
         // 位置対応で足り、数値は検算と表示用。
         const mz = String((info.kv && info.kv.mz_sorted) || '')
             .split(',').map(s => Number(s)).filter(Number.isFinite);
-        const st = { fileId, info, mz, blob, geom: null };
+        // 供給元 (blob / url) はここに持たない。呼び出しごとに src を受け取る
+        // 形にしたので、state が握ると master と共有で食い違う余地ができる。
+        const st = { fileId, info, mz, geom: null };
         _pqFiles.set(blobId, st);
         return st;
     })();
