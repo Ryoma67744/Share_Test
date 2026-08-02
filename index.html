@@ -201,6 +201,9 @@ const ProjectStorage = (() => {
                 for (const r of out) st.put(r);
             };
             tx2.oncomplete = () => resolve(out);
+            // abort は onerror とは別に飛ぶ。容量超過でロールバックされたときに
+            // 成功として扱わないよう、両方を見る (viewer 側の txDone と同じ理由)。
+            tx2.onabort = () => reject(tx2.error || new Error('IndexedDB transaction aborted'));
             tx2.onerror = () => reject(tx2.error);
         }).catch((e) => { console.warn('project_index backfill failed', e); return null; });
         if (rows) return rows;
@@ -243,6 +246,7 @@ const ProjectStorage = (() => {
             tx.objectStore('projects').put(project);
             tx.objectStore('project_index').put(indexRowFor(project));
             tx.oncomplete = () => resolve();
+            tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
             tx.onerror = () => reject(tx.error);
         });
     }
@@ -253,6 +257,7 @@ const ProjectStorage = (() => {
             tx.objectStore('projects').delete(id);
             tx.objectStore('project_index').delete(id);
             tx.oncomplete = () => resolve();
+            tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
             tx.onerror = () => reject(tx.error);
         });
     }
