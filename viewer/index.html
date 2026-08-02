@@ -367,6 +367,7 @@ body.share-mode #btn-add-overlay,
 body.share-mode #btn-build-tic { display:none !important; }
 /* 共有先でも残すもの: #method-filter (名前 / m/z / アダクト / 分子式) /
    #method-mz-range (m/z の範囲) / #method-filter-count (件数) /
+   #method-keyset-clear (KMD 図で選んだ集合の解除。隠すと表が減ったまま戻せない) /
    #overlay-list (master が登録した重ね合わせの表示。追加は上で隠す)。 */
 /* Molecule-overlay chips (master Method panel). */
 #overlay-list { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
@@ -754,6 +755,12 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                                style="font-size:11px;padding:3px 4px;border:1px solid #d1d5db;border-radius:3px;width:72px;">
                     </span>
                     <span id="method-filter-count" style="font-size:10px;color:#64748b;margin-left:4px;"></span>
+                    <!-- KMD 図で選んだ集合による絞り込み。効いている間だけ出す。
+                         ★ 解除はここに置く。KMD のコントロールに置くと、モードを
+                            変えた瞬間に「表が減ったまま解除する手段が消える」。 -->
+                    <button type="button" id="method-keyset-clear"
+                            title="KMD 図で選んだ集合による絞り込みを解除します"
+                            style="display:none;font-size:10px;padding:2px 6px;border:1px solid #93c5fd;border-radius:3px;background:#eff6ff;color:#1d4ed8;cursor:pointer;margin-left:4px;">KMD 選択 <span id="method-keyset-count"></span> 件 ✕</button>
                     <button type="button" id="btn-build-tic" style="font-size:11px;padding:3px 8px;border:1px solid #d1d5db;border-radius:3px;background:#fff;color:#475569;cursor:pointer;margin-left:6px;display:none;"
                             title="全化合物を足した TIC 背景を作ります。同じ parquet を共有する切片ぶんを1回でまとめて作り、同時に Method 表の Mean / Max も全化合物ぶん埋めます。途中で止められます。一度作れば保存され、次回以降は即座に表示されます">TIC と統計を作る</button>
                     <div id="overlay-list"></div>
@@ -909,6 +916,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                     <select id="analysis-mode" class="text-xs border-gray-300 rounded py-0.5 px-1" title="Analysis の表示を切り替え">
                         <option value="otsu">背景除去(Otsu)</option>
                         <option value="roi">ROI強度</option>
+                        <option value="kmd">KMD図</option>
                     </select>
                     <span id="analysis-roi-controls" class="flex items-center gap-1" style="display:none;">
                         <select id="graph-select-1" class="text-xs border-gray-300 rounded py-0.5 px-1"></select>
@@ -922,6 +930,15 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                         <span class="text-[10px] text-gray-400" title="ヒストグラムの赤線を左右にドラッグして背景/組織の境目を調整します">↔ 赤線をドラッグ</span>
                         <button type="button" id="otsu-strength-reset" class="tb-icon" title="自動Otsu(強度0)に戻す" aria-label="自動Otsuに戻す">⟲</button>
                         <span id="otsu-strength-readout" class="text-[10px] text-gray-500"></span>
+                    </span>
+                    <span id="analysis-kmd-controls" class="flex items-center gap-1" style="display:none;">
+                        <select id="kmd-unit" class="text-xs border-gray-300 rounded py-0.5 px-1" title="繰り返し単位。同族列がこの単位で並ぶ">
+                            <option value="CH2">CH₂ (鎖長)</option>
+                            <option value="H2">H₂ (不飽和度)</option>
+                            <option value="O">O (酸化)</option>
+                        </select>
+                        <span class="text-[10px] text-gray-400" title="点をクリックでその化合物を表示。ドラッグで囲むと Method 表がその集合だけになります">クリック=表示 / 囲む=絞り込み</span>
+                        <button type="button" id="kmd-clear" class="tb-icon" title="KMD の選択と絞り込みを解除" aria-label="KMD の選択を解除">⟲</button>
                     </span>
                 </div>
                 <div id="graph-container" class="flex-1 flex items-center justify-center border border-gray-200 rounded overflow-hidden min-h-0 bg-gray-50">
@@ -3393,8 +3410,15 @@ function _parquetWorkerBody(self, lib) {
     //
     // 形は asyncBufferFromBlob と完全に同じ ({ byteLength, slice }) なので、
     // 下流 (parquetMetadataAsync / parquetRead) は違いを知らない。
+    // URL ごとに測った長さを覚えておく。
+    // 呼び出し側 (ent.sourceBytes) は誰も埋めていないので、これが無いと
+    // **列を 1 本読むたびに HEAD が 1 往復**していた。長さは変わらないので
+    // 1 プロセス 1 回でよい。
+    const urlByteLength = new Map();
+
     const asyncBufferFromUrl = async (url, knownLength) => {
         let byteLength = Number(knownLength);
+        if (!Number.isFinite(byteLength) || byteLength <= 0) byteLength = urlByteLength.get(url) || 0;
         if (!Number.isFinite(byteLength) || byteLength <= 0) {
             const head = await fetch(url, { method: 'HEAD' });
             if (!head.ok) throw new Error('parquet: HEAD ' + head.status + ' for ' + url);
@@ -3402,6 +3426,7 @@ function _parquetWorkerBody(self, lib) {
             if (!Number.isFinite(byteLength) || byteLength <= 0) {
                 throw new Error('parquet: content-length を取得できません (' + url + ')');
             }
+            urlByteLength.set(url, byteLength);
         }
         return {
             byteLength,
@@ -4034,8 +4059,20 @@ async function parquetEnsureOpen(blobId, src) {
         // mz_sorted は %.10g なので末尾ゼロが落ちる (列名 794.5450 に対し 794.545)。
         // 文字列で突き合わせず、必ず数値にしてから使う。列順と 1:1 なので、本来は
         // 位置対応で足り、数値は検算と表示用。
+        //
+        // ★ 詰めてはいけない。
+        //   ここは `st.mz[k]` として **k 番目の m/z 列**に対応づけられる
+        //   (parquetFeatureMeta の呼び出し)。以前は .filter(Number.isFinite) で
+        //   配列を詰めていたので、mz_sorted に非数値が 1 つ混ざるだけで
+        //   **そこから先の m/z が全部 1 つずれた**。null にはならず「それらしい
+        //   値」のまま間違うので気付けない。サイドカーがあれば row.mz が優先
+        //   されるため露見しないが、サイドカー無しの経路では全化合物が狂う。
+        //   非数値は NaN のまま残す (parquetFeatureMeta が Number.isFinite で弾く)。
+        //   ★ 空欄を Number() に素で通さない。Number('') は 0 を返し、0 は有限なので
+        //     parquetFeatureMeta が「m/z 0.0000」を本物の値として採ってしまう
+        //     (同じ罠が row.mz 側にもあり、そちらは num() で弾いている)。
         const mz = String((info.kv && info.kv.mz_sorted) || '')
-            .split(',').map(s => Number(s)).filter(Number.isFinite);
+            .split(',').map(s => (String(s).trim() === '' ? NaN : Number(s)));
         // 供給元 (blob / url) はここに持たない。呼び出しごとに src を受け取る
         // 形にしたので、state が握ると master と共有で食い違う余地ができる。
         const st = { fileId, info, mz, geom: null };
@@ -4911,8 +4948,17 @@ class SectionPanel {
         const rasterH = (result && typeof result === 'object' && Number.isFinite(result.height)) ? result.height : null;
         if (this.section.msiSeries && this.section.msiSeries[key]) {
             const entRef = this.section.msiSeries[key];
-            const wasMissing = !Array.isArray(entRef.rawRange) || !Number.isFinite(entRef.rawMean) || !Number.isFinite(entRef.rawTrueMax) || !Number.isFinite(entRef.rawDispMax) || !entRef.diag
-                || !Number.isFinite(entRef.rasterW) || !Number.isFinite(entRef.rasterH);
+            // ★ 「欠けていたか」ではなく「実際に変わったか」で判断する。
+            //
+            //   従来は wasMissing (= 派生値のどれかが未設定) だけを見て
+            //   _bumpMethodSeries() を呼んでいた。ところが共有側の parquet は
+            //   master が「TIC と統計を作る」を実行していなければ rawMean も
+            //   diag も入らないので、**化合物を開くたびに毎回 true** になる。
+            //   その結果、次の切り替えで Method 表の署名が食い違い、1390 件の
+            //   絞り込み + 並べ替え + 表の作り直しが毎回走っていた。
+            //   実際にセルの中身が変わったときだけ捨てる。
+            const beforeSave = _msiDerivedSig(entRef);
+            const beforeCell = _msiCellSig(entRef);
             if (rawRange) entRef.rawRange = rawRange;
             if (rawMean != null) entRef.rawMean = rawMean;
             if (rawTrueMax != null) entRef.rawTrueMax = rawTrueMax;
@@ -4924,10 +4970,10 @@ class SectionPanel {
             // 保存を 30 秒ためる queueSaveDerived を通す。従来の queueSave() だと
             // 化合物を 1 つ開くたびにプロジェクト全体 (数 MB) の書き込みと、その
             // 5 秒後の publish RPC が走っていた (1390 化合物なら 1390 回)。
-            if (wasMissing && (rawRange || rawMean != null || rawTrueMax != null || rawDispMax != null || diag || rasterW != null) && App && App.queueSaveDerived) App.queueSaveDerived();
+            if (_msiDerivedSig(entRef) !== beforeSave && App && App.queueSaveDerived) App.queueSaveDerived();
             // rawMean / rawTrueMax / diag は Method 表のセルであり、Mean/Max は
-            // 並べ替えキーでもある。メモを捨てないと表が古い値のままになる。
-            if (wasMissing) _bumpMethodSeries();
+            // 並べ替えキーでもある。値が変わったときはメモを捨てる。
+            if (_msiCellSig(entRef) !== beforeCell) _bumpMethodSeries();
         }
         await this.attachImage(key, dataUrl);
     }
@@ -4961,30 +5007,38 @@ class SectionPanel {
             this.imageSettings[key] = { opacity: 1.0, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255, grayscale: persistedGray, applyOpacity: persistedApply };
             return;
         }
+        const isMsi = /^MSI_/i.test(key);
+        // ★ MSI では輝度スキャンをまるごと省く。
+        //
+        //   下の dispVmin/dispVmax は MSI では 0/255 固定で、mn/mx は使わない
+        //   (表示は App.getMsiWindow の窓が決める — msiWindowEval)。残る
+        //   actualMin/actualMax も **このファイル内に読み手が 1 つも無い**。
+        //   つまり MSI では canvas 生成 + drawImage + getImageData + 全画素
+        //   ループが丸ごと捨て仕事だった。化合物を 1 回切り替えるたびに
+        //   パネル 4 枚ぶん走っていたので、そのぶん操作が引っかかっていた。
+        //   HE/IF は mn/mx を実際に vmin/vmax として使うので従来どおり測る。
+        if (isMsi) {
+            this.imageSettings[key] = {
+                opacity: 1.0, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255,
+                grayscale: persistedGray, applyOpacity: persistedApply,
+            };
+            return;
+        }
         const c = document.createElement('canvas');
         c.width = img.naturalWidth; c.height = img.naturalHeight;
         const ctx = get2dContext(c, { willReadFrequently: true });
         ctx.drawImage(img, 0, 0);
         const d = ctx.getImageData(0, 0, c.width, c.height).data;
         let mn = 255, mx = 0;
-        const isMsi = /^MSI_/i.test(key);
         for (let i = 0; i < d.length; i += 4) {
-            if (isMsi && d[i + 3] === 0) continue;
             const l = Math.round(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
             if (l < mn) mn = l;
             if (l > mx) mx = l;
         }
         // actualMin/actualMax capture the observed raster luminance range.
-        // MSI display is driven by App.getMsiWindow (per-MRM window over the
-        // in-scope sections, see msiWindowEval), NOT by these per-section
-        // vmin/vmax — so vmin/vmax are pinned to 0-255 (unused for MSI) and
-        // the Master / common-window stretch is skipped below.
-        // Guard against degenerate cases (fully transparent MSI, decode
-        // failure leaving mn=255/mx=0).
+        // Guard against degenerate cases (decode failure leaving mn=255/mx=0).
         if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn > mx) { mn = 0; mx = 255; }
-        const dispVmin = isMsi ? 0 : mn;
-        const dispVmax = isMsi ? 255 : mx;
-        this.imageSettings[key] = { opacity: 1.0, vmin: dispVmin, vmax: dispVmax, actualMin: mn, actualMax: mx, grayscale: persistedGray, applyOpacity: persistedApply };
+        this.imageSettings[key] = { opacity: 1.0, vmin: mn, vmax: mx, actualMin: mn, actualMax: mx, grayscale: persistedGray, applyOpacity: persistedApply };
     }
 
     async analyzeAndInitSettings() {
@@ -5298,11 +5352,14 @@ class SectionPanel {
     }
 
     // ---- Canvas sizing ----
+    // 返り値は「末尾の renderComposite まで到達したか」。呼び出し側 (フォーカス
+    // 切り替え) は、到達していないときだけ自分で描く。以前は無条件に
+    // renderComposite を続けて呼んでいたので、1 回の切り替えで 2 回描いていた。
     setupCanvasSize() {
         const msiKey = this._pickRefMsiKey();
         const heKey  = Object.keys(this.imageSources).find(k => /HE_STAIN|IF_STAIN/i.test(k));
         const refKey = msiKey || heKey || Object.keys(this.imageSources)[0];
-        if (!refKey) return;
+        if (!refKey) return false;
         const refIsMsi = !!msiKey && refKey === msiKey;
         // MSI は未読込でも ent の記録から寸法が取れる。HE/IF は従来どおり実物から
         // (常に読み込んであるので問題ない)。
@@ -5310,7 +5367,7 @@ class SectionPanel {
             const im = this.imageSources[refKey];
             return (im && im.complete && im.naturalWidth > 0) ? { w: im.naturalWidth, h: im.naturalHeight } : null;
         })();
-        if (!refSize) return;
+        if (!refSize) return false;
 
         let w = refSize.w, h = refSize.h;
         if (refIsMsi) { const t = w; w = h; h = t; }
@@ -5335,7 +5392,15 @@ class SectionPanel {
             scale = Math.max(1, Math.min(8, Math.ceil(ratio)));
         }
         w = Math.round(w * scale); h = Math.round(h * scale);
-        [this.dom.cdisp, this.dom.croi].forEach(c => { c.width = w; c.height = h; });
+        // ★ 同じ寸法なら代入しない。canvas.width への代入は、値が変わらなくても
+        //   バッキングストアを作り直して中身を消す。ノンターゲットの切片は
+        //   どの化合物でも格子が同じなので、従来は化合物を切り替えるたびに
+        //   「同じ寸法で作り直して真っ白にする」を 4 パネル × 2 枚ぶんやっていた。
+        //   HE も自動 TIC 背景も無いので、次の像が読めるまで画面が白くなる。
+        for (const c of [this.dom.cdisp, this.dom.croi]) {
+            if (c.width !== w) c.width = w;
+            if (c.height !== h) c.height = h;
+        }
 
         const cw = this.dom.host.clientWidth;
         const ch = this.dom.host.clientHeight;
@@ -5356,6 +5421,7 @@ class SectionPanel {
         }
         this.renderComposite();
         this.drawAllRois();
+        return true;
     }
 
     // ---- Composite renderer ----
@@ -6140,12 +6206,7 @@ class SectionPanel {
         // promote it to the global focus compound so every section re-renders
         // with that single MSI layer (mirrors the Method-table row click).
         if (App.viewMode === 'compound' && /^MSI_/i.test(key)) {
-            App.setFocusCompoundKey(key);
-            for (const p of App.panels.values()) {
-                if (p.imageSources[key] && !p.visibleLayers.has(key)) {
-                    p.toggleLayer(key, true);
-                }
-            }
+            focusCompoundEverywhere(key);
             return;
         }
         const isHeLikeClick = /HE_STAIN|IF_STAIN/i.test(key);
@@ -7680,6 +7741,7 @@ async function extractRoiRawFromSection(panel, layerKey, polyMsi) {
 // 描画せず捨てる (古い結果が新しい ROI を上書きしないように)。
 async function renderAnalysisChart(gen) {
     if (App.analysisMode === 'otsu') { try { renderOtsuAnalysis(); } catch (e) { console.warn('[otsu] analysis render failed', e); } return; }
+    if (App.analysisMode === 'kmd') { try { renderKmdAnalysis(); } catch (e) { console.warn('[kmd] analysis render failed', e); } return; }
     const stale = () => (gen !== undefined && gen !== App._analysisGen);
     const host = document.getElementById('graph-container');
     const project = App.project;
@@ -7705,7 +7767,11 @@ async function renderAnalysisChart(gen) {
     const stats = {};
     let unavailable = 0;
     // 初回は各ソースのパースが走る。空欄のまま固まったように見えるのを避ける。
-    if (!host.querySelector('canvas')) {
+    // ★ クラスで絞る。解析パネルの canvas は 3 モードで共用なので、素の
+    //   querySelector('canvas') だと Otsu / KMD の canvas を掴んでしまい、
+    //   「もう描いてある」と誤判定して計算中の表示が出ない・別モードの絵の上に
+    //   棒グラフを描く、という混線になる。
+    if (!host.querySelector('canvas.roi-bar')) {
         host.innerHTML = '<p class="text-gray-400 text-xs">ROI 統計を計算中…</p>';
     }
     for (const s of sectionsWithRoi) {
@@ -7721,10 +7787,11 @@ async function renderAnalysisChart(gen) {
     }
     if (stale()) return;
 
-    let canvas = host.querySelector('canvas');
+    let canvas = host.querySelector('canvas.roi-bar');
     if (!canvas) {
         host.innerHTML = '';
         canvas = document.createElement('canvas');
+        canvas.className = 'roi-bar';
         canvas.style.cssText = 'width:100%;height:100%;display:block;';
         host.appendChild(canvas);
     }
@@ -7733,32 +7800,62 @@ async function renderAnalysisChart(gen) {
     // distorted bars + overlapping text. Redraw cheaply from cached stats (no
     // pixel re-scan); rAF-debounced so a drag-resize coalesces to one redraw.
     host._lastChart = { sections: sectionsWithRoi, channels, stats, roi, unavailable };
-    if (!host._chartResizeObserver && typeof ResizeObserver !== 'undefined') {
-        let raf = 0;
-        host._chartResizeObserver = new ResizeObserver(() => {
-            if (raf) cancelAnimationFrame(raf);
-            raf = requestAnimationFrame(() => {
-                raf = 0;
-                const last = host._lastChart;
-                const cv = host.querySelector('canvas');
-                if (last && cv) { try { drawSectionMultiBar(cv, last.sections, last.channels, last.stats, last.roi, last.unavailable); } catch (e) {} }
-            });
-        });
-        host._chartResizeObserver.observe(host);
-    }
+    ensureAnalysisResizeObserver(host);
     drawSectionMultiBar(canvas, sectionsWithRoi, channels, stats, roi, unavailable);
     document.getElementById('analysis-scope').textContent = sectionsWithRoi.length + ' section(s)';
+}
+
+// 解析パネルのリサイズ再描画。
+//
+// ★ 以前は renderAnalysisChart の中 (Otsu の早期 return より後) にしか登録が無く、
+//   しかもコールバックが**無条件に drawSectionMultiBar を呼んでいた**。つまり
+//   ・ROI を一度も開かないとリサイズ追従が効かない
+//   ・ROI を開いた後に Otsu へ切り替えて幅を変えると、Otsu のヒストグラムの上に
+//     棒グラフを描こうとする (canvas は共用なので掴めてしまう)
+//   モードが 3 つになると必ず踏むので、「今のモードの描画関数を呼ぶ」1 箇所にする。
+function ensureAnalysisResizeObserver(host) {
+    if (!host || host._chartResizeObserver || typeof ResizeObserver === 'undefined') return;
+    let raf = 0;
+    host._chartResizeObserver = new ResizeObserver(() => {
+        if (raf) cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => {
+            raf = 0;
+            try { redrawAnalysisForResize(host); } catch (e) {}
+        });
+    });
+    host._chartResizeObserver.observe(host);
+}
+
+// リサイズ時の描き直し。**キャッシュから描くだけ**で、計算は始めない
+// (幅を変えただけで Otsu の再計算や ROI の再パースが走ってはいけない)。
+function redrawAnalysisForResize(host) {
+    const mode = (App && App.analysisMode) || 'roi';
+    if (mode === 'otsu') {
+        // 記録済みのマスクがあるときだけ。無ければ何もしない (計算に入らない)。
+        if (host.querySelector('canvas.otsu-hist')) renderOtsuAnalysis();
+        return;
+    }
+    if (mode === 'kmd') {
+        const cv = host.querySelector('canvas.kmd-scatter');
+        if (cv && host._lastKmd) drawKmdScatter(cv, host._lastKmd);
+        return;
+    }
+    const cv = host.querySelector('canvas.roi-bar');
+    const last = host._lastChart;
+    if (cv && last) drawSectionMultiBar(cv, last.sections, last.channels, last.stats, last.roi, last.unavailable);
 }
 
 // ---- 背景除去(Otsu) の Analysis 表示: TIC ヒストグラム + 強度スライダー ----
 // ROI 用コントロールと Otsu 用コントロールの表示を切り替える。
 function updateAnalysisModeUi() {
     const mode = App.analysisMode || 'roi';
-    const roiC = document.getElementById('analysis-roi-controls');
-    const otsuC = document.getElementById('analysis-otsu-controls');
     // インライン style.display で切替（Tailwind の .flex が [hidden] 属性に勝つため）。
-    if (roiC) roiC.style.display = (mode === 'otsu') ? 'none' : '';
-    if (otsuC) otsuC.style.display = (mode === 'otsu') ? '' : 'none';
+    // ★ 「otsu かどうか」の二択で書かない。モードが 3 つになった時点で、
+    //   その書き方だと KMD のとき ROI のコントロールが出てしまう。
+    const show = (id, on) => { const el = document.getElementById(id); if (el) el.style.display = on ? '' : 'none'; };
+    show('analysis-roi-controls', mode === 'roi');
+    show('analysis-otsu-controls', mode === 'otsu');
+    show('analysis-kmd-controls', mode === 'kmd');
     const modeSel = document.getElementById('analysis-mode');
     if (modeSel && modeSel.value !== mode) modeSel.value = mode;
 }
@@ -7881,6 +7978,7 @@ function renderOtsuAnalysis() {
         host.appendChild(canvas);
     }
     bindOtsuHistDrag(canvas);
+    ensureAnalysisResizeObserver(host);
     drawOtsuHistogram(canvas, rec, App.otsuStrength || 0);
 
     const effLog = rec.manual ? rec.effLog : (rec.autoThresholdLog + (App.otsuStrength || 0));
@@ -7987,6 +8085,450 @@ function drawOtsuHistogram(canvas, rec, strength) {
     ctx.fillStyle = '#6b7280'; ctx.font = '9px sans-serif'; ctx.textBaseline = 'bottom';
     ctx.textAlign = 'left'; ctx.fillText('◀背景', padL, cssH - 3);
     ctx.textAlign = 'right'; ctx.fillText('組織▶  log10(TIC+1)', cssW - padR, cssH - 3);
+}
+
+// =============================================================================
+// KMD 図 (Analysis の 3 つ目のモード)
+// =============================================================================
+
+// 系列に振る色。彩度の高い順で、隣り合う系列が見分けられるようにする。
+const KMD_SERIES_COLORS = ['#ef4444', '#3b82f6', '#10b981', '#f59e0b', '#a855f7', '#ec4899', '#14b8a6', '#f97316'];
+
+// 図の状態。project には保存しない (共有先でも触れる一時的な見え方)。
+const KmdState = {
+    unitId: 'CH2',
+    series: [],            // findKmdSeries の結果
+    selectedSeries: -1,    // 系列一覧で選んだ番号 (-1 = 無選択)
+    rectKeys: null,        // 矩形選択で選んだ鍵の Set (null = 選択なし)
+    projectId: null,       // どのプロジェクトの選択か
+};
+
+// プロジェクトが変わったら選択を捨てる。
+// ★ 系列番号も鍵の集合も**前のプロジェクトのもの**なので、持ち越すと
+//   Method 表が「存在しない鍵の集合」で絞られて 0 件になる。単位だけは
+//   見方の好みなので残す。
+function resetKmdSelectionIfProjectChanged(project) {
+    const id = (project && project.id) || null;
+    if (KmdState.projectId === id) return false;
+    KmdState.projectId = id;
+    KmdState.series = [];
+    KmdState.selectedSeries = -1;
+    KmdState.rectKeys = null;
+    if (App && App.methodKeySet) { try { App.setMethodKeySet(null); } catch (e) {} }
+    return true;
+}
+
+// KMD モードの描画。点の作成 → 系列検出 → canvas → 系列一覧。
+function renderKmdAnalysis() {
+    const host = document.getElementById('graph-container');
+    if (!host) return;
+    updateAnalysisModeUi();
+    const project = App.project;
+    if (!project) { host.innerHTML = '<p class="text-gray-400 text-xs">プロジェクトがありません</p>'; return; }
+    resetKmdSelectionIfProjectChanged(project);
+
+    const unit = kmdUnitById(KmdState.unitId);
+    const built = buildKmdPoints(project, unit);
+    if (!built.points.length) {
+        host.innerHTML = '<p class="text-gray-400 text-xs px-2 text-center leading-relaxed">'
+            + 'm/z を持つ化合物がありません。<br>KMD 図は m/z から計算するので描けません。</p>';
+        host._lastKmd = null;
+        return;
+    }
+    KmdState.series = findKmdSeries(built.points, unit, {});
+    if (KmdState.selectedSeries >= KmdState.series.length) KmdState.selectedSeries = -1;
+
+    // 系列 → 色。選んだ系列だけ塗るのではなく、上位の系列に固定色を割り当てて
+    // 「どの点がどの同族列か」を一目で見えるようにする。
+    const colorByKey = new Map();
+    const nColored = Math.min(KMD_SERIES_COLORS.length, KmdState.series.length);
+    for (let i = 0; i < nColored; i++) {
+        const c = KMD_SERIES_COLORS[i];
+        for (const p of KmdState.series[i]) colorByKey.set(p.key, c);
+    }
+
+    const model = {
+        points: built.points,
+        total: built.total,
+        missingMz: built.missingMz,
+        unit,
+        colorByKey,
+        series: KmdState.series,
+        selectedSeries: KmdState.selectedSeries,
+        selectedKeys: KmdState.selectedSeries >= 0
+            ? new Set(KmdState.series[KmdState.selectedSeries].map(p => p.key)) : null,
+        rectKeys: KmdState.rectKeys,
+        focusKey: App.focusCompoundKey || null,
+        dragRect: null,
+    };
+
+    // canvas と系列一覧を 1 度だけ組む。以降は描き直すだけ (1390 点 × 再描画は軽い)。
+    let canvas = host.querySelector('canvas.kmd-scatter');
+    if (!canvas) {
+        host.innerHTML = '';
+        host.style.position = 'relative';
+        const wrap = document.createElement('div');
+        wrap.className = 'kmd-wrap';
+        wrap.style.cssText = 'position:relative;width:100%;height:100%;display:flex;flex-direction:column;min-height:0;';
+        const cvBox = document.createElement('div');
+        cvBox.className = 'kmd-canvas-box';
+        cvBox.style.cssText = 'position:relative;flex:1 1 0;min-height:0;';
+        canvas = document.createElement('canvas');
+        canvas.className = 'kmd-scatter';
+        // ★ tabindex を付けて canvas 自身にフォーカスが載るようにする。
+        //   これが無いと、図をクリックした後の ↑↓ が document の化合物送りに
+        //   吸われて Method 表が勝手にスクロールする (除外はフォーカス位置で見る)。
+        canvas.tabIndex = 0;
+        canvas.style.cssText = 'width:100%;height:100%;display:block;outline:none;';
+        cvBox.appendChild(canvas);
+        const tip = document.createElement('div');
+        tip.className = 'kmd-tip';
+        tip.style.cssText = 'position:absolute;pointer-events:none;display:none;z-index:5;'
+            + 'background:rgba(17,24,39,0.92);color:#fff;font-size:10px;line-height:1.35;'
+            + 'padding:3px 6px;border-radius:3px;white-space:nowrap;';
+        cvBox.appendChild(tip);
+        wrap.appendChild(cvBox);
+        const list = document.createElement('div');
+        list.className = 'kmd-series-list';
+        list.style.cssText = 'flex:0 0 auto;max-height:104px;overflow:auto;border-top:1px solid #e5e7eb;background:#fff;';
+        wrap.appendChild(list);
+        host.appendChild(wrap);
+        bindKmdCanvas(canvas);
+    }
+    host._lastKmd = model;
+    drawKmdScatter(canvas, model);
+    renderKmdSeriesList(host, model);
+
+    const scopeEl = document.getElementById('analysis-scope');
+    if (scopeEl) {
+        scopeEl.textContent = built.points.length + ' / ' + built.total + ' 化合物'
+            + (built.missingMz ? '  (m/z 無し ' + built.missingMz + ' 件は除外)' : '');
+    }
+}
+
+// 系列一覧。行をクリックで選択 / もう一度で解除。「重ねる」で 1 枚に色分け表示。
+function renderKmdSeriesList(host, model) {
+    const list = host.querySelector('.kmd-series-list');
+    if (!list) return;
+    const series = model.series || [];
+    if (!series.length) {
+        list.innerHTML = '<p class="text-[10px] text-gray-400 px-2 py-1">同族列は見つかりませんでした'
+            + ' (KMD が揃い、m/z 差が ' + model.unit.label + ' の整数倍で 3 点以上つながるもの)。</p>';
+        return;
+    }
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const rows = series.slice(0, 40).map((s, i) => {
+        const color = (i < KMD_SERIES_COLORS.length) ? KMD_SERIES_COLORS[i] : '#9ca3af';
+        const on = (i === model.selectedSeries);
+        return '<div class="kmd-series-row flex items-center gap-1.5 px-2 py-0.5 cursor-pointer'
+            + (on ? ' bg-blue-50' : '') + '" data-series="' + i + '" style="font-size:10px;">'
+            + '<span style="width:8px;height:8px;border-radius:9999px;flex:0 0 auto;background:' + color + ';"></span>'
+            + '<span class="text-gray-700" style="flex:0 0 auto;">' + s.length + ' 点</span>'
+            + '<span class="text-gray-400" style="flex:0 0 auto;">KMD ' + s[0].kmd.toFixed(4) + '</span>'
+            + '<span class="text-gray-500 truncate" style="flex:1 1 auto;min-width:0;">'
+            + esc(s[0].name) + ' … ' + esc(s[s.length - 1].name) + '</span>'
+            + '<button type="button" class="kmd-series-overlay text-blue-600 hover:underline" data-series="' + i
+            + '" style="flex:0 0 auto;" title="この系列を 1 枚に色分けで重ねる">重ねる</button>'
+            + '</div>';
+    }).join('');
+    const more = series.length > 40
+        ? '<p class="text-[10px] text-gray-400 px-2 py-0.5">ほか ' + (series.length - 40) + ' 系列 (長い順に 40 件まで表示)</p>' : '';
+    list.innerHTML = rows + more;
+}
+
+// 散布図の描画。drawOtsuHistogram の流儀 (clientWidth / dpr / 逆変換用の _kmdGeom) を踏襲。
+function drawKmdScatter(canvas, model) {
+    const host = canvas.parentElement;
+    const cssW = Math.max(120, (host && host.clientWidth) || 300);
+    const cssH = Math.max(80, (host && host.clientHeight) || 160);
+    const dpr = Math.min(2, (window.devicePixelRatio || 1));
+    canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, cssW, cssH);
+
+    // padB は 2 段ぶん要る。上段が x 軸の目盛り (9px, textBaseline top)、
+    // 下段が軸名と注記 (cssH-2 に bottom 基線)。18 だと重なる。
+    const padL = 34, padR = 8, padT = 8, padB = 27;
+    const plotW = Math.max(1, cssW - padL - padR), plotH = Math.max(1, cssH - padT - padB);
+    const pts = model.points;
+
+    let xmin = Infinity, xmax = -Infinity, ymin = Infinity, ymax = -Infinity;
+    let imin = Infinity, imax = -Infinity;
+    for (const p of pts) {
+        if (p.mz < xmin) xmin = p.mz; if (p.mz > xmax) xmax = p.mz;
+        if (p.kmd < ymin) ymin = p.kmd; if (p.kmd > ymax) ymax = p.kmd;
+        if (p.intensity != null && p.intensity > 0) {
+            const l = Math.log10(1 + p.intensity);
+            if (l < imin) imin = l; if (l > imax) imax = l;
+        }
+    }
+    // 端の点が枠に食い込まないように少しだけ広げる。幅 0 (点が 1 つ) も潰さない。
+    const xPad = (xmax - xmin) * 0.02 || 1;
+    const yPad = (ymax - ymin) * 0.05 || 0.01;
+    const x0 = xmin - xPad, x1 = xmax + xPad, y0 = ymin - yPad, y1 = ymax + yPad;
+    const xSpan = (x1 - x0) || 1, ySpan = (y1 - y0) || 1;
+    const xOf = (mz) => padL + plotW * ((mz - x0) / xSpan);
+    const yOf = (kmd) => padT + plotH * (1 - (kmd - y0) / ySpan);   // 上が大きい
+    const iSpan = (imax > imin) ? (imax - imin) : 0;
+    const rOf = (v) => {
+        if (v == null || !(v > 0) || !iSpan) return 2.2;
+        return 1.5 + 3.2 * ((Math.log10(1 + v) - imin) / iSpan);
+    };
+
+    // 逆変換に必要なものを canvas に貼る (drawOtsuHistogram の _otsuGeom と同じ流儀)。
+    // クリック判定・矩形選択はすべてここから読む。
+    canvas._kmdGeom = { padL, padT, padR, padB, plotW, plotH, x0, x1, y0, y1, cssW, cssH,
+        mzAt: (px) => x0 + ((px - padL) / plotW) * xSpan,
+        kmdAt: (py) => y0 + (1 - (py - padT) / plotH) * ySpan,
+        xOf, yOf };
+
+    // 枠と目盛り
+    ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = 1;
+    ctx.strokeRect(padL + 0.5, padT + 0.5, plotW - 1, plotH - 1);
+    ctx.fillStyle = '#9ca3af'; ctx.font = '9px sans-serif';
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+        const v = y0 + (ySpan * i) / 4;
+        const y = yOf(v);
+        ctx.fillText(v.toFixed(3), padL - 3, y);
+        if (i > 0 && i < 4) {
+            ctx.strokeStyle = '#f3f4f6';
+            ctx.beginPath(); ctx.moveTo(padL, y + 0.5); ctx.lineTo(padL + plotW, y + 0.5); ctx.stroke();
+        }
+    }
+    ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+    for (let i = 0; i <= 4; i++) {
+        const v = x0 + (xSpan * i) / 4;
+        ctx.fillText(formatAxisValue(v), Math.min(cssW - 12, Math.max(12, xOf(v))), padT + plotH + 3);
+    }
+
+    const sel = model.selectedKeys;
+    const rect = model.rectKeys;
+    const colorByKey = model.colorByKey || new Map();
+    // 選択があるときは、選ばれていない点を薄くして「絞り込みの結果」を見せる。
+    const dimmed = !!(sel || rect);
+    const inSel = (k) => (sel ? sel.has(k) : false) || (rect ? rect.has(k) : false);
+
+    // 2 パス: 目立たない点 → 目立つ点。重なったとき選択が上に来るように。
+    for (let pass = 0; pass < 2; pass++) {
+        for (const p of pts) {
+            const hot = inSel(p.key);
+            if (pass === 0 ? hot : !hot) continue;
+            const x = xOf(p.mz), y = yOf(p.kmd), r = rOf(p.intensity);
+            const base = p.markerColor || colorByKey.get(p.key) || '#60a5fa';
+            ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+            ctx.globalAlpha = (dimmed && !hot) ? 0.18 : 0.72;
+            ctx.fillStyle = base;
+            ctx.fill();
+        }
+    }
+    ctx.globalAlpha = 1;
+
+    // 表示中の化合物に赤い輪を出す (図と像の対応が一目で分かるように)
+    if (model.focusKey) {
+        const f = pts.find(p => p.key === model.focusKey);
+        if (f) {
+            ctx.beginPath(); ctx.arc(xOf(f.mz), yOf(f.kmd), rOf(f.intensity) + 3, 0, Math.PI * 2);
+            ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 1.5; ctx.stroke();
+        }
+    }
+
+    // ドラッグ中の矩形
+    if (model.dragRect) {
+        const d = model.dragRect;
+        ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 1; ctx.setLineDash([3, 3]);
+        ctx.strokeRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
+        ctx.setLineDash([]);
+        ctx.fillStyle = 'rgba(37,99,235,0.08)';
+        ctx.fillRect(Math.min(d.x0, d.x1), Math.min(d.y0, d.y1), Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
+    }
+
+    // 軸名と注記
+    ctx.fillStyle = '#6b7280'; ctx.font = '9px sans-serif';
+    ctx.textAlign = 'right'; ctx.textBaseline = 'bottom';
+    ctx.fillText('m/z  (縦: KMD / ' + model.unit.label + ')', cssW - padR, cssH - 2);
+    if (model.missingMz) {
+        ctx.textAlign = 'left'; ctx.fillStyle = '#b45309';
+        ctx.fillText('m/z 無し ' + model.missingMz + ' 件は除外', padL + 2, cssH - 2);
+    }
+}
+
+// 「今表示中」の赤い輪だけ描き直す。
+// ★ 点の作り直しも系列検出もしない。化合物を切り替えるたびに 1390 点を組み直すと、
+//   切り替えを軽くするためにやってきたことが台無しになる。
+function refreshKmdFocusRing() {
+    if (!App || App.analysisMode !== 'kmd') return;
+    const host = document.getElementById('graph-container');
+    const model = host && host._lastKmd;
+    const cv = host && host.querySelector('canvas.kmd-scatter');
+    if (!model || !cv) return;
+    model.focusKey = App.focusCompoundKey || null;
+    try { drawKmdScatter(cv, model); } catch (e) {}
+}
+
+// 画面座標に一番近い点。半径 (px) 以内になければ null。1390 点の総当たりで十分速い。
+function kmdHitTest(model, geom, px, py, radius) {
+    if (!model || !geom) return null;
+    const rad = radius || 7;
+    let best = null, bestD2 = rad * rad;
+    for (const p of model.points) {
+        const dx = geom.xOf(p.mz) - px, dy = geom.yOf(p.kmd) - py;
+        const d2 = dx * dx + dy * dy;
+        if (d2 <= bestD2) { bestD2 = d2; best = p; }
+    }
+    return best;
+}
+
+// 矩形 (画面座標) に入る点の鍵。
+function kmdKeysInRect(model, geom, r) {
+    const out = new Set();
+    if (!model || !geom || !r) return out;
+    const xa = Math.min(r.x0, r.x1), xb = Math.max(r.x0, r.x1);
+    const ya = Math.min(r.y0, r.y1), yb = Math.max(r.y0, r.y1);
+    for (const p of model.points) {
+        const x = geom.xOf(p.mz), y = geom.yOf(p.kmd);
+        if (x >= xa && x <= xb && y >= ya && y <= yb) out.add(p.key);
+    }
+    return out;
+}
+
+// 図の上の操作。bindOtsuHistDrag と同じ pointer の作法 (setPointerCapture / touchAction)。
+//
+//   ホバー          … 名前 / m/z / KMD を出す
+//   クリック        … その化合物を全切片で表示する
+//   ドラッグ        … 矩形選択 → Method 表をその集合だけに絞る
+//   余白クリック    … 選択解除
+//   Escape          … 選択解除
+const KMD_DRAG_MIN_PX = 4;   // これ未満はクリック扱い (手ぶれで絞り込まれないように)
+
+function bindKmdCanvas(canvas) {
+    if (canvas._kmdBound) return;
+    canvas._kmdBound = true;
+    canvas.style.cursor = 'crosshair';
+    canvas.style.touchAction = 'none';
+    const host = () => document.getElementById('graph-container');
+    const tipEl = () => { const h = host(); return h && h.querySelector('.kmd-tip'); };
+    const modelOf = () => { const h = host(); return h && h._lastKmd; };
+    const at = (e) => {
+        const rect = canvas.getBoundingClientRect();
+        return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    };
+    let drag = null;
+
+    canvas.addEventListener('pointermove', (e) => {
+        const model = modelOf(), geom = canvas._kmdGeom;
+        if (!model || !geom) return;
+        const p = at(e);
+        if (drag) {
+            drag.x1 = p.x; drag.y1 = p.y;
+            model.dragRect = drag;
+            drawKmdScatter(canvas, model);
+            return;
+        }
+        const hit = kmdHitTest(model, geom, p.x, p.y, 7);
+        const tip = tipEl();
+        if (!tip) return;
+        if (!hit) { tip.style.display = 'none'; return; }
+        const lines = [hit.name,
+            'm/z ' + hit.mz.toFixed(4) + '   KMD ' + hit.kmd.toFixed(4),
+            (hit.intensity != null ? ('最大 ' + formatRawValue(hit.intensity) + (hit.estimated ? ' (概算)' : '')) : '未読込')];
+        if (hit.lipidClass) lines.splice(1, 0, hit.lipidClass + (hit.adduct ? ('  ' + hit.adduct) : ''));
+        tip.textContent = '';
+        for (const t of lines) { const d = document.createElement('div'); d.textContent = t; tip.appendChild(d); }
+        tip.style.display = 'block';
+        // 右端・下端で切れないように内側へ寄せる
+        const box = canvas.parentElement;
+        const bw = (box && box.clientWidth) || geom.cssW, bh = (box && box.clientHeight) || geom.cssH;
+        const tw = tip.offsetWidth, th = tip.offsetHeight;
+        tip.style.left = Math.max(0, Math.min(bw - tw - 2, p.x + 10)) + 'px';
+        tip.style.top = Math.max(0, Math.min(bh - th - 2, p.y + 10)) + 'px';
+    });
+    canvas.addEventListener('pointerleave', () => { const t = tipEl(); if (t) t.style.display = 'none'; });
+
+    canvas.addEventListener('pointerdown', (e) => {
+        const p = at(e);
+        drag = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+        try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+        const t = tipEl(); if (t) t.style.display = 'none';
+        // ★ preventDefault はドラッグ中の選択を止めるために要るが、**同時に
+        //   フォーカスの移動も止める**。tabIndex を付けただけでは canvas に
+        //   フォーカスが載らず、Escape も効かず、矢印キーの除外も効かない
+        //   (document のフォーカスは body のまま)。明示的に focus する。
+        e.preventDefault();
+        try { canvas.focus(); } catch (_) {}
+    });
+
+    const finish = (e) => {
+        if (!drag) return;
+        const d = drag; drag = null;
+        try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+        const model = modelOf(), geom = canvas._kmdGeom;
+        if (model) model.dragRect = null;
+        if (!model || !geom) return;
+        const moved = Math.max(Math.abs(d.x1 - d.x0), Math.abs(d.y1 - d.y0));
+        if (moved >= KMD_DRAG_MIN_PX) {
+            const keys = kmdKeysInRect(model, geom, d);
+            // 空振りの矩形で表を 0 件にしない (何も選べなかったときは解除と同じ)
+            KmdState.rectKeys = keys.size ? keys : null;
+            KmdState.selectedSeries = -1;
+            applyKmdSelectionToMethodTable();
+            renderKmdAnalysis();
+            return;
+        }
+        // 点をクリック = その化合物を表示する。図の作り直しはしない
+        // (setFocusCompoundKey から refreshKmdFocusRing が呼ばれて輪だけ動く)。
+        const hit = kmdHitTest(model, geom, d.x1, d.y1, 7);
+        if (hit) { focusCompoundEverywhere(hit.key); return; }
+        // 余白クリック = 解除
+        if (KmdState.rectKeys || KmdState.selectedSeries >= 0) {
+            KmdState.rectKeys = null; KmdState.selectedSeries = -1;
+            applyKmdSelectionToMethodTable();
+        }
+        renderKmdAnalysis();
+    };
+    canvas.addEventListener('pointerup', finish);
+    canvas.addEventListener('pointercancel', () => {
+        drag = null;
+        const m = modelOf(); if (m) { m.dragRect = null; drawKmdScatter(canvas, m); }
+    });
+    canvas.addEventListener('keydown', (e) => {
+        if (e.key !== 'Escape') return;
+        KmdState.rectKeys = null; KmdState.selectedSeries = -1;
+        applyKmdSelectionToMethodTable();
+        renderKmdAnalysis();
+        // ★ 伝播も止める。document の keydown が Escape を「ROI 描画の中止」と
+        //   して拾うので、止めないと図の選択を消しただけのつもりで描きかけの
+        //   ROI まで消える (SharePreview._onKeyDown も同じ理由で止めている)。
+        e.preventDefault();
+        e.stopPropagation();
+    });
+}
+
+// 図で選んだ集合を Method 表の絞り込みに反映する。null なら解除。
+function applyKmdSelectionToMethodTable() {
+    let keys = null;
+    if (KmdState.rectKeys && KmdState.rectKeys.size) keys = KmdState.rectKeys;
+    else if (KmdState.selectedSeries >= 0 && KmdState.series[KmdState.selectedSeries]) {
+        keys = new Set(KmdState.series[KmdState.selectedSeries].map(p => p.key));
+    }
+    try { App.setMethodKeySet(keys); } catch (e) { console.warn('[kmd] method filter failed', e); }
+}
+
+// 系列を 1 枚の像に色分けで重ねる。**project.overlays には積まない**ので
+// 保存されず、共有先でもそのまま使える一時的な重ね合わせになる。
+function overlayKmdSeries(idx) {
+    const s = KmdState.series[idx];
+    if (!s || !s.length) return;
+    const layers = s.slice(0, 8).map((p, i) => ({ key: p.key, color: KMD_SERIES_COLORS[i % KMD_SERIES_COLORS.length] }));
+    const def = {
+        id: 'kmd-tmp',
+        name: 'KMD 系列 ' + (idx + 1) + ' (' + s.length + ' 点' + (s.length > 8 ? ' / 先頭 8 点' : '') + ')',
+        layers,
+        bg: null,
+    };
+    try { App.setActiveOverlay(def); } catch (e) { console.warn('[kmd] overlay failed', e); }
 }
 
 // Memo (project-wide) helpers.
@@ -8171,6 +8713,25 @@ const GRID_FALLBACK_REASON = {
 // clips outliers above the robust ceiling, averages rows that share one (x,y), and
 // can fall back to gap-collapsing ordinal grid indexing — all of which change what
 // the image shows. Returns '' when nothing was altered, so clean layers stay clean.
+// loadMsiLayer が書き戻す派生値の署名。2 つに分ける理由:
+//   *DerivedSig … 保存すべき値が変わったか (rasterW/H を含む。表には出ない)
+//   *CellSig    … Method 表のセル / 並べ替えキーが変わったか
+// 「欠けていたか」ではなく「変わったか」で判断するために使う (loadMsiLayer 参照)。
+function _msiDerivedSig(e) {
+    if (!e) return '';
+    return _msiCellSig(e) + '|' + e.rawDispMax + '|' + e.rasterW + '|' + e.rasterH;
+}
+function _msiCellSig(e) {
+    if (!e) return '';
+    const d = e.diag;
+    return (Array.isArray(e.rawRange) ? e.rawRange.join(',') : '')
+        + '|' + e.rawMean + '|' + e.rawTrueMax + '|' + e.statMax
+        // diag は表のバッジ。出す/出さないを決める項目だけ見る (diagBadgeHtml と同じ)。
+        + '|' + (d ? [d.clippedHigh, d.dupCells, d.dupRows, d.nPixels,
+                      d.gridFallback && d.gridFallback.x, d.gridFallback && d.gridFallback.y,
+                      d.bakeMode].join(',') : '');
+}
+
 function diagBadgeHtml(diag) {
     if (!diag || typeof diag !== 'object') return '';
     const notes = [];
@@ -8197,6 +8758,154 @@ function diagBadgeHtml(diag) {
     return '<span class="diag-badge" title="' + attr + '">⚠ 加工</span>';
 }
 
+// =============================================================================
+// 化合物を「表示する」の 1 か所。
+//
+// ★ setFocusCompoundKey だけでは絵が出ない。切片ごとの可視フラグ (visibleLayers)
+//   に入っていないレイヤーは描かれないので、焦点を変えた後に各パネルで可視に
+//   する必要がある。この 5 行が Method 表の行クリック / サムネのクリック /
+//   矢印キーの 3 か所にそのままコピーされていて、KMD 図から呼ぶと 4 か所目に
+//   なる。1 か所にまとめて、片方だけ直して食い違う事故を防ぐ。
+function ensureLayerVisibleEverywhere(key) {
+    if (!key) return;
+    for (const p of App.panels.values()) {
+        if (p.imageSources[key] && !p.visibleLayers.has(key)) p.toggleLayer(key, true);
+    }
+}
+function focusCompoundEverywhere(key) {
+    if (!key) return;
+    App.setFocusCompoundKey(key);
+    ensureLayerVisibleEverywhere(key);
+}
+
+// =============================================================================
+// KMD (Kendrick 質量欠損)
+//
+// ノンターゲットは 1 測定で 1390 化合物あり、一覧を眺めても全体の構造は見えない。
+// 質量を「繰り返し単位がちょうど整数になる物差し」に置き換えると、
+// **鎖長だけ違う一群 (同族列) の小数部分が同じ値に揃う**。
+// 縦軸にその小数部分、横軸に m/z を取ると、同族列が横一列の点の並びとして見える。
+//
+//   KM  = mz × (公称質量 / 精密質量)
+//   KMD = round(KM) − KM
+//
+// CH2 なら 14 / 14.015650。CH2 が 1 個増えると KM がちょうど 1 増える。
+// =============================================================================
+const KMD_UNITS = [
+    { id: 'CH2', label: 'CH₂', nominal: 14, exact: 14.015650 },   // 既定 (鎖長)
+    { id: 'H2',  label: 'H₂',  nominal: 2,  exact: 2.015650  },   // 不飽和度
+    { id: 'O',   label: 'O',   nominal: 16, exact: 15.994915 },   // 酸化段階
+];
+function kmdUnitById(id) { return KMD_UNITS.find(u => u.id === id) || KMD_UNITS[0]; }
+function kendrickMass(mz, u) { return mz * (u.nominal / u.exact); }
+function kendrickMassDefect(mz, u) {
+    if (!Number.isFinite(mz)) return NaN;
+    const km = kendrickMass(mz, u);
+    return Math.round(km) - km;
+}
+
+// 化合物の m/z。ノンターゲットは compoundMeta.mz、MRM は precursor で代用する。
+// **filterMethodKeys (下) と同じ規則**。片方だけ変えると、表の m/z 範囲で
+// 絞った結果と KMD 図に出る点が食い違う。
+function compoundMzOf(meta) {
+    if (!meta) return NaN;
+    if (Number.isFinite(meta.mz)) return Number(meta.mz);
+    if (Number.isFinite(meta.precursor)) return Number(meta.precursor);
+    return NaN;
+}
+
+// KMD 図に打つ点を作る。
+//
+// 同じ化合物は 4 切片ぶん別エントリとして存在するが layerKey は同一で、
+// compoundMeta の中身も同じなので 1 点に畳む。
+// findCompoundMeta は全切片を走査するので、1390 回呼ぶと O(化合物 × 切片) に
+// なる。ここでは msiSeries を 1 パス舐めて、最初に見つけた meta を使う
+// (findCompoundMeta と同じ選び方)。
+function buildKmdPoints(project, unit) {
+    const u = unit || KMD_UNITS[0];
+    const byKey = new Map();
+    for (const sec of ((project && project.sections) || [])) {
+        const series = sec.msiSeries || {};
+        for (const k of Object.keys(series)) {
+            if (!/^MSI_/i.test(k)) continue;
+            const ent = series[k];
+            if (!ent) continue;
+            const cur = byKey.get(k);
+            if (cur) {
+                // 強度は「実測が入っている方」を優先する (切片ごとに読み込み状況が違う)。
+                const m = msiMaxIntensity(ent);
+                if (m.value != null && (cur.intensity == null || (cur.estimated && !m.estimated))) {
+                    cur.intensity = m.value; cur.estimated = m.estimated;
+                }
+                if (!cur.markerColor && ent.markerColor) cur.markerColor = ent.markerColor;
+                continue;
+            }
+            const meta = ent.compoundMeta || null;
+            const mz = compoundMzOf(meta);
+            const mi = msiMaxIntensity(ent);
+            byKey.set(k, {
+                key: k,
+                name: (meta && (meta.base || meta.name)) || formatDisplayName(k),
+                mz,
+                kmd: kendrickMassDefect(mz, u),
+                nominal: Number.isFinite(mz) ? Math.round(kendrickMass(mz, u)) : NaN,
+                intensity: mi.value, estimated: mi.estimated,
+                markerColor: ent.markerColor || null,
+                lipidClass: (meta && meta.lipidClass) || null,
+                adduct: (meta && meta.adduct) || null,
+                formula: (meta && meta.formula) || null,
+            });
+        }
+    }
+    const all = [...byKey.values()];
+    const points = all.filter(p => Number.isFinite(p.mz) && Number.isFinite(p.kmd));
+    // m/z を持たない化合物は点にできない。黙って減らすと「データが少ない」と
+    // 読まれるので、件数を返して図の隅に出す。
+    return { points, total: all.length, missingMz: all.length - points.length, unit: u };
+}
+
+// 同族列を拾う。
+//
+//   1. KMD が近いものを 1 本の帯とみなす (tol)
+//   2. 帯の中を m/z 昇順に並べ、隣り合う差が繰り返し単位の整数倍なら連結
+//   3. 3 つ以上つながったものを「系列」とする
+//
+// 2 が肝。KMD が近いだけの点をつなぐと、単位の整数倍になっていない
+// 無関係な組を同族列と呼んでしまう。
+function findKmdSeries(points, unit, opts) {
+    const u = unit || KMD_UNITS[0];
+    const tol = (opts && Number.isFinite(opts.tol)) ? opts.tol : 0.003;
+    const minLen = (opts && Number.isFinite(opts.minLen)) ? opts.minLen : 3;
+    const maxGap = (opts && Number.isFinite(opts.maxGap)) ? opts.maxGap : 6;   // 何単位まで飛びを許すか
+    const sorted = points.slice().sort((a, b) => (a.kmd - b.kmd) || (a.mz - b.mz));
+
+    const bands = [];
+    let band = null;
+    for (const p of sorted) {
+        if (band && Math.abs(p.kmd - band.ref) <= tol) band.items.push(p);
+        else { band = { ref: p.kmd, items: [p] }; bands.push(band); }
+    }
+
+    const series = [];
+    for (const b of bands) {
+        if (b.items.length < minLen) continue;
+        const items = b.items.slice().sort((a, b2) => a.mz - b2.mz);
+        let run = [items[0]];
+        for (let i = 1; i < items.length; i++) {
+            const d = items[i].mz - items[i - 1].mz;
+            const n = Math.round(d / u.exact);
+            // 単位の整数倍か。許容は倍数に比例させる (n 個ぶんの誤差が積む)。
+            const ok = n >= 1 && n <= maxGap && Math.abs(d - n * u.exact) <= tol * Math.max(1, n);
+            if (ok) run.push(items[i]);
+            else { if (run.length >= minLen) series.push(run); run = [items[i]]; }
+        }
+        if (run.length >= minLen) series.push(run);
+    }
+    // 長い系列から先に見せる。同数なら m/z が小さい方から。
+    series.sort((a, b) => (b.length - a.length) || (a[0].mz - b[0].mz));
+    return series;
+}
+
 // Method 表の絞り込み。空白区切りで AND 検索し、化合物名 / m/z / アダクト /
 // 分子式 / 脂質クラス / DB 名 のどれかに部分一致すれば残す。
 // 数値だけを入れたときは m/z の前方一致も見る (「885」で 885.5499 を出したい)。
@@ -8211,9 +8920,13 @@ function filterMethodKeys(keys, getEntry, getMeta) {
     const q = String((App && App.methodFilter) || '').trim().toLowerCase();
     const lo = (App && Number.isFinite(App.methodMzMin)) ? App.methodMzMin : null;
     const hi = (App && Number.isFinite(App.methodMzMax)) ? App.methodMzMax : null;
-    if (!q && lo == null && hi == null) return keys;
+    // KMD 図で選んだ集合。null = 絞り込み無し。**空の Set は「0 件」を意味する**
+    // ので、null と取り違えないこと (取り違えると選択解除に見える)。
+    const set = (App && App.methodKeySet instanceof Set) ? App.methodKeySet : null;
+    if (!q && lo == null && hi == null && !set) return keys;
     const terms = q ? q.split(/\s+/).filter(Boolean) : [];
     return keys.filter(k => {
+        if (set && !set.has(k)) return false;
         const ent = getEntry(k) || {};
         const m = getMeta(k, ent) || {};
         if (lo != null || hi != null) {
@@ -8264,6 +8977,9 @@ function methodVisibleKeys(panel, project) {
         String(App.methodFilter || ''),
         Number.isFinite(App.methodMzMin) ? App.methodMzMin : '',
         Number.isFinite(App.methodMzMax) ? App.methodMzMax : '',
+        // KMD 図の選択。Set の中身を文字列にすると 1390 件ぶんの結合になるので、
+        // 差し替えるたびに増える整数 (エポック) だけを混ぜる。
+        (App.methodKeySet ? 'k' + (App.methodKeySetEpoch || 0) : ''),
     ].join('|');
     if (_methodKeysMemo && _methodKeysMemo.sig === sig) return _methodKeysMemo;
 
@@ -8730,14 +9446,9 @@ function _bindMethodRowDelegation(tbody) {
         // click promotes that row to the focus compound and every section
         // re-renders with that single MSI layer.
         if (App.viewMode === 'compound') {
-            App.setFocusCompoundKey(layerKey);
             // Make sure the layer is visible in every panel (otherwise
             // focus would still be hidden by the per-section visibility flag).
-            for (const p of App.panels.values()) {
-                if (p.imageSources[layerKey] && !p.visibleLayers.has(layerKey)) {
-                    p.toggleLayer(layerKey, true);
-                }
-            }
+            focusCompoundEverywhere(layerKey);
             return;
         }
         panel.handleLayerClick(layerKey, ev);
@@ -9145,7 +9856,12 @@ function renderOverlayBar() {
     const overlays = (App.project && App.project.overlays) || [];
     const active = App.activeOverlay;
     const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-    if (!overlays.length) { host.innerHTML = ''; return; }
+    // ★ 「登録済みが 0 件」でも、効いている重ね合わせがあるなら出す。
+    //   KMD の「重ねる」は project.overlays に積まない一時的な重ね合わせなので、
+    //   ここで早期 return すると **単一表示へ戻すボタンが出ない**。登録済みの
+    //   重ね合わせが 1 つも無いノンターゲットの測定PJでは、まさにその状態になる。
+    if (!overlays.length && !active) { host.innerHTML = ''; return; }
+    const listed = overlays.some(ov => active && ov.id === active.id);
     let html = overlays.map(ov => {
         const dots = (ov.layers || []).map(l => '<span class="ov-dot" style="background:' + esc(l.color || '#fff') + '"></span>').join('');
         const on = !!(active && active.id === ov.id);
@@ -9155,6 +9871,13 @@ function renderOverlayBar() {
             + '<button type="button" class="ov-del" data-ov-del="' + esc(ov.id) + '" title="削除">×</button>'
             + '</span>';
     }).join('');
+    // 登録されていない (一時的な) 重ね合わせは、名前を出さないと何が乗っているか
+    // 分からない。編集/削除は付けない — 消す先が無いので。
+    if (active && !listed) {
+        const dots = (active.layers || []).map(l => '<span class="ov-dot" style="background:' + esc(l.color || '#fff') + '"></span>').join('');
+        html += '<span class="ov-chip on" title="一時的な重ね合わせ (保存されません)">'
+            + dots + '<span class="ov-name">' + esc(active.name || 'overlay') + '</span></span>';
+    }
     if (active) html += '<button type="button" class="ov-reset" data-ov-reset title="単一化合物表示に戻す">単一表示へ</button>';
     host.innerHTML = html;
 }
@@ -9538,6 +10261,12 @@ async function openParquetWizard() {
             const roles = geom.roles;
             const sidecar = sidecarFile ? await readParquetSidecar(sidecarFile).catch(() => null) : null;
             // m/z 列 → 化合物。サイドカーの k 行目が k 番目の m/z 列に対応する。
+            // ★ フッタの mz_sorted も「k 番目の m/z 列」と 1:1 の前提。件数が
+            //   合わなければ対応が保証できないので、黙って使わずに知らせる
+            //   (ずれても null にはならず、それらしい値のまま間違うため)。
+            const mzCountMismatch = (st.mz.length > 0 && st.mz.length !== roles.mzIdxs.length)
+                ? (st.mz.length + ' 件 / m/z 列 ' + roles.mzIdxs.length + ' 件') : null;
+            if (mzCountMismatch) console.warn('[parquet] mz_sorted の件数が m/z 列数と一致しません:', mzCountMismatch);
             const seen = new Map();
             let dupWarn = 0;
             const features = roles.mzIdxs.map((colIdx, k) => {
@@ -9552,7 +10281,10 @@ async function openParquetWizard() {
             state = { mainFile, sidecarFile, geom, info: st.info, features, dupWarn };
             scanEl.innerHTML = '化合物 <b>' + features.length + '</b> 件 / スポット <b>'
                 + Number(st.info.numRows).toLocaleString() + '</b> / 切片候補 <b>' + geom.sections.length + '</b> 件'
-                + (sidecar ? '' : ' <span style="color:#b45309;">(サイドカーが無いので m/z のみの表示名になります)</span>');
+                + (sidecar ? '' : ' <span style="color:#b45309;">(サイドカーが無いので m/z のみの表示名になります)</span>')
+                + (mzCountMismatch
+                    ? ' <span style="color:#b91c1c;">⚠ フッタの m/z 一覧が ' + mzCountMismatch
+                      + ' で食い違っています。m/z が化合物とずれている可能性があります</span>' : '');
             labelsEl.style.display = '';
             labelsEl.innerHTML = geom.sections.map(s => {
                 // 「どの領域 CSV にも含まれなかったスポット」は既定で外す。
@@ -15295,7 +16027,7 @@ const Toolbar = {
     togglePickerMenu() { this._menuOpen ? this.closePickerMenu() : this.openPickerMenu(); },
     openPickerMenu() {
         if (!this.pickerMenu) return;
-        this.refreshSectionPicker();
+        this.refreshSectionPicker(true);   // 開く直前にここで作る
         this.pickerMenu.classList.remove('hidden');
         this._menuOpen = true;
     },
@@ -15327,12 +16059,17 @@ const Toolbar = {
 
     _drawThumbInto(canvas, panel) {
         if (!canvas) return;
+        const url = this._thumbDataUrlFor(panel);
+        // ★ 同じ絵なら描き直さない。ここは化合物を 1 回切り替えるたびに
+        //   最大 5 回 × (切片数 + 1) 呼ばれていて、そのたびに <img> を作って
+        //   フル解像度の data URL をデコードさせていた。32×32 の飾りのために。
+        if (canvas._thumbUrl === url) return;
+        canvas._thumbUrl = url;
         const ctx = get2dContext(canvas);
         ctx.imageSmoothingEnabled = false;
         ctx.clearRect(0, 0, canvas.width, canvas.height);
         ctx.fillStyle = '#1f2937';
         ctx.fillRect(0, 0, canvas.width, canvas.height);
-        const url = this._thumbDataUrlFor(panel);
         if (!url) return;
         const img = new Image();
         img.onload = () => {
@@ -15348,7 +16085,15 @@ const Toolbar = {
         img.src = url;
     },
 
-    refreshSectionPicker() {
+    // ★ メニューの中身は「開いているとき」だけ作る。
+    //
+    //   ここは Toolbar.refreshAll と refreshRangeEditor から呼ばれるので、
+    //   化合物を 1 回切り替えるだけで最大 5 回走る。そのたびに
+    //   pickerMenu.innerHTML = '' で DOM を全部捨てて作り直し、切片ごとに
+    //   canvas + <img> を作ってフル解像度の data URL をデコードさせていた
+    //   — メニューが閉じたままでも。openPickerMenu は開く直前にここを
+    //   force で呼ぶので、閉じている間に作っておく必要は無い。
+    refreshSectionPicker(force) {
         if (!this.pickerBtn) return;
         const project = App.project;
         const sections = (project && project.sections) || [];
@@ -15356,9 +16101,11 @@ const Toolbar = {
         const activePanel = this.activePanel();
         const activeSection = activePanel ? activePanel.section : null;
         if (this.pickerLabel) this.pickerLabel.textContent = activeSection ? (activeSection.displayName || ('Section ' + (activeSection.ordinal || ''))) : '—';
+        // ボタン脇のサムネイルは常に見えているので、こちらは毎回 (中身が
+        // 変わらなければ _drawThumbInto が自分で早抜けする)。
         if (this.pickerThumb) this._drawThumbInto(this.pickerThumb, activePanel);
 
-        if (this.pickerMenu) {
+        if (this.pickerMenu && (force || this._menuOpen)) {
             this.pickerMenu.innerHTML = '';
 
             // Cluster sections by condition (display-only) so same-condition
@@ -15778,6 +16525,23 @@ const App = {
     // アダクト (`[M-H]-`) と衝突するため。専用の数値欄を別に置いている。
     methodMzMin: null,
     methodMzMax: null,
+    // KMD 図で選んだ化合物の集合。null = 絞り込み無し、Set = その集合だけ表に出す。
+    // 空の Set は「0 件」であって「解除」ではない。エポックは署名用 (methodVisibleKeys)。
+    methodKeySet: null,
+    methodKeySetEpoch: 0,
+    setMethodKeySet(keys) {
+        this.methodKeySet = keys ? new Set(keys) : null;
+        this.methodKeySetEpoch = (this.methodKeySetEpoch || 0) + 1;
+        _bumpMethodSeries();
+        // 効いていることと解除の手段を、絞り込み欄の隣に必ず出す。
+        const btn = document.getElementById('method-keyset-clear');
+        if (btn) {
+            btn.style.display = this.methodKeySet ? '' : 'none';
+            const cnt = document.getElementById('method-keyset-count');
+            if (cnt) cnt.textContent = this.methodKeySet ? String(this.methodKeySet.size) : '';
+        }
+        try { renderMethodTable(); } catch (e) { console.warn('renderMethodTable after key-set failed', e); }
+    },
     // Shared thumb-row height across every section panel (px). The
     // section-internal splitter writes this on drag and re-broadcasts
     // it to each panel via the --thumb-h CSS variable.
@@ -15967,7 +16731,8 @@ const App = {
     setActiveOverlay(def) {
         this.activeOverlay = def || null;
         for (const p of this.panels.values()) {
-            try { p.setupCanvasSize(); p.renderComposite(); } catch (e) {}
+            // setupCanvasSize は最後まで進めば自分で描く (二重描画を避ける)。
+            try { if (!p.setupCanvasSize()) p.renderComposite(); } catch (e) {}
         }
         // オーバーレイのチップ列は renderMethodTable の先頭で描き直されていた。
         // ここを _refreshMethodRowState に変えたので、明示的に呼ぶ。
@@ -15979,7 +16744,8 @@ const App = {
         if (!this.activeOverlay) return;
         this.activeOverlay = null;
         for (const p of this.panels.values()) {
-            try { p.setupCanvasSize(); p.renderComposite(); } catch (e) {}
+            // setupCanvasSize は最後まで進めば自分で描く (二重描画を避ける)。
+            try { if (!p.setupCanvasSize()) p.renderComposite(); } catch (e) {}
         }
         try { renderOverlayBar(); } catch (e) {}   // 同上
         _refreshMethodRowState();   // 同上
@@ -15997,8 +16763,11 @@ const App = {
                 // grid (per-source T_he_to_msi). Without this the canvas
                 // would stay sized for the previous focus and the per-
                 // source T would be applied to a mismatched cdisp.
-                p.setupCanvasSize();
-                p.renderComposite();
+                //
+                // setupCanvasSize は最後まで進めば自分で renderComposite する。
+                // 参照レイヤーが決まらず途中で抜けたときだけ、こちらで描く
+                // (以前は無条件に続けて呼んでいたので毎回 2 回描いていた)。
+                if (!p.setupCanvasSize()) p.renderComposite();
             } catch (e) { console.warn('setFocusCompoundKey render failed', p.section && p.section.id, e); }
         }
         // フォーカス行が変わるだけ。1390 行を組み直さずクラスだけ貼り替える
@@ -16006,6 +16775,7 @@ const App = {
         // ただし activeOverlay を null にしているので、チップの点灯は消す。
         try { renderOverlayBar(); } catch (e) {}
         _refreshMethodRowState();
+        try { refreshKmdFocusRing(); } catch (e) {}
         Toolbar.refreshAll();
     },
 
@@ -16292,7 +17062,18 @@ const App = {
     //
     // Tally how the project's MSI layers are currently baked. Reads
     // project.sections (not this.panels) so it is valid before panels load.
+    // ★ 数え直すのは中身が変わったときだけ。
+    //
+    //   ここは 4 切片 × 1390 化合物 = 5,560 回の反復 + Object.entries の配列生成を
+    //   していて、Toolbar.refreshAll 経由で **化合物を切り替えるたび**に走っていた。
+    //   チェックボックス 1 個の状態を決めるために。
+    //   無効化の鍵は 2 つ: レイヤー集合が変わる (_methodSeriesVersion) と、
+    //   bakeMode 自体が書き換わる (_bakeModeVersion。書き込みは setMsiBakeMode と
+    //   setMsiOutlierClipAll の 2 か所だけ)。
     _countBakeModes() {
+        const sig = (this.project ? (this.project.id || '') : '-')
+            + '|' + _methodSeriesVersion + '|' + (this._bakeModeVersion || 0);
+        if (this._bakeModeMemo && this._bakeModeMemo.sig === sig) return this._bakeModeMemo.counts;
         let robust = 0, full = 0;
         for (const sec of ((this.project && this.project.sections) || [])) {
             for (const [k, e] of Object.entries((sec && sec.msiSeries) || {})) {
@@ -16300,7 +17081,13 @@ const App = {
                 if (e.bakeMode === 'full') full++; else robust++;
             }
         }
-        return { robust, full };
+        const counts = { robust, full };
+        this._bakeModeMemo = { sig, counts };
+        return counts;
+    },
+    _bumpBakeModeVersion() {
+        this._bakeModeVersion = (this._bakeModeVersion || 0) + 1;
+        this._bakeModeMemo = null;
     },
     // The project's effective outlier-clip mode: 'full' only when EVERY layer is
     // unclipped, else the 'robust' default. Used so a newly added compound joins
@@ -16353,6 +17140,7 @@ const App = {
             ent.bakeMode = target;
             jobs.push({ panel, key: msiKey, ent });
         }
+        this._bumpBakeModeVersion();
         if (!jobs.length) return;
         showToast(target === 'full' ? '外れ値クリップ OFF — 再ベイク中…' : '外れ値クリップ ON — 再ベイク中…');
         await this._rebakeJobs(jobs, target === 'full'
@@ -16389,6 +17177,7 @@ const App = {
                 jobs.push({ panel, key, ent });
             }
         }
+        this._bumpBakeModeVersion();
         if (!jobs.length) {
             try {
                 showToast(fresh
@@ -18528,6 +19317,11 @@ const App = {
     _analysisGen: 0,
     renderAnalysis() {
         if (!this.project) return;
+        // プロジェクトが変わったら KMD の選択を捨てる。ここに置くのは、
+        // プロジェクトを開く経路 (master / 共有) が両方ともここを通るため。
+        // KMD モードを開いていなくても効かせる必要がある — 別モードのまま
+        // 測定PJを切り替えると、前の鍵の集合で Method 表が絞られたままになる。
+        try { resetKmdSelectionIfProjectChanged(this.project); } catch (e) {}
         const gen = ++this._analysisGen;
         renderAnalysisChart(gen).catch(e => console.warn('renderAnalysis failed', e));
     },
@@ -19032,6 +19826,23 @@ const App = {
     // loss like the Section-2 incident becomes impossible.
     async _doSave() {
         if (!this.project) return false;
+        // ★ 共有プロジェクトはローカルに書かない。
+        //
+        //   正は「サーバ側の共有ドキュメント」で、開くたびに
+        //   _hydrateSharedProject が組み直す。hydrate 自体は putProject を
+        //   呼んでおらず、__share のレコードを読み戻す経路もどこにも無い
+        //   (書けばローカルのプロジェクト一覧に紛れ込むだけ)。
+        //   にもかかわらず、化合物をクリックすると toggleLayer →
+        //   _persistVisibleLayers → queueSave と伝わって、TIMS では
+        //   msiSeries 5,560 件を含むプロジェクト全体の structured clone が
+        //   400 ms 後にメインスレッドで走っていた。連続で切り替えたときの
+        //   引っかかりの一因。
+        if (this.project.__share) {
+            this._derivedDirty = false;
+            if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+            this._publishDirty = false;
+            return true;
+        }
         // Coalesce concurrent saves: the in-flight save already captures
         // the latest project state at call time, so a second invocation
         // can just wait for it.
@@ -19469,6 +20280,13 @@ const App = {
                 el.addEventListener('input', apply);
                 el.addEventListener('change', apply);
             }
+            // KMD で選んだ集合の解除。どのモードからでも押せる位置に置いてある。
+            const ksClear = document.getElementById('method-keyset-clear');
+            if (ksClear) ksClear.addEventListener('click', () => {
+                KmdState.selectedSeries = -1; KmdState.rectKeys = null;
+                this.setMethodKeySet(null);
+                if (this.analysisMode === 'kmd') { try { renderKmdAnalysis(); } catch (e) {} }
+            });
         }
         document.getElementById('btn-export-zip').addEventListener('click', () => exportProjectAsZip());
         const publishBtn = document.getElementById('btn-publish-share');
@@ -19564,6 +20382,11 @@ const App = {
             if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
             const tag = e.target && e.target.tagName;
             if (tag && /^(INPUT|SELECT|TEXTAREA)$/.test(tag)) return;
+            // ★ 解析パネルに触っている間は化合物送りに使わない。KMD 図は canvas に
+            //   フォーカスが載る (tabIndex) ので、除外しないと図を選んだ直後の ↑↓ が
+            //   ここに吸われ、Method 表が勝手にスクロールする。除外は「タグ名」では
+            //   なく「どこにフォーカスがあるか」で見る。
+            if (e.target && e.target.closest && e.target.closest('#panel-analysis')) return;
             if (this.viewMode !== 'compound') return;
             const panel = this.activeSectionId ? this.panels.get(this.activeSectionId) : null;
             if (!panel) return;
@@ -19581,15 +20404,10 @@ const App = {
                 : Math.max(baseIdx - 1, 0);
             if (next === idx) return;
             e.preventDefault();
-            this.setFocusCompoundKey(layerKeys[next]);
             // Mirror the click handler in renderMethodTable: ensure the new
             // focus compound is visible in every panel so the share view
             // doesn't go blank for that compound.
-            for (const p of this.panels.values()) {
-                if (p.imageSources[layerKeys[next]] && !p.visibleLayers.has(layerKeys[next])) {
-                    p.toggleLayer(layerKeys[next], true);
-                }
-            }
+            focusCompoundEverywhere(layerKeys[next]);
             // Keep the focused row scrolled into view in the Method table.
             // 仮想スクロールでは、まだ作られていない行へは飛べない — 索引から
             // 位置を出してスクロールしてから窓を作り直す (methodScrollRowIntoView)。
@@ -19603,10 +20421,52 @@ const App = {
         if (analysisModeSel) {
             analysisModeSel.value = this.analysisMode;   // 既定(otsu)をドロップダウンに反映
             analysisModeSel.addEventListener('change', () => {
-                this.analysisMode = (analysisModeSel.value === 'otsu') ? 'otsu' : 'roi';
+                const v = analysisModeSel.value;
+                this.analysisMode = (v === 'otsu' || v === 'kmd') ? v : 'roi';
                 try { updateAnalysisModeUi(); } catch (e) {}
                 if (this.analysisMode === 'otsu') { try { populateOtsuSectionSelect(); } catch (e) {} }
                 this.renderAnalysis();
+            });
+        }
+        // KMD 図のコントロール
+        const kmdUnitSel = document.getElementById('kmd-unit');
+        if (kmdUnitSel) {
+            kmdUnitSel.value = KmdState.unitId;
+            kmdUnitSel.addEventListener('change', () => {
+                KmdState.unitId = kmdUnitSel.value;
+                // 単位が変われば系列も別物になる。選択は持ち越さない。
+                KmdState.selectedSeries = -1; KmdState.rectKeys = null;
+                try { applyKmdSelectionToMethodTable(); } catch (e) {}
+                if (this.analysisMode === 'kmd') { try { renderKmdAnalysis(); } catch (e) {} }
+            });
+        }
+        const kmdClear = document.getElementById('kmd-clear');
+        if (kmdClear) kmdClear.addEventListener('click', () => {
+            KmdState.selectedSeries = -1; KmdState.rectKeys = null;
+            try { applyKmdSelectionToMethodTable(); } catch (e) {}
+            if (this.analysisMode === 'kmd') { try { renderKmdAnalysis(); } catch (e) {} }
+        });
+        // 系列一覧はモードを開くたびに作り直されるので、親に 1 度だけ委譲を張る。
+        const graphHost = document.getElementById('graph-container');
+        if (graphHost && !graphHost._kmdListBound) {
+            graphHost._kmdListBound = true;
+            graphHost.addEventListener('click', (ev) => {
+                if (this.analysisMode !== 'kmd') return;
+                const ovBtn = ev.target.closest && ev.target.closest('.kmd-series-overlay');
+                if (ovBtn) {
+                    ev.stopPropagation();
+                    try { overlayKmdSeries(Number(ovBtn.getAttribute('data-series'))); } catch (e) {}
+                    return;
+                }
+                const row = ev.target.closest && ev.target.closest('.kmd-series-row');
+                if (!row) return;
+                const i = Number(row.getAttribute('data-series'));
+                // 同じ行をもう一度押したら解除。矩形選択とは排他にする
+                // (2 つの絞り込みが同時に効くと、どちらの結果を見ているのか分からない)。
+                KmdState.selectedSeries = (KmdState.selectedSeries === i) ? -1 : i;
+                KmdState.rectKeys = null;
+                try { applyKmdSelectionToMethodTable(); } catch (e) {}
+                try { renderKmdAnalysis(); } catch (e) {}
             });
         }
         try { updateAnalysisModeUi(); } catch (e) {}   // 初期状態(otsu)の表示切替を即反映

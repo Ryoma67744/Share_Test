@@ -10,7 +10,8 @@
   "scripts": {
     "start": "node src/server.js",
     "serve": "node src/http.js",
-    "selftest": "node src/selftest.js"
+    "selftest": "node src/selftest.js",
+    "parquet-info": "node src/parquetinfo.js"
   },
   "engines": {
     "node": ">=18"
