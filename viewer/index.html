@@ -8999,6 +8999,19 @@ function methodVisibleKeys(panel, project) {
 function methodTableIsNonTarget(panel) {
     return !!(panel && panel.isNonTargetSection && panel.isNonTargetSection());
 }
+// 同じ判定を、パネルではなく project から見る版。
+//
+// ★ 真実は isNonTargetSection (:6948) と同じ section.meta.kind。判定を 2 通り
+//   持つと必ず片方だけ直されるので、見る場所は 1 つに揃える。
+//   パネルを介さないのは、共有を開いた直後など**まだパネルが無い場面**でも
+//   判定が要るため (SharePreview の自動表示)。
+// 「1 つでもあれば」にする。混在した測定PJでも、ノンターゲットの切片が 1 つ
+// あれば化合物の一覧は数千件に膨らむので、扱いはノンターゲットに寄せる。
+// DESI だけの測定PJでは必ず false を返す = 呼び出し側の分岐は変わらない。
+function projectHasNonTargetSection(project) {
+    const secs = (project && project.sections) || [];
+    return secs.some(s => !!(s && s.meta && s.meta.kind === 'nontarget'));
+}
 // ノンターゲットで出す列 (ユーザー指定): Compound | m/z | Adduct | Formula
 //
 // `w` は **仮想スクロール中だけ** 使う列幅 (_methodApplyFixedLayout)。
@@ -14838,7 +14851,10 @@ const SharePreview = {
         // ノンターゲット (parquet) は MRM 測定ではないので Precursor / Product /
         // CE / CV が常に空欄になる。メインの Method 表と同じ 4 列に差し替える
         // (SharePreview とメイン表示の食い違いは過去に 3 回起きているので揃える)。
-        const nonTarget = (project.sections || []).some(s => s && s.meta && s.meta.kind === 'nontarget');
+        // ★ 判定は projectHasNonTargetSection に寄せる (式はここに書かれていた
+        //   ものと同一)。同じ判定が 2 つあると、上のコメントどおり片方だけ
+        //   直されて食い違う。
+        const nonTarget = projectHasNonTargetSection(project);
         // Non-admin viewers see Compound + Precursor + Product (matches the
         // main Method panel, which now only hides CE/CV from share-mode
         // viewers). CV / CE remain admin-only.
@@ -18597,7 +18613,18 @@ const App = {
         // freshly-hydrated detailed view. The overlay is only auto-shown for
         // share-mode visitors (recipients and admins); the master / local
         // project flow keeps going straight to the detailed UI.
-        if (this.shareMode && !this._previewMode) {
+        //
+        // ★ ノンターゲットでは自動で出さない。
+        //   この画面は DESI (MRM) の数十化合物を並べて見比べるためのもので、
+        //   **絞り込みが無い**。1390 化合物をそのまま並べても目的のものに
+        //   たどり着けないので、Method 表の絞り込みか KMD 図から入る。
+        //   ツールバーの Preview ボタン (#btn-share-preview) からは従来どおり
+        //   開けるので、見たい人が塞がれることはない。
+        //   ついでに、開くだけで走る 1390 鍵の並べ替え / TIC の toDataURL 焼き /
+        //   全セルの画像生成が、共有直後の一番混んでいる時間から消える。
+        //   ★ DESI では projectHasNonTargetSection が必ず false を返すので、
+        //     この行を足しても分岐の結果はこれまでとまったく同じ。
+        if (this.shareMode && !this._previewMode && !projectHasNonTargetSection(project)) {
             const role = this.shareMode.role || 'viewer';
             // Two rAFs so the section panels' ResizeObserver has had a chance
             // to run setupCanvasSize() and renderComposite() once. Without
