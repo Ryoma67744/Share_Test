@@ -3449,6 +3449,9 @@ function _parquetWorkerBody(self, lib) {
     //   encoding_stats / size_statistics / geospatial_statistics /
     //   bloom_filter_* / *_index_* は全列読みでは一切読まれない。
     const INDEX_VERSION = 2;   // 保存済み索引の形が変わったら上げる
+    // 索引に残すフッタの key/value。増やすときは「本当に読むのか」を確かめること
+    // (ここに入れたものは 1 ファイルにつき 1 回 IndexedDB へ書かれる)。
+    const INDEX_KV_KEYS = new Set(['mz_sorted']);
     const buildIndex = (meta) => {
         const colNames = meta.row_groups.length
             ? meta.row_groups[0].columns.map(c => c.meta_data.path_in_schema.join('.'))
@@ -3557,7 +3560,14 @@ function _parquetWorkerBody(self, lib) {
             colNames, colTypes, colPaths, colChunkTypes,
             colStart, rgIdx, dataOff, dictOff, compSz, codecIds, codecList, rgRows,
             stats,
-            kv: (meta.key_value_metadata || []).reduce((o, e) => (o[e.key] = e.value, o), {}),
+            // ★ key_value_metadata は要る鍵だけ拾う。丸ごと入れると、書き出し側が
+            //   付ける ARROW:schema / pandas のメタ (1394 列ぶんで数百 KB の
+            //   base64) まで索引に乗り、IndexedDB へ毎回書くことになる。
+            //   使っているのは mz_sorted だけ (parquetEnsureOpen)。
+            kv: (meta.key_value_metadata || []).reduce((o, e) => {
+                if (INDEX_KV_KEYS.has(e.key)) o[e.key] = e.value;
+                return o;
+            }, {}),
         };
     };
 
@@ -4380,6 +4390,9 @@ class SectionPanel {
         this._thumbPaint = new Map();
         this._pendingDrawLoad = null;
         this._nextDrawLoad = null;   // 読み込み中に来た要求を 1 件だけ覚えておく
+        // destroy() で立てる。走り出していた読み込みが「もう無いパネル」へ
+        // 書き戻すのを防ぐ (destroy のコメント参照)。
+        this._destroyed = false;
         this.visibleLayers = new Set();
         this.msiThumbRefs = new Map();
         this.layerPopover = null;
@@ -4497,9 +4510,20 @@ class SectionPanel {
         if (this.dom.canvasCell) this.dom.canvasCell.classList.toggle('active', !!active);
     }
 
+    // ★ 破棄済みの印を立てる。
+    //
+    // パネルを消しても、走り出していた列読み (parquet で数秒) は止まらない。
+    // 従来はそれが戻ってきた時点で imageSources へ書き戻し、renderComposite や
+    // renderMethodTable まで呼んでいた — もう画面に無い切片のために。
+    // 切片の削除やプロジェクトの切り替えを速く繰り返すと、消したはずの切片の
+    // 画像で描き直しが走る。読み込み自体は途中で止められない (worker 側の
+    // 共有読みを他のパネルが待っていることがある) ので、**書き戻す側**で弾く。
     destroy() {
+        this._destroyed = true;
         if (this.dom && this.dom.root && this.dom.root.parentElement) this.dom.root.parentElement.removeChild(this.dom.root);
         if (this._thumbObserver) { try { this._thumbObserver.disconnect(); } catch (e) {} this._thumbObserver = null; }
+        this._pendingDrawLoad = null;
+        this._nextDrawLoad = null;
         try { this.releaseCaches(); } catch (e) {}
     }
 
@@ -4630,6 +4654,7 @@ class SectionPanel {
     // 表示に必要になった MSI レイヤーだけを読み込む。同じキーへの同時要求は 1 本の
     // Promise にまとめる (サムネイルの可視化と本描画が同時に要求しうるため)。
     ensureMsiLayerLoaded(key) {
+        if (this._destroyed) return Promise.resolve(false);
         if (!key || !/^MSI_/i.test(key)) return Promise.resolve(false);
         if (this.imageSources[key]) { this._touchMsiLru(key); return Promise.resolve(true); }
         const ent = (this.section.msiSeries || {})[key];
@@ -4640,6 +4665,8 @@ class SectionPanel {
         const p = (async () => {
             try {
                 await this.loadMsiLayer(key, ent);
+                // 読んでいる間にパネルが消えていたら書き戻さない。
+                if (this._destroyed) return false;
                 if (!this.imageSources[key]) return false;
                 // renderComposite は imageSettings の無いレイヤーを描画対象から
                 // 外すので、読み込んだ直後にここで作らないとイオン像が出ない。
@@ -4668,6 +4695,7 @@ class SectionPanel {
             if (!this._thumbDirty.has(key)) return;
             this._thumbDirty.delete(key);
             this.ensureMsiLayerLoaded(key).then((ok) => {
+                if (this._destroyed) return;
                 if (!ok) { this._thumbDirty.add(key); return; }
                 try { this.renderMsiThumbnail(key); } catch (e) {}
             });
@@ -4725,6 +4753,7 @@ class SectionPanel {
     // 描画そのものは待たせない (読めているレイヤーで先に描く) ので、切替やスクロールが
     // 引っかからない。同じ描画サイクルで何度呼ばれても再描画は 1 回にまとめる。
     _ensureDrawableLoaded(keys) {
+        if (this._destroyed) return;
         const missing = [];
         for (const k of (keys || [])) {
             if (!/^MSI_/i.test(k) || this.imageSources[k]) continue;
@@ -4741,6 +4770,7 @@ class SectionPanel {
             this._pendingDrawLoad = Promise.all(want.map(k => this.ensureMsiLayerLoaded(k)))
                 .then((results) => {
                     this._pendingDrawLoad = null;
+                    if (this._destroyed) { this._nextDrawLoad = null; return; }
                     // 1 枚も増えていないなら描き直さない (無限ループ防止)
                     if (results.some(Boolean)) { try { this.renderComposite(); } catch (e) {} }
                     const next = this._nextDrawLoad;
@@ -8254,25 +8284,30 @@ function methodTableIsNonTarget(panel) {
     return !!(panel && panel.isNonTargetSection && panel.isNonTargetSection());
 }
 // ノンターゲットで出す列 (ユーザー指定): Compound | m/z | Adduct | Formula
+//
+// `w` は **仮想スクロール中だけ** 使う列幅 (_methodApplyFixedLayout)。
+// table-layout:auto のままだと「いま入っている行」から幅が決まるので、
+// スクロールで行が入れ替わるたびに表が横に揺れる。割合指定にしてあるので
+// サイドバーを狭めても横スクロールにはならない。Compound は指定せず残り全部。
 const METHOD_COLS_NONTARGET = [
     { key: 'compound', label: 'Compound', align: 'left',  sort: 'A↔Z' },
-    { key: 'mz',       label: 'm/z',      align: 'right', sort: 'High↔Low' },
-    { key: 'adduct',   label: 'Adduct',   align: 'left',  sort: 'A↔Z' },
-    { key: 'formula',  label: 'Formula',  align: 'left',  sort: 'A↔Z' },
+    { key: 'mz',       label: 'm/z',      align: 'right', sort: 'High↔Low', w: '14%' },
+    { key: 'adduct',   label: 'Adduct',   align: 'left',  sort: 'A↔Z',      w: '10%' },
+    { key: 'formula',  label: 'Formula',  align: 'left',  sort: 'A↔Z',      w: '14%' },
     // 強度で並べ替えたい、という要望で Mean / Max を戻した。
     // Max は登録時にフッタの統計から入るので読み込みゼロで並べられる。
     // Mean は列を読まないと出ないので、「TIC と統計を作る」を押すまで空欄。
-    { key: 'mean',     label: 'Mean',     align: 'right', sort: 'High↔Low' },
-    { key: 'max',      label: 'Max',      align: 'right', sort: 'High↔Low' },
+    { key: 'mean',     label: 'Mean',     align: 'right', sort: 'High↔Low', w: '11%' },
+    { key: 'max',      label: 'Max',      align: 'right', sort: 'High↔Low', w: '11%' },
 ];
 const METHOD_COLS_MRM = [
     { key: 'compound',  label: 'Compound',  align: 'left',  sort: 'A↔Z' },
-    { key: 'precursor', label: 'Precursor', align: 'right', sort: 'High↔Low' },
-    { key: 'product',   label: 'Fragment',  align: 'right', sort: 'High↔Low' },
-    { key: 'ce',        label: 'CE',        align: 'right', sort: 'High↔Low' },
-    { key: 'cv',        label: 'CV',        align: 'right', sort: 'High↔Low' },
-    { key: 'mean',      label: 'Mean',      align: 'right', sort: 'High↔Low' },
-    { key: 'max',       label: 'Max',       align: 'right', sort: 'High↔Low' },
+    { key: 'precursor', label: 'Precursor', align: 'right', sort: 'High↔Low', w: '13%' },
+    { key: 'product',   label: 'Fragment',  align: 'right', sort: 'High↔Low', w: '13%' },
+    { key: 'ce',        label: 'CE',        align: 'right', sort: 'High↔Low', w: '8%' },
+    { key: 'cv',        label: 'CV',        align: 'right', sort: 'High↔Low', w: '8%' },
+    { key: 'mean',      label: 'Mean',      align: 'right', sort: 'High↔Low', w: '11%' },
+    { key: 'max',       label: 'Max',       align: 'right', sort: 'High↔Low', w: '11%' },
 ];
 function _renderMethodHead(nonTarget) {
     const thead = document.querySelector('#method-table thead tr');
@@ -8305,19 +8340,214 @@ function methodColumnCount(nonTarget) {
     return 1 + (nonTarget ? METHOD_COLS_NONTARGET.length : METHOD_COLS_MRM.length + 1);
 }
 
+// ★ MRM 登録用チェックの真実は DOM ではなく Set で持つ。
+//
+// 仮想スクロールでは画面外の行が **存在しない** ので、
+// `#method-rows .method-select:checked` を数えると「見えている行だけ」になる。
+// ついでに、並べ替え / 絞り込みで表を組み直すたびにチェックが黙って消えていた
+// 従来の挙動も直る (組み直すと <input> ごと作り直されるため)。
+// 切片が変わったら捨てる — 登録は切片単位の操作なので持ち越す意味が無い。
+let _methodSelected = new Set();
+let _methodSelectedSectionId = null;
+
+function _methodSyncSelectionSection(sectionId) {
+    if (_methodSelectedSectionId === sectionId) return;
+    _methodSelectedSectionId = sectionId;
+    _methodSelected = new Set();
+}
+function _methodClearSelection() {
+    _methodSelected = new Set();
+    document.querySelectorAll('#method-rows .method-select').forEach(cb => { cb.checked = false; });
+    const sa = document.getElementById('method-select-all');
+    if (sa) sa.checked = false;
+}
+
+// ---- Method 表の仮想スクロール ----------------------------------------------
+//
+// 1390 行 × (tr + 7〜9 セル) ≒ 12,500 個の DOM 要素を、切片の切り替え・
+// 並べ替え・絞り込みのたびに作り直していた。見えているのはせいぜい 20 行なので、
+// **画面に入っている範囲 + 余白ぶん**だけを作り、残りは高さだけのスペーサ行で
+// 埋める。
+//
+// 行数が少ないときは従来どおり全行を作る。DESI の測定PJ (数〜数十化合物) は
+// 経路ごと変わらないので、仮想化に伴う挙動差 (列幅の固定など) を一切踏まない。
+const METHOD_VIRTUAL_MIN_ROWS = 200;
+const METHOD_ROW_H_FALLBACK = 24;      // 実測できるまでの仮の行高 (px)
+const METHOD_OVERSCAN = 12;            // 画面外に上下それぞれ作っておく行数
+
+const _mv = {
+    active: false,
+    keys: [],
+    rowH: METHOD_ROW_H_FALLBACK,
+    first: -1, last: -1,
+    nCols: 9,
+    buildRow: null,
+    // buildRow は panel / project を掴んだクロージャ。切片が切り替わったのに
+    // renderMethodTable が走っていない隙にスクロールが来ると、消えた切片の行を
+    // 作ってしまう。どの切片のものかを覚えて食い違いを弾く。
+    sectionId: null,
+    raf: 0,
+    measured: false,
+};
+
+function _methodScrollBox() { return document.getElementById('method-body'); }
+
+// 仮想化中は列幅を固定する。table-layout:auto は「いま入っている行」から幅を
+// 決めるので、スクロールで行が入れ替わるたびに Compound 列が伸び縮みして
+// 表全体が揺れる。割合指定なので、サイドバーを狭めても横スクロールは出ない。
+function _methodApplyFixedLayout(nonTarget, on) {
+    const table = document.getElementById('method-table');
+    if (!table) return;
+    let cg = table.querySelector('colgroup[data-method-cols]');
+    if (!on) {
+        if (cg) cg.remove();
+        table.style.tableLayout = '';
+        return;
+    }
+    const cols = nonTarget ? METHOD_COLS_NONTARGET : METHOD_COLS_MRM;
+    // ★ CSS で display:none にしている列は <col> も出さない。
+    //   セルを display:none にすると、後ろのセルが 1 つずつ前の列へ詰まる。
+    //   <col> を出したままだと幅の割り当てが 1 つずれて、表がずれて見える。
+    //   条件はこのファイルの CSS (共有モードの CE/CV 隠し / 選択列隠し) と
+    //   同じものを使う — 片方だけ変えるとまたずれる。
+    const shareMode = document.body.classList.contains('share-mode');
+    const hideCeCv = shareMode && !document.body.classList.contains('share-admin') && !nonTarget;
+    const hideSelect = shareMode;
+    const parts = ['<col style="width:22px">'];
+    // Compound だけ幅を指定しない = 残り全部をもらう。
+    for (const c of cols) {
+        if (hideCeCv && (c.key === 'ce' || c.key === 'cv')) continue;
+        parts.push(c.key === 'compound' ? '<col>' : ('<col style="width:' + c.w + '">'));
+    }
+    if (!nonTarget && !hideSelect) parts.push('<col style="width:26px">');
+    const html = parts.join('');
+    if (!cg) {
+        cg = document.createElement('colgroup');
+        cg.setAttribute('data-method-cols', '1');
+        table.insertBefore(cg, table.firstChild);
+    }
+    if (cg.innerHTML !== html) cg.innerHTML = html;
+    table.style.tableLayout = 'fixed';
+}
+
+function _methodSpacerRow(px, nCols) {
+    const tr = document.createElement('tr');
+    tr.className = 'method-spacer';
+    tr.setAttribute('aria-hidden', 'true');
+    tr.style.height = px + 'px';
+    // padding / border を持たせない。持たせると 1 行ぶんずつ位置がずれていく。
+    tr.innerHTML = '<td colspan="' + nCols + '" style="padding:0;border:0;height:' + px + 'px"></td>';
+    return tr;
+}
+
+// いま画面に入っている範囲を作り直す。範囲が変わっていなければ何もしない。
+function _methodVirtualRender(force) {
+    if (!_mv.active || !_mv.buildRow) return;
+    // 覚えている切片と食い違ったら何もしない (次の renderMethodTable が正しく直す)。
+    if (_mv.sectionId && App.activeSectionId !== _mv.sectionId) return;
+    const tbody = document.getElementById('method-rows');
+    const box = _methodScrollBox();
+    if (!tbody || !box) return;
+    const thead = document.querySelector('#method-table thead');
+    const headH = (thead && thead.offsetHeight) || 0;
+    const total = _mv.keys.length;
+    const rowH = _mv.rowH || METHOD_ROW_H_FALLBACK;
+    const viewH = box.clientHeight || 400;
+    const top = Math.max(0, (box.scrollTop || 0) - headH);
+    const first = Math.max(0, Math.floor(top / rowH) - METHOD_OVERSCAN);
+    const last = Math.min(total, Math.ceil((top + viewH) / rowH) + METHOD_OVERSCAN);
+    if (!force && first === _mv.first && last === _mv.last) return;
+    _mv.first = first; _mv.last = last;
+
+    const frag = document.createDocumentFragment();
+    if (first > 0) frag.appendChild(_methodSpacerRow(first * rowH, _mv.nCols));
+    for (let i = first; i < last; i++) frag.appendChild(_mv.buildRow(_mv.keys[i]));
+    if (last < total) frag.appendChild(_methodSpacerRow((total - last) * rowH, _mv.nCols));
+    tbody.replaceChildren(frag);
+
+    // 行高は実測する。フォント / 余白 / 狭い画面用の padding で変わるので、
+    // 決め打ちにするとスクロール位置と行番号がずれていく。
+    if (!_mv.measured) {
+        const probe = tbody.querySelector('tr.method-row');
+        const h = probe && probe.offsetHeight;
+        if (h && Math.abs(h - _mv.rowH) > 0.5) {
+            _mv.rowH = h;
+            _mv.measured = true;
+            _mv.first = _mv.last = -1;
+            _methodVirtualRender(true);
+            return;
+        }
+        if (h) _mv.measured = true;
+    }
+}
+
+function _bindMethodScroll() {
+    const box = _methodScrollBox();
+    if (!box || box._methodScrollBound) return;
+    box._methodScrollBound = true;
+    const kick = () => {
+        if (!_mv.active || _mv.raf) return;
+        _mv.raf = requestAnimationFrame(() => { _mv.raf = 0; _methodVirtualRender(false); });
+    };
+    box.addEventListener('scroll', kick, { passive: true });
+    // スプリッタで表の高さが変わると、見える行数も変わる。幅も変わりうるので
+    // 行高を測り直す — 狭い画面用の CSS はセルの padding を 4px から 8px に
+    // 変えるので、測り直さないとスクロール位置と行番号がずれていく。
+    if (typeof ResizeObserver !== 'undefined') {
+        try {
+            new ResizeObserver(() => { _mv.measured = false; kick(); }).observe(box);
+        } catch (e) {}
+    }
+}
+
+// 指定した化合物の行を画面内に入れる。仮想化中は行がまだ無いことがあるので、
+// 索引から位置を計算してスクロールし、そのうえで窓を作り直す。
+function methodScrollRowIntoView(layerKey, block) {
+    const tbody = document.getElementById('method-rows');
+    if (!tbody || !layerKey) return;
+    const inDom = () => {
+        for (const tr of tbody.querySelectorAll('tr.method-row')) {
+            if (tr.dataset && tr.dataset.layerKey === layerKey) return tr;
+        }
+        return null;
+    };
+    let tr = inDom();
+    if (!tr && _mv.active) {
+        const idx = _mv.keys.indexOf(layerKey);
+        const box = _methodScrollBox();
+        if (idx >= 0 && box) {
+            // まず概算で飛ばして窓を作り直す。最終的な位置合わせは下の
+            // scrollIntoView が実物の行に対してやるので、ここは粗くてよい。
+            box.scrollTop = Math.max(0, idx * _mv.rowH - (box.clientHeight || 400) / 2);
+            _methodVirtualRender(true);
+            tr = inDom();
+        }
+    }
+    if (tr && tr.scrollIntoView) {
+        try { tr.scrollIntoView({ block: block || 'nearest' }); } catch (e) { tr.scrollIntoView(); }
+    }
+}
+
 function renderMethodTable() {
     try { renderOverlayBar(); } catch (e) {}
     const tbody = document.getElementById('method-rows');
     if (!tbody) return;
     const project = App.project;
-    if (!project) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No project</td></tr>'; _methodRenderedSig = null; return; }
+    const stop = (msg) => {
+        _mv.active = false; _mv.buildRow = null; _mv.sectionId = null;
+        _methodApplyFixedLayout(false, false);
+        tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">' + msg + '</td></tr>';
+        _methodRenderedSig = null;
+    };
+    if (!project) { stop('No project'); return; }
     const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
-    if (!panel) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No active section</td></tr>'; _methodRenderedSig = null; return; }
+    if (!panel) { stop('No active section'); return; }
 
     // 列構成は切片の種別で決まる (ノンターゲットは MRM 固有の列を出さない)。
     const nonTarget = methodTableIsNonTarget(panel);
     _renderMethodHead(nonTarget);
     const nCols = methodColumnCount(nonTarget);
+    _methodSyncSelectionSection(panel.section.id);
 
     // 絞り込み (要望①) と並べ替えは methodVisibleKeys に集約してメモ化する。
     // ↑↓ キーのナビゲーションも同じものを使うので、表に見えている並びと
@@ -8331,6 +8561,8 @@ function renderMethodTable() {
     _updateMethodHeaderArrows('#method-table thead', App.methodSort);
 
     if (!layerKeys.length) {
+        _mv.active = false; _mv.buildRow = null; _mv.sectionId = null;
+        _methodApplyFixedLayout(nonTarget, false);
         tbody.innerHTML = '<tr><td colspan="' + nCols + '" class="px-2 py-2 text-center text-gray-400">'
             + (memo.total ? '絞り込みに一致する化合物がありません' : 'No MSI layer in this section')
             + '</td></tr>';
@@ -8339,14 +8571,12 @@ function renderMethodTable() {
     }
 
     _methodRenderedSig = memo.sig;
-    tbody.innerHTML = '';
     _bindMethodRowDelegation(tbody);
-    // 行は DocumentFragment に組んでから 1 回で挿入する。1390 行を tbody へ
-    // 直接 append すると、そのたびにレイアウトが無効化される。
-    const frag = document.createDocumentFragment();
     const safe = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-    for (const layerKey of layerKeys) {
+    // 1 行を組む。全行を作る経路と仮想スクロールの経路で **同じ関数**を通すので、
+    // 「スクロールすると行の見た目が変わる」が構造的に起こらない。
+    const buildRow = (layerKey) => {
         const ent = panel.section.msiSeries[layerKey] || {};
         const meta = ent.compoundMeta || findCompoundMeta(project, layerKey) || {};
         const compoundName = meta.base || formatDisplayName(layerKey);
@@ -8420,28 +8650,51 @@ function renderMethodTable() {
                  '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(rawMean) + '</td>' +
                  '<td class="px-2 py-1 border-b border-gray-100 text-right text-gray-700">' + safe(rawMax) + '</td>' +
                  '<td class="px-1 py-1 border-b border-gray-100 text-center method-select-cell" data-cell="select">' +
-                    '<input type="checkbox" class="method-select" data-layer-key="' + safe(layerKey) + '" title="MRM管理へ登録">' +
+                    '<input type="checkbox" class="method-select"' + (_methodSelected.has(layerKey) ? ' checked' : '') +
+                    ' data-layer-key="' + safe(layerKey) + '" title="MRM管理へ登録">' +
                  '</td>'));
         tr.innerHTML = cellHtml;
         // リスナーは行に付けない。1390 行 × 7 個 ≒ 8300 個のリスナーになり、
         // 表を組み直すたびに全部作り直していた。クリック / ダブルクリック /
         // 右クリックは tbody 1 箇所で受けて data-layer-key から行を特定する
         // (_bindMethodRowDelegation)。
-        frag.appendChild(tr);
+        return tr;
+    };
+
+    if (layerKeys.length >= METHOD_VIRTUAL_MIN_ROWS) {
+        // 行の集合が変わったら、行高の実測もやり直す (列構成が変われば高さも変わる)。
+        const sameKeys = _mv.active && _mv.keys.length === layerKeys.length && _mv.nCols === nCols;
+        _mv.active = true;
+        _mv.keys = layerKeys;
+        _mv.nCols = nCols;
+        _mv.buildRow = buildRow;
+        _mv.sectionId = panel.section.id;
+        if (!sameKeys) { _mv.measured = false; _mv.rowH = _mv.rowH || METHOD_ROW_H_FALLBACK; }
+        _mv.first = _mv.last = -1;
+        _methodApplyFixedLayout(nonTarget, true);
+        _bindMethodScroll();
+        _methodVirtualRender(true);
+    } else {
+        _mv.active = false; _mv.buildRow = null; _mv.sectionId = null;
+        _methodApplyFixedLayout(nonTarget, false);
+        // 行は DocumentFragment に組んでから 1 回で挿入する。tbody へ直接
+        // append すると、そのたびにレイアウトが無効化される。
+        const frag = document.createDocumentFragment();
+        for (const layerKey of layerKeys) frag.appendChild(buildRow(layerKey));
+        tbody.replaceChildren(frag);
     }
-    tbody.appendChild(frag);
 
     // Stock-take embed: bring the 評価対象 row into view. The Method table
     // scrolls inside #method-body, and the requested compound is often well
     // below the fold — a correct highlight the user never sees is no better
     // than no highlight. Done once per preview so a later re-render (marker
     // colour, range edit …) doesn't yank the list back under the user.
-    if (App._previewMode && App._previewFocusKey && !App._previewScrolled) {
-        const row = tbody.querySelector('tr.eval-target');
-        if (row) {
-            App._previewScrolled = true;
-            try { row.scrollIntoView({ block: 'center' }); } catch (e) { row.scrollIntoView(); }
-        }
+    // 行が絞り込みで消えている間は印を立てない (従来は「行が見つかったときだけ」
+    // 立てていた)。立ててしまうと、絞り込みを解除しても二度と飛ばなくなる。
+    if (App._previewMode && App._previewFocusKey && !App._previewScrolled
+        && layerKeys.indexOf(App._previewFocusKey) >= 0) {
+        App._previewScrolled = true;
+        methodScrollRowIntoView(App._previewFocusKey, 'center');
     }
 }
 
@@ -8472,6 +8725,7 @@ function _bindMethodRowDelegation(tbody) {
         // 選択チェックは行のクリック動作 (化合物切替 / レイヤー操作) を起こさない。
         if (t.classList && t.classList.contains('method-select')) return;
 
+
         // In Compound mode, the Method table is the compound switcher: a
         // click promotes that row to the focus compound and every section
         // re-renders with that single MSI layer.
@@ -8487,6 +8741,19 @@ function _bindMethodRowDelegation(tbody) {
             return;
         }
         panel.handleLayerClick(layerKey, ev);
+    });
+
+    // チェックの状態は Set が真実。<input> は画面に出ている間だけの写しなので、
+    // ここで必ず Set 側へ書き戻す (仮想スクロールで行が消えても残る)。
+    tbody.addEventListener('change', (ev) => {
+        const t = ev.target;
+        if (!t || !t.classList || !t.classList.contains('method-select')) return;
+        const layerKey = t.getAttribute('data-layer-key');
+        if (!layerKey) return;
+        if (t.checked) _methodSelected.add(layerKey);
+        else _methodSelected.delete(layerKey);
+        const sa = document.getElementById('method-select-all');
+        if (sa && sa.checked && !t.checked) sa.checked = false;
     });
 
     tbody.addEventListener('contextmenu', (ev) => {
@@ -8642,11 +8909,18 @@ function _parseMrmTags(s) {
     return out;
 }
 
-function openMrmRegisterOptionsModal(n) {
+function openMrmRegisterOptionsModal(n, hidden) {
+    // 絞り込みで隠れているチェック済みの行は登録しない。黙って落とすと
+    // 「チェックしたのに入っていない」になるので、件数を出して知らせる。
+    const hiddenNote = (hidden > 0)
+        ? ('<p style="font-size:11px;color:#b45309;margin-bottom:8px;">絞り込みで隠れているチェック済みの行が ' + hidden
+           + ' 件あります。これらは登録しません（絞り込みを解除すると対象になります）。</p>')
+        : '';
     const html = ''
         + '<h2>MRM管理へ登録 (' + n + ' 件)</h2>'
         + '<form>'
         + '<p style="font-size:11px;color:#475569;margin-bottom:8px;">選択した ' + n + ' 行を MRM管理ライブラリへ登録します。タグ・役割は任意（全行へ適用）。同名化合物が無ければ自動作成します。</p>'
+        + hiddenNote
         + '<label style="display:block;font-size:11px;color:#475569;">タグ (カンマ/スペース区切り)'
         +   '<input type="text" name="tags" placeholder="神経伝達物質, アミノ酸" style="width:100%;padding:5px 7px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;margin-top:2px;">'
         + '</label>'
@@ -8673,7 +8947,12 @@ async function registerSelectedToMrmLibrary() {
     if (!project) { showToast('プロジェクトがありません'); return; }
     const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
     if (!panel) { showToast('アクティブな切片がありません'); return; }
-    const checked = Array.from(document.querySelectorAll('#method-rows .method-select:checked'));
+    // ★ チェックの真実は _methodSelected (Set)。DOM を数えると、仮想スクロールで
+    //   画面外に出ている行が抜け落ちる。表示中の並びと突き合わせるので、
+    //   絞り込みで隠れている行を黙って登録することもない。
+    const visible = methodVisibleKeys(panel, project).keys;
+    const checked = visible.filter(k => _methodSelected.has(k));
+    const hiddenChecked = _methodSelected.size - checked.length;
     if (!checked.length) { showToast('登録する行をチェックしてください'); return; }
 
     let masterPw = _readCachedMasterPw();
@@ -8682,7 +8961,7 @@ async function registerSelectedToMrmLibrary() {
         if (!masterPw) return;
     }
 
-    const opts = await openMrmRegisterOptionsModal(checked.length);
+    const opts = await openMrmRegisterOptionsModal(checked.length, hiddenChecked);
     if (opts == null) return;  // cancelled
 
     const projName = project.displayName || '';
@@ -8692,8 +8971,7 @@ async function registerSelectedToMrmLibrary() {
 
     // 1 行ぶんの登録データを組む。バッチ RPC と 1 件ずつの旧 RPC で
     // まったく同じ値を送るため、ここで 1 回だけ作る。
-    const rows = checked.map((cb) => {
-        const layerKey = cb.getAttribute('data-layer-key');
+    const rows = checked.map((layerKey) => {
         const ent = (panel.section.msiSeries || {})[layerKey] || {};
         const meta = ent.compoundMeta || findCompoundMeta(project, layerKey) || {};
         const name = meta.base || formatDisplayName(layerKey);
@@ -8717,8 +8995,7 @@ async function registerSelectedToMrmLibrary() {
 
     const finish = (ok, fail, aborted) => {
         _saveCachedMasterPw(masterPw);
-        document.querySelectorAll('#method-rows .method-select').forEach(c => { c.checked = false; });
-        const sa = document.getElementById('method-select-all'); if (sa) sa.checked = false;
+        _methodClearSelection();
         showToast((aborted ? 'MRM管理へ登録 (中断): ' : 'MRM管理へ登録: ')
             + ok + ' 件' + (fail ? ' / 失敗 ' + fail + ' 件' : ''), 3500);
     };
@@ -15550,6 +15827,13 @@ const App = {
             thead.addEventListener('change', (ev) => {
                 const sa = ev.target;
                 if (!sa || sa.id !== 'method-select-all') return;
+                // 「表示中の全行」= いまの絞り込み / 並べ替えを通った鍵の集合。
+                // DOM を走査すると、仮想スクロールでは画面内の 20 行しか
+                // 選べない (残りは要素として存在しない)。
+                const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
+                const keys = (panel && App.project) ? methodVisibleKeys(panel, App.project).keys : [];
+                if (sa.checked) for (const k of keys) _methodSelected.add(k);
+                else for (const k of keys) _methodSelected.delete(k);
                 document.querySelectorAll('#method-rows .method-select').forEach(cb => { cb.checked = sa.checked; });
             });
         }
@@ -17558,6 +17842,13 @@ const App = {
         });
         const tbody = document.getElementById('method-rows');
         if (tbody) tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No project</td></tr>';
+        // 仮想スクロールと選択の後始末。閉じたプロジェクトの鍵を掴んだままにすると、
+        // スクロールイベントで消えた化合物の行を作りに行ってしまう。
+        _mv.active = false; _mv.keys = []; _mv.buildRow = null; _mv.sectionId = null;
+        _mv.first = _mv.last = -1;
+        _methodApplyFixedLayout(false, false);
+        _methodSelected = new Set();
+        _methodSelectedSectionId = null;
         renderMemoForm();
         this.refreshAnalysisScope();
         this.refreshShareInfoButton();
@@ -19300,8 +19591,9 @@ const App = {
                 }
             }
             // Keep the focused row scrolled into view in the Method table.
-            const tr = document.querySelector('#method-rows tr[data-layer-key="' + layerKeys[next] + '"]');
-            if (tr && tr.scrollIntoView) tr.scrollIntoView({ block: 'nearest' });
+            // 仮想スクロールでは、まだ作られていない行へは飛べない — 索引から
+            // 位置を出してスクロールしてから窓を作り直す (methodScrollRowIntoView)。
+            methodScrollRowIntoView(layerKeys[next], 'nearest');
         });
         ['graph-select-1', 'graph-select-2', 'graph-select-3'].forEach(id => {
             document.getElementById(id).addEventListener('change', () => this.renderAnalysis());
