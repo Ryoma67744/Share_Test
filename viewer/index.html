@@ -2829,6 +2829,20 @@ function buildOtsuRecordFromTic(tic, gridIdx, W, H, opts, useLog) {
     };
 }
 
+// ★ その切片に「使えるマスクが実在するか」。
+//
+// 同じ事実を otsu.applied と otsu.bySource の 2 か所で表していたせいで、
+// 片方だけ立っている記録が生まれ、
+//   ・#198〜PR-HF1 の間に「TIC と統計を作る」が作った記録 → applied が無い
+//   ・PR-HF1 前の ensureSectionOtsu が壊した記録         → bySource が空
+// のどちらでも判定が食い違っていた。前者は renderOtsuAnalysis を
+// **無限ループ**させ、タブを丸ごと固めていた (CPU 102%/メモリ 4 GB)。
+// 以後この 1 か所だけを真とする。applied はもう読まない。
+function otsuHasMasks(sec) {
+    const o = sec && sec.meta && sec.meta.otsu;
+    return !!(o && o.bySource && Object.keys(o.bySource).length > 0);
+}
+
 // 描画用(同期): あるレイヤーに対応する keep grid を返す。背景除去 OFF や
 // マスク未計算/寸法不一致なら null。renderComposite / renderMsiThumbnail が参照。
 function otsuKeepGridForLayer(section, layerKey) {
@@ -7086,8 +7100,36 @@ function populateOtsuSectionSelect() {
     else if (App.activeSectionId && [...sel.options].some(o => o.value === App.activeSectionId)) sel.value = App.activeSectionId;
 }
 
+// ★ 同じ切片に対する ensureSectionOtsu を二重に飛ばさないための印。
+//   A (「作れたときだけ再描画する」) だけでもループは止まるが、ここを
+//   将来また無条件の再描画に戻されたときの二重の歯止めとして持つ。
+//   解析パネルの再描画は配色変更などでも走るので、重い計算を勝手に
+//   何本も始めないという効果もある。
+//   切片ごとに持つ (解析パネルの切片セレクタを動かすと別の切片が走るため、
+//   1 個のスロットだと先に終わった方が後発のガードを外してしまう)。
+const _otsuEnsureInFlight = new Set();
+// 旧記録の修復 (force) を試した切片。1 セッション 1 回まで。修復しても
+// histCounts が埋まらない記録が万一あっても、そこで回り続けないようにする。
+const _otsuForceTried = new Set();
+
+// ensureSectionOtsu が「作れなかった」ときの終端表示。
+// computeSectionOtsuMasks が返す reasons をそのまま案内に変える
+// (以前は理由を捨てて一律「元データ無し」と出していた)。
+function otsuUnavailableHtml(r) {
+    const reasons = (r && r.reasons) || {};
+    const vals = Object.keys(reasons).map(k => reasons[k]);
+    const p = (s) => '<p class="text-gray-400 text-xs px-2 text-center leading-relaxed">' + s + '</p>';
+    if (vals.includes('needs-tic-pass')) {
+        return p('この切片は parquet です。<br>左下の <b>「TIC と統計を作る」</b> を実行すると、'
+            + '背景除去(Otsu)のマスクも一緒に作られます。');
+    }
+    if (vals.includes('no-blob')) return p('元データがこの端末にありません。');
+    if (vals.includes('parse-failed')) return p('元データを解釈できませんでした。');
+    return p('背景除去(Otsu)のマスクを作れませんでした。');
+}
+
 // Otsu Analysis 本体: 選択切片の TIC ヒストグラム + 自動/有効閾値線 + 除去%。
-// マスク未計算ならその場で計算してから再描画する。
+// マスク未計算ならその場で 1 回だけ計算してから再描画する。
 function renderOtsuAnalysis() {
     const host = document.getElementById('graph-container');
     if (!host) return;
@@ -7101,27 +7143,51 @@ function renderOtsuAnalysis() {
     if (!sec) sec = (project.sections || []).find(s => Object.keys(s.msiSeries || {}).some(k => /^MSI_/i.test(k)));
     if (!sec) { host.innerHTML = '<p class="text-gray-400 text-xs">MSI データのある切片がありません</p>'; return; }
 
-    const otsu = sec.meta && sec.meta.otsu;
-    if (!otsu || !otsu.applied || !otsu.bySource || !Object.keys(otsu.bySource).length) {
+    // ★ 「計算して、終わったらもう一度描く」を書くときの決まり:
+    //    **記録が実際に増えたときだけ**再描画すること。作れなかったのに
+    //    再描画すると、同じ条件で同じ計算に入り直して microtask だけで回る
+    //    無限ループになり、paint も input も timer も永久に来なくなる
+    //    (実機で CPU 102% / メモリ 4 GB。parquet は必ず「作れない」に落ちる)。
+    const afterEnsure = (r) => {
+        _otsuEnsureInFlight.delete(sec.id);
+        // 解析パネルを「開いただけ」で走る計算なので、保存は派生扱いにする
+        // (マスクは元データから必ず再計算できる)。実編集ではないので
+        // ここで公開まで走らせる必要もない。
+        try { App.queueSaveDerived(); } catch (e) {}
+        if (App.analysisMode !== 'otsu') return;
+        if (r && r.computed) { renderOtsuAnalysis(); return; }   // ← 増えたときだけ
+        host.innerHTML = otsuUnavailableHtml(r);
+    };
+    const onEnsureError = (e) => {
+        _otsuEnsureInFlight.delete(sec.id);
+        console.warn('[otsu] ensure for analysis failed', e);
+        host.innerHTML = '<p class="text-gray-400 text-xs">計算に失敗しました(元データを確認)</p>';
+    };
+
+    if (!otsuHasMasks(sec)) {
+        // 二重の歯止め: 同じ切片の計算が飛んでいる間は何もしない。
+        if (_otsuEnsureInFlight.has(sec.id)) return;
+        _otsuEnsureInFlight.add(sec.id);
         host.innerHTML = '<p class="text-gray-400 text-xs">背景除去(Otsu)を計算中…</p>';
-        App.ensureSectionOtsu(sec).then(() => {
-            // 解析パネルを「開いただけ」で走る計算なので、保存は派生扱いにする
-            // (マスクは元データから必ず再計算できる)。実編集ではないので
-            // ここで公開まで走らせる必要もない。
-            try { App.queueSaveDerived(); } catch (e) {}
-            if (App.analysisMode === 'otsu') renderOtsuAnalysis();
-        }).catch(e => { console.warn('[otsu] ensure for analysis failed', e); host.innerHTML = '<p class="text-gray-400 text-xs">計算に失敗しました(元データを確認)</p>'; });
+        App.ensureSectionOtsu(sec).then(afterEnsure).catch(onEnsureError);
         return;
     }
+    const otsu = sec.meta.otsu;
     const srcKey = Object.keys(otsu.bySource)[0];
     const rec = otsu.bySource[srcKey];
     if (!rec || !rec.histCounts) {
-        // 旧バージョンで作られたヒストグラム無しのマスク → その場で再計算。
+        // 旧バージョンで作られたヒストグラム無しのマスク → その場で 1 回だけ再計算。
+        if (_otsuEnsureInFlight.has(sec.id)) return;
+        if (_otsuForceTried.has(sec.id)) {
+            host.innerHTML = '<p class="text-gray-400 text-xs px-2 text-center leading-relaxed">'
+                + 'この切片の背景除去の記録は古い形式で、ヒストグラムを描けません。<br>'
+                + '<b>「TIC と統計を作る」</b> を実行し直してください。</p>';
+            return;
+        }
+        _otsuForceTried.add(sec.id);
+        _otsuEnsureInFlight.add(sec.id);
         host.innerHTML = '<p class="text-gray-400 text-xs">背景除去(Otsu)を計算中…</p>';
-        App.ensureSectionOtsu(sec, { force: true }).then(() => {
-            try { App.queueSaveDerived(); } catch (e) {}   // 上と同じ理由 (旧記録の修復)
-            if (App.analysisMode === 'otsu') renderOtsuAnalysis();
-        }).catch(e => { console.warn('[otsu] recompute for analysis failed', e); host.innerHTML = '<p class="text-gray-400 text-xs">計算に失敗しました(元データを確認)</p>'; });
+        App.ensureSectionOtsu(sec, { force: true }).then(afterEnsure).catch(onEnsureError);
         return;
     }
 
@@ -15617,7 +15683,10 @@ const App = {
     _otsuIsFresh(sec, opts) {
         opts = opts || {};
         const otsu = sec && sec.meta && sec.meta.otsu;
-        if (!otsu || !otsu.applied || !otsu.bySource) return false;
+        // applied ではなく bySource の実体を見る (otsuHasMasks)。#198〜PR-HF1 の
+        // 間に「TIC と統計を作る」が作った記録には applied が無く、ここで
+        // 「未計算」と誤判定されて毎回 parquet の再計算に回されていた。
+        if (!otsuHasMasks(sec)) return false;
         if (!!otsu.manual !== !!(opts.manualThreshold != null)) return false;
         const cur = this._otsuSourceKeys(sec);
         const had = new Set(Object.keys(otsu.bySource));
@@ -15805,7 +15874,10 @@ const App = {
         const secs = (this.project && this.project.sections) || [];
         const needRecompute = [];
         for (const sec of secs) {
-            if (!(sec.meta && sec.meta.otsu && sec.meta.otsu.applied)) continue;
+            // applied ではなく bySource の実体で判定する。applied しか見て
+            // いなかったため、「TIC と統計を作る」で作ったマスク (applied が
+            // 無い形) の切片が丸ごと飛ばされ、強度スライダーが効かなかった。
+            if (!otsuHasMasks(sec)) continue;
             const allCached = this._rethresholdSectionFromCache(sec);
             if (!allCached) needRecompute.push(sec);
         }
