@@ -358,7 +358,16 @@ body.share-mode:not(.share-admin) #method-table:not(.method-nontarget) #method-r
    are unaffected. */
 body.share-mode #method-select-col,
 body.share-mode .method-select-cell,
-body.share-mode #method-actions { display:none !important; }
+/* ★ 行ごと隠さない。#method-actions には「化合物の絞り込み」と
+   「プロジェクトを書き換える操作」が同居していて、以前はまとめて
+   消していたため、共有先では 1390 化合物から目的のものを探す手段が
+   まったく無かった。書き換え系のボタンだけを隠す。 */
+body.share-mode #btn-mrm-register,
+body.share-mode #btn-add-overlay,
+body.share-mode #btn-build-tic { display:none !important; }
+/* 共有先でも残すもの: #method-filter (名前 / m/z / アダクト / 分子式) /
+   #method-mz-range (m/z の範囲) / #method-filter-count (件数) /
+   #overlay-list (master が登録した重ね合わせの表示。追加は上で隠す)。 */
 /* Molecule-overlay chips (master Method panel). */
 #overlay-list { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
 .ov-chip { display:inline-flex; align-items:center; gap:3px; padding:1px 4px 1px 5px; border:1px solid #cbd5e1; border-radius:9999px; background:#fff; font-size:10px; cursor:pointer; color:#334155; }
@@ -645,7 +654,10 @@ body.share-mode #btn-share-preview { display:inline-flex; }
   #btn-publish-share, #btn-share-info, #btn-add-section, #btn-add-parquet, #btn-delete-project,
   #tb-add-heif, #tb-add-msi, #tb-align-heif, #tb-del-section,
   #tb-flip-group, #tb-msi-um-group, #tb-rot-share-default,
-  #roi-draw-toggle, #method-actions { display:none !important; }
+  /* 狭い画面でも絞り込みは残す (共有先の唯一の探索手段なので)。
+     書き換え系のボタンだけ畳む。 */
+  #roi-draw-toggle,
+  #btn-mrm-register, #btn-add-overlay, #btn-build-tic { display:none !important; }
   header { flex-wrap:wrap; }
 }
     </style>
@@ -3566,6 +3578,40 @@ function _parquetWorkerBody(self, lib) {
     //   オフセット類を BigInt に戻すのは hyparquet の plan.js:93 が
     //   `columnOffset + meta.total_compressed_size` を計算するため。
     //   片方だけ Number にすると TypeError になる。
+    // ★ hyparquet に渡す schema は「root + その列」の 2 要素だけにする。
+    //
+    //   getSchemaPath (schema.js:34) は呼ばれるたびに schemaTree をゼロから
+    //   作り直し、rowgroup.js:26 は **column chunk ごと** にそれを呼ぶ。
+    //   全列ぶんの schema (実データで 1395 要素) を渡していると、1 列読むだけで
+    //   500 chunk × 1395 = 約 70 万ノードを確保することになり、これが
+    //   「化合物を切り替えると待たされる」の正体だった。
+    //
+    //   schemaTree は root の num_children を見て子を数える (schema.js:14-22)
+    //   ので、num_children を 1 にした root と当該列だけを渡せば、
+    //   まったく同じツリー (root → その列) ができる。約 70 万 → 1 千。
+    const schemaCache = new Map();          // fileId は 1 つなので colIdx をキーに
+    const schemaForColumn = (idx, colIdx, path) => {
+        let sc = schemaCache.get(idx);
+        if (!sc) { sc = new Map(); schemaCache.set(idx, sc); }
+        const hit = sc.get(colIdx);
+        if (hit) return hit;
+        const full = idx.schema || [];
+        const leafName = path[path.length - 1];
+        // root は先頭。葉は「型を持つ同名の要素」。見つからなければ全体を渡して
+        // 従来どおりに動かす (削れないだけで壊れない)。
+        const root = full[0];
+        let leaf = null;
+        for (let i = 1; i < full.length; i++) {
+            const el = full[i];
+            if (el && el.name === leafName && el.type) { leaf = el; break; }
+        }
+        const trimmed = (root && leaf && path.length === 1)
+            ? [Object.assign({}, root, { num_children: 1 }), leaf]
+            : full;
+        sc.set(colIdx, trimmed);
+        return trimmed;
+    };
+
     const minimalMeta = (idx, colIdx) => {
         const from = idx.colStart[colIdx], to = idx.colStart[colIdx + 1];
         const path = idx.colPaths[colIdx] || [idx.colNames[colIdx]];
@@ -3593,7 +3639,8 @@ function _parquetWorkerBody(self, lib) {
             };
         }
         return {
-            version: idx.version, schema: idx.schema, num_rows: idx.numRows,
+            version: idx.version, schema: schemaForColumn(idx, colIdx, path),
+            num_rows: idx.numRows,
             created_by: idx.created_by, metadata_length: idx.metadata_length,
             row_groups,
         };
@@ -3606,18 +3653,37 @@ function _parquetWorkerBody(self, lib) {
     const readColumn = async (file, idx, colIdx, mode) => {
         if (!mode) mode = modeForType(idx.colTypes && idx.colTypes[colIdx]);
         const name = idx.colNames[colIdx];
-        let out = null;
+        // ★ onComplete ではなく onChunk で受ける。
+        //
+        //   onComplete は hyparquet に「行の配列」を作らせる (read.js:90-123)。
+        //   1 列しか要求していなくても 10 万行ぶんの **1 要素の配列** が作られ、
+        //   こちらは rows[i][0] で 1 個ずつ取り出し直していた。転置と約 20 万個の
+        //   一時オブジェクトが丸ごと無駄。
+        //   onChunk (read.js:70-87) は列チャンクをそのまま
+        //   { columnData, rowStart } で渡すので、出力用の配列へ直接書き写せる。
+        const n = Number(idx.numRows) || 0;
+        let out = (mode === 'raw') ? new Array(n)
+                : (mode === 'f64') ? new Float64Array(n) : new Float32Array(n);
+        if (mode !== 'raw') out.fill(NaN);
+        let seen = 0;
         await parquetRead({
             file, metadata: minimalMeta(idx, colIdx), columns: [name], compressors,
-            onComplete: (rows) => {
-                if (mode === 'raw') { out = rows.map(r => r[0]); return; }
-                out = (mode === 'f64') ? new Float64Array(rows.length) : new Float32Array(rows.length);
-                for (let i = 0; i < rows.length; i++) {
-                    const v = rows[i][0];
-                    out[i] = (v === null || v === undefined) ? NaN : Number(v);
+            onChunk: ({ columnData, rowStart }) => {
+                const len = columnData.length;
+                if (rowStart + len > seen) seen = rowStart + len;
+                if (mode === 'raw') {
+                    for (let i = 0; i < len; i++) out[rowStart + i] = columnData[i];
+                    return;
+                }
+                for (let i = 0; i < len; i++) {
+                    const v = columnData[i];
+                    out[rowStart + i] = (v === null || v === undefined) ? NaN : Number(v);
                 }
             },
         });
+        // numRows とチャンクの合計がずれるファイルでも、実際に埋まった長さで返す
+        // (呼び出し側は length を行数として使う)。
+        if (seen !== n) out = (mode === 'raw') ? out.slice(0, seen) : out.subarray(0, seen);
         return out;
     };
 
