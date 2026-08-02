@@ -1685,6 +1685,31 @@ const ProjectStorage = (() => {
         return new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
     }
 
+    // ★ 書き込みは必ずトランザクションの決着まで待つ。
+    //
+    // IndexedDB は `request.onsuccess` を **コミットの前** に発火する。
+    // 大きな値を書くと、その後のコミットで QuotaExceededError が出て
+    // トランザクションごと abort (ロールバック) されることがあるが、
+    // pr() だけを見ていると **「書けたつもりで消えている」** 状態になる。
+    //
+    // 実際にこれで壊れていた: 共有側が 836 MB の parquet を putBlob し、
+    // 成功したものとして blobId を msiSeries に書き込んだが、blob は
+    // ロールバックされて存在しなかった。getBlob が null を返し、
+    // loadMsiLayer が無言で return するので、**エラーが 1 行も出ないまま
+    // MSI 画像だけが表示されない**という状態になっていた
+    // (DESI は blob が小さく quota に収まるので露見しなかった)。
+    function txDone(t) {
+        return new Promise((resolve, reject) => {
+            t.oncomplete = () => resolve();
+            t.onabort = () => reject(t.error || new Error('IndexedDB transaction aborted'));
+            t.onerror = () => reject(t.error || new Error('IndexedDB transaction failed'));
+        });
+    }
+    // 容量不足かどうか。呼び出し側が案内を出し分けるために使う。
+    function isQuotaError(e) {
+        return !!e && (e.name === 'QuotaExceededError' || /quota/i.test(String(e.message || e)));
+    }
+
     // Summary rows only. Reads the tiny `project_index` store instead of
     // getAll()-ing every project — one non-target project is several MB of
     // msiSeries, and this used to deserialize ALL of them to build a couple
@@ -1718,6 +1743,7 @@ const ProjectStorage = (() => {
             const st = t2.objectStore('project_index');
             await pr(st.clear());
             for (const r of rows) await pr(st.put(r));
+            await txDone(t2);   // コミットまで見る (途中で abort されたら気付く)
         } catch (e) { console.warn('project_index backfill failed', e); }
         return sortRows(rows);
     }
@@ -1747,8 +1773,10 @@ const ProjectStorage = (() => {
         // the two can never disagree (a separate write could be lost to a
         // crash between them).
         const t = await tx(['projects', 'project_index'], 'readwrite');
+        const done = txDone(t);
         await pr(t.objectStore('projects').put(rec));
         await pr(t.objectStore('project_index').put(indexRowFor(rec)));
+        await done;   // ★ コミットまで待つ。ここを省くと容量超過で消えても成功に見える
         return rec;
     }
 
@@ -1756,11 +1784,13 @@ const ProjectStorage = (() => {
         const proj = await getProject(id);
         const blobIds = collectBlobIds(proj);
         const t = await tx(['projects', 'blobs', 'project_index'], 'readwrite');
+        const done = txDone(t);
         await pr(t.objectStore('projects').delete(id));
         await pr(t.objectStore('project_index').delete(id));
         for (const bid of blobIds) {
             try { await pr(t.objectStore('blobs').delete(bid)); } catch (_) {}
         }
+        await done;
     }
 
     function collectBlobIds(project) {
@@ -1782,7 +1812,11 @@ const ProjectStorage = (() => {
     async function putBlob(rec) {
         // rec: { id, blob, mime, filename }
         const t = await tx(['blobs'], 'readwrite');
+        const done = txDone(t);
         await pr(t.objectStore('blobs').put(rec));
+        // ★ ここが今回のバグの本体。commit を待たずに返すと、836 MB の blob が
+        //   容量超過でロールバックされても「保存できた」ことになる。
+        await done;
         return rec.id;
     }
 
@@ -1795,7 +1829,9 @@ const ProjectStorage = (() => {
     async function deleteBlob(id) {
         if (!id) return;
         const t = await tx(['blobs'], 'readwrite');
+        const done = txDone(t);
         await pr(t.objectStore('blobs').delete(id));
+        await done;
     }
 
     // ---- parquet フッタ索引 (pq_index) --------------------------------------
@@ -1808,13 +1844,17 @@ const ProjectStorage = (() => {
     }
     async function putPqIndex(rec) {
         const t = await tx(['pq_index'], 'readwrite');
+        const done = txDone(t);
         await pr(t.objectStore('pq_index').put(rec));
+        await done;
         return rec.id;
     }
     async function deletePqIndex(id) {
         if (!id) return;
         const t = await tx(['pq_index'], 'readwrite');
+        const done = txDone(t);
         await pr(t.objectStore('pq_index').delete(id));
+        await done;
     }
 
     // NOTE: a `pruneOrphanBlobs(project)` helper used to live here. It had no
@@ -1845,8 +1885,10 @@ const ProjectStorage = (() => {
             });
         } catch (e) { return; }   // on any error, do nothing (never risk data loss)
         const t = await tx(['blobs'], 'readwrite');
+        const done = txDone(t);
         const all = await pr(t.objectStore('blobs').getAllKeys());
         for (const k of all) if (!used.has(k)) await pr(t.objectStore('blobs').delete(k));
+        await done;
     }
 
     return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, deleteBlob, pruneShareOrphans,
@@ -2671,17 +2713,17 @@ async function _ensureRoiRawGrid(section, layerKey) {
         }
     }
 
-    let rec = null;
-    try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
-    if (!rec || !rec.blob) return null;
-
     // ★ parquet は列指向なので、この化合物の 1 列だけを読む。
+    //   供給元は master ならローカル blob、共有先なら Storage の URL
+    //   (共有先は 836 MB を保存しないので getBlob では引けない)。
     //   ここを通さないと extractSourceMatrixForExport の xlsx 経路へ落ち、
     //   836 MB を丸ごと ArrayBuffer に展開して XLSX.read に食わせることになる
     //   (タブが固まる。要望③「ROI は DESI と同一機能」が成立しなくなる)。
     if (ent.kind === 'parquet') {
         try {
-            const grid = await parquetRoiGrid(ent, rec.blob);
+            const src = await parquetSrcForEnt(ent);
+            if (!src) return null;
+            const grid = await parquetRoiGrid(ent, src);
             if (!grid) return null;
             _roiGridCacheSet(wantKey, grid);
             return grid;
@@ -2690,6 +2732,11 @@ async function _ensureRoiRawGrid(section, layerKey) {
             return null;
         }
     }
+
+    // xlsx/txt はファイル全体を 1 回で読む従来経路。
+    let rec = null;
+    try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
+    if (!rec || !rec.blob) return null;
 
     let m = null;
     try { m = extractSourceMatrixForExport(await rec.blob.arrayBuffer(), ent, entries); }
@@ -3325,6 +3372,46 @@ function _parquetWorkerBody(self, lib) {
             await blob.slice(start, end === undefined ? blob.size : end).arrayBuffer(),
     });
 
+    // ★ URL から HTTP Range で読む AsyncBuffer。
+    //
+    // 共有先が 836 MB を丸ごとダウンロードして IndexedDB に置く必要は無い。
+    // parquet は列単位のランダムアクセスなので、1 化合物あたり実際に要るのは
+    // 数百 KB だけ。Range リクエストにすれば **ダウンロード 0 / 保存 0** になり、
+    // 容量超過で書き込みが取り消される問題そのものが構造的に消える。
+    //
+    // 形は asyncBufferFromBlob と完全に同じ ({ byteLength, slice }) なので、
+    // 下流 (parquetMetadataAsync / parquetRead) は違いを知らない。
+    const asyncBufferFromUrl = async (url, knownLength) => {
+        let byteLength = Number(knownLength);
+        if (!Number.isFinite(byteLength) || byteLength <= 0) {
+            const head = await fetch(url, { method: 'HEAD' });
+            if (!head.ok) throw new Error('parquet: HEAD ' + head.status + ' for ' + url);
+            byteLength = Number(head.headers.get('content-length'));
+            if (!Number.isFinite(byteLength) || byteLength <= 0) {
+                throw new Error('parquet: content-length を取得できません (' + url + ')');
+            }
+        }
+        return {
+            byteLength,
+            slice: async (start, end) => {
+                const last = (end === undefined ? byteLength : end) - 1;
+                const resp = await fetch(url, { headers: { Range: 'bytes=' + start + '-' + last } });
+                // 206 が正。200 が返るサーバは Range を無視して全体を返しているので、
+                // 黙って全部読むと 836 MB を掴んでしまう。必ず気付けるようにする。
+                if (resp.status === 200) throw new Error('parquet: サーバが Range に対応していません (' + url + ')');
+                if (!resp.ok) throw new Error('parquet: HTTP ' + resp.status + ' for ' + url);
+                return await resp.arrayBuffer();
+            },
+        };
+    };
+
+    // blob / url のどちらで来ても同じ AsyncBuffer にする 1 か所の入口。
+    const asyncBufferOf = async (d) => {
+        if (d && d.blob) return asyncBufferFromBlob(d.blob);
+        if (d && d.url) return await asyncBufferFromUrl(d.url, d.byteLength);
+        throw new Error('parquet: blob も url も指定されていません');
+    };
+
     // ★ 巨大な metadata から「1 列を読むのに必要な数値」だけを抜き出して、
     //   **オブジェクトを 1 つも保持しない平坦な表**にする。
     //
@@ -3516,9 +3603,8 @@ function _parquetWorkerBody(self, lib) {
     // 呼び出し側が決め打ちすると、DOUBLE で書き出されたファイルを 32bit に丸めて
     // しまうため、既定は必ずファイル側の型に従う。
     // 型付き配列は転送可能なので postMessage のコピーを避けられる。
-    const readColumn = async (blob, idx, colIdx, mode) => {
+    const readColumn = async (file, idx, colIdx, mode) => {
         if (!mode) mode = modeForType(idx.colTypes && idx.colTypes[colIdx]);
-        const file = asyncBufferFromBlob(blob);
         const name = idx.colNames[colIdx];
         let out = null;
         await parquetRead({
@@ -3546,7 +3632,7 @@ function _parquetWorkerBody(self, lib) {
                 // **この worker は使い捨てにして呼び出し側が terminate する**
                 // (主スレッドの parquetEnsureOpen を参照)。buildIndex を抜けた
                 // 時点で meta への参照を手放し、索引だけを返す。
-                const meta = await parquetMetadataAsync(asyncBufferFromBlob(e.data.blob));
+                const meta = await parquetMetadataAsync(await asyncBufferOf(e.data));
                 const idx = buildIndex(meta);
                 opened.set(fileId, idx);
                 // 主スレッドへ返すのは「そのまま保存できる形」。型付き配列は
@@ -3571,7 +3657,7 @@ function _parquetWorkerBody(self, lib) {
             } else if (op === 'column') {
                 const idx = opened.get(fileId);
                 if (!idx) throw new Error('parquet: file not opened');
-                const vals = await readColumn(e.data.blob, idx, e.data.colIdx, e.data.mode);
+                const vals = await readColumn(await asyncBufferOf(e.data), idx, e.data.colIdx, e.data.mode);
                 done(vals, (vals && vals.buffer) ? [vals.buffer] : []);
             } else if (op === 'columns') {
                 // 複数列をまとめて (x / y / annotation の 3 列など)。
@@ -3580,8 +3666,10 @@ function _parquetWorkerBody(self, lib) {
                 if (!idx) throw new Error('parquet: file not opened');
                 const modes = e.data.modes || [];
                 const outs = [];
+                // AsyncBuffer は 1 回だけ作る (url 経路では HEAD を毎回投げないため)。
+                const file = await asyncBufferOf(e.data);
                 for (let k = 0; k < e.data.colIdxs.length; k++) {
-                    outs.push(await readColumn(e.data.blob, idx, e.data.colIdxs[k], modes[k]));
+                    outs.push(await readColumn(file, idx, e.data.colIdxs[k], modes[k]));
                 }
                 done(outs, outs.filter(o => o && o.buffer).map(o => o.buffer));
             } else if (op === 'close') {
@@ -3721,7 +3809,7 @@ function _notifyMsiLoadFailed(err) {
 //
 // 対応表は保存せず、ファイルごとにセッション内でキャッシュする。作るのに要る
 // のは x/y/annotation の 3 列だけ (数 MB) なので、開き直しても安い。
-const _pqFiles = new Map();   // blobId -> { fileId, info, geom, blob }
+const _pqFiles = new Map();   // 供給元キー (blobId か 'url:<URL>') -> { fileId, info, mz, geom }
 
 function parquetFileState(blobId) { return _pqFiles.get(blobId) || null; }
 
@@ -3802,20 +3890,42 @@ async function _pqDeleteSavedIndex(blobId) {
     await ProjectStorage.deletePqIndex(blobId);
 }
 
-async function _pqOpenViaThrowawayWorker(fileId, blob) {
+// ★ parquet の中身の在りか。master はローカルの Blob、共有先は Storage の URL。
+//   worker には { blob } か { url, byteLength } のどちらかを渡す。
+//   共有先で 836 MB を IndexedDB に置かないための入口がここ。
+function parquetSrcFromBlob(blob) { return { blob }; }
+function parquetSrcFromUrl(url, byteLength) { return { url, byteLength: byteLength || 0 }; }
+
+// ent (msiSeries のエントリ) から供給元を引く。共有先の parquet は
+// sourceUrl だけを持ち、ローカルには保存されていない。
+async function parquetSrcForEnt(ent) {
+    if (ent && ent.sourceUrl) return parquetSrcFromUrl(ent.sourceUrl, ent.sourceBytes);
+    if (!ent || !ent.blobId) return null;
+    const rec = await ProjectStorage.getBlob(ent.blobId);
+    if (!rec || !rec.blob) return null;
+    return parquetSrcFromBlob(rec.blob);
+}
+
+// _pqFiles / pq_index のキー。共有先は blobId を持たないので URL から作る。
+function parquetKeyForEnt(ent) {
+    if (ent && ent.sourceUrl) return 'url:' + ent.sourceUrl;
+    return ent && ent.blobId;
+}
+
+async function _pqOpenViaThrowawayWorker(fileId, src) {
     // フッタ解析専用の短命 worker。索引を受け取ったら即 terminate するので、
     // hyparquet が作った 70 万個のオブジェクトと 280 MB の ArrayBuffer は
     // GC を待たずにヒープごと解放される。
     const h = _makeParquetWorker(null);
     if (!h) throw new Error('parquet worker を起動できませんでした');
     try {
-        return await h.call({ op: 'open', fileId, blob }, [], PARQUET_OPEN_TIMEOUT_MS);
+        return await h.call(Object.assign({ op: 'open', fileId }, src), [], PARQUET_OPEN_TIMEOUT_MS);
     } finally {
         try { h.terminate(); } catch (e) {}
     }
 }
 
-async function parquetEnsureOpen(blobId, blob) {
+async function parquetEnsureOpen(blobId, src) {
     const cached = _pqFiles.get(blobId);
     if (cached && cached.info) return cached;
     const running = _pqOpening.get(blobId);
@@ -3836,7 +3946,7 @@ async function parquetEnsureOpen(blobId, blob) {
         }
         if (!info) {
             // ③ 使い捨て worker でフッタを解析し、平坦な索引だけを受け取る。
-            const opened = await _pqOpenViaThrowawayWorker(fileId, blob);
+            const opened = await _pqOpenViaThrowawayWorker(fileId, src);
             const index = opened && opened.index;
             if (!index) throw new Error('parquet: 索引を作れませんでした');
             // 常駐 worker には索引だけを渡す (フッタは二度と読まない)。
@@ -3877,26 +3987,26 @@ function parquetColumnRoles(colNames) {
 // x/y/annotation を 1 回読み、切片ごとの格子と「行番号 → 格子位置」を作る。
 // parquetEnsureOpen と同じ理由で in-flight を共有する — これが無いと 4 パネルが
 // x/y/annotation の 3 列を 4 回ずつ読み、10 万行ぶんの中間配列も 4 倍になる。
-async function parquetEnsureGeometry(blobId, blob) {
+async function parquetEnsureGeometry(blobId, src) {
     const st0 = _pqFiles.get(blobId);
     if (st0 && st0.geom) return st0.geom;
     const running = _pqGeomLoading.get(blobId);
     if (running) return running;
-    const p = (async () => await _parquetBuildGeometry(blobId, blob))();
+    const p = (async () => await _parquetBuildGeometry(blobId, src))();
     _pqGeomLoading.set(blobId, p);
     try { return await p; }
     finally { _pqGeomLoading.delete(blobId); }
 }
 
-async function _parquetBuildGeometry(blobId, blob) {
-    const st = await parquetEnsureOpen(blobId, blob);
+async function _parquetBuildGeometry(blobId, src) {
+    const st = await parquetEnsureOpen(blobId, src);
     if (st.geom) return st.geom;
     const roles = parquetColumnRoles(st.info.colNames);
     if (roles.xIdx < 0 || roles.yIdx < 0) throw new Error('parquet: x/y 列が見つかりません');
     const idxs = [roles.xIdx, roles.yIdx];
     if (roles.annIdx >= 0) idxs.push(roles.annIdx);
     const cols = await callParquetWorker(
-        { op: 'columns', fileId: st.fileId, blob, colIdxs: idxs }, [], PARQUET_COLUMN_TIMEOUT_MS);
+        Object.assign({ op: 'columns', fileId: st.fileId, colIdxs: idxs }, src), [], PARQUET_COLUMN_TIMEOUT_MS);
     const xs = cols[0], ys = cols[1];
     // annotation 列が無いファイルは全行を 1 切片として扱う。
     const ann = (roles.annIdx >= 0 && cols[2]) ? cols[2] : null;
@@ -3937,8 +4047,9 @@ async function _parquetBuildGeometry(blobId, blob) {
 
 // ent が指す切片の幾何 (行→格子の対応表) を引く。buildParquetRaster と
 // parquetRoiGrid が同じ選び方をするように 1 か所にまとめてある。
-async function parquetSectionGeom(ent, blob) {
-    const geom = await parquetEnsureGeometry(ent.blobId, blob);
+async function parquetSectionGeom(ent, src) {
+    const key = parquetKeyForEnt(ent);
+    const geom = await parquetEnsureGeometry(key, src);
     const sec = geom.sections.find(s => s.label === ent.annotation)
         || (geom.sections.length === 1 ? geom.sections[0] : null);
     if (!sec) throw new Error('parquet: 切片 "' + ent.annotation + '" が見つかりません');
@@ -3947,7 +4058,7 @@ async function parquetSectionGeom(ent, blob) {
     // 「geom は自分の st 由来、st は他人の st」という食い違いが起きえた
     // (下流が fileId しか見ていなかったので実害は出ていなかっただけ)。
     // in-flight を共有するようにしたので、いまは 1 個であることが保証される。
-    const st = _pqFiles.get(ent.blobId);
+    const st = _pqFiles.get(key);
     if (!st) throw new Error('parquet: file not opened');
     return { geom, sec, st };
 }
@@ -3963,11 +4074,11 @@ async function parquetSectionGeom(ent, blob) {
 // 出力用の配列は必ず新しく作る)。
 const _pqColumnInFlight = new Map();   // 'blobId|colIdx|mode' -> Promise
 
-function parquetReadColumnShared(st, blob, blobId, colIdx, mode) {
-    const key = blobId + '|' + colIdx + '|' + (mode || '');
+function parquetReadColumnShared(st, src, srcKey, colIdx, mode) {
+    const key = srcKey + '|' + colIdx + '|' + (mode || '');
     const running = _pqColumnInFlight.get(key);
     if (running) return running;
-    const msg = { op: 'column', fileId: st.fileId, blob, colIdx };
+    const msg = Object.assign({ op: 'column', fileId: st.fileId, colIdx }, src);
     if (mode) msg.mode = mode;
     const p = callParquetWorker(msg, [], PARQUET_COLUMN_TIMEOUT_MS);
     _pqColumnInFlight.set(key, p);
@@ -3988,9 +4099,9 @@ function scatterParquetColumn(col, sec, Arr) {
 
 // ROI 統計用の生強度グリッド。1 化合物 = 1 列なので、836 MB のファイルから
 // 読むのは約 0.3 MB の 1 列だけ。xlsx/txt のようにファイル全体を展開しない。
-async function parquetRoiGrid(ent, blob) {
-    const { sec, st } = await parquetSectionGeom(ent, blob);
-    const col = await parquetReadColumnShared(st, blob, ent.blobId, ent.colIdx, null);
+async function parquetRoiGrid(ent, src) {
+    const { sec, st } = await parquetSectionGeom(ent, src);
+    const col = await parquetReadColumnShared(st, src, parquetKeyForEnt(ent), ent.colIdx, null);
     if (!col) return null;
     // ROI 統計は Float64 で持つ (DESI 経路の _ensureRoiRawGrid と同じ精度)。
     return { W: sec.W, H: sec.H, values: scatterParquetColumn(col, sec, Float64Array) };
@@ -3998,9 +4109,9 @@ async function parquetRoiGrid(ent, blob) {
 
 // 1 化合物 × 1 切片ぶんのラスタを作る。返す形は computeRasterPixels と同じなので、
 // 呼び出し側 (loadMsiLayer) は xlsx/txt と区別せずに扱える。
-async function buildParquetRaster(ent, blob) {
-    const { sec, st } = await parquetSectionGeom(ent, blob);
-    const col = await parquetReadColumnShared(st, blob, ent.blobId, ent.colIdx, null);
+async function buildParquetRaster(ent, src) {
+    const { sec, st } = await parquetSectionGeom(ent, src);
+    const col = await parquetReadColumnShared(st, src, parquetKeyForEnt(ent), ent.colIdx, null);
     if (!col) throw new Error('parquet: 列を読めませんでした');
     // 格子へ散らす (ROI 統計と同じ関数を通す)。触れなかったセルは NaN のまま
     // = データ無し (走査外)。
@@ -4078,12 +4189,12 @@ function _ticImageFromAccum(accum, count, w, h) {
 // targets: [{ sectionId, label, accum, count, W, H }] を呼び出し側が用意する。
 // onCol(doneCols, totalCols, phase) で進捗、shouldAbort() で中断。
 // 戻り値: 化合物ごと・切片ごとの統計 statsByKey[key][sectionId]
-async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opts) {
+async function parquetAccumulateTicAndStats(blobId, src, features, targets, opts) {
     opts = opts || {};
     const onCol = opts.onCol || (() => {});
     const shouldAbort = opts.shouldAbort || (() => false);
     const batch = Math.max(1, opts.batch || PARQUET_TIC_BATCH);
-    const geom = await parquetEnsureGeometry(blobId, blob);
+    const geom = await parquetEnsureGeometry(blobId, src);
     const st = _pqFiles.get(blobId);
     if (!st) throw new Error('parquet: file not opened');
     // 切片ラベル → 累積先。geom の対応表もここで引き当てておく。
@@ -4109,7 +4220,7 @@ async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opt
         // worker 往復をまとめる。worker 側は直列に読むので parquet の I/O は
         // 減らないが、postMessage の往復ぶんは確実に減る。
         const cols = await callParquetWorker(
-            { op: 'columns', fileId: st.fileId, blob, colIdxs: chunk.map(f => f.colIdx) },
+            Object.assign({ op: 'columns', fileId: st.fileId, colIdxs: chunk.map(f => f.colIdx) }, src),
             [], 900000);
         readMs += Date.now() - t0;
         const t1 = Date.now();
@@ -4200,6 +4311,7 @@ class SectionPanel {
         this._thumbObserver = null;
         this._thumbPaint = new Map();
         this._pendingDrawLoad = null;
+        this._nextDrawLoad = null;   // 読み込み中に来た要求を 1 件だけ覚えておく
         this.visibleLayers = new Set();
         this.msiThumbRefs = new Map();
         this.layerPopover = null;
@@ -4336,7 +4448,18 @@ class SectionPanel {
         const persistedVis = (this.section.meta && this.section.meta.visibleLayers) || null;
         const wantMsi = new Set();
         if (Array.isArray(persistedVis)) {
-            for (const k of persistedVis) if (/^MSI_/i.test(k) && registeredMsi.includes(k)) wantMsi.add(k);
+            // ★ Compound モードでは描かれるのはフォーカス 1 本だけなので、
+            //   保存された可視レイヤーを全部読むのは丸損。行をクリックするたび
+            //   visibleLayers が増える仕様と組み合わさると、1390 本ぶんの列読みを
+            //   開くたびに直列で走らせることになっていた。
+            //   Free モードでは従来どおり全部復元する (実際に重ねて描くため)。
+            const registered = new Set(registeredMsi);
+            const compound = (typeof App !== 'undefined' && App && App.viewMode === 'compound');
+            for (const k of persistedVis) {
+                if (!/^MSI_/i.test(k) || !registered.has(k)) continue;
+                if (compound && App.focusCompoundKey && k !== App.focusCompoundKey) continue;
+                wantMsi.add(k);
+            }
         }
         // 既定 (初回) は先頭 1 本だけ。従来の「先頭 MSI を表示」と同じ絵になる。
         if (!wantMsi.size && registeredMsi.length) wantMsi.add(registeredMsi[0]);
@@ -4442,7 +4565,8 @@ class SectionPanel {
         if (!key || !/^MSI_/i.test(key)) return Promise.resolve(false);
         if (this.imageSources[key]) { this._touchMsiLru(key); return Promise.resolve(true); }
         const ent = (this.section.msiSeries || {})[key];
-        if (!ent || !ent.blobId) return Promise.resolve(false);
+        // 共有先の parquet は blobId ではなく sourceUrl だけを持つ。
+        if (!ent || (!ent.blobId && !ent.sourceUrl)) return Promise.resolve(false);
         const inflight = this._msiLoadInFlight.get(key);
         if (inflight) return inflight;
         const p = (async () => {
@@ -4537,17 +4661,31 @@ class SectionPanel {
         for (const k of (keys || [])) {
             if (!/^MSI_/i.test(k) || this.imageSources[k]) continue;
             const ent = (this.section.msiSeries || {})[k];
-            if (ent && ent.blobId) missing.push(k);
+            if (ent && (ent.blobId || ent.sourceUrl)) missing.push(k);
         }
         if (!missing.length) return;
-        if (this._pendingDrawLoad) return;          // 進行中のぶんが終わったらまとめて描き直す
-        this._pendingDrawLoad = Promise.all(missing.map(k => this.ensureMsiLayerLoaded(k)))
-            .then((results) => {
-                this._pendingDrawLoad = null;
-                if (!results.some(Boolean)) return;  // 1 枚も増えていないなら描き直さない (無限ループ防止)
-                try { this.renderComposite(); } catch (e) {}
-            })
-            .catch(() => { this._pendingDrawLoad = null; });
+        // ★ 進行中でも要求を捨てない。
+        //   以前はここで return していたので、先行の列読み (数秒) が終わるまでの
+        //   クリックが**全部黙って消え**、「化合物を押しても画像が切り替わらない」
+        //   ように見えていた。最後の要求を覚えておいて、終わり次第それを処理する。
+        if (this._pendingDrawLoad) { this._nextDrawLoad = missing; return; }
+        const run = (want) => {
+            this._pendingDrawLoad = Promise.all(want.map(k => this.ensureMsiLayerLoaded(k)))
+                .then((results) => {
+                    this._pendingDrawLoad = null;
+                    // 1 枚も増えていないなら描き直さない (無限ループ防止)
+                    if (results.some(Boolean)) { try { this.renderComposite(); } catch (e) {} }
+                    const next = this._nextDrawLoad;
+                    this._nextDrawLoad = null;
+                    // 待たせていた要求のうち、まだ読めていないものだけを処理する。
+                    if (next) {
+                        const still = next.filter(k => !this.imageSources[k]);
+                        if (still.length) run(still);
+                    }
+                })
+                .catch(() => { this._pendingDrawLoad = null; this._nextDrawLoad = null; });
+        };
+        run(missing);
     }
 
     // 読み込み済み MSI ラスタの LRU。ROI 値グリッドの _roiRawGridCache と同じ考え方で、
@@ -4559,8 +4697,22 @@ class SectionPanel {
     }
     _evictMsiRasters() {
         if (this._msiLru.size <= MSI_LAYER_CACHE_MAX) return;
-        const keep = new Set(this.visibleLayers);
-        if (typeof App !== 'undefined' && App && App.focusCompoundKey) keep.add(App.focusCompoundKey);
+        // ★ keep は「いま実際に描かれているもの」だけにする。
+        //
+        //   Compound モードでは renderComposite が **フォーカス 1 本以外の MSI を
+        //   必ず読み飛ばす** (:5311) のに、Method 表の行クリックは
+        //   visibleLayers へ **足すだけ** (_bindMethodRowDelegation:8324)。
+        //   ここで visibleLayers を丸ごと keep にしていたため、16 本を超えて
+        //   クリックした時点で LRU が完全に無効化され、描かれもしないラスタが
+        //   無制限に溜まっていた (1390 化合物ぶん見ると数 GB になる)。
+        const keep = new Set();
+        const compound = (typeof App !== 'undefined' && App && App.viewMode === 'compound');
+        if (compound) {
+            if (App.focusCompoundKey) keep.add(App.focusCompoundKey);
+            // HE/IF などの非 MSI は LRU の対象外なので、ここでは触らない。
+        } else {
+            for (const k of this.visibleLayers) keep.add(k);
+        }
         if (this.activeMsiKey) keep.add(this.activeMsiKey);
         for (const key of [...this._msiLru]) {
             if (this._msiLru.size <= MSI_LAYER_CACHE_MAX) break;
@@ -4587,9 +4739,15 @@ class SectionPanel {
     }
 
     async loadMsiLayer(key, ent) {
-        if (!ent || !ent.blobId) return;
-        const rec = await ProjectStorage.getBlob(ent.blobId);
-        if (!rec) return;
+        // ★ ここは無言で return してはいけない。
+        //   以前は「登録は在るのに元データが無い」ときに黙って返していたので、
+        //   共有側で 836 MB の blob が容量超過でロールバックされていたとき、
+        //   **コンソールに 1 行も出ないまま MSI 画像だけが表示されない**という、
+        //   手掛かりゼロの状態になっていた。呼び出し元 (ensureMsiLayerLoaded) が
+        //   catch して 1 回だけ通知する。
+        if (!ent || (!ent.blobId && !ent.sourceUrl)) {
+            throw new Error('この化合物には元データの参照がありません (' + key + ')');
+        }
         // Parse + rasterize in the worker (keeps the UI responsive on large
         // xlsx/txt); fall back to the identical main-thread parser on any
         // worker failure or when workers aren't supported.
@@ -4598,9 +4756,20 @@ class SectionPanel {
             // parquet は列指向なので、この化合物の 1 列だけを読む。ファイル全体を
             // 読み直す xlsx/txt とは経路が別で、メインスレッドの代替実装も無い
             // (専用のモジュール worker が唯一の入口)。失敗したら握りつぶさずに
-            // 投げて、呼び出し側 (ensureMsiLayerLoaded) が警告を出す。
-            result = await buildParquetRaster(ent, rec.blob);
+            // 投げて、呼び出し側 (ensureMsiLayerLoaded) が 1 回だけ通知する。
+            // 供給元は master ならローカル blob、共有先なら Storage の URL。
+            const src = await parquetSrcForEnt(ent);
+            if (!src) {
+                throw new Error('元データが見つかりません (' + key + ')。'
+                    + '保存容量が足りずに書き込みが取り消された可能性があります');
+            }
+            result = await buildParquetRaster(ent, src);
         } else {
+            const rec = await ProjectStorage.getBlob(ent.blobId);
+            if (!rec || !rec.blob) {
+                throw new Error('元データがこの端末に保存されていません (' + key + ')。'
+                    + '保存容量が足りずに書き込みが取り消された可能性があります');
+            }
             if (parseWorkerAvailable()) {
                 try {
                     const op = (ent.kind === 'txt') ? 'txt-raster' : 'xlsx-raster';
@@ -7071,14 +7240,36 @@ function groupRoiRowsByColor(rows, palette) {
 // list_rois requires a section uuid, so a project-wide ROI fetch fans out
 // to one RPC per section. Per-section failures are logged and skipped so
 // a single missing section does not blank out the whole list.
+// ★ 共有トークンが切れたことを 1 か所で覚える。
+//   期限切れ (SQLSTATE 28000 = invalid or expired token) になると、12 秒ごとの
+//   ROI ポーリングが **切片の数 × 無限回** 403 を投げ続け、コンソールが
+//   埋まって本当のエラーが見えなくなっていた (実機で数百行)。
+let _shareTokenExpired = false;
+function _isExpiredTokenError(e) {
+    if (!e) return false;
+    if (e.code === '28000') return true;
+    return /invalid or expired token/i.test(String(e.message || e));
+}
+function _noteShareTokenExpired() {
+    if (_shareTokenExpired) return;
+    _shareTokenExpired = true;
+    try { if (typeof App !== 'undefined' && App && App._stopShareRoiPoll) App._stopShareRoiPoll(); } catch (e) {}
+    try {
+        showToast('共有セッションの有効期限が切れました。ページを再読み込みしてください', 12000);
+    } catch (e) {}
+}
+
 async function fetchAllShareRois(token, sections) {
     if (!token || !Array.isArray(sections) || !sections.length) return [];
+    if (_shareTokenExpired) return [];
     const tasks = sections.map(async (sec) => {
         if (!sec || !sec.id) return [];
         try {
             const rows = await SupabaseClient.listRois(token, sec.id);
             return rows || [];
         } catch (e) {
+            // 期限切れは 1 回だけ知らせて、以後は静かにする。
+            if (_isExpiredTokenError(e)) { _noteShareTokenExpired(); return []; }
             console.warn('list_rois failed for section', sec.id, e);
             return [];
         }
@@ -8839,7 +9030,7 @@ function isParquetSidecarName(name) {
 // 取れなければ null を返し、呼び出し側は m/z だけで表示名を作る。
 async function readParquetSidecar(file) {
     const blobId = 'sidecar_' + (file.name || 'x') + '_' + file.size;
-    const st = await parquetEnsureOpen(blobId, file);
+    const st = await parquetEnsureOpen(blobId, parquetSrcFromBlob(file));
     const want = ['display_name', 'compound', 'mz', 'adduct', 'formula', 'ppm',
                   'lipid_class', 'database', 'smiles', 'raw'];
     const idxs = [], keys = [];
@@ -8952,8 +9143,8 @@ async function openParquetWizard() {
         scanEl.textContent = '目録を読み込み中… (大きなファイルでは数十秒かかることがあります)';
         try {
             const blobId = 'reg_' + mainFile.name + '_' + mainFile.size;
-            const st = await parquetEnsureOpen(blobId, mainFile);
-            const geom = await parquetEnsureGeometry(blobId, mainFile);
+            const st = await parquetEnsureOpen(blobId, parquetSrcFromBlob(mainFile));
+            const geom = await parquetEnsureGeometry(blobId, parquetSrcFromBlob(mainFile));
             const roles = geom.roles;
             const sidecar = sidecarFile ? await readParquetSidecar(sidecarFile).catch(() => null) : null;
             // m/z 列 → 化合物。サイドカーの k 行目が k 番目の m/z 列に対応する。
@@ -16972,6 +17163,15 @@ const App = {
                 const mime = ref.mime || blob.type;
                 const id = uid('blob');
                 await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() });
+                // ★ 書けたことを読み戻して確かめる。putBlob は commit まで待つように
+                //   直したが、ブラウザ側の事後 eviction もありうるので、
+                //   「blobId だけ在って中身が無い」状態を絶対に先へ通さない。
+                //   これを通すと Method 表に 1390 行の幽霊が並び、画像だけ出ない。
+                const back = await ProjectStorage.getBlob(id);
+                if (!back || !back.blob) {
+                    throw new Error('保存できませんでした (' + Math.round((blob.size || 0) / 1e6) + ' MB)。'
+                        + '保存容量が足りない可能性があります');
+                }
                 return { id, mime };
             })();
             blobByPath.set(ref.path, job);
@@ -16988,6 +17188,23 @@ const App = {
         }
         const runDlTask = async ({ kind, sec, key, ref }) => {
             try {
+                // ★ parquet はダウンロードしない。
+                //   1 本のファイルに全切片 × 全化合物が入っていて 836 MB あるが、
+                //   列指向なので 1 化合物あたり実際に要るのは数百 KB。Storage の
+                //   URL に HTTP Range を投げれば足りる。丸ごと IndexedDB に置くと
+                //   容量超過でトランザクションが取り消され、「blobId は在るのに
+                //   中身が無い」状態になって MSI が 1 枚も出なくなっていた。
+                if (kind === 'msi' && ref.kind === 'parquet') {
+                    const url = SupabaseClient.publicUrl('atlases', ref.path);
+                    if (!url) throw new Error('publicUrl returned null for ' + ref.path);
+                    sec.msiSeries[key] = Object.assign({}, ref, { blobId: null, sourceUrl: url });
+                    if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
+                        sec.msiFiles[ref.sourceFileId] = {
+                            id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, sourceUrl: url,
+                        };
+                    }
+                    return;
+                }
                 const { id, mime } = await ensureBlob(ref);
                 if (kind === 'image') {
                     sec.images[key] = { blobId: id, mime, filename: ref.filename };
@@ -17582,7 +17799,7 @@ const App = {
                 t.accum = new Float64Array(t.W * t.H);
                 t.count = new Uint32Array(t.W * t.H);
             }
-            const r = await parquetAccumulateTicAndStats(blobId, rec.blob, features, targets, {
+            const r = await parquetAccumulateTicAndStats(blobId, parquetSrcFromBlob(rec.blob), features, targets, {
                 shouldAbort: () => aborted,
                 onCol: (done, total, tm) => {
                     try {
@@ -17980,6 +18197,7 @@ const App = {
             // ROI vanished and would also clobber serverIdsBySection
             // entries the finalize step is about to write into.
             if (this.drawing && this.drawing.mode) return;
+            if (_shareTokenExpired) { this._stopShareRoiPoll(); return; }
             this._refreshShareRois().catch(e => console.warn('share ROI poll failed', e));
         }, 12000);
     },
@@ -17990,6 +18208,7 @@ const App = {
 
     async _refreshShareRois() {
         if (!this.shareMode || !this.shareMode.token || !this.project) return;
+        if (_shareTokenExpired) return;
         const rows = await fetchAllShareRois(this.shareMode.token, this.project.sections);
         const remote = groupRoiRowsByColor(rows, this.project.anatomyPalette);
         // Reconcile: keep the local ROI id stable across polls so
