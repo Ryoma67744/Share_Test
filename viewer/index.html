@@ -1605,9 +1605,12 @@ function readFileAsText(file) {
 // number in BOTH files.
 const ProjectStorage = (() => {
     const DB_NAME = 'desi-projects';
-    // v3: added the `project_index` store (see listProjects). Additive only —
-    // no existing store is touched, so a v2 database upgrades in place.
-    const DB_VERSION = 3;
+    // v3: added the `project_index` store (see listProjects).
+    // v4: added the `pq_index` store — parquet のフッタ索引 (平坦な数値表)。
+    //     これが無いと、開くたびに 280 MB のフッタを 0.7〜1.4 GB のオブジェクトへ
+    //     展開し直すことになる。いずれも追加のみで、既存ストアには触れないので
+    //     古いバージョンのデータベースもそのまま昇格できる。
+    const DB_VERSION = 4;
     let dbPromise = null;
 
     function open() {
@@ -1624,6 +1627,10 @@ const ProjectStorage = (() => {
                 // records, which also repairs a database written by an older
                 // build that did not maintain it.
                 if (!db.objectStoreNames.contains('project_index')) db.createObjectStore('project_index', { keyPath: 'id' });
+                // parquet のフッタ索引。キーは blobId。中身は型付き配列が主なので
+                // 構造化クローンは安い (実データで約 17 MB)。壊れていたり版が
+                // 古かったりしたら黙って捨てて作り直すだけなので、移行処理は不要。
+                if (!db.objectStoreNames.contains('pq_index')) db.createObjectStore('pq_index', { keyPath: 'id' });
             };
             // Another tab holding the old version blocks the upgrade. Without
             // this the page just hangs on a promise that never settles.
@@ -1791,6 +1798,25 @@ const ProjectStorage = (() => {
         await pr(t.objectStore('blobs').delete(id));
     }
 
+    // ---- parquet フッタ索引 (pq_index) --------------------------------------
+    // 中身は viewer 側の _pqSaveIndex / _pqLoadSavedIndex しか知らない。
+    // ここは「blobId をキーに 1 レコードを出し入れする」だけの薄い層。
+    async function getPqIndex(id) {
+        if (!id) return null;
+        const t = await tx(['pq_index'], 'readonly');
+        return await pr(t.objectStore('pq_index').get(id)) || null;
+    }
+    async function putPqIndex(rec) {
+        const t = await tx(['pq_index'], 'readwrite');
+        await pr(t.objectStore('pq_index').put(rec));
+        return rec.id;
+    }
+    async function deletePqIndex(id) {
+        if (!id) return;
+        const t = await tx(['pq_index'], 'readwrite');
+        await pr(t.objectStore('pq_index').delete(id));
+    }
+
     // NOTE: a `pruneOrphanBlobs(project)` helper used to live here. It had no
     // callers anywhere in the repo, and it was dangerous as written — it kept
     // only the blobs of the ONE project passed in and deleted every other
@@ -1823,7 +1849,8 @@ const ProjectStorage = (() => {
         for (const k of all) if (!used.has(k)) await pr(t.objectStore('blobs').delete(k));
     }
 
-    return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, deleteBlob, pruneShareOrphans };
+    return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, deleteBlob, pruneShareOrphans,
+             getPqIndex, putPqIndex, deletePqIndex };
 })();
 
 // =============================================================
@@ -2592,6 +2619,11 @@ const MSI_LUT_CACHE_MAX = 24;
 // postMessage の往復が 90 回ほどになる。大きくしすぎると転送する型付き配列が
 // 増えてピークメモリが上がるので (10 万行 × 4 B × N)、16 で頭打ちにする。
 const PARQUET_TIC_BATCH = 16;
+// parquet worker のタイムアウト。以前は全部 10 分だったので、worker が黙ったときに
+// 10 分間 UI が「読み込み中」のまま無反応に見えていた。フッタ解析だけは長め、
+// 列読みは短めにして、切れたら理由を出す。
+const PARQUET_OPEN_TIMEOUT_MS = 300000;    // フッタ解析 (数百 MB を展開する)
+const PARQUET_COLUMN_TIMEOUT_MS = 120000;  // 1〜数列の読み出し
 
 
 function _roiGridKey(section, layerKey, ent) {
@@ -3270,10 +3302,8 @@ const PARQUET_LIBS = {
     compressors: 'https://cdn.jsdelivr.net/npm/hyparquet-compressors@1.1.1/+esm',
 };
 
-let _pqWorker = null;
+let _pqWorker = null;          // 常駐 worker のハンドル (_makeParquetWorker)
 let _pqWorkerBroken = false;
-let _pqSeq = 0;
-const _pqPending = new Map();
 
 function parquetWorkerSupported() {
     return typeof Worker !== 'undefined' && typeof Blob !== 'undefined'
@@ -3284,7 +3314,7 @@ function parquetWorkerSupported() {
 // 壊れないようにする (既存の parse worker と同じ「関数を toString で運ぶ」方式)。
 function _parquetWorkerBody(self, lib) {
     const { parquetMetadataAsync, parquetRead, compressors } = lib;
-    // 開いたファイルの索引。fileId -> { schema, numRows, colNames, chunksByCol, ... }
+    // 開いたファイルの索引。fileId -> buildIndex() が返す平坦な表
     const opened = new Map();
 
     // Blob を hyparquet の AsyncBuffer に見せる。slice は要求された範囲だけを
@@ -3295,10 +3325,31 @@ function _parquetWorkerBody(self, lib) {
             await blob.slice(start, end === undefined ? blob.size : end).arrayBuffer(),
     });
 
-    // 巨大な metadata から「列ごとの chunk 一覧」だけを抜き出す。
-    // 元の row_groups[].columns[] は (row group 数 × 列数) 個あり、実データでは
-    // 100 万エントリ・280 MB に達する。列ごとに割り直せば 1 列あたり row group 数
-    // ぶんで済み、必要なときにその列だけ組み直せる。
+    // ★ 巨大な metadata から「1 列を読むのに必要な数値」だけを抜き出して、
+    //   **オブジェクトを 1 つも保持しない平坦な表**にする。
+    //
+    // なぜ: hyparquet (metadata.js:132-175) は (row group 数 × 列数) 個の
+    //   ColumnChunk オブジェクトを作る。1 個あたり 17 フィールド + 配列 3 本 +
+    //   ネスト 3 個 + BigInt 5 個。実データ (約 500 row group × 1394 列 =
+    //   約 70 万個) では V8 上で 0.7〜1.4 GB になり、これを 4 切片ぶん同時に
+    //   作っていたためタブが Out of Memory で落ちていた。
+    //   以前の実装はこの重いオブジェクトへの参照を chunksByCol に入れて
+    //   保持し続けていたので、索引を作っても 1 バイトも減らせていなかった。
+    //
+    // 何が要るか (hyparquet 1.27.1 のソースで確認済み):
+    //   plan.js:87-100    chunk.file_path(falsy 判定) / meta.path_in_schema /
+    //                     meta.data_page_offset / meta.dictionary_page_offset /
+    //                     meta.total_compressed_size
+    //   rowgroup.js:26,88 path_in_schema / data_page_offset / dictionary_page_offset
+    //   column.js:88      columnDecoder の type と codec (types.d.ts:494-503 の
+    //                     ColumnDecoder は他に ColumnMetaData 由来の項目を持たない)
+    //   plan.js:40        rowGroup.num_rows
+    //   filter.js:122     statistics — **filter を渡したときだけ**。readColumn は
+    //                     渡さないので、集約したら捨ててよい
+    //   total_byte_size / encodings / num_values / key_value_metadata /
+    //   encoding_stats / size_statistics / geospatial_statistics /
+    //   bloom_filter_* / *_index_* は全列読みでは一切読まれない。
+    const INDEX_VERSION = 2;   // 保存済み索引の形が変わったら上げる
     const buildIndex = (meta) => {
         const colNames = meta.row_groups.length
             ? meta.row_groups[0].columns.map(c => c.meta_data.path_in_schema.join('.'))
@@ -3307,29 +3358,89 @@ function _parquetWorkerBody(self, lib) {
         // (row group 数 × 列数) 回 × 列数 の線形探索になり、実運用規模
         // (500 row group × 2000 列) では 20 億回の文字列比較になって固まる。
         const colIndexByName = new Map(colNames.map((n, i) => [n, i]));
-        // chunksByCol[c][k] と rgIdxByCol[c][k] は対の関係。row group の番号を
-        // 一緒に持つのは、列が欠けた row group があっても行数の割り当てが
-        // ずれないようにするため (minimalMeta が rgRows をこの番号で引く)。
-        const chunksByCol = colNames.map(() => []);
-        const rgIdxByCol = colNames.map(() => []);
-        const rgRows = [];
-        for (let r = 0; r < meta.row_groups.length; r++) {
-            const rg = meta.row_groups[r];
-            rgRows.push(rg.num_rows);
-            for (let j = 0; j < rg.columns.length; j++) {
-                const cc = rg.columns[j];
-                // parquet は row group 内の列を schema 順に並べるので、まず同じ
-                // 位置の名前と一致するかだけ見る。一致すれば名前の文字列化
-                // (実運用で 100 万本・各 150 文字) を丸ごと省ける。
-                let i = -1;
-                const p = cc.meta_data.path_in_schema;
-                if (j < colNames.length && p.length === 1 && p[0] === colNames[j]) i = j;
-                else {
-                    const name = p.join('.');
-                    i = colIndexByName.has(name) ? colIndexByName.get(name) : -1;
-                }
-                if (i >= 0) { chunksByCol[i].push(cc); rgIdxByCol[i].push(r); }
+        const nCol = colNames.length;
+        const nRg = meta.row_groups.length;
+        // 同じ列解決を 2 回まわす。1 周目で列ごとの本数を数えて場所を決め、
+        // 2 周目で数値を書き込む。中間の配列を作らないための 2 パス。
+        const resolve = (cc, j) => {
+            const p = cc.meta_data.path_in_schema;
+            // parquet は row group 内の列を schema 順に並べるので、まず同じ
+            // 位置の名前と一致するかだけ見る。一致すれば名前の文字列化
+            // (実運用で 100 万本・各 150 文字) を丸ごと省ける。
+            if (j < nCol && p.length === 1 && p[0] === colNames[j]) return j;
+            const name = p.join('.');
+            return colIndexByName.has(name) ? colIndexByName.get(name) : -1;
+        };
+        const counts = new Int32Array(nCol);
+        for (let r = 0; r < nRg; r++) {
+            const cols = meta.row_groups[r].columns;
+            for (let j = 0; j < cols.length; j++) {
+                const i = resolve(cols[j], j);
+                if (i >= 0) counts[i]++;
             }
+        }
+        // colStart[c] .. colStart[c+1] がその列の chunk の範囲 (CSR 形式)。
+        const colStart = new Int32Array(nCol + 1);
+        for (let c = 0; c < nCol; c++) colStart[c + 1] = colStart[c] + counts[c];
+        const total = colStart[nCol];
+        const rgIdx   = new Int32Array(total);    // その chunk が属する row group 番号
+        const dataOff = new Float64Array(total);  // data_page_offset
+        const dictOff = new Float64Array(total);  // dictionary_page_offset (無ければ 0)
+        const compSz  = new Float64Array(total);  // total_compressed_size
+        // codec は仕様上 chunk ごとに変えられるので chunk ごとに持つ。ただし
+        // 実際は数種類しかないので、辞書 + 1 バイトの索引にする (総量 0.7 MB)。
+        const codecIds = new Uint8Array(total);
+        const codecList = [];
+        const codecIdOf = (name) => {
+            const s = name || '';
+            let k = codecList.indexOf(s);
+            if (k < 0) { k = codecList.length; codecList.push(s); }
+            return k;
+        };
+        const rgRows = new Float64Array(nRg);
+        // 列ごとの定数。path_in_schema は join せずに実物の配列を持つ
+        // (ネストした列名で split('.') に頼ると壊れるため)。
+        const colPaths = new Array(nCol);
+        const colChunkTypes = new Array(nCol);
+        // statistics はここで集約して捨てる。データを 1 バイトも読まずに真の
+        // min/max が出るのは従来どおり。
+        const stMin = new Float64Array(nCol).fill(Infinity);
+        const stMax = new Float64Array(nCol).fill(-Infinity);
+        const stNulls = new Float64Array(nCol);
+        const stAny = new Uint8Array(nCol);
+        const fill = new Int32Array(nCol);
+        for (let r = 0; r < nRg; r++) {
+            const rg = meta.row_groups[r];
+            rgRows[r] = Number(rg.num_rows);
+            const cols = rg.columns;
+            for (let j = 0; j < cols.length; j++) {
+                const cc = cols[j];
+                const i = resolve(cc, j);
+                if (i < 0) continue;
+                const md = cc.meta_data;
+                const at = colStart[i] + fill[i]++;
+                rgIdx[at]   = r;
+                dataOff[at] = Number(md.data_page_offset);
+                dictOff[at] = md.dictionary_page_offset ? Number(md.dictionary_page_offset) : 0;
+                compSz[at]  = Number(md.total_compressed_size);
+                codecIds[at] = codecIdOf(md.codec);
+                if (colPaths[i] === undefined) {
+                    colPaths[i] = md.path_in_schema.slice();
+                    colChunkTypes[i] = md.type || null;
+                }
+                const s = md.statistics;
+                if (s) {
+                    const lo = Number(s.min_value !== undefined ? s.min_value : s.min);
+                    const hi = Number(s.max_value !== undefined ? s.max_value : s.max);
+                    if (Number.isFinite(lo)) { if (lo < stMin[i]) stMin[i] = lo; stAny[i] = 1; }
+                    if (Number.isFinite(hi)) { if (hi > stMax[i]) stMax[i] = hi; stAny[i] = 1; }
+                    if (s.null_count !== undefined && s.null_count !== null) stNulls[i] += Number(s.null_count);
+                }
+            }
+        }
+        const stats = new Array(nCol);
+        for (let c = 0; c < nCol; c++) {
+            stats[c] = stAny[c] ? { min: stMin[c], max: stMax[c], nulls: stNulls[c] } : null;
         }
         // 列ごとの物理型。フッタの schema に FLOAT / DOUBLE / BYTE_ARRAY として
         // 入っている。受け取る配列の幅をこれで決めるので、こちらで決め打ちしない。
@@ -3337,11 +3448,16 @@ function _parquetWorkerBody(self, lib) {
         // 決め打ちすると DOUBLE で書き出されたファイルを 32bit に丸めてしまう。
         const typeByName = new Map();
         for (const el of (meta.schema || [])) if (el && el.name && el.type) typeByName.set(el.name, el.type);
-        const colTypes = colNames.map(n => typeByName.get(n) || null);
+        const colTypes = colNames.map((n, i) => typeByName.get(n) || colChunkTypes[i] || null);
         return {
+            v: INDEX_VERSION,
+            // schema は全列ぶん残す (2000 要素でも小さい)。hyparquet は
+            // getSchemaPath でここを引くので削れない。
             schema: meta.schema, version: meta.version, created_by: meta.created_by,
             metadata_length: meta.metadata_length, numRows: meta.num_rows,
-            colNames, colTypes, chunksByCol, rgIdxByCol, rgRows,
+            colNames, colTypes, colPaths, colChunkTypes,
+            colStart, rgIdx, dataOff, dictOff, compSz, codecIds, codecList, rgRows,
+            stats,
             kv: (meta.key_value_metadata || []).reduce((o, e) => (o[e.key] = e.value, o), {}),
         };
     };
@@ -3356,33 +3472,44 @@ function _parquetWorkerBody(self, lib) {
         return 'f64';
     };
 
-    // 1 列ぶんの最小 FileMetaData を組み直す。schema は全列ぶん残す (2000 要素でも
-    // 小さい)。捨てるのは row_groups[].columns[] の巨大な配列の方。
-    // ※ この形で全メタデータ読みと完全一致することを合成 parquet で実測済み。
-    const minimalMeta = (idx, colIdx) => ({
-        version: idx.version, schema: idx.schema, num_rows: idx.numRows,
-        created_by: idx.created_by, metadata_length: idx.metadata_length,
-        // num_rows は「その chunk が属する row group の行数」。chunk の並び順では
-        // なく rgIdxByCol で引く — 列が欠けた row group があると 1 つずれるため。
-        row_groups: idx.chunksByCol[colIdx].map((cc, k) => ({
-            columns: [cc], total_byte_size: 0n,
-            num_rows: idx.rgRows[(idx.rgIdxByCol && idx.rgIdxByCol[colIdx][k]) ?? k],
-        })),
-    });
-
-    // row group 横断で統計を集約。データを 1 バイトも読まずに真の min/max が出る。
-    const aggStats = (chunks) => {
-        let min = Infinity, max = -Infinity, nulls = 0, any = false;
-        for (const cc of chunks) {
-            const s = cc.meta_data && cc.meta_data.statistics;
-            if (!s) continue;
-            const lo = Number(s.min_value !== undefined ? s.min_value : s.min);
-            const hi = Number(s.max_value !== undefined ? s.max_value : s.max);
-            if (Number.isFinite(lo)) { if (lo < min) min = lo; any = true; }
-            if (Number.isFinite(hi)) { if (hi > max) max = hi; any = true; }
-            if (s.null_count !== undefined && s.null_count !== null) nulls += Number(s.null_count);
+    // ★ 1 列ぶんの最小 FileMetaData を、**読むときに**平坦な表から組み立てる。
+    //   作るのは (その列の row group 数) 個だけ = 実データで 500 個。
+    //   フッタ全体ぶん (70 万個) を持ち続ける必要が無くなる。
+    //
+    //   オフセット類を BigInt に戻すのは hyparquet の plan.js:93 が
+    //   `columnOffset + meta.total_compressed_size` を計算するため。
+    //   片方だけ Number にすると TypeError になる。
+    const minimalMeta = (idx, colIdx) => {
+        const from = idx.colStart[colIdx], to = idx.colStart[colIdx + 1];
+        const path = idx.colPaths[colIdx] || [idx.colNames[colIdx]];
+        const type = idx.colChunkTypes[colIdx] || idx.colTypes[colIdx];
+        const row_groups = new Array(to - from);
+        for (let k = from; k < to; k++) {
+            const dict = idx.dictOff[k];
+            row_groups[k - from] = {
+                // num_rows は「その chunk が属する row group の行数」。chunk の
+                // 並び順ではなく rgIdx で引く — 列が欠けた row group があると
+                // 1 つずれるため。
+                num_rows: idx.rgRows[idx.rgIdx[k]],
+                total_byte_size: 0n,   // hyparquet は読まない (構築のみ)
+                columns: [{
+                    // file_path は falsy であること (plan.js:88 が例外を投げる)
+                    meta_data: {
+                        path_in_schema: path,
+                        type,
+                        codec: idx.codecList[idx.codecIds[k]],
+                        data_page_offset: BigInt(idx.dataOff[k]),
+                        dictionary_page_offset: dict ? BigInt(dict) : undefined,
+                        total_compressed_size: BigInt(idx.compSz[k]),
+                    },
+                }],
+            };
         }
-        return any ? { min, max, nulls } : null;
+        return {
+            version: idx.version, schema: idx.schema, num_rows: idx.numRows,
+            created_by: idx.created_by, metadata_length: idx.metadata_length,
+            row_groups,
+        };
     };
 
     // mode を省略すると、その列の物理型から自動で決める (modeForType)。
@@ -3414,20 +3541,28 @@ function _parquetWorkerBody(self, lib) {
         const failed = (err) => self.postMessage({ id, ok: false, error: String((err && err.message) || err) });
         try {
             if (op === 'open') {
-                // フッタを 1 回だけ解析して索引にする。実データではここが数百 MB。
+                // フッタを 1 回だけ解析して平坦な索引にする。実データでは
+                // hyparquet がここで 0.7〜1.4 GB のオブジェクトを作るので、
+                // **この worker は使い捨てにして呼び出し側が terminate する**
+                // (主スレッドの parquetEnsureOpen を参照)。buildIndex を抜けた
+                // 時点で meta への参照を手放し、索引だけを返す。
                 const meta = await parquetMetadataAsync(asyncBufferFromBlob(e.data.blob));
                 const idx = buildIndex(meta);
                 opened.set(fileId, idx);
-                // 主スレッドへ返すのは「保存できる形」。BigInt はそのまま構造化
-                // クローンで運べる (JSON にすると落ちるので JSON を挟まないこと)。
+                // 主スレッドへ返すのは「そのまま保存できる形」。型付き配列は
+                // 構造化クローンで運べる (JSON にすると落ちるので JSON を挟まない)。
+                // op:'open' でも索引そのものを返して、呼び出し側が永続化と
+                // op:'restore' に使えるようにする。
                 done({
                     numRows: idx.numRows, colNames: idx.colNames, kv: idx.kv,
-                    stats: idx.chunksByCol.map(aggStats),
+                    stats: idx.stats, index: idx,
                 });
             } else if (op === 'restore') {
                 // 保存しておいた索引を worker に戻す (フッタの再解析を避ける)。
-                opened.set(fileId, e.data.index);
-                done(true);
+                const ix = e.data.index;
+                if (!ix || ix.v !== INDEX_VERSION) throw new Error('parquet: index version mismatch');
+                opened.set(fileId, ix);
+                done({ numRows: ix.numRows, colNames: ix.colNames, kv: ix.kv, stats: ix.stats });
             } else if (op === 'index') {
                 // 永続化用に索引そのものを取り出す。
                 const idx = opened.get(fileId);
@@ -3468,41 +3603,112 @@ function _buildParquetWorkerSource() {
     ].join('\n\n');
 }
 
+// worker を 1 本立てて、自分だけの pending 表を持つハンドルにする。
+// 常駐 worker (列読み用) と、フッタ解析だけをやって捨てる短命 worker の
+// 両方をこれで作る。pending 表を共有していると、短命側を terminate した
+// ときに常駐側の待ちまで巻き込むので必ず分ける。
+function _makeParquetWorker(onFatal) {
+    if (!parquetWorkerSupported()) return null;
+    let url = null, w = null;
+    try {
+        url = URL.createObjectURL(new Blob([_buildParquetWorkerSource()], { type: 'text/javascript' }));
+        w = new Worker(url, { type: 'module' });
+    } catch (e) {
+        console.warn('parquet worker init failed', e);
+        return null;
+    }
+    setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
+    const pending = new Map();
+    let seq = 0, dead = false;
+    const killAll = (msg) => {
+        const list = Array.from(pending.values());
+        pending.clear();
+        list.forEach(p => { try { p.reject(new Error(msg)); } catch (_) {} });
+    };
+    w.onmessage = (e) => {
+        const d = e.data || {};
+        const pend = pending.get(d.id);
+        if (!pend) return;
+        if (d.ok) pend.resolve(d.result);
+        else pend.reject(new Error(d.error || 'parquet worker error'));
+    };
+    w.onerror = (ev) => {
+        // ここに来る主因は 2 つ: CDN からモジュールを取得できない / worker が
+        // メモリ不足で落ちる。xlsx/txt と違ってメインスレッドの代替実装が無いので、
+        // 握りつぶさずに理由を残し、呼び出し側 (onFatal) に知らせる。
+        console.warn('parquet worker error', ev && (ev.message || ev));
+        dead = true;
+        killAll('parquet worker が停止しました (ライブラリを取得できないか、メモリ不足の可能性があります)');
+        try { w.terminate(); } catch (_) {}
+        if (onFatal) { try { onFatal(ev); } catch (_) {} }
+    };
+    return {
+        get dead() { return dead; },
+        call(msg, transfer, timeoutMs) {
+            return new Promise((resolve, reject) => {
+                if (dead) { reject(new Error('parquet worker は停止しています')); return; }
+                const id = ++seq;
+                let timer = null;
+                pending.set(id, {
+                    resolve: (v) => { if (timer) clearTimeout(timer); pending.delete(id); resolve(v); },
+                    reject:  (e) => { if (timer) clearTimeout(timer); pending.delete(id); reject(e); },
+                });
+                if (timeoutMs) {
+                    timer = setTimeout(() => {
+                        const p = pending.get(id);
+                        if (p) { pending.delete(id); p.reject(new Error('parquet worker timeout (' + msg.op + ')')); }
+                    }, timeoutMs);
+                }
+                try { w.postMessage(Object.assign({ id }, msg), transfer || []); }
+                catch (e) { const p = pending.get(id); if (p) { pending.delete(id); p.reject(e); } }
+            });
+        },
+        terminate() {
+            dead = true;
+            killAll('parquet worker を終了しました');
+            try { w.terminate(); } catch (_) {}
+        },
+    };
+}
+
 function _getParquetWorker() {
     if (_pqWorkerBroken) return null;
     if (_pqWorker) return _pqWorker;
-    if (!parquetWorkerSupported()) { _pqWorkerBroken = true; return null; }
-    try {
-        const url = URL.createObjectURL(new Blob([_buildParquetWorkerSource()], { type: 'text/javascript' }));
-        const w = new Worker(url, { type: 'module' });
-        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
-        w.onmessage = (e) => {
-            const d = e.data || {};
-            const pend = _pqPending.get(d.id);
-            if (!pend) return;
-            if (d.ok) pend.resolve(d.result);
-            else pend.reject(new Error(d.error || 'parquet worker error'));
-        };
-        w.onerror = (ev) => {
-            // ここに来る主因は CDN からモジュールを取得できないこと。xlsx/txt と違って
-            // メインスレッドの代替実装が無いので、握りつぶさずに理由を残す。
-            console.warn('parquet worker error', ev && (ev.message || ev));
-            _pqWorkerBroken = true;
-            const pendings = Array.from(_pqPending.values());
-            _pqPending.clear();
-            pendings.forEach(p => {
-                try { p.reject(new Error('parquet worker が起動できませんでした (CDN からライブラリを取得できない可能性があります)')); } catch (_) {}
-            });
-            try { w.terminate(); } catch (_) {}
-            _pqWorker = null;
-        };
-        _pqWorker = w;
-        return _pqWorker;
-    } catch (e) {
-        console.warn('parquet worker init failed', e);
+    const h = _makeParquetWorker(() => {
         _pqWorkerBroken = true;
-        return null;
-    }
+        _pqWorker = null;
+        _notifyParquetBroken();
+    });
+    if (!h) { _pqWorkerBroken = true; return null; }
+    _pqWorker = h;
+    return _pqWorker;
+}
+
+// worker が落ちたことを 1 回だけユーザーに知らせる。以前はコンソールに
+// 出すだけだったので、化合物をクリックしても**何も起きない**ように見えていた。
+let _pqBrokenNotified = false;
+function _notifyParquetBroken() {
+    if (_pqBrokenNotified) return;
+    _pqBrokenNotified = true;
+    try {
+        showToast('parquet の読み込み機能が停止しました。ページを再読み込みしてください'
+            + ' (メモリ不足、またはライブラリを取得できていない可能性があります)', 12000);
+    } catch (e) {}
+}
+
+// レイヤーの読み込みが失敗したことを知らせる。1390 化合物ぶん出さないよう、
+// 15 秒に 1 回だけに絞る (worker が落ちていると全部が同時に失敗するため)。
+let _msiLoadFailNotifiedAt = 0;
+function _notifyMsiLoadFailed(err) {
+    if (_pqWorkerBroken) { _notifyParquetBroken(); return; }
+    const now = (typeof performance !== 'undefined' && performance.now) ? performance.now() : 0;
+    if (_msiLoadFailNotifiedAt && (now - _msiLoadFailNotifiedAt) < 15000) return;
+    _msiLoadFailNotifiedAt = now || 1;
+    const msg = String((err && err.message) || err || '');
+    try {
+        showToast('イオン像を読み込めませんでした' + (msg ? ' (' + msg + ')' : '')
+            + '。詳細はコンソールを確認してください', 8000);
+    } catch (e) {}
 }
 
 // ---- parquet を「1 化合物 = 1 レイヤー」に落とし込む -------------------------
@@ -3519,6 +3725,28 @@ const _pqFiles = new Map();   // blobId -> { fileId, info, geom, blob }
 
 function parquetFileState(blobId) { return _pqFiles.get(blobId) || null; }
 
+// ★ 別のプロジェクトへ移るときに、worker が抱えている索引を明示的に解放する。
+//   op:'close' は最初から実装されていたのに**呼び出し側が 1 つも無く**、
+//   worker の opened Map はタブの寿命ぶん縮まなかった。索引を平坦にして
+//   1 ファイルあたり約 17 MB まで減らしたので致命的ではなくなったが、
+//   プロジェクトを渡り歩くと積み上がるので、ここで返す。
+//   (次に同じファイルを開くときは IndexedDB の pq_index から復元されるので、
+//    フッタを読み直すことにはならない。)
+function parquetReleaseAll() {
+    const ids = [];
+    for (const st of _pqFiles.values()) if (st && st.fileId) ids.push(st.fileId);
+    _pqFiles.clear();
+    _pqOpening.clear();
+    _pqGeomLoading.clear();
+    _pqColumnInFlight.clear();
+    if (!ids.length) return;
+    if (_pqWorkerBroken || !_pqWorker) return;   // 立ち上げ直してまで閉じない
+    for (const fileId of new Set(ids)) {
+        callParquetWorker({ op: 'close', fileId }, [], 15000)
+            .catch(e => console.warn('[parquet] close failed', fileId, e));
+    }
+}
+
 // 登録ウィザードは「まだ blobId が決まっていない」段階で開くため 'reg_<名前>_<サイズ>'
 // を仮キーにしている。putBlob で本番の blobId が決まったら、解析済みの状態を
 // そちらにも張る。これが無いと **初回表示で 280 MB のフッタを解析し直し、
@@ -3531,20 +3759,104 @@ function parquetAliasFileState(fromBlobId, toBlobId) {
     return true;
 }
 
-// フッタを 1 回だけ解析して索引を worker に持たせる。2 回目以降は何もしない。
+// ★ フッタの解析は「1 ファイルにつき生涯 1 回」。
+//
+// 以前はここに in-flight の重複排除が無く、rebuildSectionPanels が並行度 4 で
+// パネルを読むため、同じ blobId に対して op:'open' が **4 本同時に**飛んでいた。
+// hyparquet はフッタ 280 MB を 0.7〜1.4 GB のオブジェクトに展開するので、
+// ピークが 4 倍になってタブが Out of Memory で落ちていた。
+//
+// 対策は 3 段:
+//   ① 進行中の Promise を共有する (このマップ)
+//   ② 索引を IndexedDB に保存し、次からは op:'restore' で戻すだけにする
+//   ③ 解析そのものは**使い捨ての worker**でやり、終わったら terminate する
+//      (hyparquet が作った巨大なオブジェクトを worker のヒープごと確実に手放す)
+const _pqOpening = new Map();    // blobId -> Promise<state>
+const _pqGeomLoading = new Map();// blobId -> Promise<geom>
+
+// 保存した索引が「この版のコードで読める」ことの印。buildIndex の形を変えたら
+// worker 側の INDEX_VERSION と一緒にここも上げる (不一致なら黙って作り直す)。
+const PQ_INDEX_VERSION = 2;
+
+async function _pqLoadSavedIndex(blobId) {
+    try {
+        const rec = await ProjectStorage.getPqIndex(blobId);
+        if (!rec || !rec.index) return null;
+        if (rec.v !== PQ_INDEX_VERSION || rec.index.v !== PQ_INDEX_VERSION) {
+            // 古い形。捨てて作り直す (壊れた索引で読むより安全)。
+            try { await ProjectStorage.deletePqIndex(blobId); } catch (e) {}
+            return null;
+        }
+        return rec.index;
+    } catch (e) {
+        console.warn('[parquet] 索引の読み出しに失敗', e);
+        return null;
+    }
+}
+
+async function _pqSaveIndex(blobId, index) {
+    await ProjectStorage.putPqIndex({ id: blobId, v: PQ_INDEX_VERSION, index, savedAt: nowIso() });
+}
+
+async function _pqDeleteSavedIndex(blobId) {
+    await ProjectStorage.deletePqIndex(blobId);
+}
+
+async function _pqOpenViaThrowawayWorker(fileId, blob) {
+    // フッタ解析専用の短命 worker。索引を受け取ったら即 terminate するので、
+    // hyparquet が作った 70 万個のオブジェクトと 280 MB の ArrayBuffer は
+    // GC を待たずにヒープごと解放される。
+    const h = _makeParquetWorker(null);
+    if (!h) throw new Error('parquet worker を起動できませんでした');
+    try {
+        return await h.call({ op: 'open', fileId, blob }, [], PARQUET_OPEN_TIMEOUT_MS);
+    } finally {
+        try { h.terminate(); } catch (e) {}
+    }
+}
+
 async function parquetEnsureOpen(blobId, blob) {
-    let st = _pqFiles.get(blobId);
-    if (st && st.info) return st;
-    const fileId = 'pq_' + blobId;
-    const info = await callParquetWorker({ op: 'open', fileId, blob }, [], 600000);
-    // mz_sorted は %.10g なので末尾ゼロが落ちる (列名 794.5450 に対し 794.545)。
-    // 文字列で突き合わせず、必ず数値にしてから使う。列順と 1:1 なので、本来は
-    // 位置対応で足り、数値は検算と表示用。
-    const mz = String((info.kv && info.kv.mz_sorted) || '')
-        .split(',').map(s => Number(s)).filter(Number.isFinite);
-    st = { fileId, info, mz, blob, geom: null };
-    _pqFiles.set(blobId, st);
-    return st;
+    const cached = _pqFiles.get(blobId);
+    if (cached && cached.info) return cached;
+    const running = _pqOpening.get(blobId);
+    if (running) return running;                 // ← 4 本目までが同じ Promise を待つ
+    const p = (async () => {
+        const fileId = 'pq_' + blobId;
+        let info = null;
+        // ② 保存済みの索引があれば、フッタを一切読まずに worker へ戻す。
+        const saved = await _pqLoadSavedIndex(blobId);
+        if (saved) {
+            try {
+                info = await callParquetWorker({ op: 'restore', fileId, index: saved }, [], 60000);
+            } catch (e) {
+                console.warn('[parquet] 保存済み索引を復元できませんでした。作り直します', e);
+                info = null;
+                try { await _pqDeleteSavedIndex(blobId); } catch (e2) {}
+            }
+        }
+        if (!info) {
+            // ③ 使い捨て worker でフッタを解析し、平坦な索引だけを受け取る。
+            const opened = await _pqOpenViaThrowawayWorker(fileId, blob);
+            const index = opened && opened.index;
+            if (!index) throw new Error('parquet: 索引を作れませんでした');
+            // 常駐 worker には索引だけを渡す (フッタは二度と読まない)。
+            await callParquetWorker({ op: 'restore', fileId, index }, [], 60000);
+            info = { numRows: opened.numRows, colNames: opened.colNames, kv: opened.kv, stats: opened.stats };
+            // 次回のために保存する。失敗しても動作には影響しない。
+            _pqSaveIndex(blobId, index).catch(e => console.warn('[parquet] 索引の保存に失敗', e));
+        }
+        // mz_sorted は %.10g なので末尾ゼロが落ちる (列名 794.5450 に対し 794.545)。
+        // 文字列で突き合わせず、必ず数値にしてから使う。列順と 1:1 なので、本来は
+        // 位置対応で足り、数値は検算と表示用。
+        const mz = String((info.kv && info.kv.mz_sorted) || '')
+            .split(',').map(s => Number(s)).filter(Number.isFinite);
+        const st = { fileId, info, mz, blob, geom: null };
+        _pqFiles.set(blobId, st);
+        return st;
+    })();
+    _pqOpening.set(blobId, p);
+    try { return await p; }
+    finally { _pqOpening.delete(blobId); }
 }
 
 // m/z 列の範囲。仕様で列順は id, x, y, <m/z 群>, annotation に固定されている。
@@ -3563,7 +3875,20 @@ function parquetColumnRoles(colNames) {
 }
 
 // x/y/annotation を 1 回読み、切片ごとの格子と「行番号 → 格子位置」を作る。
+// parquetEnsureOpen と同じ理由で in-flight を共有する — これが無いと 4 パネルが
+// x/y/annotation の 3 列を 4 回ずつ読み、10 万行ぶんの中間配列も 4 倍になる。
 async function parquetEnsureGeometry(blobId, blob) {
+    const st0 = _pqFiles.get(blobId);
+    if (st0 && st0.geom) return st0.geom;
+    const running = _pqGeomLoading.get(blobId);
+    if (running) return running;
+    const p = (async () => await _parquetBuildGeometry(blobId, blob))();
+    _pqGeomLoading.set(blobId, p);
+    try { return await p; }
+    finally { _pqGeomLoading.delete(blobId); }
+}
+
+async function _parquetBuildGeometry(blobId, blob) {
     const st = await parquetEnsureOpen(blobId, blob);
     if (st.geom) return st.geom;
     const roles = parquetColumnRoles(st.info.colNames);
@@ -3571,7 +3896,7 @@ async function parquetEnsureGeometry(blobId, blob) {
     const idxs = [roles.xIdx, roles.yIdx];
     if (roles.annIdx >= 0) idxs.push(roles.annIdx);
     const cols = await callParquetWorker(
-        { op: 'columns', fileId: st.fileId, blob, colIdxs: idxs }, [], 600000);
+        { op: 'columns', fileId: st.fileId, blob, colIdxs: idxs }, [], PARQUET_COLUMN_TIMEOUT_MS);
     const xs = cols[0], ys = cols[1];
     // annotation 列が無いファイルは全行を 1 切片として扱う。
     const ann = (roles.annIdx >= 0 && cols[2]) ? cols[2] : null;
@@ -3617,7 +3942,39 @@ async function parquetSectionGeom(ent, blob) {
     const sec = geom.sections.find(s => s.label === ent.annotation)
         || (geom.sections.length === 1 ? geom.sections[0] : null);
     if (!sec) throw new Error('parquet: 切片 "' + ent.annotation + '" が見つかりません');
-    return { geom, sec, st: _pqFiles.get(ent.blobId) };
+    // st は必ず _pqFiles の 1 個。以前は parquetEnsureOpen が await のあとで
+    // 毎回新しい st を作って last-writer-wins で上書きしていたため、
+    // 「geom は自分の st 由来、st は他人の st」という食い違いが起きえた
+    // (下流が fileId しか見ていなかったので実害は出ていなかっただけ)。
+    // in-flight を共有するようにしたので、いまは 1 個であることが保証される。
+    const st = _pqFiles.get(ent.blobId);
+    if (!st) throw new Error('parquet: file not opened');
+    return { geom, sec, st };
+}
+
+// ★ 同じ列を同時に何本も読まない。
+//
+// 1 本の parquet を 4 切片が共有していると、化合物を 1 つクリックしただけで
+// 4 パネルが**まったく同じ列**を読みに行く。列は全 annotation にまたがるので
+// 中身も同一で、4 回ぶんの伸長 (10 万値) と転送が丸ごと無駄になっていた。
+// 進行中の読みを共有して 1 回にする。
+//
+// 返す配列は呼び出し側で書き換えないこと (scatterParquetColumn は読むだけで、
+// 出力用の配列は必ず新しく作る)。
+const _pqColumnInFlight = new Map();   // 'blobId|colIdx|mode' -> Promise
+
+function parquetReadColumnShared(st, blob, blobId, colIdx, mode) {
+    const key = blobId + '|' + colIdx + '|' + (mode || '');
+    const running = _pqColumnInFlight.get(key);
+    if (running) return running;
+    const msg = { op: 'column', fileId: st.fileId, blob, colIdx };
+    if (mode) msg.mode = mode;
+    const p = callParquetWorker(msg, [], PARQUET_COLUMN_TIMEOUT_MS);
+    _pqColumnInFlight.set(key, p);
+    // 成否にかかわらず、終わったら印を外す (失敗を握り続けない)。
+    const clear = () => { if (_pqColumnInFlight.get(key) === p) _pqColumnInFlight.delete(key); };
+    p.then(clear, clear);
+    return p;
 }
 
 // 1 列を読んで、その切片の格子へ散らす。**この 1 行が表示ラスタと ROI 統計の
@@ -3633,8 +3990,7 @@ function scatterParquetColumn(col, sec, Arr) {
 // 読むのは約 0.3 MB の 1 列だけ。xlsx/txt のようにファイル全体を展開しない。
 async function parquetRoiGrid(ent, blob) {
     const { sec, st } = await parquetSectionGeom(ent, blob);
-    const col = await callParquetWorker(
-        { op: 'column', fileId: st.fileId, blob, colIdx: ent.colIdx }, [], 600000);
+    const col = await parquetReadColumnShared(st, blob, ent.blobId, ent.colIdx, null);
     if (!col) return null;
     // ROI 統計は Float64 で持つ (DESI 経路の _ensureRoiRawGrid と同じ精度)。
     return { W: sec.W, H: sec.H, values: scatterParquetColumn(col, sec, Float64Array) };
@@ -3644,8 +4000,7 @@ async function parquetRoiGrid(ent, blob) {
 // 呼び出し側 (loadMsiLayer) は xlsx/txt と区別せずに扱える。
 async function buildParquetRaster(ent, blob) {
     const { sec, st } = await parquetSectionGeom(ent, blob);
-    const col = await callParquetWorker(
-        { op: 'column', fileId: st.fileId, blob, colIdx: ent.colIdx }, [], 600000);
+    const col = await parquetReadColumnShared(st, blob, ent.blobId, ent.colIdx, null);
     if (!col) throw new Error('parquet: 列を読めませんでした');
     // 格子へ散らす (ROI 統計と同じ関数を通す)。触れなかったセルは NaN のまま
     // = データ無し (走査外)。
@@ -3811,24 +4166,12 @@ async function parquetAccumulateTicAndStats(blobId, blob, features, targets, opt
 }
 
 function callParquetWorker(msg, transfer, timeoutMs) {
-    return new Promise((resolve, reject) => {
-        const w = _getParquetWorker();
-        if (!w) { reject(new Error('parquet worker unavailable')); return; }
-        const id = ++_pqSeq;
-        let timer = null;
-        _pqPending.set(id, {
-            resolve: (v) => { if (timer) clearTimeout(timer); _pqPending.delete(id); resolve(v); },
-            reject:  (e) => { if (timer) clearTimeout(timer); _pqPending.delete(id); reject(e); },
-        });
-        if (timeoutMs) {
-            timer = setTimeout(() => {
-                const p = _pqPending.get(id);
-                if (p) { _pqPending.delete(id); p.reject(new Error('parquet worker timeout')); }
-            }, timeoutMs);
-        }
-        try { w.postMessage(Object.assign({ id }, msg), transfer || []); }
-        catch (e) { const p = _pqPending.get(id); if (p) { _pqPending.delete(id); p.reject(e); } }
-    });
+    const w = _getParquetWorker();
+    if (!w) {
+        _notifyParquetBroken();
+        return Promise.reject(new Error('parquet worker unavailable'));
+    }
+    return w.call(msg, transfer, timeoutMs);
 }
 
 // =============================================================
@@ -4112,7 +4455,11 @@ class SectionPanel {
                 this._touchMsiLru(key);
                 return true;
             } catch (e) {
+                // ★ 握り潰さない。以前はここで console.warn だけして false を
+                //   返していたので、parquet worker が落ちていると化合物を
+                //   クリックしても**何も起きず、何も表示されない**状態になった。
                 console.warn('MSI レイヤーの遅延読み込みに失敗', key, e);
+                _notifyMsiLoadFailed(e);
                 return false;
             } finally {
                 this._msiLoadInFlight.delete(key);
@@ -8502,7 +8849,7 @@ async function readParquetSidecar(file) {
     }
     if (!idxs.length) return null;
     const cols = await callParquetWorker(
-        { op: 'columns', fileId: st.fileId, blob: file, colIdxs: idxs }, [], 600000);
+        { op: 'columns', fileId: st.fileId, blob: file, colIdxs: idxs }, [], PARQUET_COLUMN_TIMEOUT_MS);
     const n = cols[0] ? cols[0].length : 0;
     const out = [];
     for (let r = 0; r < n; r++) {
@@ -16681,6 +17028,7 @@ const App = {
 
         this.project = project;
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
+        parquetReleaseAll();               // worker が抱えている parquet 索引も返す
         // Restore the project-level colormap before the first render so the
         // initial paint already uses the recipient's last-picked map (or
         // master's published default). sessionStorage entry wins so a
@@ -16917,6 +17265,7 @@ const App = {
         // 前回のセッションで公開しきれなかった編集があればここで拾い直す。
         this._publishDirty = !!project.__publishPending;
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
+        parquetReleaseAll();               // worker が抱えている parquet 索引も返す
         this.project.anatomyPalette = this.project.anatomyPalette || DEFAULT_ANATOMY_PALETTE;
         this.project.sections = this.project.sections || [];
         this.project.rois = this.project.rois || [];
@@ -17057,6 +17406,7 @@ const App = {
         const id = this.project.id;
         this.project = null;
         _roiRawGridCache.clear();
+        parquetReleaseAll();
         this.panels.forEach(p => p.destroy());
         this.panels.clear();
         await ProjectStorage.deleteProject(id);
@@ -17430,8 +17780,19 @@ const App = {
             grid.appendChild(panel.root);
             return panel;
         });
-        let liIdx = 0;
-        await Promise.all(Array.from({ length: Math.min(4, panelsToLoad.length) }, async () => {
+        // ★ 1 枚目だけは単独で読む。
+        //   parquet を共有する切片では、1 枚目が「フッタ索引」と「行→格子の
+        //   対応表」を作る。これらは parquetEnsureOpen / parquetEnsureGeometry の
+        //   in-flight 共有で 1 回にまとめられるが、**1 枚目を先に通しておけば
+        //   そもそも同時に走らない**ので、ピークが確実に 1 本ぶんで収まる。
+        //   (ここが並行度 4 のままだったため、280 MB のフッタを 4 回同時に
+        //    展開してタブが Out of Memory で落ちていた。)
+        if (panelsToLoad.length) {
+            try { await panelsToLoad[0].loadAllLayers(); }
+            catch (e) { console.warn('loadAllLayers failed', panelsToLoad[0].section && panelsToLoad[0].section.id, e); }
+        }
+        let liIdx = 1;
+        await Promise.all(Array.from({ length: Math.min(4, Math.max(0, panelsToLoad.length - 1)) }, async () => {
             while (liIdx < panelsToLoad.length) {
                 const p = panelsToLoad[liIdx++];
                 try { await p.loadAllLayers(); }
