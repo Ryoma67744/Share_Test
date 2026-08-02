@@ -87,6 +87,10 @@ revoke all on public.mrm_usages      from anon, authenticated;
 --     compound (consolidated in the management UI). Auto-assigned on create,
 --     editable so two name variants can be set to the same number.
 alter table public.mrm_compounds add column if not exists serial_no integer;
+-- max(serial_no) is taken on every register_from_result and once per batch;
+-- without this it is a sequential scan of the whole table. Kept next to the
+-- column so pasting just this section into the editor still works.
+create index if not exists mrm_compounds_serial_idx on public.mrm_compounds(serial_no);
 -- Backfill rows with a null serial_no, continuing past any existing max so we
 -- never collide. No-op once every row has a number (idempotent).
 update public.mrm_compounds c
@@ -538,6 +542,7 @@ declare
     v_tid     uuid;
     v_uid     uuid;
     v_serial  integer;
+    v_isnew   boolean;
     v_name    text;
     v_out     jsonb := '[]'::jsonb;
     v_ok      int := 0;
@@ -550,6 +555,14 @@ begin
         raise exception 'rows must be a jsonb array';
     end if;
 
+    -- serial_no is seeded once and held for the whole call, which widens the
+    -- read-modify-write race the single-row function has for ~1 statement into
+    -- one that lasts the whole batch. There is no unique constraint on
+    -- serial_no, and the management UI treats "same serial_no" as "same
+    -- logical compound" (mrm.html), so two concurrent batches handing out the
+    -- same numbers would visibly merge unrelated compounds. Serialise the
+    -- assignment; the lock is released at transaction end.
+    perform pg_advisory_xact_lock(hashtext('public.mrm_compounds.serial_no'));
     select coalesce(max(serial_no), 0) into v_serial from public.mrm_compounds;
 
     for v_row in select * from jsonb_array_elements(_rows)
@@ -559,9 +572,17 @@ begin
             if length(v_name) = 0 then
                 raise exception 'name required';
             end if;
-            v_serial := v_serial + 1;
+            -- Only a genuinely new compound consumes a number. The single-row
+            -- function recomputes max()+1 per call, so a re-register leaves no
+            -- gap; bumping unconditionally here would drift the counter far
+            -- past the table's real max when re-registering known compounds.
+            -- (name is UNIQUE, so this is one index probe.)
+            select not exists (select 1 from public.mrm_compounds where name = v_name) into v_isnew;
+            if v_isnew then v_serial := v_serial + 1; end if;
 
-            -- 1. compound (identical to register_from_result step 1)
+            -- 1. compound (identical to register_from_result step 1; on the
+            --    conflict path serial_no is not in the DO UPDATE list, so the
+            --    value passed here is ignored and the existing number stands)
             insert into public.mrm_compounds(name, tags, polarity, serial_no, check_level, shelf)
                  values (v_name,
                          coalesce((select array_agg(x) from jsonb_array_elements_text(
@@ -606,25 +627,31 @@ begin
                                                  'usage_id', v_uid);
         exception when others then
             -- The row's own subtransaction rolls back; the batch continues.
-            -- Re-seed the counter because a rolled-back insert may or may not
-            -- have consumed the number we handed out.
+            -- Re-seed from max(): the rolled-back insert did NOT persist the
+            -- number we handed out, so the counter is now ahead of reality.
+            -- (Re-seeding always lands on a free number, since every serial
+            -- that actually persisted is <= max.)
             v_fail := v_fail + 1;
+            -- Keep the SQLSTATE: `when others` also catches transient classes
+            -- (40001 serialization failure, 40P01 deadlock) that a caller may
+            -- want to retry, and they are indistinguishable from a permanent
+            -- data error by message alone.
             v_out := v_out || jsonb_build_object('ok', false,
                                                  'name', coalesce(v_row->>'name', ''),
+                                                 'sqlstate', SQLSTATE,
                                                  'error', SQLERRM);
             select coalesce(max(serial_no), 0) into v_serial from public.mrm_compounds;
         end;
     end loop;
 
-    return jsonb_build_object('ok', v_ok, 'failed', v_fail, 'results', v_out);
+    -- ok_count, not ok: each element of `results` uses 'ok' as a boolean, and
+    -- register_from_result returns 'ok': true. A batch where every row failed
+    -- would otherwise return a falsy 'ok' under the same name as a success flag.
+    return jsonb_build_object('ok_count', v_ok, 'failed', v_fail, 'results', v_out);
 end
 $$;
 
 grant execute on function public.register_from_result_batch(text, jsonb) to anon, authenticated;
-
--- max(serial_no) is taken on every single-row register_from_result and once
--- per batch; without this it is a sequential scan of the whole table.
-create index if not exists mrm_compounds_serial_idx on public.mrm_compounds(serial_no);
 
 -- ---- 6b. Instrument .exp template storage ------------------
 -- Single-row table holding the MassLynx ".exp" template text. The instrument
@@ -977,6 +1004,7 @@ grant execute on function public.get_exp_template_ro(text)  to anon, authenticat
 -- drop function if exists public.set_exp_template(text, text);
 -- drop table if exists public.mrm_exp_template;
 -- drop function if exists public.register_from_result(text, text, text[], text, numeric, numeric, numeric, numeric, text, text, text, text, text[]);
+-- drop function if exists public.register_from_result_batch(text, jsonb);
 -- drop function if exists public.record_usage(text, uuid, text, text, text, text, text[]);
 -- drop function if exists public.delete_transition(text, uuid);
 -- drop function if exists public.update_transition(text, uuid, numeric, numeric, numeric, numeric, text, boolean, text, text);

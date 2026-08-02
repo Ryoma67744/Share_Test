@@ -1630,7 +1630,13 @@ const ProjectStorage = (() => {
             req.onblocked = () => {
                 try { alert('別のタブでこのアプリが開いています。\nそのタブを閉じるか再読み込みしてください (データベースの更新待ちです)。'); } catch (e) {}
             };
-            req.onsuccess = () => resolve(req.result);
+            req.onsuccess = () => {
+                // Another tab requesting a newer version must not be blocked
+                // by this connection: close it and let that tab upgrade. The
+                // next call here re-opens at the new version.
+                try { req.result.onversionchange = () => { try { req.result.close(); } catch (e) {} dbPromise = null; }; } catch (e) {}
+                resolve(req.result);
+            };
             req.onerror = () => reject(req.error);
         });
         return dbPromise;
@@ -1691,12 +1697,18 @@ const ProjectStorage = (() => {
             console.warn('project_index read failed; falling back to a full scan', e);
         }
         // ---- backfill ----
-        const t2 = await tx(['projects'], 'readonly');
+        // ★ Scan and rebuild in ONE readwrite transaction. Doing the scan in
+        //   one transaction and the clear()+put()s in another leaves a window
+        //   where a concurrent putProject writes a correct summary row that
+        //   the backfill then wipes and replaces with the stale one it read.
+        //   The counts would still match afterwards, so the staleness check
+        //   below could never notice — and a stale slug feeds the import
+        //   dedupe, which deletes a project.
+        const t2 = await tx(['projects', 'project_index'], 'readwrite');
         const all = await pr(t2.objectStore('projects').getAll());
         const rows = (all || []).map(indexRowFor);
         try {
-            const t3 = await tx(['project_index'], 'readwrite');
-            const st = t3.objectStore('project_index');
+            const st = t2.objectStore('project_index');
             await pr(st.clear());
             for (const r of rows) await pr(st.put(r));
         } catch (e) { console.warn('project_index backfill failed', e); }
@@ -7998,8 +8010,16 @@ async function registerSelectedToMrmLibrary() {
     // 旧経路は 1 化合物 = 1 RPC の直列 await で、RPC ごとに bcrypt(cost 12) が
     // 走っていた。1390 化合物で 8〜15 分。バッチは検証 1 回で済む。
     // SQL は手で適用する運用なので、RPC が無ければ黙って旧経路へ落ちる。
-    const CHUNK = 500;
+    // 1 リクエストの行数。小さめにしてある理由が 2 つある:
+    //  ・500 行 = 1500 INSERT を 1 文で回すと、role の statement_timeout に
+    //    掛かったときにそのチャンクが丸ごと巻き戻る。取りこぼしは小さいほうがよい
+    //  ・行ごとの EXCEPTION ブロックはサブトランザクションを作る。1 バックエンドの
+    //    subxid キャッシュは 64 なので、それを超えると他のセッションの可視性判定が
+    //    SLRU 参照に落ちる
+    // 50 行なら 1390 件で 28 往復 = bcrypt 28 回 (元は 1390 回)。
+    const CHUNK = 50;
     let progress = null, cancelled = false;
+    let ok = 0, fail = 0, done = 0, sentUpTo = 0;
     try {
         if (rows.length > 1) {
             progress = openPublishProgressModal(rows.length, {
@@ -8010,26 +8030,26 @@ async function registerSelectedToMrmLibrary() {
             });
             progress.setCancelHandler(() => { cancelled = true; });
         }
-        let ok = 0, fail = 0, done = 0;
         for (let i = 0; i < rows.length; i += CHUNK) {
-            if (cancelled) { if (progress) progress.close(); finish(ok, fail, true); return; }
+            if (cancelled) break;
             const chunk = rows.slice(i, i + CHUNK);
             const res = await SupabaseClient.registerFromResultBatch(
                 masterPw, chunk.map(r => {
                     const o = Object.assign({}, r); delete o.layerKey; return o;
                 }));
-            ok += (res && Number(res.ok)) || 0;
+            ok += (res && Number(res.ok_count)) || 0;
             fail += (res && Number(res.failed)) || 0;
             // 失敗行は名前つきでコンソールへ (どれが落ちたか追えるように)。
             const results = (res && Array.isArray(res.results)) ? res.results : [];
             for (const r of results) {
-                if (r && r.ok === false) console.warn('register_from_result_batch row failed:', r.name, r.error);
+                if (r && r.ok === false) console.warn('register_from_result_batch row failed:', r.name, r.sqlstate, r.error);
             }
             done += chunk.length;
+            sentUpTo = i + chunk.length;   // ここまでは確定 (コミット済み)
             if (progress) progress.update(done, rows.length);
         }
         if (progress) progress.close();
-        finish(ok, fail, false);
+        finish(ok, fail, cancelled);
         return;
     } catch (e) {
         if (progress) progress.close();
@@ -8039,7 +8059,19 @@ async function registerSelectedToMrmLibrary() {
             const msg = String((e && (e.message || e.details)) || '');
             if (/unauthorized|28000/i.test(msg)) { showToast('Master password が違います', 4000); return; }
             console.warn('register_from_result_batch failed', e);
-            showToast('MRM管理への登録に失敗しました: ' + msg, 5000);
+            // ★ ここで諦めて return してはいけない。usages は常に追記なので、
+            //   選択を残したままユーザーが押し直すと、既にコミット済みのぶんが
+            //   二重に登録される。ここまでの結果を確定させて選択を解除する。
+            showToast('MRM管理への登録に失敗しました (' + ok + ' 件は登録済み): ' + msg, 6000);
+            finish(ok, fail, true);
+            return;
+        }
+        if (sentUpTo > 0) {
+            // 一部だけコミットされた状態で RPC が消えるのは実際上起こらないが、
+            // 起きたときに先頭から 1 件ずつ流し直すと二重登録になる。
+            console.warn('register_from_result_batch disappeared mid-run; not replaying committed rows');
+            showToast('MRM管理への登録が中断しました (' + ok + ' 件は登録済み)', 6000);
+            finish(ok, fail, true);
             return;
         }
         console.warn('register_from_result_batch not found — falling back to one RPC per row. '
@@ -8047,7 +8079,7 @@ async function registerSelectedToMrmLibrary() {
     }
 
     // ---- 旧経路 (1 件 1 RPC) --------------------------------------------
-    let ok = 0, fail = 0;
+    ok = 0; fail = 0;
     progress = (rows.length > 1) ? openPublishProgressModal(rows.length, {
         title: 'MRM管理へ登録中…',
         subtitle: rows.length + ' 件を 1 件ずつ登録します (SQL が未更新のため時間がかかります)。',
@@ -15915,7 +15947,14 @@ const App = {
             if (newId) {
                 history.replaceState({}, '', location.pathname + '?project=' + encodeURIComponent(newId));
                 try { await this.openProject(newId); }
-                catch (e) { console.warn('open after import failed', e); this.renderEmpty(); }
+                catch (e) {
+                    console.warn('open after import failed', e);
+                    this.renderEmpty();
+                    // openProject is what normally fills the picker; on this
+                    // branch it did not run, and renderEmpty leaves the
+                    // <select> empty — no way back except editing the URL.
+                    try { await this.refreshProjectPicker(); } catch (e2) {}
+                }
             } else {
                 location.href = '../';
             }
@@ -15947,12 +15986,13 @@ const App = {
         // normally does it, and it did not run on this path.
         if (!opened) {
             try {
+                // refreshProjectPicker lists again; do it once and reuse.
                 const all = await ProjectStorage.listProjects();
                 if (!all.length) {
                     location.replace('../');
                     return;
                 }
-                await this.refreshProjectPicker();
+                this._fillProjectPicker(all);
             } catch (e) {}
         }
     },
@@ -16190,27 +16230,58 @@ const App = {
         catch (e) { alert('project doc 取得失敗: ' + (e.message || e)); return null; }
         if (!doc) { alert('project doc が空です'); return null; }
 
-        // Same-slug Local project? Confirm overwrite. This is rare on a
-        // fresh PC but common on the original PC re-importing to pull
-        // edits from another machine.
+        // Same-slug Local project? Ask BEFORE downloading — but delete AFTER.
+        //
+        // ★ This branch used to be unreachable: listProjects() projected
+        //   shareInfo away, so the find() never matched. Now that the summary
+        //   carries shareInfo it fires for real, which makes the ORDER matter:
+        //   the original code deleted the local project (and every one of its
+        //   blobs) and only then started downloading the replacement.
+        //   _buildLocalProjectFromDoc treats every blob download failure as
+        //   non-fatal, so a dropped connection or an IDB quota error partway
+        //   through 1390 layers would leave a stub and no way back.
+        //   Build and save the replacement FIRST, drop the old copy LAST, and
+        //   only when every layer actually arrived.
+        let existing = null;
         try {
-            const existing = (await ProjectStorage.listProjects())
-                .find(p => p && p.shareInfo && p.shareInfo.slug === slug);
-            if (existing) {
-                const ok = confirm(
-                    'Local に "' + slug + '" が既に存在します。\n' +
-                    'サーバの内容で上書きしますか? (Cancel: 取り込み中止)\n\n' +
-                    '※ 未 publish のローカル編集は失われます。'
-                );
-                if (!ok) return null;
-                try { await ProjectStorage.deleteProject(existing.id); } catch (e) {}
-            }
+            existing = (await ProjectStorage.listProjects())
+                .find(p => p && p.shareInfo && p.shareInfo.slug === slug) || null;
         } catch (e) { console.warn('listProjects during import failed', e); }
+        if (existing) {
+            // Name the LOCAL project, not the slug — that is how the user
+            // recognises it. And be honest about what the doc cannot carry.
+            const ok = confirm(
+                'Local に "' + (existing.displayName || slug) + '" (slug: ' + slug + ') が既にあります。\n' +
+                'サーバの内容で取り込み直しますか? (Cancel: 中止)\n\n' +
+                '取り込みが完全に成功したら、いまのローカル版は削除されます。\n' +
+                '引き継がれないもの:\n' +
+                '  ・未 publish の編集 / 切片 / レイヤー\n' +
+                '  ・共有パスワード (viewer / admin) — 次の publish で入れ直しになります\n' +
+                '  ・配色・平滑化・背景除去などの表示設定\n' +
+                '  ・管理画面のフォルダ内の位置 (新しい ID になるため)'
+            );
+            if (!ok) return null;
+        }
 
         const project = await this._buildLocalProjectFromDoc(slug, doc, session);
         if (!project) return null;
+        const importFailures = project.__importFailures || 0;
+        delete project.__importFailures;          // 永続化するレコードには残さない
         try { await ProjectStorage.putProject(project); }
         catch (e) { alert('IDB 保存失敗: ' + (e.message || e)); return null; }
+
+        // ここまで来て初めて古いローカル版を消せる。1 枚でも落ちていたら消さない。
+        if (existing) {
+            if (importFailures) {
+                alert('取り込みは完了しましたが ' + importFailures + ' 件のレイヤーを'
+                    + 'ダウンロードできませんでした。\n'
+                    + '安全のため、いまのローカル版 "' + (existing.displayName || slug) + '" は残しています。\n'
+                    + '取り込んだ方に問題がなければ、管理画面から手動で削除してください。');
+            } else {
+                try { await ProjectStorage.deleteProject(existing.id); }
+                catch (e) { console.warn('delete superseded local project failed', e); }
+            }
+        }
         return project.id;
     },
 
@@ -16330,6 +16401,9 @@ const App = {
                 }
             }
         }
+        // 呼び出し側が「部分的にしか取り込めなかった」を判断できるようにする。
+        // これが 0 でない限り、置き換え対象のローカル版を消してはいけない。
+        if (failed.length) project.__importFailures = failed.length;
         if (failed.length) {
             const summary = failed.length + ' 件のレイヤーをダウンロードできませんでした (' +
                 failed.slice(0, 3).map(f => f.kind + ':' + f.key).join(', ') +
@@ -16700,9 +16774,14 @@ const App = {
     },
 
     async refreshProjectPicker() {
-        const all = await ProjectStorage.listProjects();
+        this._fillProjectPicker(await ProjectStorage.listProjects());
+    },
+
+    // Split out so a caller that already has the list does not fetch it twice.
+    _fillProjectPicker(all) {
         const sel = document.getElementById('project-picker');
-        sel.innerHTML = '<option value="">(no project)</option>' + all.map(p => '<option value="' + p.id + '">' + (p.displayName || p.id) + '</option>').join('');
+        if (!sel) return;
+        sel.innerHTML = '<option value="">(no project)</option>' + (all || []).map(p => '<option value="' + p.id + '">' + (p.displayName || p.id) + '</option>').join('');
         if (this.project) sel.value = this.project.id;
     },
 

@@ -283,11 +283,11 @@ select count(*) from public.projects where is_public;    -- 公開 link 数
 
 **この 3 ファイルを SQL Editor で再実行してください (すべて冪等)。**
 
-| ファイル | 追加されるもの |
-| --- | --- |
-| `share_locks.sql` | `list_projects_v2(_master_pw)` |
-| `mrm_library.sql` | `register_from_result_batch(_master_pw, _rows)` / `mrm_compounds_serial_idx` / `mrm_compounds_name_norm_idx` |
-| `mrm_reconcile.sql` | (関数本体は不変。索引についての注記のみ) |
+| ファイル | 追加されるもの | 再適用 |
+| --- | --- | --- |
+| `share_locks.sql` | `list_projects_v2(_master_pw)` | **必要** |
+| `mrm_library.sql` | `register_from_result_batch(_master_pw, _rows)` / `mrm_compounds_serial_idx` / `mrm_compounds_name_norm_idx` | **必要** |
+| `mrm_reconcile.sql` | コメントのみの変更 (関数も索引も不変) | 不要 |
 
 ### 何が変わるか
 
@@ -299,6 +299,12 @@ select count(*) from public.projects where is_public;    -- 公開 link 数
     **master パスワード**を聞くようになります。他の管理系 RPC
     (`delete_project_doc` / `upsert_project_doc` など) と同じ形で、管理画面の
     ログインゲート自体も既に `verify_master_pw` へ移行済みです。
+  - **一覧が増えることがあります**: 旧 `list_projects` は admin 資格情報の行が
+    ある project しか返しませんでした。`upsert_project_doc` は admin パスワードを
+    渡したときにしかその行を作らないので、**公開リンクのみの project や
+    admin パスワード無しで publish した project は今まで一覧に出ていません**でした。
+    v2 は全件返すので、それらが「サーバのみ」として現れます。消えたわけでも
+    増えたわけでもなく、見えるようになっただけです。
 - **`register_from_result_batch`** — Method 表からの「選択を管理へ登録」は
   1 化合物 = 1 RPC の直列実行で、**RPC ごとに bcrypt** が走っていました
   (1390 化合物で 8〜15 分)。バッチは検証 1 回で同じ登録を行います。
