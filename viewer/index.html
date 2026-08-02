@@ -2488,8 +2488,10 @@ const ROI_RAW_GRID_CACHE_MAX = 24;
 const MSI_LAYER_CACHE_MAX = 16;
 // renderComposite が焼いた「窓 + カラーマップ適用済みキャンバス」の保持上限
 // (パネルごと)。1 枚 = W*H*4 バイト (10 万画素で約 400 KB)。24 枚で約 9.6 MB。
-// MSI_LAYER_CACHE_MAX より少し多いのは、オーバーレイ表示で 1 レイヤーにつき
-// 色違いが同時に要ることがあるため。
+// 実際には _evictMsiRasters が画像を捨てるときに同じキーをここからも落とすので、
+// 保持数は「読み込み済みレイヤー数」= MSI_LAYER_CACHE_MAX 前後に張り付き、この
+// 上限が効くことはまず無い。暴走時の最終防波堤として置いてある。
+// (キーはレイヤーキーのみなので、同じ層の配色違いを 2 枚持つことはできない。)
 const MSI_LUT_CACHE_MAX = 24;
 // 合成 TIC / 統計を作るときに 1 回の worker 往復でまとめて読む列数。
 // worker 側は直列に読むので parquet の I/O は減らないが、1390 回だった
@@ -3866,6 +3868,8 @@ class SectionPanel {
 
     destroy() {
         if (this.dom && this.dom.root && this.dom.root.parentElement) this.dom.root.parentElement.removeChild(this.dom.root);
+        if (this._thumbObserver) { try { this._thumbObserver.disconnect(); } catch (e) {} this._thumbObserver = null; }
+        try { this.releaseCaches(); } catch (e) {}
     }
 
     // ---- Layer loading ----
@@ -4044,10 +4048,29 @@ class SectionPanel {
 
     // 配色変更などで全サムネイルを焼き直す。読み込み済みはその場で、未読込は
     // 「汚れている」印だけ付けて、次に画面へ入ったときに焼く。
+    // パネルを捨てるときに焼き済みキャンバスも明示的に手放す。GC 任せでも
+    // 回収はされるが、退避を確定的にしておく。
+    releaseCaches() {
+        if (this._msiLutCache) this._msiLutCache.clear();
+        this.msiValueRasters.clear();
+        this.imageSources = {};
+        this.imageDataUrls = {};
+    }
+
     markAllThumbsDirty() {
         for (const key of this.msiThumbRefs.keys()) {
             if (this.imageSources[key]) { try { this.renderMsiThumbnail(key); } catch (e) {} }
-            else this._thumbDirty.add(key);
+            else {
+                // 未読込 / LRU で退避済み。印を付けるだけでは足りない —
+                // _thumbDirty を消化するのは _observeThumb が仕込む paint だけで、
+                // その paint は「初回に画面へ入った時点」で unobserve され
+                // _thumbPaint からも消えている。付け直さないと、いったん退避した
+                // サムネイルは配色を変えても永久に古い色のまま残る。
+                this._thumbDirty.add(key);
+                const cell = this.dom.thumbCells && this.dom.thumbCells.get(key);
+                const box = cell && cell.querySelector ? (cell.querySelector('[data-thumb-key]') || cell) : null;
+                if (box) { try { this._observeThumb(key, box); } catch (e) {} }
+            }
         }
     }
 
@@ -7381,6 +7404,9 @@ function filterMethodKeys(keys, getEntry, getMeta) {
 // テストで固定してある。
 let _methodSeriesVersion = 0;
 let _methodKeysMemo = null;
+// いま tbody に出ている内容の署名。_refreshMethodRowState が「貼り直しで足りるか
+// 組み直しが要るか」を判断するのに使う。null = まだ何も出していない。
+let _methodRenderedSig = null;
 function _bumpMethodSeries() { _methodSeriesVersion++; _methodKeysMemo = null; }
 
 function methodVisibleKeys(panel, project) {
@@ -7473,9 +7499,9 @@ function renderMethodTable() {
     const tbody = document.getElementById('method-rows');
     if (!tbody) return;
     const project = App.project;
-    if (!project) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No project</td></tr>'; return; }
+    if (!project) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No project</td></tr>'; _methodRenderedSig = null; return; }
     const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
-    if (!panel) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No active section</td></tr>'; return; }
+    if (!panel) { tbody.innerHTML = '<tr><td colspan="9" class="px-2 py-2 text-center text-gray-400">No active section</td></tr>'; _methodRenderedSig = null; return; }
 
     // 列構成は切片の種別で決まる (ノンターゲットは MRM 固有の列を出さない)。
     const nonTarget = methodTableIsNonTarget(panel);
@@ -7497,9 +7523,11 @@ function renderMethodTable() {
         tbody.innerHTML = '<tr><td colspan="' + nCols + '" class="px-2 py-2 text-center text-gray-400">'
             + (memo.total ? '絞り込みに一致する化合物がありません' : 'No MSI layer in this section')
             + '</td></tr>';
+        _methodRenderedSig = memo.sig;   // 「0 件」も正しく出し切った状態
         return;
     }
 
+    _methodRenderedSig = memo.sig;
     tbody.innerHTML = '';
     _bindMethodRowDelegation(tbody);
     // 行は DocumentFragment に組んでから 1 回で挿入する。1390 行を tbody へ
@@ -7627,7 +7655,7 @@ function _bindMethodRowDelegation(tbody) {
             ev.stopPropagation();
             // Right click (or shift) clears the marker.
             if (ev.shiftKey || ev.button === 2) { applyMarkerColor(panel, layerKey, null); return; }
-            _openSharedMarkerInput(panel, layerKey, t);
+            _openSharedMarkerInput(panel, layerKey);
             return;
         }
         // 選択チェックは行のクリック動作 (化合物切替 / レイヤー操作) を起こさない。
@@ -7688,7 +7716,7 @@ function _bindMethodRowDelegation(tbody) {
 // 表の外に 1 個だけ置く色ピッカー。行ごとに <input type="color"> を持つと
 // 1390 個の DOM ノードになるので、押されたスウォッチに合わせて使い回す。
 let _sharedMarkerInput = null;
-function _openSharedMarkerInput(panel, layerKey, swatchEl) {
+function _openSharedMarkerInput(panel, layerKey) {
     if (!_sharedMarkerInput) {
         const inp = document.createElement('input');
         inp.type = 'color';
@@ -7697,14 +7725,22 @@ function _openSharedMarkerInput(panel, layerKey, swatchEl) {
         inp.tabIndex = -1;
         inp.addEventListener('input', (ev) => {
             const tgt = _sharedMarkerInput._target;
-            if (tgt) applyMarkerColor(tgt.panel, tgt.layerKey, ev.target.value);
+            if (!tgt) return;
+            // パネルが作り直されていたら書き込まない。この入力は document.body に
+            // 残り続けるので、_target が古いパネル (= 古い project 一式) を
+            // 掴んだままになるのを避ける意味もある。
+            const live = App.panels && App.panels.get(tgt.sectionId);
+            if (!live || live !== tgt.panel) { _sharedMarkerInput._target = null; return; }
+            applyMarkerColor(tgt.panel, tgt.layerKey, ev.target.value);
         });
+        // ピッカーを閉じたら参照を手放す (パネル / project を掴み続けない)。
+        inp.addEventListener('change', () => { _sharedMarkerInput._target = null; });
         document.body.appendChild(inp);
         _sharedMarkerInput = inp;
     }
     const ent = panel.section.msiSeries && panel.section.msiSeries[layerKey];
     _sharedMarkerInput.value = (ent && ent.markerColor) || '#ff0000';
-    _sharedMarkerInput._target = { panel, layerKey, swatchEl };
+    _sharedMarkerInput._target = { panel, layerKey, sectionId: panel.section.id };
     _sharedMarkerInput.click();
 }
 
@@ -7727,7 +7763,13 @@ function applyMarkerColor(panel, layerKey, color) {
 function _restampMarkerSwatch(layerKey, color) {
     const tbody = document.getElementById('method-rows');
     if (!tbody) return;
-    const tr = tbody.querySelector('tr.method-row[data-layer-key="' + (window.CSS && CSS.escape ? CSS.escape(layerKey) : layerKey) + '"]');
+    // セレクタは組まない。sanitizeCompoundName はほとんどの文字を残すので、
+    // 化合物名に " が入ると壊れた属性セレクタになって例外が飛ぶ
+    // (CSS.escape が無い環境もある)。dataset を直接見れば安全。
+    let tr = null;
+    for (const row of tbody.querySelectorAll('tr.method-row')) {
+        if (row.dataset && row.dataset.layerKey === layerKey) { tr = row; break; }
+    }
     const sw = tr && tr.querySelector('.marker-swatch');
     if (!sw) return;
     sw.style.cssText = color
@@ -7735,7 +7777,8 @@ function _restampMarkerSwatch(layerKey, color) {
         : 'background:transparent;';
 }
 
-// 行の状態クラス (active / focus / 実測棚卸しの印) だけを貼り直す。
+// 行の状態クラス (active / focus) だけを貼り直す。実測棚卸しの
+// eval-target / eval-pending はプレビュー起動時に確定するので触らない。
 // フォーカス化合物やアクティブレイヤーが変わっただけなら、セルの中身は
 // 1 つも変わらないので表を組み直す必要が無い。
 function _restampMethodRows() {
@@ -7756,9 +7799,22 @@ function _restampMethodRows() {
     return true;
 }
 
-// フォーカス / アクティブが変わっただけの場面で呼ぶ。行の中身は変わらないので
-// クラスを貼り直すだけで済ませ、まだ表が組まれていないときだけ本体を呼ぶ。
+// フォーカス / アクティブが変わっただけの場面で呼ぶ。
+//
+// ★ 「本当にクラスだけで済むのか」を推測してはいけない。呼び出し元の中には、
+//    ついでにセルの中身や行の集合まで変えているものがある (レイヤー追加、
+//    遅延読み込みでの Mean/Max/⚠加工 の初回埋め、切片の削除など)。
+//    そこで、いま画面に出ている内容の署名 (_methodRenderedSig) と、これから
+//    出るべき内容の署名を突き合わせ、違えば必ず組み直す。署名には行数・
+//    _methodSeriesVersion・切片 ID・並べ替え・絞り込みが入っているので、
+//    「行が増えた / 統計が埋まった / 切片が変わった」はすべてここで捕まる。
 function _refreshMethodRowState() {
+    const panel = App.activeSectionId ? App.panels.get(App.activeSectionId) : null;
+    if (panel && App.project) {
+        let sig = null;
+        try { sig = methodVisibleKeys(panel, App.project).sig; } catch (e) {}
+        if (sig !== null && sig !== _methodRenderedSig) { try { renderMethodTable(); } catch (e) {} return; }
+    }
     if (!_restampMethodRows()) { try { renderMethodTable(); } catch (e) {} }
 }
 
@@ -7976,7 +8032,7 @@ function openOverlayModal(existing) {
             target = res;
         }
         App.queueSave();
-        App.setActiveOverlay(target);   // also re-renders + refreshes the bar via renderMethodTable
+        App.setActiveOverlay(target);   // re-renders the panels and refreshes the chip bar
     });
 }
 
@@ -11572,6 +11628,7 @@ async function publishProjectToShare() {
     App._autoPublishPausedSlug = null;
 
     showToast('Supabase へアップロード中...', 1800);
+    const epochAtStart = App._publishEpoch || 0;
     try {
         await _publishCore(project, meta, masterPw, { silent: false });
         _saveCachedMasterPw(masterPw);
@@ -11596,9 +11653,16 @@ async function publishProjectToShare() {
         // 手動 publish で送り終えたので、直前の queueSave(0) が立てた
         // _publishDirty と、それが仕込んだ 5 秒タイマーを取り消す。
         // 放置すると同じ内容をもう 1 回 auto-publish してしまう。
-        App._publishDirty = false;
-        if (App._autoPublishTimer) { clearTimeout(App._autoPublishTimer); App._autoPublishTimer = 0; }
-        if (App._setSyncStatus) App._setSyncStatus('synced');
+        // ただし ★ アップロード中に入った編集は別。ペイロードはアップロードの
+        // 前に固めているので、その後の編集はまだサーバに無い。世代が動いて
+        // いたら立てたままにして、5 秒タイマーもそのまま生かす。
+        // (直前の queueSave(0) 自体も世代を進めるので、それを基準に取る)
+        if ((App._publishEpoch || 0) === epochAtStart + 1) {
+            App._publishDirty = false;
+            delete project.__publishPending;
+            if (App._autoPublishTimer) { clearTimeout(App._autoPublishTimer); App._autoPublishTimer = 0; }
+        }
+        if (App._setSyncStatus) App._setSyncStatus(App._publishDirty ? 'local-saved' : 'synced');
         await openShareInfoModal(project.shareInfo, { titleSuccess: true });
     } catch (e) {
         // 中断はエラーではない。サーバ上の公開内容は一切変わっていない
@@ -12002,7 +12066,12 @@ const SharePreview = {
         this._previewOrgan = null;
         this._hiddenSectionIds = null;
         App.activeSectionScope = null;   // stop scoping the main view's window
+        // サムネイルの焼き直しは 1 枚ずつ同期の toDataURL() なので、配色が
+        // 実際に変わったときだけにする (_savedColormap は開くたびに必ず入るので、
+        // 「戻した結果いまと同じ」なら焼き直す必要が無い)。
+        let cmChanged = false;
         if (this._savedColormap) {
+            cmChanged = (this._savedColormap !== _activeColormapName);
             setActiveColormap(this._savedColormap);
             this._savedColormap = null;
             // Keep the main-view toolbar dropdown in sync with the
@@ -12015,8 +12084,7 @@ const SharePreview = {
         // _restoreOpacity, visibility by _restoreVisibility).
         if (App && App.panels) {
             for (const p of App.panels.values()) {
-                // 配色を戻すのでサムネイルも一緒に (上の tb-colormap と同じ理由)。
-                try { p.renderComposite(); p.markAllThumbsDirty(); } catch (e) {}
+                try { p.renderComposite(); if (cmChanged) p.markAllThumbsDirty(); } catch (e) {}
             }
         }
         if (this._opacityRaf) {
@@ -14689,6 +14757,9 @@ const App = {
         for (const p of this.panels.values()) {
             try { p.setupCanvasSize(); p.renderComposite(); } catch (e) {}
         }
+        // オーバーレイのチップ列は renderMethodTable の先頭で描き直されていた。
+        // ここを _refreshMethodRowState に変えたので、明示的に呼ぶ。
+        try { renderOverlayBar(); } catch (e) {}
         _refreshMethodRowState();   // 行の中身は変わらない (active/focus のみ)
         if (typeof Toolbar !== 'undefined' && Toolbar.refreshAll) Toolbar.refreshAll();
     },
@@ -14698,6 +14769,7 @@ const App = {
         for (const p of this.panels.values()) {
             try { p.setupCanvasSize(); p.renderComposite(); } catch (e) {}
         }
+        try { renderOverlayBar(); } catch (e) {}   // 同上
         _refreshMethodRowState();   // 同上
         if (typeof Toolbar !== 'undefined' && Toolbar.refreshAll) Toolbar.refreshAll();
     },
@@ -14719,6 +14791,8 @@ const App = {
         }
         // フォーカス行が変わるだけ。1390 行を組み直さずクラスだけ貼り替える
         // (↑↓ キーの連打がそのまま表の全再構築になっていた)。
+        // ただし activeOverlay を null にしているので、チップの点灯は消す。
+        try { renderOverlayBar(); } catch (e) {}
         _refreshMethodRowState();
         Toolbar.refreshAll();
     },
@@ -16457,14 +16531,20 @@ const App = {
         //   _doSave は this.project を見るので、フラッシュせずに差し替えると
         //   30 秒タイマーが「別のプロジェクト」を書いてしまい、こちらの統計は
         //   黙って捨てられる (再計算はできるが、無駄な書き込みが 1 回増える)。
+        // 実編集の保留分も先に書き切る。400 ms タイマーが this.project の
+        // 差し替え中に焼けると、どちらのプロジェクトを書いたのか曖昧になる。
+        try { await this._flushSave(); } catch (e) { console.warn('flush on switch failed', e); }
         try { await this._flushDerivedSaveAsync(); } catch (e) { console.warn('derived flush on switch failed', e); }
         // 公開待ちのフラグとタイマーもプロジェクト単位。持ち越すと、切り替えた先の
-        // プロジェクトを「変更が無いのに」公開してしまう。
+        // プロジェクトを「変更が無いのに」公開してしまう。開き直したときは
+        // project.__publishPending から復元するので、ここで消しても失われない。
         this._publishDirty = false;
         if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
         const project = await ProjectStorage.getProject(id);
         if (!project) { localStorage.removeItem('desi:lastProjectId'); this.renderEmpty(); return; }
         this.project = project;
+        // 前回のセッションで公開しきれなかった編集があればここで拾い直す。
+        this._publishDirty = !!project.__publishPending;
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         this.project.anatomyPalette = this.project.anatomyPalette || DEFAULT_ANATOMY_PALETTE;
         this.project.sections = this.project.sections || [];
@@ -17509,7 +17589,19 @@ const App = {
         // 実編集はすべてここを通る。共有へ送るべき変更があったことを記録し、
         // auto-publish の発火条件にする (_scheduleAutoPublish)。派生統計だけの
         // 書き戻しは queueSaveDerived を通るので、このフラグは立たない。
+        //
+        // ★ プロジェクト側にも印を残す。改修前は「化合物を 1 つ開くだけで
+        //   auto-publish が走る」という副作用が、たまたま『ローカルがサーバより
+        //   進んだまま』を毎セッション解消していた。その副作用を消したので、
+        //   印を永続化しないと「5 秒タイマーが焼ける前にタブを閉じた編集」が
+        //   二度と公開されないまま "✓ Synced" と表示され続ける。
+        //   putProject は project をそのまま書くので 1 フィールドで足りる
+        //   (publish のペイロードは _sections / _meta を個別に組むので混ざらない)。
         this._publishDirty = true;
+        // 世代番号。真偽値だと「元から true のまま編集が入った」が区別できず、
+        // アップロード中の編集を取りこぼす。
+        this._publishEpoch = (this._publishEpoch || 0) + 1;
+        if (this.project.shareInfo && this.project.shareInfo.slug) this.project.__publishPending = true;
         if (this.saveTimer) clearTimeout(this.saveTimer);
         this.saveTimer = setTimeout(() => {
             this.saveTimer = 0;
@@ -17543,7 +17635,11 @@ const App = {
         if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
         if (!this._derivedDirty || !this.project) return;
         this._derivedDirty = false;
-        this._doSave().catch(e => console.warn('derived save threw', e));
+        // 書けなかったら印を戻す。捨ててしまうと (再計算はできるとはいえ)
+        // 次にその層を開くまで統計が欠けたままになる。
+        this._doSave()
+            .then(ok => { if (!ok) this._derivedDirty = true; })
+            .catch(e => { this._derivedDirty = true; console.warn('derived save threw', e); });
     },
 
     // プロジェクトを切り替える前など、書き終わりを待ちたい場面用。
@@ -17551,7 +17647,7 @@ const App = {
         if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
         if (!this._derivedDirty || !this.project) return Promise.resolve(false);
         this._derivedDirty = false;
-        return this._doSave();
+        return this._doSave().then(ok => { if (!ok) this._derivedDirty = true; return ok; });
     },
 
     // Real save with up-to-3 retry on transient failures. Quota errors do
@@ -17582,7 +17678,12 @@ const App = {
                     //  #project-name-input の change) で明示的に呼ぶ。
                     // 副作用として、保存のたびに updatedAt 降順へ並べ替わる挙動は
                     // 止まる (順序を読むコードは無く、次に開いたとき並び直る)。
-                    this._setSyncStatus('local-saved');
+                    // 'local-saved' は「IDB へ書いた。5 秒後に公開する」という意味。
+                    // 派生統計だけを書いたときは公開は走らないので、この表示に
+                    // すると "💾 Local 保存中" のまま戻らず、しかもその状態は
+                    // クリックで強制再同期 (数 MB のアップロード) を起こす。
+                    this._setSyncStatus(this._publishDirty ? 'local-saved'
+                        : (this._syncState === 'synced' ? 'synced' : 'local-saved'));
                     this._scheduleAutoPublish();
                     return true;
                 } catch (e) {
@@ -17605,6 +17706,10 @@ const App = {
     // finish. Used by critical mutations to make sure the IDB write
     // completes before verify-after-write reads back.
     async _flushSave() {
+        // ためてある派生統計もここで書き切る。_flushSave の呼び出し元はすべて
+        // 「書いてから IDB を読み直して検証する」形なので、派生を残したままだと
+        // いずれ古い値を読むことになる。
+        if (this._derivedDirty) { try { await this._flushDerivedSaveAsync(); } catch (e) {} }
         if (this.saveTimer) {
             clearTimeout(this.saveTimer);
             this.saveTimer = 0;
@@ -17734,7 +17839,10 @@ const App = {
 
         if (this._autoPublishInflight) return;
         // 手動 publish が走っている間は割り込まない。5 秒後にもう一度試す。
-        if (_publishGate) { this._scheduleAutoPublish(); return; }
+        // ★ _scheduleAutoPublish は _publishDirty で弾くので、ユーザーが明示的に
+        //   「強制再同期」した場合 (変更が無いのに送りたい場合) は印を立ててから
+        //   仕込み直す。立てないと再スケジュールが黙って捨てられる。
+        if (_publishGate) { this._publishDirty = true; this._scheduleAutoPublish(); return; }
         this._autoPublishInflight = true;
         try {
             // Conflict detection: server's projects.updated_at vs our
@@ -17746,6 +17854,8 @@ const App = {
             }
 
             this._setSyncStatus('uploading', 0, 0);
+            // アップロード中に入った編集を取りこぼさないための基準 (世代番号)。
+            const epochAtStart = this._publishEpoch || 0;
             const meta = {
                 slug: project.shareInfo.slug,
                 isPublic: !!project.shareInfo.isPublic,
@@ -17756,11 +17866,17 @@ const App = {
                 silent: true,
                 onProgress: (done, total) => this._setSyncStatus('uploading', done, total),
             });
-            try { await ProjectStorage.putProject(project); } catch (e) {}
             // 送り終えたのでフラグを降ろす。失敗した場合は立てたままにして
             // 次の保存で再挑戦させる (catch 側では触らない)。
-            this._publishDirty = false;
-            this._setSyncStatus('synced');
+            // ★ アップロード中に入った編集まで「送った」ことにしないこと。
+            //   ペイロードは _publishCore に入る前のスナップショットなので、
+            //   その後の編集はまだサーバに無い。世代が動いていたら立てたままにする。
+            if ((this._publishEpoch || 0) === epochAtStart) {
+                this._publishDirty = false;
+                delete project.__publishPending;
+            }
+            try { await ProjectStorage.putProject(project); } catch (e) {}
+            this._setSyncStatus(this._publishDirty ? 'local-saved' : 'synced');
         } catch (e) {
             console.warn('auto-publish failed', e);
             const msg = String((e && (e.message || e.details)) || e);
@@ -17847,6 +17963,10 @@ const App = {
     // Click on sync indicator: state-aware recovery actions.
     async _handleSyncStatusClick() {
         const state = this._syncState;
+        // これはユーザーが明示的に「今すぐ同期して」と押した操作。内容が
+        // 変わっていなくても送る (それが強制再同期の目的) ので、内容依存の
+        // ガード (_scheduleAutoPublish の _publishDirty 判定) を通す印を立てる。
+        this._publishDirty = true;
         if (state === 'error') {
             // Save error: try the local IDB write again first. Only after
             // it succeeds does the auto-publish make sense.
@@ -17893,6 +18013,7 @@ const App = {
                     this.project.shareInfo.lastSyncedAt = nowIso();
                     try { await ProjectStorage.putProject(this.project); } catch (e) {}
                 }
+                this._publishDirty = true;   // 明示的な上書き指示。内容ガードを通す
                 this.autoPublishProject().catch(e => console.warn('overwrite failed', e));
             }
             return;
