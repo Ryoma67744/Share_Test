@@ -761,6 +761,40 @@ $$;
 
 grant execute on function public.list_projects(text) to anon, authenticated;
 
+-- ---- 6a. list_projects_v2: same catalogue, one bcrypt --------------
+-- list_projects() puts crypt() inside a correlated subquery, so it runs
+-- ONE bcrypt(cost 12) PER PROJECT ROW. At ~0.3 s each that is 25-40 s
+-- for 100 projects, and it cannot be made cheaper while keeping the
+-- per-project check: every credential row carries its own salt, so two
+-- projects sharing the same admin password still hash differently and
+-- there is nothing to deduplicate.
+--
+-- This version gates on the lab-wide master password instead, which is
+-- ONE bcrypt regardless of project count. That matches how every other
+-- master-side function in this file already works (delete_project_doc,
+-- upsert_project_doc, set_all_admin_passwords, ...), and it matches the
+-- manager page's own login gate: index.html moved that gate from
+-- list_projects(pw) to verify_master_pw() precisely because the
+-- per-project admin passwords let every previously-published project's
+-- old password (including the legacy default) unlock the manager.
+--
+-- list_projects() is kept as-is so an older client keeps working.
+create or replace function public.list_projects_v2(_master_pw text)
+returns table (slug text, display_name text, meta jsonb, created_at timestamptz, updated_at timestamptz)
+language plpgsql security definer set search_path = public, extensions as $$
+begin
+    if not public._verify_master_pw(_master_pw) then
+        raise exception 'unauthorized' using errcode = '28000';
+    end if;
+    return query
+        select p.slug, p.display_name, p.meta, p.created_at, p.updated_at
+          from public.projects p
+         order by coalesce(p.updated_at, p.created_at) desc;
+end
+$$;
+
+grant execute on function public.list_projects_v2(text) to anon, authenticated;
+
 -- ---- 6b. delete_project_doc: Master-side server removal ------------
 -- Drops the project row (cascade-deletes sections / rois / credentials
 -- / session_tokens / roi_locks via existing FKs at schema.sql:32,40,

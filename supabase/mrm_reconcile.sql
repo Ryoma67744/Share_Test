@@ -30,6 +30,15 @@ create table if not exists public.mrm_ignored_compounds (
 );
 alter table public.mrm_ignored_compounds enable row level security;
 revoke all on public.mrm_ignored_compounds from anon, authenticated;
+-- name_norm is already this table's primary key, so the `ic.name_norm = ...`
+-- probe below is an index lookup. mrm_compounds has no such column — it is
+-- normalised on the fly — so it needs an EXPRESSION index; see below.
+
+-- The `status` probe further down normalises mrm_compounds.name on the fly.
+-- Its expression index (mrm_compounds_name_norm_idx) lives in mrm_library.sql,
+-- next to the table it indexes, so re-running that file alone still creates it.
+-- ★ The normalisation below must stay BYTE-IDENTICAL to the index definition
+--   or the planner will ignore the index.
 
 -- ---- List every measured compound across all projects ---------------------
 create or replace function public.list_measured_compounds(_master_pw text)

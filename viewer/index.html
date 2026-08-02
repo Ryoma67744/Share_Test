@@ -1605,7 +1605,9 @@ function readFileAsText(file) {
 // number in BOTH files.
 const ProjectStorage = (() => {
     const DB_NAME = 'desi-projects';
-    const DB_VERSION = 2;
+    // v3: added the `project_index` store (see listProjects). Additive only —
+    // no existing store is touched, so a v2 database upgrades in place.
+    const DB_VERSION = 3;
     let dbPromise = null;
 
     function open() {
@@ -1616,11 +1618,49 @@ const ProjectStorage = (() => {
                 const db = req.result;
                 if (!db.objectStoreNames.contains('projects')) db.createObjectStore('projects', { keyPath: 'id' });
                 if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs', { keyPath: 'id' });
+                // Tiny per-project summary row so the pickers / manager list
+                // never have to deserialize whole projects. Left EMPTY here on
+                // purpose: listProjects() backfills it lazily from the real
+                // records, which also repairs a database written by an older
+                // build that did not maintain it.
+                if (!db.objectStoreNames.contains('project_index')) db.createObjectStore('project_index', { keyPath: 'id' });
+            };
+            // Another tab holding the old version blocks the upgrade. Without
+            // this the page just hangs on a promise that never settles.
+            req.onblocked = () => {
+                try { alert('別のタブでこのアプリが開いています。\nそのタブを閉じるか再読み込みしてください (データベースの更新待ちです)。'); } catch (e) {}
             };
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => reject(req.error);
         });
         return dbPromise;
+    }
+
+    // The one place that decides what a summary row looks like. Keep in sync
+    // with the copy in the root index.html (both pages read the same store).
+    //
+    // The shape deliberately MIRRORS the real record for the handful of fields
+    // list screens read (including a real `shareInfo` object), so a summary can
+    // stand in for a project wherever only those fields are used. That also
+    // fixes a latent bug: callers looked up a published project by
+    // `p.shareInfo.slug` on the list result, which could never match because
+    // the old projection dropped shareInfo entirely (see
+    // _importProjectFromServer and the manager's local/server reconcile).
+    //
+    // __summary marks it as NOT a real project; putProject refuses to write
+    // one back, so a caller that mutates a list row and saves it cannot
+    // silently replace a whole project with a stub.
+    function indexRowFor(project) {
+        const si = project.shareInfo || {};
+        return {
+            __summary: true,
+            id: project.id,
+            displayName: project.displayName || '(untitled)',
+            updatedAt: project.updatedAt || '',
+            createdAt: project.createdAt || '',
+            memo: project.memo || null,
+            shareInfo: (si.slug || si.url) ? { slug: si.slug || '', url: si.url || '' } : null,
+        };
     }
 
     async function tx(stores, mode) {
@@ -1632,11 +1672,35 @@ const ProjectStorage = (() => {
         return new Promise((resolve, reject) => { req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error); });
     }
 
+    // Summary rows only. Reads the tiny `project_index` store instead of
+    // getAll()-ing every project — one non-target project is several MB of
+    // msiSeries, and this used to deserialize ALL of them to build a couple
+    // of <option> strings.
+    //
+    // Falls back to the full scan (and backfills the index) whenever the
+    // index looks incomplete: first run after the v3 upgrade, or a record
+    // written by an older build.
     async function listProjects() {
-        const t = await tx(['projects'], 'readonly');
-        const all = await pr(t.objectStore('projects').getAll());
-        return (all || []).map(p => ({ id: p.id, displayName: p.displayName || '(untitled)', updatedAt: p.updatedAt || '' }))
-            .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+        const sortRows = (rows) => rows.slice().sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+        try {
+            const t = await tx(['projects', 'project_index'], 'readonly');
+            const keys = await pr(t.objectStore('projects').getAllKeys());
+            const idx = await pr(t.objectStore('project_index').getAll());
+            if ((idx || []).length === (keys || []).length) return sortRows(idx || []);
+        } catch (e) {
+            console.warn('project_index read failed; falling back to a full scan', e);
+        }
+        // ---- backfill ----
+        const t2 = await tx(['projects'], 'readonly');
+        const all = await pr(t2.objectStore('projects').getAll());
+        const rows = (all || []).map(indexRowFor);
+        try {
+            const t3 = await tx(['project_index'], 'readwrite');
+            const st = t3.objectStore('project_index');
+            await pr(st.clear());
+            for (const r of rows) await pr(st.put(r));
+        } catch (e) { console.warn('project_index backfill failed', e); }
+        return sortRows(rows);
     }
 
     async function getProject(id) {
@@ -1646,6 +1710,12 @@ const ProjectStorage = (() => {
     }
 
     async function putProject(project) {
+        // Guard: a summary row from listProjects() is not a project. Writing
+        // one here would replace a whole project with a stub (its sections and
+        // msiSeries would be gone). Fail loudly instead.
+        if (project && project.__summary) {
+            throw new Error('putProject: refusing to write a listProjects() summary row as a project (id=' + project.id + ')');
+        }
         const rec = Object.assign({}, project, { updatedAt: nowIso() });
         // Never persist the read-only collaborator overlay (`_collab`): it is a
         // transient, in-memory-only view of viewer-authored server ROIs. Stripping
@@ -1654,16 +1724,21 @@ const ProjectStorage = (() => {
         if (Array.isArray(rec.rois) && rec.rois.some(r => r && r._collab)) {
             rec.rois = rec.rois.filter(r => !(r && r._collab));
         }
-        const t = await tx(['projects'], 'readwrite');
+        // The summary row is written in the SAME transaction as the record, so
+        // the two can never disagree (a separate write could be lost to a
+        // crash between them).
+        const t = await tx(['projects', 'project_index'], 'readwrite');
         await pr(t.objectStore('projects').put(rec));
+        await pr(t.objectStore('project_index').put(indexRowFor(rec)));
         return rec;
     }
 
     async function deleteProject(id) {
         const proj = await getProject(id);
         const blobIds = collectBlobIds(proj);
-        const t = await tx(['projects', 'blobs'], 'readwrite');
+        const t = await tx(['projects', 'blobs', 'project_index'], 'readwrite');
         await pr(t.objectStore('projects').delete(id));
+        await pr(t.objectStore('project_index').delete(id));
         for (const bid of blobIds) {
             try { await pr(t.objectStore('blobs').delete(bid)); } catch (_) {}
         }
@@ -1704,12 +1779,10 @@ const ProjectStorage = (() => {
         await pr(t.objectStore('blobs').delete(id));
     }
 
-    async function pruneOrphanBlobs(project) {
-        const used = new Set(collectBlobIds(project));
-        const t = await tx(['blobs'], 'readwrite');
-        const all = await pr(t.objectStore('blobs').getAllKeys());
-        for (const k of all) if (!used.has(k)) await pr(t.objectStore('blobs').delete(k));
-    }
+    // NOTE: a `pruneOrphanBlobs(project)` helper used to live here. It had no
+    // callers anywhere in the repo, and it was dangerous as written — it kept
+    // only the blobs of the ONE project passed in and deleted every other
+    // project's blobs. Removed rather than left as a loaded gun.
 
     // Delete blobs not referenced by ANY persisted project. Share recipients
     // never persist their project, so all their downloaded blobs are orphans —
@@ -1718,18 +1791,27 @@ const ProjectStorage = (() => {
     async function pruneShareOrphans() {
         const used = new Set();
         try {
-            const metas = await listProjects();
-            for (const m of (metas || [])) {
-                const proj = await getProject(m.id);
-                if (proj) for (const id of collectBlobIds(proj)) used.add(id);
-            }
+            // One cursor pass. This used to call listProjects() (which
+            // deserialized every project) and then getProject() for each one
+            // (deserializing every project a SECOND time).
+            const t = await tx(['projects'], 'readonly');
+            await new Promise((resolve, reject) => {
+                const req = t.objectStore('projects').openCursor();
+                req.onsuccess = (e) => {
+                    const c = e.target.result;
+                    if (!c) { resolve(); return; }
+                    for (const id of collectBlobIds(c.value)) used.add(id);
+                    c.continue();
+                };
+                req.onerror = () => reject(req.error);
+            });
         } catch (e) { return; }   // on any error, do nothing (never risk data loss)
         const t = await tx(['blobs'], 'readwrite');
         const all = await pr(t.objectStore('blobs').getAllKeys());
         for (const k of all) if (!used.has(k)) await pr(t.objectStore('blobs').delete(k));
     }
 
-    return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, deleteBlob, pruneOrphanBlobs, pruneShareOrphans };
+    return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, deleteBlob, pruneShareOrphans };
 })();
 
 // =============================================================
@@ -7879,8 +7961,9 @@ async function registerSelectedToMrmLibrary() {
     const slug = (project.shareInfo && project.shareInfo.slug) || null;
     const num = (v) => (v == null || v === '') ? null : Number(v);
 
-    let ok = 0, fail = 0;
-    for (const cb of checked) {
+    // 1 行ぶんの登録データを組む。バッチ RPC と 1 件ずつの旧 RPC で
+    // まったく同じ値を送るため、ここで 1 回だけ作る。
+    const rows = checked.map((cb) => {
         const layerKey = cb.getAttribute('data-layer-key');
         const ent = (panel.section.msiSeries || {})[layerKey] || {};
         const meta = ent.compoundMeta || findCompoundMeta(project, layerKey) || {};
@@ -7891,33 +7974,121 @@ async function registerSelectedToMrmLibrary() {
             if (/_neg\b/i.test(s)) polarity = '-';
             else if (/_pos\b/i.test(s)) polarity = '+';
         }
+        return {
+            layerKey,
+            name, polarity,
+            precursor: num(meta.precursor), product: num(meta.product),
+            ce: num(meta.ce), cv: num(meta.cv),
+            role: opts.role || null,
+            tags: opts.tags || [],
+            project_slug: slug, project_name: projName,
+            sample_types: sampleTypes,
+        };
+    });
+
+    const finish = (ok, fail, aborted) => {
+        _saveCachedMasterPw(masterPw);
+        document.querySelectorAll('#method-rows .method-select').forEach(c => { c.checked = false; });
+        const sa = document.getElementById('method-select-all'); if (sa) sa.checked = false;
+        showToast((aborted ? 'MRM管理へ登録 (中断): ' : 'MRM管理へ登録: ')
+            + ok + ' 件' + (fail ? ' / 失敗 ' + fail + ' 件' : ''), 3500);
+    };
+
+    // ---- バッチ経路 ----------------------------------------------------
+    // 旧経路は 1 化合物 = 1 RPC の直列 await で、RPC ごとに bcrypt(cost 12) が
+    // 走っていた。1390 化合物で 8〜15 分。バッチは検証 1 回で済む。
+    // SQL は手で適用する運用なので、RPC が無ければ黙って旧経路へ落ちる。
+    const CHUNK = 500;
+    let progress = null, cancelled = false;
+    try {
+        if (rows.length > 1) {
+            progress = openPublishProgressModal(rows.length, {
+                title: 'MRM管理へ登録中…',
+                subtitle: rows.length + ' 件を登録します。',
+                unit: '件',
+                cancelLabel: '中断',
+            });
+            progress.setCancelHandler(() => { cancelled = true; });
+        }
+        let ok = 0, fail = 0, done = 0;
+        for (let i = 0; i < rows.length; i += CHUNK) {
+            if (cancelled) { if (progress) progress.close(); finish(ok, fail, true); return; }
+            const chunk = rows.slice(i, i + CHUNK);
+            const res = await SupabaseClient.registerFromResultBatch(
+                masterPw, chunk.map(r => {
+                    const o = Object.assign({}, r); delete o.layerKey; return o;
+                }));
+            ok += (res && Number(res.ok)) || 0;
+            fail += (res && Number(res.failed)) || 0;
+            // 失敗行は名前つきでコンソールへ (どれが落ちたか追えるように)。
+            const results = (res && Array.isArray(res.results)) ? res.results : [];
+            for (const r of results) {
+                if (r && r.ok === false) console.warn('register_from_result_batch row failed:', r.name, r.error);
+            }
+            done += chunk.length;
+            if (progress) progress.update(done, rows.length);
+        }
+        if (progress) progress.close();
+        finish(ok, fail, false);
+        return;
+    } catch (e) {
+        if (progress) progress.close();
+        const missing = (e && e.code === 'PGRST202')
+            || /Could not find the function/i.test(String((e && (e.message || e.details || e.hint)) || ''));
+        if (!missing) {
+            const msg = String((e && (e.message || e.details)) || '');
+            if (/unauthorized|28000/i.test(msg)) { showToast('Master password が違います', 4000); return; }
+            console.warn('register_from_result_batch failed', e);
+            showToast('MRM管理への登録に失敗しました: ' + msg, 5000);
+            return;
+        }
+        console.warn('register_from_result_batch not found — falling back to one RPC per row. '
+            + 'Apply supabase/mrm_library.sql in the Supabase SQL Editor to make this fast.');
+    }
+
+    // ---- 旧経路 (1 件 1 RPC) --------------------------------------------
+    let ok = 0, fail = 0;
+    progress = (rows.length > 1) ? openPublishProgressModal(rows.length, {
+        title: 'MRM管理へ登録中…',
+        subtitle: rows.length + ' 件を 1 件ずつ登録します (SQL が未更新のため時間がかかります)。',
+        unit: '件',
+        cancelLabel: '中断',
+    }) : null;
+    cancelled = false;
+    if (progress) progress.setCancelHandler(() => { cancelled = true; });
+    for (let i = 0; i < rows.length; i++) {
+        if (cancelled) { if (progress) progress.close(); finish(ok, fail, true); return; }
+        const r = rows[i];
         try {
             await SupabaseClient.registerFromResult({
                 _master_pw: masterPw,
-                _name: name,
-                _tags: opts.tags,
-                _polarity: polarity,
-                _precursor: num(meta.precursor),
-                _product: num(meta.product),
-                _ce: num(meta.ce),
-                _cv: num(meta.cv),
-                _role: opts.role || null,
-                _project_slug: slug,
-                _project_name: projName,
-                _sample_types: sampleTypes,
+                _name: r.name,
+                _tags: r.tags,
+                _polarity: r.polarity,
+                _precursor: r.precursor,
+                _product: r.product,
+                _ce: r.ce,
+                _cv: r.cv,
+                _role: r.role,
+                _project_slug: r.project_slug,
+                _project_name: r.project_name,
+                _sample_types: r.sample_types,
             });
             ok++;
         } catch (e) {
-            console.warn('register_from_result failed for', layerKey, e);
+            console.warn('register_from_result failed for', r.layerKey, e);
             fail++;
             const msg = String((e && (e.message || e.details)) || '');
-            if (/unauthorized|28000/i.test(msg)) { showToast('Master password が違います', 4000); return; }
+            if (/unauthorized|28000/i.test(msg)) {
+                if (progress) progress.close();
+                showToast('Master password が違います', 4000);
+                return;
+            }
         }
+        if (progress) progress.update(i + 1, rows.length);
     }
-    _saveCachedMasterPw(masterPw);
-    document.querySelectorAll('#method-rows .method-select').forEach(c => { c.checked = false; });
-    const sa = document.getElementById('method-select-all'); if (sa) sa.checked = false;
-    showToast('MRM管理へ登録: ' + ok + ' 件' + (fail ? ' / 失敗 ' + fail + ' 件' : ''), 3500);
+    if (progress) progress.close();
+    finish(ok, fail, false);
 }
 
 // --- Molecule color-overlay (master) --------------------------------------
@@ -14439,6 +14610,14 @@ const SupabaseClient = (() => {
         // One transactional upsert per selected Method-table row: compound +
         // transition + usage. See supabase/mrm_library.sql:register_from_result.
         registerFromResult(args) { return rpc('register_from_result', args); },
+        // Same work, N rows, ONE bcrypt. register_from_result re-verifies the
+        // master password on every call (bcrypt cost 12 ≒ 0.3 s of server
+        // CPU), so 1390 compounds took 8-15 minutes purely in password
+        // hashing. Callers MUST fall back to registerFromResult on PGRST202:
+        // the SQL is applied by hand and this page ships ahead of it.
+        registerFromResultBatch(masterPw, rows) {
+            return rpc('register_from_result_batch', { _master_pw: masterPw, _rows: rows });
+        },
         // ① Phase 2: recipient-facing folder index (folder share). Not master
         // gated — public folders need no password; private ones take one.
         getFolderIndex(slug, password) { return rpc('get_folder_index', { _slug: slug, _password: password || null }); },
@@ -15717,7 +15896,10 @@ const App = {
             return;
         }
 
-        await this.refreshProjectPicker();
+        // The picker is populated by openProject() below (it ends with
+        // refreshProjectPicker so the <select> shows the opened project).
+        // Doing it here as well meant a cold boot listed the store twice.
+        // The no-project branch further down refreshes it explicitly.
         // The new root /index.html drives project selection. Look for
         // ?import=<slug> first (came from "Open (master)" on a server-only
         // row — pull project data into Local IDB then continue), then
@@ -15761,7 +15943,8 @@ const App = {
             try { openHelpModal(want).catch(() => {}); } catch (e) {}
         }
         // No local project at all? Send the user to the management page to
-        // pick or create one.
+        // pick or create one. Otherwise fill the picker here — openProject()
+        // normally does it, and it did not run on this path.
         if (!opened) {
             try {
                 const all = await ProjectStorage.listProjects();
@@ -15769,6 +15952,7 @@ const App = {
                     location.replace('../');
                     return;
                 }
+                await this.refreshProjectPicker();
             } catch (e) {}
         }
     },

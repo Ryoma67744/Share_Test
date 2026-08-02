@@ -6,9 +6,15 @@
   <meta name="robots" content="noindex, nofollow">
 <title>DESI Data Share — Projects</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+<!-- defer: none of these is touched while the document parses. The Supabase
+     client is built lazily inside _client() (which already guards on the
+     global being undefined), and marked / DOMPurify are only used by the help
+     modal. Leaving them synchronous blocked first paint on three CDN
+     round-trips. Tailwind stays synchronous — deferring it flashes unstyled
+     content. viewer/index.html has used this pattern since it shipped. -->
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
 <script>
   // Keep these in sync with viewer/index.html. Both pages connect to the
   // same Supabase project so the same anon key is used here.
@@ -118,7 +124,8 @@
 // ===========================================================================
 const ProjectStorage = (() => {
     const DB_NAME = 'desi-projects';
-    const DB_VERSION = 2;
+    // v3: added the `project_index` store. MUST match viewer/index.html.
+    const DB_VERSION = 3;
     let dbPromise = null;
     function open() {
         if (dbPromise) return dbPromise;
@@ -128,11 +135,58 @@ const ProjectStorage = (() => {
                 const db = e.target.result;
                 if (!db.objectStoreNames.contains('projects')) db.createObjectStore('projects', { keyPath: 'id' });
                 if (!db.objectStoreNames.contains('blobs'))    db.createObjectStore('blobs',    { keyPath: 'id' });
+                // Small per-project summary rows; see listSummaries(). Left
+                // empty here — it is backfilled lazily on first read.
+                if (!db.objectStoreNames.contains('project_index')) db.createObjectStore('project_index', { keyPath: 'id' });
+            };
+            req.onblocked = () => {
+                try { alert('別のタブでこのアプリが開いています。\nそのタブを閉じるか再読み込みしてください (データベースの更新待ちです)。'); } catch (e) {}
             };
             req.onsuccess = () => resolve(req.result);
             req.onerror = () => reject(req.error);
         });
         return dbPromise;
+    }
+    // Keep in sync with viewer/index.html's indexRowFor.
+    function indexRowFor(project) {
+        const si = project.shareInfo || {};
+        return {
+            __summary: true,
+            id: project.id,
+            displayName: project.displayName || '(untitled)',
+            updatedAt: project.updatedAt || '',
+            createdAt: project.createdAt || '',
+            memo: project.memo || null,
+            shareInfo: (si.slug || si.url) ? { slug: si.slug || '', url: si.url || '' } : null,
+        };
+    }
+    function _req(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
+    // Summary rows for the project list. The full listProjects() below
+    // deserializes EVERY project (a non-target project is several MB of
+    // msiSeries) and the list only shows a handful of fields — and it ran on
+    // every debounced search keystroke.
+    async function listSummaries() {
+        const db = await open();
+        try {
+            const tx = db.transaction(['projects', 'project_index'], 'readonly');
+            const keys = await _req(tx.objectStore('projects').getAllKeys());
+            const idx  = await _req(tx.objectStore('project_index').getAll());
+            if ((idx || []).length === (keys || []).length) return idx || [];
+        } catch (e) {
+            console.warn('project_index read failed; falling back to a full scan', e);
+        }
+        // Backfill (first run after the v3 upgrade, or records written by an
+        // older build that did not maintain the index).
+        const all = await listProjects();
+        const rows = all.map(indexRowFor);
+        try {
+            const tx2 = db.transaction('project_index', 'readwrite');
+            const st = tx2.objectStore('project_index');
+            st.clear();
+            for (const r of rows) st.put(r);
+            await new Promise((res) => { tx2.oncomplete = res; tx2.onerror = res; });
+        } catch (e) { console.warn('project_index backfill failed', e); }
+        return rows;
     }
     async function listProjects() {
         const db = await open();
@@ -158,10 +212,17 @@ const ProjectStorage = (() => {
         });
     }
     async function putProject(project) {
+        // A summary row from listSummaries() is not a project; writing one
+        // here would replace a whole project with a stub.
+        if (project && project.__summary) {
+            throw new Error('putProject: refusing to write a listSummaries() row as a project (id=' + project.id + ')');
+        }
         const db = await open();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction('projects', 'readwrite');
+            // Summary written in the SAME transaction so the two cannot drift.
+            const tx = db.transaction(['projects', 'project_index'], 'readwrite');
             tx.objectStore('projects').put(project);
+            tx.objectStore('project_index').put(indexRowFor(project));
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
@@ -169,13 +230,14 @@ const ProjectStorage = (() => {
     async function deleteProject(id) {
         const db = await open();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction('projects', 'readwrite');
+            const tx = db.transaction(['projects', 'project_index'], 'readwrite');
             tx.objectStore('projects').delete(id);
+            tx.objectStore('project_index').delete(id);
             tx.oncomplete = () => resolve();
             tx.onerror = () => reject(tx.error);
         });
     }
-    return { open, listProjects, getProject, putProject, deleteProject };
+    return { open, listProjects, listSummaries, getProject, putProject, deleteProject };
 })();
 
 // ===========================================================================
@@ -200,6 +262,12 @@ const SupabaseClient = (() => {
     return {
         configured() { return !!_client(); },
         listProjects(ownerPw) { return rpc('list_projects', { _owner_password: ownerPw }); },
+        // list_projects() runs one bcrypt PER PROJECT (the crypt() call sits
+        // inside a correlated subquery), so 100 projects cost 25-40 s. v2
+        // gates on the lab-wide master password instead — one bcrypt total.
+        // Callers must fall back to listProjects() on PGRST202 because the
+        // SQL is applied by hand and the page ships ahead of it.
+        listProjectsV2(masterPw) { return rpc('list_projects_v2', { _master_pw: masterPw }); },
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
         changeMasterPw(cur, next) { return rpc('change_master_password', { _current_pw: cur, _new_pw: next }); },
         setProjectPasswordMaster(masterPw, slug, role, pw) { return rpc('set_project_password_master', { _master_pw: masterPw, _slug: slug, _role: role, _pw: pw }); },
@@ -1133,8 +1201,57 @@ function parseList(s) {
     return out;
 }
 
+// Missing-RPC detection. The SQL files are applied by hand in the Supabase
+// SQL Editor, so a freshly deployed page routinely runs against an older
+// schema. Every new RPC added here must degrade to the old one instead of
+// failing outright. (Same shape as viewer/index.html's upsert_project_doc
+// fallback.)
+function _isMissingRpc(e) {
+    const msg = String((e && (e.message || e.details || e.hint)) || '');
+    return (e && e.code === 'PGRST202') || /Could not find the function/i.test(msg);
+}
+
 async function fetchServerProjectList(forcePrompt) {
     if (!SupabaseClient.configured()) return null;
+    // Prefer the master password: list_projects_v2 verifies it ONCE instead
+    // of running a bcrypt per project. The login gate has normally already
+    // cached it, so this is usually promptless; a rejected password clears
+    // the cache and asks again. Falls back to the per-project admin password
+    // when the server does not have v2 yet.
+    let missingV2 = false;
+    for (let attempt = 0; attempt < 2 && !missingV2; attempt++) {
+        let masterPw = readCachedMasterPw();
+        if (!masterPw || attempt > 0) {
+            masterPw = (prompt('サーバから一覧取得: master password を入力してください') || '').trim();
+            if (!masterPw) return null;
+        }
+        try {
+            const rows = await SupabaseClient.listProjectsV2(masterPw);
+            try {
+                sessionStorage.setItem('desi:masterPw', JSON.stringify({ pw: masterPw, expiresAt: Date.now() + 12 * 3600 * 1000 }));
+            } catch (e) {}
+            return Array.isArray(rows) ? rows : [];
+        } catch (e) {
+            if (_isMissingRpc(e)) {
+                console.warn('list_projects_v2 not found — falling back to list_projects. '
+                    + 'Apply supabase/share_locks.sql in the Supabase SQL Editor to make this fast.');
+                missingV2 = true;
+                break;
+            }
+            const msg = String((e && (e.message || e.details)) || '');
+            if (/unauthorized|28000/i.test(msg)) {
+                // Wrong master password. Drop the cache so the next loop asks.
+                try { sessionStorage.removeItem('desi:masterPw'); } catch (e2) {}
+                if (attempt === 0) { showToast('Master password が違います', 2500); continue; }
+                showToast('Master password が違います', 3600);
+                return null;
+            }
+            console.warn('list_projects_v2 failed', e);
+            showToast('サーバ一覧の取得に失敗しました', 3600);
+            return null;
+        }
+    }
+    // ---- legacy path: per-project admin password (one bcrypt per project) ----
     let pw = forcePrompt ? '' : readCachedOwnerPw();
     if (!pw) {
         pw = (prompt('サーバから一覧取得: admin password を入力してください') || '').trim();
@@ -1163,7 +1280,10 @@ async function fetchServerProjectList(forcePrompt) {
 }
 
 async function buildRows() {
-    const local = await ProjectStorage.listProjects();
+    // Summary rows only — this runs on every debounced search keystroke, and
+    // the full records are several MB each for a non-target project. The
+    // summary carries exactly the fields the list reads (including shareInfo).
+    const local = await ProjectStorage.listSummaries();
     const localBySlug = new Map();
     const localOnly = [];
     for (const lp of local) {
@@ -1190,11 +1310,22 @@ async function buildRows() {
                 if (cands.length === 1) {
                     const lp = cands[0];
                     const prev = lp.shareInfo || {};
-                    lp.shareInfo = Object.assign({}, prev, {
+                    const nextShare = Object.assign({}, prev, {
                         slug: sp.slug,
                         url: prev.url || new URL('viewer/index.html#share=' + encodeURIComponent(sp.slug), location.href).href,
                     });
-                    try { await ProjectStorage.putProject(lp); } catch (e) { console.warn('reconcile putProject failed', e); }
+                    // lp is a SUMMARY row. Load the real record, adopt the slug
+                    // there, and write that back — writing lp itself would
+                    // replace the project with a stub. (putProject also refuses
+                    // summary rows, so this is belt and braces.)
+                    try {
+                        const full = await ProjectStorage.getProject(lp.id);
+                        if (full) {
+                            full.shareInfo = Object.assign({}, full.shareInfo || {}, nextShare);
+                            await ProjectStorage.putProject(full);
+                        }
+                    } catch (e) { console.warn('reconcile putProject failed', e); }
+                    lp.shareInfo = nextShare;   // keep this render's row consistent
                     localBySlug.set(sp.slug, lp);
                     const row = rows.find(x => x.kind === 'local-only' && x.local === lp);
                     if (row) { row.kind = 'local+server'; row.server = sp; }

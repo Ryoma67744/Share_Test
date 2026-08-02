@@ -6,9 +6,11 @@
   <meta name="robots" content="noindex, nofollow">
 <title>DESI Data Share — MRM管理</title>
 <script src="https://cdn.tailwindcss.com"></script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<!-- defer: built lazily in _client(); XLSX is only used by the Excel
+     import / export buttons. Neither is referenced while parsing. -->
+<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <!-- ③ SheetJS: parse Excel MRM lists for bulk import (same version as viewer/index.html). -->
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
   // Keep these in sync with index.html / viewer/index.html. Same Supabase
   // project, same anon key.
@@ -778,19 +780,33 @@ function renderLibrary() {
     // group open while a search/filter is active so matches are never hidden.
     const anyFilter = !!((searchText || '').trim() || filterPolarity || selectedTags.size || selectedSampleTypes.size);
     const collapsed = _mrmCollapsedSet();
+    // 折りたたまれている群の中身は作らない。<details> は CSS で隠すだけなので、
+    // 従来は「見えていない行」まで毎回すべて組み立てていた (一括登録で
+    // ライブラリが数千件になると、そこが描画の大半になる)。
+    // 開いた瞬間に組む。行の checked 状態は unitHtml が selectedTransitions を
+    // その場で見て決めるので、あとから組んでも選択状態は正しく出る。
+    // 行の操作は #lib への委譲 (bindLibraryEvents) なので、後付けの DOM でも動く。
     host.innerHTML = note + tagNames.map(t => {
-        const list = groups.get(t).map(unitHtml).join('');
         const open = (anyFilter || !collapsed.has(_collapseKey(t))) ? ' open' : '';
+        const list = open ? groups.get(t).map(unitHtml).join('') : '';
         return '<details class="tag-group" data-tag="' + safe(t) + '"' + open + '>'
             + '<summary>' + safe(t) + ' <span class="muted" style="font-weight:400;">(' + groups.get(t).length + ')</span></summary>'
-            + '<div class="tag-group-body">' + list + '</div>'
+            + '<div class="tag-group-body"' + (open ? '' : ' data-lazy="1"') + '>' + list + '</div>'
             + '</details>';
     }).join('');
     // `toggle` does not bubble → bind per <details>. Re-bound each render (old
     // listeners are discarded with the replaced DOM).
     host.querySelectorAll('details.tag-group').forEach(d => {
         d.addEventListener('toggle', () => {
-            const name = _collapseKey(d.getAttribute('data-tag'));
+            const tag = d.getAttribute('data-tag');
+            if (d.open) {
+                const body = d.querySelector('.tag-group-body');
+                if (body && body.dataset && body.dataset.lazy) {
+                    body.innerHTML = (groups.get(tag) || []).map(unitHtml).join('');
+                    delete body.dataset.lazy;
+                }
+            }
+            const name = _collapseKey(tag);
             const set = _mrmCollapsedSet();
             if (d.open) set.delete(name); else set.add(name);
             _saveMrmCollapsed(set);
