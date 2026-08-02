@@ -16420,6 +16420,11 @@ const App = {
     },
 
     renderEmpty() {
+        // プロジェクトを閉じたので、保存待ち / 公開待ちの状態も畳む。
+        this._derivedDirty = false;
+        if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+        this._publishDirty = false;
+        if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
         document.getElementById('sections-grid').innerHTML = '';
         document.getElementById('sections-empty').classList.remove('hidden');
         document.getElementById('section-count').textContent = '0 sections';
@@ -16448,6 +16453,15 @@ const App = {
         // and force re-auth for the new slug.
         this._stopMasterCollabPoll();
         this._collabSession = null;
+        // ★ 切り替えの前に、いま開いているプロジェクトの派生統計を書き切る。
+        //   _doSave は this.project を見るので、フラッシュせずに差し替えると
+        //   30 秒タイマーが「別のプロジェクト」を書いてしまい、こちらの統計は
+        //   黙って捨てられる (再計算はできるが、無駄な書き込みが 1 回増える)。
+        try { await this._flushDerivedSaveAsync(); } catch (e) { console.warn('derived flush on switch failed', e); }
+        // 公開待ちのフラグとタイマーもプロジェクト単位。持ち越すと、切り替えた先の
+        // プロジェクトを「変更が無いのに」公開してしまう。
+        this._publishDirty = false;
+        if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
         const project = await ProjectStorage.getProject(id);
         if (!project) { localStorage.removeItem('desi:lastProjectId'); this.renderEmpty(); return; }
         this.project = project;
@@ -17530,6 +17544,14 @@ const App = {
         if (!this._derivedDirty || !this.project) return;
         this._derivedDirty = false;
         this._doSave().catch(e => console.warn('derived save threw', e));
+    },
+
+    // プロジェクトを切り替える前など、書き終わりを待ちたい場面用。
+    _flushDerivedSaveAsync() {
+        if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+        if (!this._derivedDirty || !this.project) return Promise.resolve(false);
+        this._derivedDirty = false;
+        return this._doSave();
     },
 
     // Real save with up-to-3 retry on transient failures. Quota errors do
