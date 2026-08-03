@@ -467,7 +467,14 @@ function findTransition(tid) {
 async function loadLibrary() {
     const host = document.getElementById('lib');
     if (!SupabaseClient.configured()) {
-        host.innerHTML = '<div class="card p-6 text-center text-sm text-red-600">Supabase が未設定です (SUPABASE_URL / ANON_KEY)。</div>';
+        // ★ 「未設定」と「部品を読み込めなかった」は別物。まとめて "未設定" と
+        //   言うと、設定は正しいのに設定を疑わせる誤誘導になる。
+        const libMissing = (typeof supabase === 'undefined' || !supabase.createClient);
+        host.innerHTML = '<div class="card p-6 text-center text-sm text-red-600">'
+            + (libMissing
+                ? 'サーバへ接続する部品を読み込めませんでした。<br>通信環境や広告ブロックをご確認のうえ、ページを再読み込みしてください。'
+                : 'Supabase が未設定です (SUPABASE_URL / ANON_KEY)。')
+            + '</div>';
         return;
     }
     const pw = _readCachedMasterPw();

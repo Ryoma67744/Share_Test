@@ -272,7 +272,12 @@ const SupabaseClient = (() => {
     function _client() {
         if (client) return client;
         if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) return null;
-        if (typeof supabase === 'undefined' || !supabase.createClient) return null;
+        // 部品を読めていないのは異常。呼び出し側は serverUnavailableReason() で
+        // 「未設定」と区別して利用者に伝える (viewer/index.html と同じ扱い)。
+        if (typeof supabase === 'undefined' || !supabase.createClient) {
+            console.warn('supabase-js failed to load; server features disabled.');
+            return null;
+        }
         client = supabase.createClient(window.SUPABASE_URL, window.SUPABASE_ANON_KEY, { auth: { persistSession: false } });
         return client;
     }
@@ -1235,8 +1240,31 @@ function _isMissingRpc(e) {
     return (e && e.code === 'PGRST202') || /Could not find the function/i.test(msg);
 }
 
+// サーバ機能が使えない理由。**「未設定」と「部品を読み込めなかった」は別物**で、
+// 前者は正常 (ローカル専用で動かしている)、後者は異常。同じ null にまとめると
+// 呼び出し側が黙って諦めるしかなくなる。
+function serverUnavailableReason() {
+    if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) {
+        return 'このページはサーバ機能なしで動いています (接続先が未設定)';
+    }
+    if (typeof supabase === 'undefined' || !supabase.createClient) {
+        return 'サーバへ接続する部品を読み込めませんでした。'
+             + '通信環境や広告ブロックをご確認のうえ、ページを再読み込みしてください';
+    }
+    return null;   // 使える
+}
+
 async function fetchServerProjectList(forcePrompt) {
-    if (!SupabaseClient.configured()) return null;
+    // ★ ここで無言で return しない。
+    //   supabase-js を CDN から読めていないときもここに落ちる。ログイン判定は
+    //   sessionStorage だけを見る (isMasterUnlocked) ので、**部品が一度も
+    //   読めていなくてもページには入れてしまう**。黙って返すと、サーバを使う
+    //   機能だけが理由不明で全滅する。
+    if (!SupabaseClient.configured()) {
+        const why = serverUnavailableReason();
+        if (why) showToast(why, 5200);
+        return null;
+    }
     // Prefer the master password: list_projects_v2 verifies it ONCE instead
     // of running a bcrypt per project. The login gate has normally already
     // cached it, so this is usually promptless; a rejected password clears
@@ -1256,7 +1284,13 @@ async function fetchServerProjectList(forcePrompt) {
             try {
                 sessionStorage.setItem('desi:masterPw', JSON.stringify({ pw: masterPw, expiresAt: Date.now() + 12 * 3600 * 1000 }));
             } catch (e) {}
-            return Array.isArray(rows) ? rows : [];
+            const list = Array.isArray(rows) ? rows : [];
+            // ★ 0 件でも黙って返さない。旧経路 (下) には案内があるのに、こちらだけ
+            //   無言だった。押しても画面が何も変わらないので「反応しない」に見える。
+            if (!list.length && forcePrompt) {
+                showToast('サーバに公開済みのプロジェクトはありませんでした', 3600);
+            }
+            return list;
         } catch (e) {
             if (_isMissingRpc(e)) {
                 console.warn('list_projects_v2 not found — falling back to list_projects. '
@@ -1281,7 +1315,10 @@ async function fetchServerProjectList(forcePrompt) {
     let pw = forcePrompt ? '' : readCachedOwnerPw();
     if (!pw) {
         pw = (prompt('サーバから一覧取得: admin password を入力してください') || '').trim();
-        if (!pw) return null;
+        // ★ 入力をやめたときも一言出す。ここを無言で返していたので、
+        //   ブラウザがダイアログを抑止している端末では**押しても永久に無反応**
+        //   ("このページでこれ以上ダイアログを表示しない" は、そのタブでは戻せない)。
+        if (!pw) { if (forcePrompt) showToast('パスワードが入力されなかったので中止しました', 2800); return null; }
     }
     try {
         const rows = await SupabaseClient.listProjects(pw);
@@ -1909,12 +1946,33 @@ async function init() {
         // Jump straight into the viewer with the newly-created project.
         location.href = 'viewer/index.html?project=' + encodeURIComponent(project.id);
     });
-    document.getElementById('btn-refresh-server').addEventListener('click', async () => {
-        const rows = await fetchServerProjectList(true);
-        if (rows) {
-            serverRowsCache = rows;
-            await loadWorkspaceTree();
-            await renderList();
+    // ★ 押した結果を必ず見せる。
+    //
+    //   以前は旧経路 (list_projects) しか無く、ボタンからは forcePrompt=true で
+    //   **毎回かならず admin パスワードのダイアログが出ていた**。それが唯一の
+    //   フィードバックだった。list_projects_v2 (master pw で bcrypt 1 回) を
+    //   先に試すようにしたことで、パスワードがキャッシュ済みなら**プロンプトが
+    //   出ず一瞬で終わる**ようになり、成功しても画面が何も変わらないため
+    //   「ボタンが反応しない」と区別がつかなくなった。速くした副作用。
+    //   実行中の表示と、終わったときの件数を出す。
+    document.getElementById('btn-refresh-server').addEventListener('click', async (ev) => {
+        const btn = ev.currentTarget;
+        const label = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = '取得中…';
+        try {
+            const rows = await fetchServerProjectList(true);
+            if (rows) {
+                serverRowsCache = rows;
+                await loadWorkspaceTree();
+                await renderList();
+                // 0 件のときの案内は fetchServerProjectList 側が理由付きで出すので、
+                // ここでは取れたときだけ言う (二重に出さない)。
+                if (rows.length) showToast('サーバから ' + rows.length + ' 件を取得しました', 2400);
+            }
+        } finally {
+            btn.disabled = false;
+            btn.textContent = label;
         }
     });
     document.getElementById('btn-new-folder').addEventListener('click', () => treeCreateFolder(null));
