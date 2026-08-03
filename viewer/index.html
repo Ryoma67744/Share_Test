@@ -13544,7 +13544,14 @@ async function publishProjectToShare() {
     const project = App.project;
     if (!project) { showToast('プロジェクトを開いてから実行してください'); return; }
     if (!SupabaseClient.configured()) {
-        alert('Supabase が未設定です。supabase/README.md を見て URL / anon key を埋め込んでください。');
+        // ★ 「未設定」と言い切らない。部品を読み込めなかっただけのときに
+        //   設定を疑わせるのは誤誘導 (設定は正しい)。
+        //   未設定側だけは README への案内を足したいので、その場で見分ける
+        //   (mrm.html:472 と同じやり方)。
+        const libMissing = (typeof supabase === 'undefined' || !supabase.createClient);
+        alert(libMissing
+            ? serverUnavailableReason()
+            : 'Supabase が未設定です。supabase/README.md を見て URL / anon key を埋め込んでください。');
         return;
     }
     const meta = await openPublishMetaModal(project);
@@ -15444,16 +15451,32 @@ async function openNewProjectFormModal(initial) {
 }
 
 async function _fetchServerProjectList(forcePrompt) {
-    if (!SupabaseClient.configured()) return null;
+    // ★ 無言で終わらない。ここを黙って返していたので、supabase-js を読み込め
+    //   ていない端末では**押しても何も起きない**状態になっていた
+    //   (index.html 側で同じ穴を踏んだのと同型)。
+    if (!SupabaseClient.configured()) {
+        showToast(serverUnavailableReason() || 'サーバに接続できません', 5200);
+        return null;
+    }
     let pw = forcePrompt ? '' : _readCachedOwnerPw();
     if (!pw) {
         pw = (prompt('サーバから一覧取得: admin password を入力してください') || '').trim();
-        if (!pw) return null;
+        // 入力をやめたときも一言出す。ダイアログが抑止されている端末では
+        // ここが**永久に無反応**になるため (そのタブでは解除できない)。
+        if (!pw) { if (forcePrompt) showToast('パスワードが入力されなかったので中止しました', 2800); return null; }
     }
     try {
         const rows = await SupabaseClient.listProjects(pw);
+        const list = Array.isArray(rows) ? rows : [];
+        // 0 件は「サーバのエラー」ではなく「1 件も一致しなかった」。
+        // 黙って 0 件を返すと理由が分からないので、明示的に押したときは言う。
+        // (パスワードが違っても 0 件になる。管理ページ側と同じ扱い)
+        if (!list.length) {
+            if (forcePrompt) showToast('サーバから 0 件でした。admin パスワードが違うか、まだ Publish 済みプロジェクトがありません', 4200);
+            return list;
+        }
         _saveCachedOwnerPw(pw);
-        return Array.isArray(rows) ? rows : [];
+        return list;
     } catch (e) {
         console.warn('list_projects failed', e);
         showToast('サーバ一覧の取得に失敗 (パスワード違い?)');
@@ -16308,6 +16331,22 @@ const Toolbar = {
 // =============================================================
 const SUPABASE_URL = window.SUPABASE_URL || '';
 const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || '';
+
+// サーバ機能が使えない理由。**「未設定」と「部品を読み込めなかった」は別物**で、
+// 前者は正常 (ローカル専用で動かしている)、後者は異常。同じ null にまとめると
+// 呼び出し側が黙って諦めるしかなくなる。index.html:1246 と同じ約束
+// (戻り値はそのまま見せられるメッセージ / 使えるときは null)。
+// ここが見るのは window.* ではなく上の const。
+function serverUnavailableReason() {
+    if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
+        return 'このページはサーバ機能なしで動いています (接続先が未設定)';
+    }
+    if (typeof supabase === 'undefined' || !supabase.createClient) {
+        return 'サーバへ接続する部品を読み込めませんでした。'
+             + '通信環境や広告ブロックをご確認のうえ、ページを再読み込みしてください';
+    }
+    return null;   // 使える
+}
 
 const SupabaseClient = (() => {
     let client = null;
@@ -17873,7 +17912,8 @@ const App = {
     // the cache.
     async bootstrapShareMode(slug) {
         if (!SupabaseClient.configured()) {
-            showToast('Share モードは設定されていません (SUPABASE_URL / ANON_KEY 未設定)');
+            showToast(serverUnavailableReason()
+                || 'Share モードは設定されていません (SUPABASE_URL / ANON_KEY 未設定)', 5200);
             this.renderEmpty();
             return;
         }
@@ -18050,7 +18090,7 @@ const App = {
     // session_token returned by unlock_project must carry role='admin'.
     async _importProjectFromServer(slug) {
         if (!SupabaseClient.configured()) {
-            alert('Supabase が未設定です');
+            alert(serverUnavailableReason() || 'Supabase が未設定です');
             return null;
         }
         const adminPw = (prompt(
@@ -19498,7 +19538,15 @@ const App = {
     async _ensureCollabToken(slug) {
         const s = this._collabSession;
         if (s && s.slug === slug && s.token && s.expiresAt && Date.now() < s.expiresAt - 60000) return s.token;
-        if (!SupabaseClient.configured()) return null;
+        // ここはポーリングから何度も呼ばれるので、トーストで繰り返し出さない。
+        // ただし黙って諦めない — 共同研究者の ROI が出ない理由が分かるように残す。
+        if (!SupabaseClient.configured()) {
+            if (!this._collabNoServerWarned) {
+                this._collabNoServerWarned = true;
+                console.warn('[collab] 共同研究者 ROI を取得できません: ' + serverUnavailableReason());
+            }
+            return null;
+        }
         let pw = _readCachedOwnerPw();
         let prompted = false;
         if (!pw) {
@@ -19896,7 +19944,17 @@ const App = {
                     // 派生統計だけを書いたときは公開は走らないので、この表示に
                     // すると "💾 Local 保存中" のまま戻らず、しかもその状態は
                     // クリックで強制再同期 (数 MB のアップロード) を起こす。
-                    this._setSyncStatus(this._publishDirty ? 'local-saved'
+                    // ★ 'no-server' は消さない。ここは**保存のたびに**走るので、
+                    //   publish が一度も通っていない (= _publishDirty が立った
+                    //   まま) 状態では、せっかく出した「⚠ サーバに接続できません」
+                    //   が次の編集で "💾 Local 保存中" に戻ってしまう。それでは
+                    //   「そのうち公開される」という誤解に逆戻りする。
+                    //   下の _scheduleAutoPublish() は従来どおり動かすので、
+                    //   部品が後から使えるようになれば autoPublishProject() 側で
+                    //   自然に復帰する。
+                    this._setSyncStatus(
+                        this._syncState === 'no-server' ? 'no-server'
+                        : this._publishDirty ? 'local-saved'
                         : (this._syncState === 'synced' ? 'synced' : 'local-saved'));
                     this._scheduleAutoPublish();
                     return true;
@@ -20043,7 +20101,13 @@ const App = {
         const project = this.project;
         if (!project || project.__share) return;
         if (!project.shareInfo || !project.shareInfo.slug) return;
-        if (!SupabaseClient.configured()) return;
+        // ★ 黙って止まらない。
+        //   ここを無言で return していたので、supabase-js を読み込めていない
+        //   端末では**自動 publish が何もせず**、同期インジケータは
+        //   「💾 Local 保存中」のまま止まり続けた。利用者は「そのうち同期
+        //   される」と思ったまま、実際には 1 度も公開されない。
+        //   「master pw 期限切れ」には状態があるのに、こちらには無かった。
+        if (!SupabaseClient.configured()) { this._setSyncStatus('no-server'); return; }
 
         const masterPw = _readCachedMasterPw();
         if (!masterPw) {
@@ -20162,6 +20226,9 @@ const App = {
             }
             case 'conflict':        text = '⚠ サーバが新しい'; break;
             case 'needs-master-pw': text = '🔑 Master pw 期限切れ'; break;
+            // ★ サーバに繋がらない。**「Local 保存中」のまま黙って止まらせない**。
+            //   公開されていないことが一目で分かる必要がある。
+            case 'no-server':       text = '⚠ サーバに接続できません'; break;
             case 'error':           text = '⚠ Sync 失敗'; break;
             default:                text = state;
         }
@@ -20169,6 +20236,9 @@ const App = {
         el.title = (state === 'error' && a) ? a
                  : (state === 'conflict') ? '別 PC が新しいバージョンを publish しました。クリックで対応'
                  : (state === 'needs-master-pw') ? 'クリックで Master pw 入力'
+                 : (state === 'no-server')
+                     ? (serverUnavailableReason() || 'サーバに接続できないため公開できていません')
+                       + '（この変更はこの端末にだけ保存されています。クリックで再試行）'
                  : (state === 'synced') ? 'クリックで強制再同期'
                  : '';
         el.style.display = 'inline-flex';
@@ -20199,6 +20269,16 @@ const App = {
             if (!pw) return;
             _saveCachedMasterPw(pw);
             this.autoPublishProject().catch(e => console.warn('manual sync failed', e));
+            return;
+        }
+        // サーバに繋がらない。押されたらもう一度試す — CDN の一時的な失敗なら
+        // 読み直しで直るので、「再読み込みしてください」で終わらせない。
+        if (state === 'no-server') {
+            if (SupabaseClient.configured()) {
+                this.autoPublishProject().catch(e => console.warn('manual sync failed', e));
+                return;
+            }
+            showToast(serverUnavailableReason() || 'サーバに接続できません', 5200);
             return;
         }
         if (state === 'conflict') {
