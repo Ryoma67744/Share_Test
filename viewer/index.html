@@ -3247,6 +3247,10 @@ let _parseWorker = null;
 let _parseWorkerBroken = false;
 let _parseSeq = 0;
 const _parsePending = new Map();
+// parquet worker に投げて返ってきていない仕事の数。xlsx/txt の _parsePending とは
+// 別のワーカーなので別勘定だが、進捗ピルでは足して 1 つに見せる
+// (_updateParseBusyIndicator)。増減は parquet worker ラッパの call() が管理する。
+let _pqInFlight = 0;
 
 function parseWorkerSupported() {
     return typeof Worker !== 'undefined'
@@ -3263,7 +3267,14 @@ function parseWorkerAvailable() {
 // so a background import is visible without blocking interaction.
 function _updateParseBusyIndicator() {
     if (typeof document === 'undefined') return;
-    const n = _parsePending.size;
+    // ★ parquet の列読みも数える。
+    //
+    //   _parsePending は xlsx/txt のパースワーカーだけなので、TIMS ノンターゲット
+    //   (parquet) では**読み込み中に何も出なかった**。1 化合物あたり数百 MB の
+    //   ファイルから列を読むので瞬時ではなく、「読んでいるのか固まったのか」を
+    //   区別する手掛かりが画面に 1 つも無い状態だった。
+    //   ピルは 1 つに合流させる (2 つ出すと画面が騒がしいだけ)。
+    const n = _parsePending.size + _pqInFlight;
     let el = document.getElementById('parse-busy-indicator');
     if (n <= 0) { if (el) el.remove(); return; }
     if (!el) {
@@ -3904,9 +3915,21 @@ function _makeParquetWorker(onFatal) {
                 if (dead) { reject(new Error('parquet worker は停止しています')); return; }
                 const id = ++seq;
                 let timer = null;
+                // 進捗ピル用の在庫数。settle は 1 回きりなので、二重に減らさない
+                // よう done で守る (killAll は pending.clear() のあとに reject を
+                // 呼ぶので、ここを通らない経路が無いことも兼ねて確認できる)。
+                let done = false;
+                _pqInFlight++;
+                _updateParseBusyIndicator();
+                const settle = () => {
+                    if (done) return;
+                    done = true;
+                    _pqInFlight = Math.max(0, _pqInFlight - 1);
+                    _updateParseBusyIndicator();
+                };
                 pending.set(id, {
-                    resolve: (v) => { if (timer) clearTimeout(timer); pending.delete(id); resolve(v); },
-                    reject:  (e) => { if (timer) clearTimeout(timer); pending.delete(id); reject(e); },
+                    resolve: (v) => { if (timer) clearTimeout(timer); pending.delete(id); settle(); resolve(v); },
+                    reject:  (e) => { if (timer) clearTimeout(timer); pending.delete(id); settle(); reject(e); },
                 });
                 if (timeoutMs) {
                     timer = setTimeout(() => {
