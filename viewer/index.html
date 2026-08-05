@@ -63,6 +63,7 @@ body.share-mode #btn-projects,
 body.share-mode #btn-import-zip,
 body.share-mode #btn-add-section,
 body.share-mode #btn-add-parquet,
+body.share-mode #btn-replace-parquet,
 body.share-mode #btn-delete-project,
 body.share-mode #btn-publish-share,
 body.share-mode #btn-share-info,
@@ -652,7 +653,8 @@ body.share-mode #btn-share-preview { display:inline-flex; }
   /* View-only on phones: hide editing / admin / management affordances. */
   header h1, #project-picker,
   #btn-share-admin-login, #btn-projects, #btn-new-project, #btn-import-zip,
-  #btn-publish-share, #btn-share-info, #btn-add-section, #btn-add-parquet, #btn-delete-project,
+  #btn-publish-share, #btn-share-info, #btn-add-section, #btn-add-parquet,
+  #btn-replace-parquet, #btn-delete-project,
   #tb-add-heif, #tb-add-msi, #tb-align-heif, #tb-del-section,
   #tb-flip-group, #tb-msi-um-group, #tb-rot-share-default,
   /* 狭い画面でも絞り込みは残す (共有先の唯一の探索手段なので)。
@@ -695,6 +697,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
             <button id="btn-share-info" class="btn" title="View the share URL and passwords from the last publish" style="display:none;">Share info</button>
             <button id="btn-add-section" class="btn primary" title="Add a tissue section panel">+ Section</button>
             <button id="btn-add-parquet" class="btn" title="TIMS ノンターゲット (parquet) を登録。annotation ごとに切片を自動生成します">+ parquet</button>
+            <button id="btn-replace-parquet" class="btn" title="登録済みの parquet を、中身が同じ別ファイル (再パック版など) に差し替えます。切片・ROI・背景除去・表示設定はそのまま残ります">parquet 差し替え</button>
             <button id="btn-delete-project" class="btn danger" title="Delete current project">Delete</button>
             <button id="btn-help" class="btn" title="Open the user guide">Help</button>
         </div>
@@ -10232,6 +10235,33 @@ function isParquetSidecarName(name) {
     return new RegExp(PARQUET_SIDECAR_SUFFIX + '\\.parquet$', 'i').test(String(name || ''));
 }
 
+// ★ 変換器の中間ファイル <BASE>_temp.parquet を本体候補から外す。
+//
+//   中間ファイルは snappy / 512 行 row group / 全列 float64 で書かれ、成功時は
+//   変換器が消すが **失敗すると残る**。論理スキーマは本番と同じなので
+//   parquetColumnRoles は普通に x/y/annotation を見つけ、**登録は成功してしまう**。
+//   結果、再パックで消したはずの「細切れ row group」と「float64 (転送 2 倍)」に
+//   逆戻りしたまま運用され、利用者には見分けがつかない。
+//   「再パックしたのに速くならない」は原因究明が極めて難しいので、名前で弾く。
+const PARQUET_TEMP_SUFFIX = '_temp';
+function isParquetTempName(name) {
+    return new RegExp(PARQUET_TEMP_SUFFIX + '\\.parquet$', 'i').test(String(name || ''));
+}
+
+// 選択されたファイルを「本体候補 / サイドカー / 除外」に仕分ける。
+// サイドカーと中間ファイルは役割が違う — サイドカーは**使う**が本体候補からは
+// 外し、中間ファイルは**使わない**。まとめて 1 つの述語にすると取り違える。
+function parquetClassifyFiles(files) {
+    const mains = [], sidecars = [], excluded = [];
+    for (const f of (files || [])) {
+        const n = (f && f.name) || '';
+        if (isParquetSidecarName(n)) { sidecars.push(f); continue; }
+        if (isParquetTempName(n)) { excluded.push({ file: f, why: '変換器の中間ファイル' }); continue; }
+        mains.push(f);
+    }
+    return { mains, sidecars, excluded };
+}
+
 // サイドカーから化合物メタを読む。行順は本体の m/z 列順と一致する (k 行目 = k 番目)。
 // 取れなければ null を返し、呼び出し側は m/z だけで表示名を作る。
 async function readParquetSidecar(file) {
@@ -10321,6 +10351,14 @@ async function openParquetWizard() {
           <label>parquet ファイル (複数選択可)
             <input type="file" name="src" accept=".parquet" multiple required>
           </label>
+          <div data-pick style="display:none;margin:6px 0;">
+            <label style="font-size:11px;color:#b45309;">本体の parquet が複数あります。どれを登録するか選んでください
+              <select data-main-pick style="width:100%;font-size:11px;">
+                <option value="">— 選択してください —</option>
+              </select>
+            </label>
+          </div>
+          <div data-excl style="font-size:11px;color:#64748b;min-height:0;margin:2px 0;"></div>
           <div data-scan style="font-size:11px;color:#475569;min-height:16px;margin:6px 0;"></div>
           <div data-labels style="max-height:220px;overflow:auto;border:1px solid #e5e7eb;border-radius:4px;padding:6px;display:none;"></div>
           <p data-err style="color:#b91c1c;font-size:11px;min-height:14px;"></p>
@@ -10336,16 +10374,53 @@ async function openParquetWizard() {
     const labelsEl = card.querySelector('[data-labels]');
     const errEl = card.querySelector('[data-err]');
     const okBtn = card.querySelector('[data-modal-ok]');
+    const pickBox = card.querySelector('[data-pick]');
+    const pickSel = card.querySelector('[data-main-pick]');
+    const exclEl = card.querySelector('[data-excl]');
     let state = null;
 
-    srcInp.addEventListener('change', async () => {
+    // ★ 本体候補が複数あるとき、黙って先頭を採らない。
+    //
+    //   入力は multiple なので「フォルダから 3 サンプル選ぶ」が普通に起きる。
+    //   従来の files.find(...) は**最初の 1 つだけを無言で採用**し、残りは
+    //   警告もエラーも無く捨てていた。どれが登録されたのか利用者には分からない。
+    //   1 件なら従来どおり自動で進み、2 件以上のときだけ選ばせる。
+    srcInp.addEventListener('change', () => {
         errEl.textContent = ''; labelsEl.style.display = 'none'; labelsEl.innerHTML = '';
-        okBtn.disabled = true; state = null;
+        scanEl.textContent = ''; okBtn.disabled = true; state = null;
+        pickBox.style.display = 'none'; exclEl.textContent = '';
         const files = Array.from(srcInp.files || []);
         if (!files.length) return;
-        const sidecarFile = files.find(f => isParquetSidecarName(f.name)) || null;
-        const mainFile = files.find(f => !isParquetSidecarName(f.name)) || null;
-        if (!mainFile) { errEl.textContent = '本体の parquet が選択されていません (サイドカーだけでは登録できません)。'; return; }
+        const { mains, sidecars, excluded } = parquetClassifyFiles(files);
+        // 除外したものは黙って消さず、必ず見せる。
+        if (excluded.length) {
+            exclEl.textContent = '除外: '
+                + excluded.map(x => x.file.name + '（' + x.why + '）').join(' / ');
+        }
+        if (!mains.length) {
+            errEl.textContent = '本体の parquet が選択されていません'
+                + (sidecars.length ? '（サイドカーだけでは登録できません）' : '')
+                + (excluded.length ? '。中間ファイル (_temp.parquet) は本体として使えません' : '') + '。';
+            return;
+        }
+        const sidecarFile = sidecars[0] || null;
+        if (mains.length === 1) { runScan(mains[0], sidecarFile); return; }
+        pickSel.innerHTML = '<option value="">— 選択してください —</option>'
+            + mains.map((f, i) => '<option value="' + i + '">' + String(f.name).replace(/</g, '&lt;')
+                + '（' + (f.size / 1048576).toFixed(1) + ' MB）</option>').join('');
+        pickBox.style.display = '';
+        pickSel.onchange = () => {
+            const i = Number(pickSel.value);
+            if (!Number.isInteger(i) || i < 0 || i >= mains.length) {
+                okBtn.disabled = true; state = null; scanEl.textContent = ''; return;
+            }
+            runScan(mains[i], sidecarFile);
+        };
+    });
+
+    async function runScan(mainFile, sidecarFile) {
+        errEl.textContent = ''; labelsEl.style.display = 'none'; labelsEl.innerHTML = '';
+        okBtn.disabled = true; state = null;
         scanEl.textContent = '目録を読み込み中… (大きなファイルでは数十秒かかることがあります)';
         try {
             const blobId = 'reg_' + mainFile.name + '_' + mainFile.size;
@@ -10395,7 +10470,7 @@ async function openParquetWizard() {
             errEl.textContent = '目録を読み込めませんでした: ' + (e && e.message ? e.message : e);
             scanEl.textContent = '';
         }
-    });
+    }
 
     card._collect = () => {
         if (!state) { errEl.textContent = 'ファイルを選択してください。'; return false; }
@@ -10403,6 +10478,141 @@ async function openParquetWizard() {
             .filter(c => c.checked).map(c => c.value);
         if (!labels.length) { errEl.textContent = '切片を 1 つ以上選択してください。'; return false; }
         return Object.assign({ labels }, state);
+    };
+    return p;
+}
+
+// ---- ソース parquet の差し替え ---------------------------------------------
+//
+// ★ なぜ「再登録」ではなく「差し替え」なのか。
+//
+//   変換器が再パックすると (row group を束ねるなど) バイト列が変わり blobId が
+//   変わる。しかし論理内容 — 行数・並び順・列数・列順・列名・型・値 — は同じ。
+//   これを再登録で持ち込むと addParquetSource は**切片を新規作成する**ので、
+//   section.id に紐づく成果物がすべて置き去りになる:
+//     ROI          … project.rois[].polysBySection[sec.id]
+//     背景除去      … section.meta.otsu
+//     表示設定      … section.meta.layerDisplay[key]
+//     位置合わせ / HE・IF … section.meta / section.images
+//   しかも旧切片は消えないので、4 切片が 8 切片になり半分が壊れた状態で残る。
+//
+//   列順・列名・型が不変なら colIdx の対応は 1:1 に保たれるので、
+//   **blobId だけを張り替える**のが本来の操作になる。切片も ROI も触らない。
+//
+// ★ ただし無条件に張り替えてはいけない。別のファイルを指定されたら、像と ROI の
+//   対応が**静かに**壊れる。下の検証を全部通るまで 1 バイトも書かない。
+function parquetReplaceMismatch(oldInfo, oldMz, oldGeom, newInfo, newMz, newGeom) {
+    const a = oldInfo.colNames || [], b = newInfo.colNames || [];
+    if (a.length !== b.length) return '列数が違います (' + a.length + ' → ' + b.length + ')';
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i]) return '列名 #' + i + ' が違います (' + a[i] + ' → ' + b[i] + ')';
+    }
+    if (Number(oldInfo.numRows) !== Number(newInfo.numRows)) {
+        return '行数が違います (' + oldInfo.numRows + ' → ' + newInfo.numRows + ')';
+    }
+    const ma = oldMz || [], mb = newMz || [];
+    if (ma.length !== mb.length) return 'mz_sorted の件数が違います (' + ma.length + ' → ' + mb.length + ')';
+    for (let i = 0; i < ma.length; i++) {
+        if (ma[i] !== mb[i]) return 'mz_sorted #' + i + ' が違います (' + ma[i] + ' → ' + mb[i] + ')';
+    }
+    // ★ ここが本丸。幾何 (格子と行→セルの対応) まで一致して初めて、
+    //   既存の ROI・Otsu マスクが新しいファイルの上でも同じ画素を指すと言える。
+    const sa = oldGeom.sections || [], sb = newGeom.sections || [];
+    if (sa.length !== sb.length) return '切片数が違います (' + sa.length + ' → ' + sb.length + ')';
+    for (let i = 0; i < sa.length; i++) {
+        const x = sa[i], y = sb[i];
+        if (x.label !== y.label) return '切片ラベルが違います (' + x.label + ' → ' + y.label + ')';
+        if (x.W !== y.W || x.H !== y.H) {
+            return '切片 ' + x.label + ' の格子が違います ('
+                + x.W + '×' + x.H + ' → ' + y.W + '×' + y.H + ')';
+        }
+        if (x.cellIdx.length !== y.cellIdx.length) {
+            return '切片 ' + x.label + ' のスポット数が違います ('
+                + x.cellIdx.length + ' → ' + y.cellIdx.length + ')';
+        }
+        for (let k = 0; k < x.cellIdx.length; k++) {
+            if (x.cellIdx[k] !== y.cellIdx[k] || x.rowIdx[k] !== y.rowIdx[k]) {
+                return '切片 ' + x.label + ' の画素対応が違います (spot #' + k + ')';
+            }
+        }
+    }
+    return null;
+}
+
+function openParquetReplaceModal(sources) {
+    const opts = sources.map((s, i) =>
+        '<option value="' + i + '">' + String(s.filename || '(名前なし)').replace(/</g, '&lt;')
+        + '（レイヤー ' + s.count + ' 件 / 切片 ' + s.sectionCount + ' 件）</option>').join('');
+    const html = `
+        <h2>ソース parquet を差し替える</h2>
+        <form>
+          <p style="font-size:11px;color:#475569;margin-bottom:6px;">
+            <b>中身が同じ別ファイル</b>（再パック版など）に差し替えます。<br>
+            <span style="color:#64748b;">切片・ROI・背景除去・表示設定・位置合わせは<b>そのまま残ります</b>。
+            列名・行数・m/z 一覧・画素の対応がすべて一致することを確認してから差し替えます。
+            1 つでも違えば中止します。</span>
+          </p>
+          <label>差し替える対象
+            <select data-target style="width:100%;font-size:11px;">${opts}</select>
+          </label>
+          <label style="margin-top:6px;display:block;">新しい parquet
+            <input type="file" name="src" accept=".parquet" required>
+          </label>
+          <div data-scan style="font-size:11px;color:#475569;min-height:16px;margin:6px 0;"></div>
+          <p data-err style="color:#b91c1c;font-size:11px;min-height:14px;white-space:pre-wrap;"></p>
+          <div class="modal-actions">
+            <button type="button" class="btn" data-modal-cancel>Cancel</button>
+            <button type="submit" class="btn primary" data-modal-ok disabled>差し替える</button>
+          </div>
+        </form>`;
+    const p = openModal(html);
+    const card = openModal._card;
+    const srcInp = card.querySelector('input[name=src]');
+    const tgtSel = card.querySelector('[data-target]');
+    const scanEl = card.querySelector('[data-scan]');
+    const errEl = card.querySelector('[data-err]');
+    const okBtn = card.querySelector('[data-modal-ok]');
+    let picked = null;
+
+    const rescan = async () => {
+        errEl.textContent = ''; okBtn.disabled = true; picked = null;
+        const file = (srcInp.files || [])[0];
+        if (!file) { scanEl.textContent = ''; return; }
+        if (isParquetTempName(file.name)) {
+            errEl.textContent = '中間ファイル (_temp.parquet) は差し替えに使えません。';
+            scanEl.textContent = ''; return;
+        }
+        if (isParquetSidecarName(file.name)) {
+            errEl.textContent = 'サイドカーではなく本体の parquet を選んでください。';
+            scanEl.textContent = ''; return;
+        }
+        const src = sources[Number(tgtSel.value) || 0];
+        scanEl.textContent = '照合中… (目録と画素の対応を確認します)';
+        try {
+            const newKey = 'replace_' + file.name + '_' + file.size;
+            const st = await parquetEnsureOpen(newKey, parquetSrcFromBlob(file));
+            const geom = await parquetEnsureGeometry(newKey, parquetSrcFromBlob(file));
+            const why = parquetReplaceMismatch(src.info, src.mz, src.geom, st.info, st.mz, geom);
+            if (why) {
+                errEl.textContent = '中身が一致しないので差し替えられません:\n' + why;
+                scanEl.textContent = ''; return;
+            }
+            picked = { file, src, newKey };
+            scanEl.innerHTML = '✅ 一致を確認しました（列 <b>' + st.info.colNames.length
+                + '</b> / 行 <b>' + Number(st.info.numRows).toLocaleString()
+                + '</b> / 切片 <b>' + geom.sections.length + '</b>）。差し替えられます。';
+            okBtn.disabled = false;
+        } catch (e) {
+            console.error('parquet 差し替えの照合に失敗', e);
+            errEl.textContent = '照合できませんでした: ' + (e && e.message ? e.message : e);
+            scanEl.textContent = '';
+        }
+    };
+    srcInp.addEventListener('change', rescan);
+    tgtSel.addEventListener('change', rescan);
+    card._collect = () => {
+        if (!picked) { errEl.textContent = '一致を確認できたファイルを選んでください。'; return false; }
+        return picked;
     };
     return p;
 }
@@ -19006,6 +19216,98 @@ const App = {
         await this._verifyPersistence('addSection', { sectionCount: expectedCount });
     },
 
+    // 登録済み parquet を、中身が同じ別ファイルへ差し替える。
+    // 再登録と違い section.id を作り直さないので、ROI・背景除去・表示設定・
+    // 位置合わせ・HE/IF がそのまま残る (openParquetReplaceModal の冒頭を参照)。
+    async replaceParquetSource() {
+        if (!this.project) { showToast('先にプロジェクトを作成してください'); return; }
+        if (this.shareMode) {
+            // 共有先は blobId ではなく sourceUrl を持つので張り替えでは済まない。
+            // 黙って何もしない、にはしない。
+            showToast('共有プロジェクトは差し替えできません。Master 側で差し替えたうえで、再アップロードと再 publish が必要です', 6000);
+            return;
+        }
+        // 同じソースファイルを指すレイヤーを 1 グループにまとめる。
+        // 既存の srcKey の作り方に合わせる (sourceFileId 優先、無ければ blobId)。
+        const groups = new Map();
+        for (const sec of (this.project.sections || [])) {
+            for (const [k, e] of Object.entries((sec && sec.msiSeries) || {})) {
+                if (!e || e.kind !== 'parquet' || !e.blobId) continue;
+                const key = e.sourceFileId || e.blobId;
+                let g = groups.get(key);
+                if (!g) {
+                    g = { srcKey: key, blobId: e.blobId, filename: e.filename || '',
+                          count: 0, sections: new Set(), ents: [] };
+                    groups.set(key, g);
+                }
+                g.count++; g.sections.add(sec.id); g.ents.push(e);
+            }
+        }
+        const sources = [...groups.values()];
+        if (!sources.length) { showToast('差し替えられる parquet が登録されていません'); return; }
+
+        // 現行ファイルの目録と幾何を先に読む (照合の基準)。
+        for (const s of sources) {
+            try {
+                const st = await parquetEnsureOpen(s.blobId, await parquetSrcForEnt({ blobId: s.blobId }));
+                s.info = st.info; s.mz = st.mz;
+                s.geom = await parquetEnsureGeometry(s.blobId, await parquetSrcForEnt({ blobId: s.blobId }));
+                s.sectionCount = s.sections.size;
+            } catch (e) {
+                console.warn('差し替え対象の目録を読めません', s.blobId, e);
+            }
+        }
+        const usable = sources.filter(s => s.info && s.geom);
+        if (!usable.length) { showToast('登録済み parquet の目録を読めませんでした'); return; }
+
+        const picked = await openParquetReplaceModal(usable);
+        if (!picked) return;
+        const { file, src, newKey } = picked;
+
+        try {
+            // ここまで来たら照合済み。新 blob を書いてから ent を張り替える。
+            const blobId = uid('blob');
+            await ProjectStorage.putBlob({
+                id: blobId, blob: file,
+                mime: file.type || 'application/octet-stream',
+                filename: file.name || 'data.parquet',
+            });
+            // ★ ここで parquetAliasFileState は使わない。直後に parquetReleaseAll で
+            //   捨てるので効かないうえ、「仮キーで索引を保存してメモリ上の別名だけ
+            //   張る」のは監査 5 で穴として挙げた形そのもの (次回起動で結局
+            //   解析し直す)。再パック後のフッタは 2 MB なので、素直に開き直す。
+            for (const e of src.ents) {
+                e.blobId = blobId;
+                e.filename = file.name;
+                // ★ sourceBytes を埋める。共有先の parquet は長さが分からないと
+                //   worker ごとに HEAD が 1 往復発生する (:3477 のコメント参照)。
+                //   publish はここを載せて送るので、差し替え時に入れておく。
+                e.sourceBytes = file.size;
+            }
+            // 旧ファイルの後片付け。索引を残すと IDB を無駄に食う。
+            try { await ProjectStorage.deleteBlob(src.blobId); } catch (e2) {}
+            try { await ProjectStorage.deletePqIndex(src.blobId); } catch (e2) {}
+            // 照合用に開いた 'replace_...' キーの索引も残さない。
+            try { await ProjectStorage.deletePqIndex(newKey); } catch (e2) {}
+            // 旧ファイルを指したままの索引・幾何をセッションから落とす。
+            // 個別に落とす口は無いので、まとめて返す (この直後に開き直す)。
+            parquetReleaseAll();
+
+            this.queueSave(0);
+            await this._flushSave();
+            // 読み込み済みラスタは旧ファイル由来なので捨てて読み直させる。
+            for (const p of this.panels.values()) {
+                if (p.msiValueRasters) p.msiValueRasters.clear();
+                if (p._msiLutCache) p._msiLutCache.clear();
+            }
+            showToast('ソースを差し替えました（' + src.count + ' レイヤー）。切片・ROI・背景除去はそのままです', 5000);
+            await this.openProject(this.project.id);
+        } catch (e) {
+            console.error('parquet の差し替えに失敗', e);
+            alert('差し替えに失敗しました: ' + (e && e.message ? e.message : e));
+        }
+    },
+
     // TIMS ノンターゲット (parquet) の登録。既存の openMsiWizard は「1 切片へ 1 ファイル」
     // だが、parquet は 1 ファイルに全切片 (annotation) × 全化合物が入っているので、
     // プロジェクト単位の入口を分けている。
@@ -20429,6 +20731,8 @@ const App = {
         {
             const bp = document.getElementById('btn-add-parquet');
             if (bp) bp.addEventListener('click', () => this.addParquetSource());
+            const br = document.getElementById('btn-replace-parquet');
+            if (br) br.addEventListener('click', () => this.replaceParquetSource());
         }
         {
             // 「TIC を作る」(要望③)。ノンターゲットでは自動生成しないので明示操作。
