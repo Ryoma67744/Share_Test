@@ -4115,6 +4115,68 @@ async function _pqOpenViaThrowawayWorker(fileId, src) {
     }
 }
 
+// ★ 「このファイルは速い作りか」を索引から読み取る。
+//
+//   再パック (row group を束ねる) で 1 列の読みが約 500 往復 → 1 往復になり、
+//   ノンターゲットの体感が解決した。ところが**そのファイルが再パック済みか
+//   どうかを確かめる手段がアプリのどこにも無かった**。古い設定のまま書かれた
+//   ファイルを登録しても普通に成功し、症状は「なんとなく遅い」だけ。
+//   原因究明は極めて難しい (実際、縦線の調査では仮説を 4 回外した)。
+//
+//   事実は索引に全部入っているので、拾って見せるだけでよい。
+//   ★ worker には触らない。主スレッドは open 経路 (opened.index) でも
+//     restore 経路 (_pqLoadSavedIndex の戻り値) でも索引そのものを持っている。
+//     INDEX_VERSION を上げる必要も無いので、保存済み索引は捨てられない。
+//   ★ これは**表示用の飾り**であって、読み込みに要るものではない。索引の形が
+//     想定と違っても (古い保存分・部分的なスタブ) **絶対に例外を投げない**こと。
+//     ここで throw すると parquetEnsureOpen ごと落ちて MSI が 1 枚も出なくなる。
+//     分からなければ null を返し、呼び出し側は「表示しない」に倒す。
+function parquetLayoutFacts(idx) {
+    if (!idx || !Array.isArray(idx.colNames) || !idx.colNames.length) return null;
+    const colStart = idx.colStart;
+    if (!colStart || typeof colStart.length !== 'number') return null;
+    const roles = parquetColumnRoles(idx.colNames);
+    const mzIdxs = (roles && roles.mzIdxs) || [];
+    // 利用者に見せるのは row group 数ではなく **1 列を読むのに要る範囲取得の
+    // 回数**。体感に直結するのはこちらで、row group 数は内部事情でしかない。
+    let chunks = 0;
+    for (const c of mzIdxs) {
+        if (c + 1 >= colStart.length) continue;          // 索引が短い = 信用しない
+        const n = (colStart[c + 1] - colStart[c]) | 0;
+        if (n > chunks) chunks = n;      // 最悪の列で見る (1 本でも遅ければ遅い)
+    }
+    if (!chunks) return null;            // m/z 列が無い / 数えられない
+    const first = mzIdxs[0];
+    const at = colStart[first];
+    const codecId = (idx.codecIds && at < idx.codecIds.length) ? idx.codecIds[at] : -1;
+    return {
+        rgCount: (idx.rgRows && idx.rgRows.length) || 0,
+        mzCols: mzIdxs.length,
+        chunksPerCol: chunks,
+        mzType: (Array.isArray(idx.colTypes) ? (idx.colTypes[first] || null) : null),
+        codec: (codecId >= 0 && Array.isArray(idx.codecList)) ? (idx.codecList[codecId] || null) : null,
+        footerBytes: Number(idx.metadata_length) || 0,
+    };
+}
+
+// レイアウトの判定と、利用者へ出す 1 行。
+// ★ 断定しない。「古い可能性」と書く — 意図的に分割している場合もありうる。
+function parquetLayoutVerdict(f) {
+    if (!f || !f.chunksPerCol) return null;
+    const n = f.chunksPerCol;
+    const dbl = (f.mzType === 'DOUBLE');
+    let level, text;
+    if (n <= 1) { level = 'good'; text = '◎ 最適 — 1 化合物あたり範囲取得 1 回'; }
+    else if (n <= 8) { level = 'ok'; text = '○ 実用 — 1 化合物あたり範囲取得 ' + n + ' 回'; }
+    else {
+        level = 'warn';
+        text = '⚠ 1 化合物あたり範囲取得 ' + n + ' 回 — 変換器の row group 設定が'
+             + '古い可能性があります (1 ファイル 1 row group なら 1 回で済みます)';
+    }
+    if (dbl) text += '。m/z 列が DOUBLE なので転送量が float32 の 2 倍になります';
+    return { level, text, n, dbl };
+}
+
 async function parquetEnsureOpen(blobId, src) {
     const cached = _pqFiles.get(blobId);
     if (cached && cached.info) return cached;
@@ -4123,11 +4185,16 @@ async function parquetEnsureOpen(blobId, src) {
     const p = (async () => {
         const fileId = 'pq_' + blobId;
         let info = null;
+        // レイアウトの事実 (1 列あたりの範囲取得回数など) を作る元。
+        // ★ open / restore の**両方**で埋めること。片方だけだと
+        //   「初回は出るが次から出ない」という一番たちの悪い挙動になる。
+        let idxForFacts = null;
         // ② 保存済みの索引があれば、フッタを一切読まずに worker へ戻す。
         const saved = await _pqLoadSavedIndex(blobId);
         if (saved) {
             try {
                 info = await callParquetWorker({ op: 'restore', fileId, index: saved }, [], 60000);
+                idxForFacts = saved;
             } catch (e) {
                 console.warn('[parquet] 保存済み索引を復元できませんでした。作り直します', e);
                 info = null;
@@ -4142,6 +4209,7 @@ async function parquetEnsureOpen(blobId, src) {
             // 常駐 worker には索引だけを渡す (フッタは二度と読まない)。
             await callParquetWorker({ op: 'restore', fileId, index }, [], 60000);
             info = { numRows: opened.numRows, colNames: opened.colNames, kv: opened.kv, stats: opened.stats };
+            idxForFacts = index;
             // 次回のために保存する。失敗しても動作には影響しない。
             _pqSaveIndex(blobId, index).catch(e => console.warn('[parquet] 索引の保存に失敗', e));
         }
@@ -4164,7 +4232,13 @@ async function parquetEnsureOpen(blobId, src) {
             .split(',').map(s => (String(s).trim() === '' ? NaN : Number(s)));
         // 供給元 (blob / url) はここに持たない。呼び出しごとに src を受け取る
         // 形にしたので、state が握ると master と共有で食い違う余地ができる。
-        const st = { fileId, info, mz, geom: null };
+        // 表示用の飾りが読み込みを壊さないよう、ここでも受け止める。
+        // parquetLayoutFacts は投げない作りだが、将来の変更で投げるように
+        // なっても MSI が出なくなるのは割に合わない。
+        let layout = null;
+        try { layout = parquetLayoutFacts(idxForFacts); }
+        catch (e) { console.warn('[parquet] レイアウト情報を作れませんでした', e); }
+        const st = { fileId, info, mz, geom: null, layout };
         _pqFiles.set(blobId, st);
         return st;
     })();
@@ -10470,8 +10544,14 @@ async function openParquetWizard() {
                 return { key, colIdx, meta, max: stt ? stt.max : null };
             });
             state = { mainFile, sidecarFile, geom, info: st.info, features, dupWarn };
+            // ★ 登録してしまう前にレイアウトを見せる。遅い作りのファイルは
+            //   登録も表示も普通に成功してしまうので、ここで気づけないと
+            //   「なんとなく遅い」だけが残る。
+            const lv = parquetLayoutVerdict(st.layout);
+            const lvColor = lv ? ({ good: '#15803d', ok: '#475569', warn: '#b45309' })[lv.level] : '';
             scanEl.innerHTML = '化合物 <b>' + features.length + '</b> 件 / スポット <b>'
                 + Number(st.info.numRows).toLocaleString() + '</b> / 切片候補 <b>' + geom.sections.length + '</b> 件'
+                + (lv ? '<br><span style="color:' + lvColor + ';">' + lv.text + '</span>' : '')
                 + (sidecar ? '' : ' <span style="color:#b45309;">(サイドカーが無いので m/z のみの表示名になります)</span>')
                 + (mzCountMismatch
                     ? ' <span style="color:#b91c1c;">⚠ フッタの m/z 一覧が ' + mzCountMismatch
@@ -10621,9 +10701,29 @@ function openParquetReplaceModal(sources) {
                 scanEl.textContent = ''; return;
             }
             picked = { file, src, newKey };
+            // ★ 「速くなるのか」をその場で答える。差し替えの動機はほぼこれなので、
+            //   一致の確認だけでは足りない。変わらないなら変換器の設定が効いて
+            //   いないということが、ここで分かる。
+            const before = src.layout, after = st.layout;
+            let delta = '';
+            if (before && after && before.chunksPerCol && after.chunksPerCol) {
+                const b = before.chunksPerCol, a = after.chunksPerCol;
+                delta = (a < b)
+                    ? '<br><span style="color:#15803d;">1 化合物あたりの範囲取得が <b>'
+                      + b + ' 回 → ' + a + ' 回</b> になります</span>'
+                    : (a === b)
+                        ? '<br><span style="color:#b45309;">1 化合物あたりの範囲取得は <b>'
+                          + a + ' 回のまま</b>で変わりません（変換器の設定が効いていない可能性）</span>'
+                        : '<br><span style="color:#b91c1c;">1 化合物あたりの範囲取得が <b>'
+                          + b + ' 回 → ' + a + ' 回</b> に<b>増えます</b></span>';
+                if (before.mzType !== after.mzType) {
+                    delta += '<br><span style="color:#475569;">m/z 列の型: ' + before.mzType
+                           + ' → ' + after.mzType + '</span>';
+                }
+            }
             scanEl.innerHTML = '✅ 一致を確認しました（列 <b>' + st.info.colNames.length
                 + '</b> / 行 <b>' + Number(st.info.numRows).toLocaleString()
-                + '</b> / 切片 <b>' + geom.sections.length + '</b>）。差し替えられます。';
+                + '</b> / 切片 <b>' + geom.sections.length + '</b>）。差し替えられます。' + delta;
             okBtn.disabled = false;
         } catch (e) {
             console.error('parquet 差し替えの照合に失敗', e);
@@ -19273,7 +19373,7 @@ const App = {
         for (const s of sources) {
             try {
                 const st = await parquetEnsureOpen(s.blobId, await parquetSrcForEnt({ blobId: s.blobId }));
-                s.info = st.info; s.mz = st.mz;
+                s.info = st.info; s.mz = st.mz; s.layout = st.layout;
                 s.geom = await parquetEnsureGeometry(s.blobId, await parquetSrcForEnt({ blobId: s.blobId }));
                 s.sectionCount = s.sections.size;
             } catch (e) {
