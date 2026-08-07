@@ -1535,6 +1535,646 @@ function invertAffine(T) {
     ];
 }
 
+// ---- HE↔MSI registration math -------------------------------------------
+// Shared by the Align modal (Wizards.openAlignmentModal): the landmark
+// residual readout and the automatic silhouette solver. Everything here is
+// pure except heTissueMask (needs a canvas to read pixels), so
+// window.__alignSelfTest can drive the solver on synthetic masks.
+//
+// ★ 座標系の約束: T_he_to_msi は「生 HE ピクセル → 生 MSI ラスタピクセル」の
+//   3×3 で、表示上の回転/反転 (sectionTransform) は一切絡まない。この節の
+//   関数はすべて生ピクセル空間で話す。ランドマークも生空間で保存されている
+//   (:11893 付近) ので、そのまま渡してよい。
+//
+// ★ マスクは { mask:Uint8Array(w*h, 0|1), w, h, sx, sy } で表す。sx/sy は
+//   「マスク1画素あたりの生ピクセル数」。HE は縮小して作るので sx>1 になる。
+
+const HE_MASK_MAX_EDGE = 512;    // work resolution for the HE tissue mask
+const HE_MASK_SAT_MIN  = 0.10;   // H&E tissue is saturated pink/purple...
+const HE_MASK_VAL_MAX  = 0.995;  // ...while slide background is near-white
+const ALIGN_DICE_MAX_EDGE = 384; // MSI grid is decimated to this for Dice
+const ALIGN_ANISO_MIN = 0.03;    // below this a silhouette carries no rotation info
+// Expected RMS error of the silhouette solver, in MSI px, used as its weight in
+// the hybrid blend and shown to the user as "見込み誤差".
+// ★ 実測値 (合成グラウンドトゥルース + 現実的な抽出ずれ 8 種 × 鏡映):
+//     スケール推定  RMS 0.61 px, 中央値 0.30, 最悪 1.13
+//     スケール固定  RMS 0.49 px, 中央値 0.33, 最悪 1.20
+//   きれいな条件なら 0.1 px 前後だが、HE と MSI のマスク境界が 1 MSI px 系統的に
+//   ずれると誤差もほぼ 1 px になる。これは手法の限界ではなく当然の帰結で、
+//   2 つのマスクが 1 px 食い違っていれば 1 px より良く合わせようがない。
+//   重みには保守側 (やや大きめ) を使う。過小評価すると自動解を信じすぎるため。
+const AUTO_ALIGN_SIGMA_PX = 0.9;         // scale estimated from silhouette area
+const AUTO_ALIGN_SIGMA_LOCKED_PX = 0.7;  // scale locked to a known µm/px ratio
+
+// T is always rebuilt from the 5 scalar params the Align sliders hold, so a
+// solver only has to produce {flip, scale, rotate, offx, offy}. Promoted to
+// module scope (was a modal-local const) so the auto-solver and the self-test
+// can share the exact same matrix construction as the manual path.
+function buildHeToMsiAffine(st) {
+    const sx = (st.flip_lr ? -1 : 1) * (st.scale_pct / 100);
+    const sy = (st.flip_ud ? -1 : 1) * (st.scale_pct / 100);
+    const th = st.rotate_deg * Math.PI / 180;
+    const cos = Math.cos(th), sin = Math.sin(th);
+    // T = T(tx,ty) · R(theta) · S(sx,sy)
+    return [
+        [ cos * sx, -sin * sy, st.offx ],
+        [ sin * sx,  cos * sy, st.offy ],
+        [ 0, 0, 1 ],
+    ];
+}
+
+// Closed-form complex least squares for a PROPER similarity (rotation +
+// uniform scale + translation, no reflection). Reflection is carried by the
+// Flip checkboxes and pre-compensated by the caller — see the Solve handler.
+function solveSimilarity(srcPts, dstPts) {
+    if (srcPts.length < 2 || srcPts.length !== dstPts.length) {
+        throw new Error('対応点が 2 組以上必要です');
+    }
+    const N = srcPts.length;
+    let sxs = 0, sys = 0, sxd = 0, syd = 0;
+    for (let i = 0; i < N; i++) {
+        sxs += srcPts[i][0]; sys += srcPts[i][1];
+        sxd += dstPts[i][0]; syd += dstPts[i][1];
+    }
+    const meanS = [sxs / N, sys / N];
+    const meanD = [sxd / N, syd / N];
+    let num_re = 0, num_im = 0, den = 0;
+    for (let i = 0; i < N; i++) {
+        const xs = srcPts[i][0] - meanS[0], ys = srcPts[i][1] - meanS[1];
+        const xd = dstPts[i][0] - meanD[0], yd = dstPts[i][1] - meanD[1];
+        num_re += xd * xs + yd * ys;
+        num_im += yd * xs - xd * ys;
+        den    += xs * xs + ys * ys;
+    }
+    if (den < 1e-12) throw new Error('退化した対応点 (全て同じ位置?) です');
+    const a_re = num_re / den, a_im = num_im / den;
+    const s = Math.hypot(a_re, a_im);
+    const theta = Math.atan2(a_im, a_re);
+    const tx = meanD[0] - (a_re * meanS[0] - a_im * meanS[1]);
+    const ty = meanD[1] - (a_im * meanS[0] + a_re * meanS[1]);
+    return { s, theta, tx, ty };
+}
+
+// Per-landmark residual of the CURRENT transform, in MSI px and in µm.
+// Read-only: never mutates state. Returns null when there is nothing to score.
+function computeLandmarkResiduals(landmarks, T, umPerPx) {
+    const he  = (landmarks && landmarks.he)  || [];
+    const msi = (landmarks && landmarks.msi) || [];
+    const n = Math.min(he.length, msi.length);
+    if (!n || !T) return null;
+    const ux = Number(umPerPx && umPerPx.x) || 0;
+    const uy = Number(umPerPx && umPerPx.y) || 0;
+    const hasUm = ux > 0 && uy > 0;
+    const perPoint = [];
+    let sum2 = 0, maxPx = 0, sum2um = 0, maxUm = 0;
+    for (let i = 0; i < n; i++) {
+        const p = applyAffinePoint(T, he[i][0], he[i][1]);
+        const dx = p[0] - msi[i][0];
+        const dy = p[1] - msi[i][1];
+        const d = Math.hypot(dx, dy);
+        // µm uses the per-axis pixel pitch so anisotropic grids stay honest.
+        const dUm = hasUm ? Math.hypot(dx * ux, dy * uy) : NaN;
+        perPoint.push({ i, dx, dy, d, dUm });
+        sum2 += d * d;
+        if (d > maxPx) maxPx = d;
+        if (hasUm) { sum2um += dUm * dUm; if (dUm > maxUm) maxUm = dUm; }
+    }
+    return {
+        n, perPoint,
+        rmse_px: Math.sqrt(sum2 / n), max_px: maxPx,
+        rmse_um: hasUm ? Math.sqrt(sum2um / n) : NaN,
+        max_um:  hasUm ? maxUm : NaN,
+    };
+}
+
+// How well spread the landmarks are over the raster. Clustered points make the
+// similarity fit ill-conditioned: measured worst case is ~830 µm for 3 points
+// bunched in the middle versus ~225 µm for 3 spread out.
+function assessLandmarkGeometry(pts, W, H) {
+    const n = (pts && pts.length) || 0;
+    if (n < 2) return { n, spread: 0 };
+    let cx = 0, cy = 0;
+    for (let i = 0; i < n; i++) { cx += pts[i][0]; cy += pts[i][1]; }
+    cx /= n; cy /= n;
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+        const dx = pts[i][0] - cx, dy = pts[i][1] - cy;
+        sum += dx * dx + dy * dy;
+    }
+    const rg = Math.sqrt(sum / n);                       // radius of gyration
+    const R = Math.sqrt(Math.max(1, W * H)) / 2;         // raster "radius"
+    return { n, spread: R > 0 ? rg / R : 0 };
+}
+
+// Area, centroid, principal-axis angle and anisotropy, all reported in RAW
+// pixel units (mask-space moments are rescaled by sx/sy first, so a
+// non-square downsample cannot skew the axis).
+// aniso = (λ1−λ2)/(λ1+λ2): 0 = perfect disc, 1 = a line. ★ A near-zero value
+// means the silhouette carries NO rotation information — Dice will still read
+// ~0.997 for any angle, so this is the only advance warning we get.
+function maskMoments(mask, w, h, sx, sy) {
+    sx = sx || 1; sy = sy || 1;
+    let n = 0, cx = 0, cy = 0;
+    for (let y = 0; y < h; y++) {
+        const row = y * w;
+        for (let x = 0; x < w; x++) {
+            if (mask[row + x]) { n++; cx += x; cy += y; }
+        }
+    }
+    if (!n) return null;
+    cx /= n; cy /= n;
+    let mu20 = 0, mu02 = 0, mu11 = 0;
+    for (let y = 0; y < h; y++) {
+        const row = y * w, dy = y - cy;
+        for (let x = 0; x < w; x++) {
+            if (mask[row + x]) { const dx = x - cx; mu20 += dx * dx; mu02 += dy * dy; mu11 += dx * dy; }
+        }
+    }
+    const m20 = (mu20 / n) * sx * sx;
+    const m02 = (mu02 / n) * sy * sy;
+    const m11 = (mu11 / n) * sx * sy;
+    const tr = m20 + m02;
+    const det = m20 * m02 - m11 * m11;
+    const disc = Math.sqrt(Math.max(tr * tr / 4 - det, 0));
+    const l1 = tr / 2 + disc, l2 = tr / 2 - disc;
+    return {
+        n,
+        cx: cx * sx, cy: cy * sy,
+        area: n * sx * sy,
+        axis: 0.5 * Math.atan2(2 * m11, m20 - m02),
+        aniso: (l1 + l2) > 0 ? (l1 - l2) / (l1 + l2) : 0,
+    };
+}
+
+// ---- Binary morphology on Uint8Array masks (no CV library available) -----
+function _maskDilate3(src, w, h) {
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+        const y0 = y > 0 ? y - 1 : 0, y1 = y < h - 1 ? y + 1 : h - 1;
+        for (let x = 0; x < w; x++) {
+            const x0 = x > 0 ? x - 1 : 0, x1 = x < w - 1 ? x + 1 : w - 1;
+            let on = 0;
+            for (let yy = y0; yy <= y1 && !on; yy++) {
+                for (let xx = x0; xx <= x1; xx++) {
+                    if (src[yy * w + xx]) { on = 1; break; }
+                }
+            }
+            out[y * w + x] = on;
+        }
+    }
+    return out;
+}
+
+function _maskErode3(src, w, h) {
+    const out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+        const y0 = y > 0 ? y - 1 : 0, y1 = y < h - 1 ? y + 1 : h - 1;
+        for (let x = 0; x < w; x++) {
+            // ★ 境界は「外側を前景とみなす」クランプ。外側を背景扱いにすると
+            //   dilate→erode の closing がキャンバス端に接した組織の外周 1px を
+            //   毎回削り、面積比から出すスケールに系統誤差が乗る。
+            const x0 = x > 0 ? x - 1 : 0, x1 = x < w - 1 ? x + 1 : w - 1;
+            let all = 1;
+            for (let yy = y0; yy <= y1 && all; yy++) {
+                for (let xx = x0; xx <= x1; xx++) {
+                    if (!src[yy * w + xx]) { all = 0; break; }
+                }
+            }
+            out[y * w + x] = all;
+        }
+    }
+    return out;
+}
+
+// Otsu on a value array → cleaned binary mask, same morphology chain as the
+// HE side. useLog matches the existing background-removal path (log10(TIC+1)).
+function _otsuMaskFromArray(vals, W, H, useLog) {
+    const n = W * H;
+    const scored = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+        const v = vals[i];
+        if (!Number.isFinite(v)) { scored[i] = NaN; continue; }
+        scored[i] = useLog ? Math.log10(Math.max(0, v) + 1) : v;
+    }
+    const res = computeOtsuThreshold(scored, OTSU_NBINS);
+    if (!res || res.degenerate) return null;
+    let m = new Uint8Array(n);
+    for (let i = 0; i < n; i++) m[i] = (Number.isFinite(scored[i]) && scored[i] > res.threshold) ? 1 : 0;
+    m = _maskErode3(_maskDilate3(m, W, H), W, H);
+    m = _maskFillHoles(m, W, H);
+    return _maskKeepMainComponents(m, W, H, 0.01, 0.98);
+}
+
+// Flood the background inward from the border; whatever the flood never
+// reaches is an interior hole and becomes foreground.
+function _maskFillHoles(src, w, h) {
+    const n = w * h;
+    const outside = new Uint8Array(n);
+    const stack = [];
+    const push = (i) => { if (!src[i] && !outside[i]) { outside[i] = 1; stack.push(i); } };
+    for (let x = 0; x < w; x++) { push(x); push((h - 1) * w + x); }
+    for (let y = 0; y < h; y++) { push(y * w); push(y * w + w - 1); }
+    while (stack.length) {
+        const i = stack.pop();
+        const x = i % w, y = (i / w) | 0;
+        if (x > 0)     push(i - 1);
+        if (x < w - 1) push(i + 1);
+        if (y > 0)     push(i - w);
+        if (y < h - 1) push(i + w);
+    }
+    const out = new Uint8Array(n);
+    for (let i = 0; i < n; i++) out[i] = outside[i] ? 0 : 1;
+    return out;
+}
+
+// Two-pass union-find labelling, then keep the big components.
+// ★ 破片を全部落とさない: post-MSI H&E はレーザー痕・切片裂けで組織が数片に
+//   割れているのが普通なので、最大成分の minFrac 未満だけを捨て、面積比
+//   coverFrac に達するまでは複数成分を残す (添付解析の dapi_tissue_mask と同方針)。
+function _maskKeepMainComponents(src, w, h, minFrac, coverFrac) {
+    const n = w * h;
+    const labels = new Int32Array(n);
+    const parent = [0];
+    const find = (a) => { while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; } return a; };
+    const union = (a, b) => { a = find(a); b = find(b); if (a !== b) parent[b] = a; };
+    let next = 1;
+    for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+            const i = y * w + x;
+            if (!src[i]) continue;
+            const up   = y > 0 ? labels[i - w] : 0;
+            const left = x > 0 ? labels[i - 1] : 0;
+            if (up && left)  { labels[i] = up; if (up !== left) union(up, left); }
+            else if (up)     { labels[i] = up; }
+            else if (left)   { labels[i] = left; }
+            else             { labels[i] = next; parent[next] = next; next++; }
+        }
+    }
+    const area = new Map();
+    for (let i = 0; i < n; i++) {
+        if (!labels[i]) continue;
+        const r = find(labels[i]);
+        labels[i] = r;
+        area.set(r, (area.get(r) || 0) + 1);
+    }
+    if (!area.size) return src;
+    const sorted = Array.from(area.entries()).sort((a, b) => b[1] - a[1]);
+    const biggest = sorted[0][1];
+    let total = 0;
+    for (let i = 0; i < sorted.length; i++) total += sorted[i][1];
+    const keep = new Set();
+    let acc = 0;
+    for (let i = 0; i < sorted.length; i++) {
+        if (sorted[i][1] < biggest * minFrac) break;
+        keep.add(sorted[i][0]);
+        acc += sorted[i][1];
+        if (acc >= total * coverFrac) break;
+    }
+    const out = new Uint8Array(n);
+    for (let i = 0; i < n; i++) if (labels[i] && keep.has(labels[i])) out[i] = 1;
+    return out;
+}
+
+// H&E tissue silhouette. Saturation is the discriminator: stained tissue is
+// pink/purple (high S) while slide background is near-white or grey (low S).
+// Returns null when the mask is degenerate (empty or covering everything),
+// which the caller must surface rather than silently aligning to noise.
+function heTissueMask(imgEl, maxEdge) {
+    maxEdge = maxEdge || HE_MASK_MAX_EDGE;
+    if (!imgEl || !imgEl.complete) return null;
+    const rawW = imgEl.naturalWidth  || imgEl.width;
+    const rawH = imgEl.naturalHeight || imgEl.height;
+    if (!rawW || !rawH) return null;
+    const k = Math.max(1, Math.max(rawW, rawH) / maxEdge);
+    const w = Math.max(8, Math.round(rawW / k));
+    const h = Math.max(8, Math.round(rawH / k));
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const ctx = get2dContext(c, { willReadFrequently: true });
+    // Area-average on the way down so thin stroma is not dropped outright.
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    let d;
+    try {
+        ctx.drawImage(imgEl, 0, 0, w, h);
+        d = ctx.getImageData(0, 0, w, h).data;
+    } catch (e) {
+        console.warn('heTissueMask: getImageData failed', e);
+        return null;
+    }
+    let m = new Uint8Array(w * h);
+    for (let i = 0, p = 0; p < m.length; i += 4, p++) {
+        if (d[i + 3] === 0) continue;                    // transparent =背景
+        const r = d[i], g = d[i + 1], b = d[i + 2];
+        const mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+        if (mx === 0) continue;                          // pure black = 背景
+        const mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+        if ((mx - mn) / mx > HE_MASK_SAT_MIN && mx / 255 < HE_MASK_VAL_MAX) m[p] = 1;
+    }
+    m = _maskErode3(_maskDilate3(m, w, h), w, h);        // closing
+    m = _maskFillHoles(m, w, h);
+    m = _maskKeepMainComponents(m, w, h, 0.01, 0.98);
+    let n = 0;
+    for (let i = 0; i < m.length; i++) n += m[i];
+    if (n < 16 || n > m.length * 0.995) return null;     // degenerate
+    return { mask: m, w, h, sx: rawW / w, sy: rawH / h };
+}
+
+// (theta, s, rho, c_he, c_msi) → the 5 scalar params buildHeToMsiAffine wants.
+// rho = -1 means the HE has to be mirrored. We always route the mirror through
+// flip_lr, because setting BOTH flips is just a proper rotation by theta+180°
+// and would leave two encodings for one transform.
+// The offsets follow from T rotating about the HE raw origin, so we solve
+// T(c_he) = c_msi for the translation.
+function alignStateFromSimilarity(theta, s, rho, cHe, cMsi) {
+    const sx = (rho < 0 ? -1 : 1) * s, sy = s;
+    const cos = Math.cos(theta), sin = Math.sin(theta);
+    return {
+        flip_lr: rho < 0,
+        flip_ud: false,
+        scale_pct: s * 100,
+        rotate_deg: theta * 180 / Math.PI,
+        offx: cMsi[0] - (cos * sx * cHe[0] - sin * sy * cHe[1]),
+        offy: cMsi[1] - (sin * sx * cHe[0] + cos * sy * cHe[1]),
+    };
+}
+
+// Dice between the HE mask warped through T and the MSI mask, evaluated on
+// the MSI grid. ~51 evaluations converge the search (measured), and the grid
+// is capped at ALIGN_DICE_MAX_EDGE, so this stays a few tens of ms on the
+// main thread — no worker needed.
+function maskDiceUnderAffine(heM, msiM, T) {
+    const Ti = invertAffine(T);
+    if (!Ti) return 0;
+    const a = Ti[0][0], b = Ti[0][1], tx = Ti[0][2];
+    const c = Ti[1][0], d = Ti[1][1], ty = Ti[1][2];
+    const hw = heM.w, hh = heM.h, hm = heM.mask;
+    const isx = 1 / heM.sx, isy = 1 / heM.sy;
+    let inter = 0, nHe = 0, nMsi = 0;
+    for (let j = 0; j < msiM.h; j++) {
+        const my = (j + 0.5) * msiM.sy;
+        const row = j * msiM.w;
+        for (let i = 0; i < msiM.w; i++) {
+            const mx = (i + 0.5) * msiM.sx;
+            // MSI raw → HE raw → HE mask index (nearest neighbour).
+            const hxf = (a * mx + b * my + tx) * isx;
+            const hyf = (c * mx + d * my + ty) * isy;
+            let inHe = 0;
+            if (hxf >= 0 && hyf >= 0) {
+                const hx = hxf | 0, hy = hyf | 0;   // |0 == floor for non-negatives
+                if (hx < hw && hy < hh) inHe = hm[hy * hw + hx];
+            }
+            const inMsi = msiM.mask[row + i];
+            if (inHe) nHe++;
+            if (inMsi) nMsi++;
+            if (inHe && inMsi) inter++;
+        }
+    }
+    return (nHe + nMsi) ? (2 * inter) / (nHe + nMsi) : 0;
+}
+
+// Automatic HE→MSI similarity from the two tissue silhouettes.
+//   1. moment init with a CONTINUOUS angle (this is the decisive difference
+//      from a dihedral/bounding-box search, which cannot correct 5–10°),
+//   2. pick among the 4 branches (principal-axis 180° ambiguity × chirality),
+//   3. coarse-to-fine coordinate descent on (theta, scale, cx, cy).
+// Measured on synthetic ground truth: RMS well under 1 MSI px for every true
+// rotation from 0° to 35°, and robust to tears, laser tracks and detached
+// fragments.
+// opts.lockScale — when the physical pixel pitches are known on both sides the
+// scale is not a free parameter at all. Passing it removes the solver's one
+// real weakness: a systematic mask-boundary bias otherwise leaks straight into
+// the area ratio and comes back as a scale error.
+function autoAlignSilhouette(heM, msiM, opts) {
+    opts = opts || {};
+    const hM = maskMoments(heM.mask, heM.w, heM.h, heM.sx, heM.sy);
+    const mM = maskMoments(msiM.mask, msiM.w, msiM.h, msiM.sx, msiM.sy);
+    if (!hM || !mM || !(hM.area > 0) || !(mM.area > 0)) return null;
+    const cHe = [hM.cx, hM.cy];
+    const lock = Number(opts.lockScale);
+    const scaleLocked = Number.isFinite(lock) && lock > 0;
+    const s0 = scaleLocked ? lock : Math.sqrt(mM.area / hM.area);
+    const evalAt = (theta, s, rho, cx, cy) => {
+        const st = alignStateFromSimilarity(theta, s, rho, cHe, [cx, cy]);
+        return { st, dice: maskDiceUnderAffine(heM, msiM, buildHeToMsiAffine(st)) };
+    };
+    // Mirroring negates the HE principal-axis angle, hence the sign switch.
+    let best = null;
+    for (const rho of [1, -1]) {
+        const base = rho > 0 ? (mM.axis - hM.axis) : (mM.axis + hM.axis);
+        for (const add of [0, Math.PI]) {
+            const r = evalAt(base + add, s0, rho, mM.cx, mM.cy);
+            if (!best || r.dice > best.dice) {
+                best = { dice: r.dice, theta: base + add, s: s0, rho, cx: mM.cx, cy: mM.cy };
+            }
+        }
+    }
+    // Coarse-to-fine refinement. Translation steps are in MSI px, so the
+    // finest pass resolves a quarter of an MSI pixel — below the physical
+    // limit of the measurement anyway.
+    const STEPS = [[4 * Math.PI / 180, 0.04, 4], [1 * Math.PI / 180, 0.01, 1], [0.25 * Math.PI / 180, 0.0025, 0.25]];
+    let evals = 4;
+    for (const [dth, ds, dt] of STEPS) {
+        let moved = true;
+        while (moved) {
+            moved = false;
+            for (let pj = 0; pj < 4; pj++) {
+                if (pj === 1 && scaleLocked) continue;   // scale is a known constant
+                for (const sgn of [1, -1]) {
+                    let th = best.theta, s = best.s, cx = best.cx, cy = best.cy;
+                    if (pj === 0) th += sgn * dth;
+                    else if (pj === 1) s *= (1 + sgn * ds);
+                    else if (pj === 2) cx += sgn * dt;
+                    else cy += sgn * dt;
+                    if (!(s > 0)) continue;
+                    const r = evalAt(th, s, best.rho, cx, cy);
+                    evals++;
+                    if (r.dice > best.dice + 1e-6) {
+                        best = { dice: r.dice, theta: th, s, rho: best.rho, cx, cy };
+                        moved = true;
+                    }
+                }
+            }
+        }
+    }
+    const state = alignStateFromSimilarity(best.theta, best.s, best.rho, cHe, [best.cx, best.cy]);
+    return {
+        state, dice: best.dice, evals, scaleLocked,
+        // Weight for the hybrid blend, and the number shown to the user as
+        // "expected accuracy". Locking the scale removes the dominant error term.
+        sigmaPx: scaleLocked ? AUTO_ALIGN_SIGMA_LOCKED_PX : AUTO_ALIGN_SIGMA_PX,
+        aniso: Math.min(hM.aniso, mM.aniso),
+        reliableRotation: Math.min(hM.aniso, mM.aniso) >= ALIGN_ANISO_MIN,
+        heArea: hM.area, msiArea: mM.area,
+        // Ratio between the silhouette-implied scale and the locked one. Far
+        // from 1.0 means the two segmentations disagree about how much tissue
+        // there is — worth showing rather than hiding.
+        areaScaleRatio: scaleLocked ? Math.sqrt(mM.area / hM.area) / lock : 1,
+    };
+}
+
+// RMS displacement between two transforms, measured over the HE tissue and
+// reported in MSI px. This is the only honest answer to "how far apart are
+// these two alignments?" — comparing matrices or angles is meaningless once
+// scale and translation interact.
+function transformDisagreementPx(heM, TA, TB, stride) {
+    if (!heM || !TA || !TB) return NaN;
+    stride = stride || 4;
+    let sum = 0, n = 0;
+    for (let y = 0; y < heM.h; y += stride) {
+        const row = y * heM.w;
+        for (let x = 0; x < heM.w; x += stride) {
+            if (!heM.mask[row + x]) continue;
+            const rx = (x + 0.5) * heM.sx, ry = (y + 0.5) * heM.sy;
+            const a = applyAffinePoint(TA, rx, ry);
+            const b = applyAffinePoint(TB, rx, ry);
+            const dx = a[0] - b[0], dy = a[1] - b[1];
+            sum += dx * dx + dy * dy; n++;
+        }
+    }
+    return n ? Math.sqrt(sum / n) : NaN;
+}
+
+// Expected error of a landmark fit, in MSI px.
+// ★ 生の残差をそのまま信用してはいけない: 4-DOF similarity は 2 点なら必ず
+//   残差 0 で通る (真の誤差は中央値 105 µm もあるのに)。自由度で不偏化して
+//   クリック誤差 sigma を逆算し、実測の n スケーリング (RMS ≈ 2.1·sigma/√n)
+//   に載せ替える。n=2 は sigma が推定不能なので 1 MSI px を仮定する。
+function estimateLandmarkFitSigmaPx(resid) {
+    if (!resid || resid.n < 2) return null;
+    const n = resid.n;
+    // per-point residual obeys E[d^2] = 2*sigma^2*(1 - 2/n) for a 4-DOF fit
+    let sigmaClick = (n <= 2) ? 1.0 : resid.rmse_px / Math.sqrt(2 * (1 - 2 / n));
+    if (!(sigmaClick > 0) || !Number.isFinite(sigmaClick)) sigmaClick = 1.0;
+    return Math.max(0.05, 2.1 * sigmaClick / Math.sqrt(n));
+}
+
+// Inverse-variance blend of two alignments, done in PARAMETER space.
+// ★ 行列を直接平均してはいけない (similarity でなくなる)。角度は円周平均。
+// Returns null when the two disagree on chirality — a mirrored and a
+// non-mirrored fit are not on a common geodesic, so the caller must pick one.
+function blendAlignStates(a, wA, b, wB) {
+    if (!a || !b) return null;
+    if (!!a.flip_lr !== !!b.flip_lr || !!a.flip_ud !== !!b.flip_ud) return null;
+    const w = wA + wB;
+    if (!(w > 0) || !Number.isFinite(w)) return null;
+    const ra = a.rotate_deg * Math.PI / 180, rb = b.rotate_deg * Math.PI / 180;
+    const ang = Math.atan2(wA * Math.sin(ra) + wB * Math.sin(rb),
+                           wA * Math.cos(ra) + wB * Math.cos(rb));
+    return {
+        flip_lr: !!a.flip_lr,
+        flip_ud: !!a.flip_ud,
+        scale_pct: (wA * a.scale_pct + wB * b.scale_pct) / w,
+        rotate_deg: ang * 180 / Math.PI,
+        offx: (wA * a.offx + wB * b.offx) / w,
+        offy: (wA * a.offy + wB * b.offy) / w,
+    };
+}
+
+// Synthetic ground-truth check for the registration math. There is no test
+// framework in this repo, so this is the gate: run __alignSelfTest() in the
+// browser console and every row must pass before trusting the auto-solver.
+// Usage: __alignSelfTest()  /  __alignSelfTest({ tolPx: 0.5 })
+window.__alignSelfTest = function (opts) {
+    opts = opts || {};
+    const MW = opts.msiEdge || 200, MH = MW;
+    const HW = opts.heEdge  || 480, HH = HW;
+    const TOL = opts.tolPx || 1.0;              // MSI px — 1 px is the physical floor
+    // A real section is never rotationally symmetric; the degenerate disc is
+    // exercised separately by the anisotropy-guard check below.
+    const mkShape = (lobe) => (x, y) => {
+        const a = MW * 0.35, b = MW * 0.26, cx = MW * 0.5, cy = MH * 0.5;
+        const dx = (x - cx) / a, dy = (y - cy) / b;
+        if (dx * dx + dy * dy <= 1) return true;
+        if (!lobe) return false;
+        const lx = (x - (cx + a * 0.80)) / (a * 0.33);
+        const ly = (y - (cy - b * 0.58)) / (b * 0.33);
+        return lx * lx + ly * ly <= 1;
+    };
+    const msiMaskFrom = (inside) => {
+        const m = new Uint8Array(MW * MH);
+        for (let y = 0; y < MH; y++) {
+            for (let x = 0; x < MW; x++) if (inside(x + 0.5, y + 0.5)) m[y * MW + x] = 1;
+        }
+        return { mask: m, w: MW, h: MH, sx: 1, sy: 1 };
+    };
+    const heMaskFrom = (inside, T) => {
+        const m = new Uint8Array(HW * HH);
+        for (let y = 0; y < HH; y++) {
+            for (let x = 0; x < HW; x++) {
+                const p = applyAffinePoint(T, x + 0.5, y + 0.5);
+                if (inside(p[0], p[1])) m[y * HW + x] = 1;
+            }
+        }
+        return { mask: m, w: HW, h: HH, sx: 1, sy: 1 };
+    };
+    const truthState = (deg, s, flip) => {
+        const th = deg * Math.PI / 180;
+        const sx = (flip ? -1 : 1) * s, sy = s;
+        const cos = Math.cos(th), sin = Math.sin(th);
+        const hx = HW * 0.5, hy = HH * 0.5;
+        return {
+            flip_lr: !!flip, flip_ud: false, scale_pct: s * 100, rotate_deg: deg,
+            offx: MW * 0.5 - (cos * sx * hx - sin * sy * hy),
+            offy: MH * 0.5 - (sin * sx * hx + cos * sy * hy),
+        };
+    };
+    const rows = [];
+    let pass = 0, fail = 0;
+    const angles = opts.angles || [0, 2, 5, 10, 20, 35, -12];
+    const inside = mkShape(true);
+    const msiM = msiMaskFrom(inside);
+    for (let ai = 0; ai < angles.length; ai++) {
+        for (const flip of [false, true]) {
+            const deg = angles[ai];
+            const Ttrue = buildHeToMsiAffine(truthState(deg, 0.35, flip));
+            const heM = heMaskFrom(inside, Ttrue);
+            const auto = autoAlignSilhouette(heM, msiM);
+            if (!auto) { rows.push({ deg, flip, ok: false, note: 'solver returned null' }); fail++; continue; }
+            const rms = transformDisagreementPx(heM, Ttrue, buildHeToMsiAffine(auto.state), 2);
+            const ok = Number.isFinite(rms) && rms < TOL;
+            if (ok) pass++; else fail++;
+            rows.push({
+                deg, flip, ok,
+                rms_px: Number(rms.toFixed(3)),
+                dice: Number(auto.dice.toFixed(4)),
+                aniso: Number(auto.aniso.toFixed(3)),
+                evals: auto.evals,
+                flip_ok: !!auto.state.flip_lr === !!flip,
+            });
+        }
+    }
+    // The decomposition must be exact: T(c_he) has to land on c_msi.
+    const decomposition = (function () {
+        const cHe = [123.4, 88.1], cMsi = [61.2, 77.9];
+        const T = buildHeToMsiAffine(alignStateFromSimilarity(0.37, 0.42, -1, cHe, cMsi));
+        const p = applyAffinePoint(T, cHe[0], cHe[1]);
+        const err = Math.hypot(p[0] - cMsi[0], p[1] - cMsi[1]);
+        return { err, ok: err < 1e-9 };
+    })();
+    if (decomposition.ok) pass++; else fail++;
+    // A perfect disc carries no rotation information — Dice still reads ~0.997,
+    // so the anisotropy guard is the ONLY warning the user can get. It must fire.
+    const discShape = (x, y) => {
+        const dx = x - MW * 0.5, dy = y - MH * 0.5, r = MW * 0.30;
+        return dx * dx + dy * dy <= r * r;
+    };
+    const discAuto = autoAlignSilhouette(
+        heMaskFrom(discShape, buildHeToMsiAffine(truthState(0, 0.35, false))),
+        msiMaskFrom(discShape));
+    const anisotropyGuard = {
+        aniso: discAuto ? Number(discAuto.aniso.toFixed(4)) : null,
+        dice: discAuto ? Number(discAuto.dice.toFixed(4)) : null,
+        fired: !!(discAuto && !discAuto.reliableRotation),
+    };
+    if (anisotropyGuard.fired) pass++; else fail++;
+
+    const out = { pass, fail, tolPx: TOL, rows, decomposition, anisotropyGuard };
+    try { console.table(rows); } catch (e) {}
+    console.log(fail === 0 ? '✅ __alignSelfTest PASSED' : '❌ __alignSelfTest FAILED', out);
+    return out;
+};
+
 function pointInPolygon(x, y, vertices) {
     let inside = false;
     for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i++) {
@@ -3011,6 +3651,14 @@ function otsuHasMasks(sec) {
 // マスク未計算/寸法不一致なら null。renderComposite / renderMsiThumbnail が参照。
 function otsuKeepGridForLayer(section, layerKey) {
     if (!(typeof App !== 'undefined' && App && App.otsuBgRemove)) return null;
+    return _otsuKeepGridRaw(section, layerKey);
+}
+
+// 同じ keep grid を「表示トグル (App.otsuBgRemove) に関係なく」返す版。Align の
+// 自動整合は背景除去が OFF でも組織マスクが要るのでこちらを使う。
+// ★ 描画経路は必ず otsuKeepGridForLayer のほうを使うこと。こちらを描画で使うと
+//   ユーザが背景除去を OFF にしても背景が消えてしまう。
+function _otsuKeepGridRaw(section, layerKey) {
     const otsu = section && section.meta && section.meta.otsu;
     if (!otsu || !otsu.bySource) return null;
     const ent = section.msiSeries && section.msiSeries[layerKey];
@@ -3022,6 +3670,75 @@ function otsuKeepGridForLayer(section, layerKey) {
     let grid = _otsuKeepDecodeCache.get(cacheKey);
     if (!grid) { grid = unpackBitsFromB64(rec.keepB64, rec.W * rec.H); _otsuKeepDecodeCache.set(cacheKey, grid); }
     return { keep: grid, W: rec.W, H: rec.H };
+}
+
+// MSI 側の組織マスク。既存の背景除去 (Otsu) 資産をそのまま使い、無ければ生強度
+// ラスタから、それも無ければ合成 TIC の grayscale から作る。返り値は
+// heTissueMask と同じ { mask, w, h, sx, sy } 形式 (sx/sy = 生 MSI px / マスク px)。
+function msiTissueMaskForAlign(section, panel, layerKey, fallbackImg) {
+    // Cap the working grid so each Dice evaluation stays cheap.
+    const decimate = (mask, W, H) => {
+        const k = Math.max(1, Math.ceil(Math.max(W, H) / ALIGN_DICE_MAX_EDGE));
+        if (k === 1) return { mask, w: W, h: H, sx: 1, sy: 1 };
+        const w = Math.max(1, Math.floor(W / k)), h = Math.max(1, Math.floor(H / k));
+        const out = new Uint8Array(w * h);
+        for (let y = 0; y < h; y++) {
+            for (let x = 0; x < w; x++) {
+                let on = 0, tot = 0;
+                for (let dy = 0; dy < k; dy++) {
+                    const yy = y * k + dy; if (yy >= H) break;
+                    for (let dx = 0; dx < k; dx++) {
+                        const xx = x * k + dx; if (xx >= W) break;
+                        tot++; if (mask[yy * W + xx]) on++;
+                    }
+                }
+                out[y * w + x] = (tot && on * 2 >= tot) ? 1 : 0;   // majority
+            }
+        }
+        return { mask: out, w, h, sx: k, sy: k };
+    };
+    const finish = (mask, W, H) => {
+        if (!mask) return null;
+        let n = 0;
+        for (let i = 0; i < mask.length; i++) n += mask[i];
+        if (n < 16 || n > mask.length * 0.995) return null;        // degenerate
+        return decimate(mask, W, H);
+    };
+    // 1) Existing Otsu keep grid (display toggle deliberately ignored).
+    const kg = _otsuKeepGridRaw(section, layerKey);
+    if (kg && kg.keep && kg.W && kg.H) {
+        const m = new Uint8Array(kg.W * kg.H);
+        for (let i = 0; i < m.length; i++) m[i] = kg.keep[i] ? 1 : 0;
+        const r = finish(_maskKeepMainComponents(_maskFillHoles(m, kg.W, kg.H), kg.W, kg.H, 0.01, 0.98), kg.W, kg.H);
+        if (r) return r;
+    }
+    // 2) Raw intensity raster → Otsu on log10(v+1), same as the bg-removal path.
+    const vr = panel && panel.msiValueRasters && panel.msiValueRasters.get(layerKey);
+    if (vr && vr.values && vr.W && vr.H) {
+        const r = finish(_otsuMaskFromArray(vr.values, vr.W, vr.H, true), vr.W, vr.H);
+        if (r) return r;
+    }
+    // 3) Synthetic TIC (or any grayscale MSI thumbnail) → Otsu on luminance.
+    //    合成 TIC は msiValueRasters に実体が無いのでこの経路になる。
+    if (fallbackImg && fallbackImg.complete && fallbackImg.naturalWidth) {
+        const W = fallbackImg.naturalWidth, H = fallbackImg.naturalHeight;
+        try {
+            const c = document.createElement('canvas');
+            c.width = W; c.height = H;
+            const ctx = get2dContext(c, { willReadFrequently: true });
+            ctx.drawImage(fallbackImg, 0, 0);
+            const d = ctx.getImageData(0, 0, W, H).data;
+            const lum = new Float64Array(W * H);
+            for (let i = 0, p = 0; p < lum.length; i += 4, p++) {
+                lum[p] = d[i + 3] === 0 ? NaN : (0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+            }
+            const r = finish(_otsuMaskFromArray(lum, W, H, false), W, H);
+            if (r) return r;
+        } catch (e) {
+            console.warn('msiTissueMaskForAlign: TIC fallback failed', e);
+        }
+    }
+    return null;
 }
 
 // Pure parse (no DOM/canvas): xlsx ArrayBuffer → [{x,y,v}] rows. Shared verbatim
@@ -5428,16 +6145,20 @@ class SectionPanel {
         return wc.T_he_to_msi || null;
     }
 
-    // True when this source file has a landmark-based ("genuine") alignment in
-    // any HE/IF layer's per-source slider record. Sliders-only entries (no
-    // landmarks) are treated as provisional and may be shadowed by a real
-    // alignment elsewhere (see _resolveTHeToMsi).
+    // True when this source file has a landmark-based OR auto-aligned
+    // ("genuine") alignment in any HE/IF layer's per-source slider record.
+    // Sliders-only entries are treated as provisional and may be shadowed by a
+    // real alignment elsewhere (see _resolveTHeToMsi).
+    // ★ autoAligned を見ないと、シルエット自動整合はランドマークを作らないため
+    //   △(暫定) 扱いになり、レガシー共有 T に覆い隠されてしまう。
     _sourceHasGenuineAlignment(fid) {
         if (!fid) return false;
         const al = (this.section.meta && this.section.meta.alignment) || {};
         for (const k of Object.keys(al)) {
             const bs = al[k] && al[k].bySource && al[k].bySource[fid];
-            if (bs && bs.landmarks && bs.landmarks.he && bs.landmarks.he.length >= 2) return true;
+            if (!bs) continue;
+            if (bs.landmarks && bs.landmarks.he && bs.landmarks.he.length >= 2) return true;
+            if (bs.autoAligned) return true;
         }
         return false;
     }
@@ -10814,46 +11535,9 @@ const Wizards = {
         const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
 
         // ---- Math helpers ----------------------------------------------------
-        const buildHeToMsiAffine = (st) => {
-            const sx = (st.flip_lr ? -1 : 1) * (st.scale_pct / 100);
-            const sy = (st.flip_ud ? -1 : 1) * (st.scale_pct / 100);
-            const th = st.rotate_deg * Math.PI / 180;
-            const cos = Math.cos(th), sin = Math.sin(th);
-            // T = T(tx,ty) · R(theta) · S(sx,sy)
-            return [
-                [ cos * sx, -sin * sy, st.offx ],
-                [ sin * sx,  cos * sy, st.offy ],
-                [ 0, 0, 1 ],
-            ];
-        };
-        const solveSimilarity = (srcPts, dstPts) => {
-            if (srcPts.length < 2 || srcPts.length !== dstPts.length) {
-                throw new Error('対応点が 2 組以上必要です');
-            }
-            const N = srcPts.length;
-            let sxs = 0, sys = 0, sxd = 0, syd = 0;
-            for (let i = 0; i < N; i++) {
-                sxs += srcPts[i][0]; sys += srcPts[i][1];
-                sxd += dstPts[i][0]; syd += dstPts[i][1];
-            }
-            const meanS = [sxs / N, sys / N];
-            const meanD = [sxd / N, syd / N];
-            let num_re = 0, num_im = 0, den = 0;
-            for (let i = 0; i < N; i++) {
-                const xs = srcPts[i][0] - meanS[0], ys = srcPts[i][1] - meanS[1];
-                const xd = dstPts[i][0] - meanD[0], yd = dstPts[i][1] - meanD[1];
-                num_re += xd * xs + yd * ys;
-                num_im += yd * xs - xd * ys;
-                den    += xs * xs + ys * ys;
-            }
-            if (den < 1e-12) throw new Error('退化した対応点 (全て同じ位置?) です');
-            const a_re = num_re / den, a_im = num_im / den;
-            const s = Math.hypot(a_re, a_im);
-            const theta = Math.atan2(a_im, a_re);
-            const tx = meanD[0] - (a_re * meanS[0] - a_im * meanS[1]);
-            const ty = meanD[1] - (a_im * meanS[0] + a_re * meanS[1]);
-            return { s, theta, tx, ty };
-        };
+        // buildHeToMsiAffine / solveSimilarity live at module scope now (near
+        // invertAffine) so the auto-solver and __alignSelfTest share exactly
+        // the same matrix construction as this manual path.
 
         // ---- Snapshot for Cancel --------------------------------------------
         sec.meta = sec.meta || {};
@@ -10909,6 +11593,10 @@ const Wizards = {
                 offy:       Number.isFinite(a.offy) ? a.offy : 0,
                 landmarks:  { he: (a.landmarks && a.landmarks.he ? a.landmarks.he.slice() : []),
                               msi: (a.landmarks && a.landmarks.msi ? a.landmarks.msi.slice() : []) },
+                // Marker left by the silhouette auto-solver. Only read by
+                // _sourceHasGenuineAlignment and the source glyphs; the
+                // transform itself always comes from the 5 params above.
+                autoAligned: a.autoAligned || null,
                 pickMode:   'none',
             };
         };
@@ -10932,6 +11620,7 @@ const Wizards = {
                 st.landmarks.he  = bySrc.landmarks.he  ? bySrc.landmarks.he.slice()  : [];
                 st.landmarks.msi = bySrc.landmarks.msi ? bySrc.landmarks.msi.slice() : [];
             }
+            st.autoAligned = bySrc.autoAligned || null;
         };
         const state = loadStateFor(layerKey);
         const msiUm = sec.meta.world_coords.msi_um_per_px || { x: 50, y: 50 };
@@ -11126,11 +11815,14 @@ const Wizards = {
         // sourceFileId (legacy projects).
         // Alignment status for a source, shown in the dropdown so the user can
         // see at a glance which sources are aligned: ✓ = aligned with landmarks,
-        // △ = provisional (sliders only, no landmarks), − = not aligned yet.
+        // ⊙ = silhouette auto-aligned, △ = provisional (sliders only), − = none.
         const sourceAlignStatus = (fid) => {
             const a = sec.meta.alignment[state.layerKey] || {};
             const bs = (a.bySource && a.bySource[fid]) || null;
             if (bs && bs.landmarks && bs.landmarks.he && bs.landmarks.he.length >= 2) return '✓';
+            // ⊙ = シルエット自動整合済み (対応点は無いが暫定ではない)。
+            // _sourceHasGenuineAlignment と同じ判定にしておくこと。
+            if (bs && bs.autoAligned) return '⊙';
             const wc = sec.meta.world_coords || {};
             const hasT = !!((wc.T_he_to_msi_by_source && wc.T_he_to_msi_by_source[fid])
                 || (bs && Number.isFinite(bs.scale_pct)));
@@ -11216,9 +11908,14 @@ const Wizards = {
                 <button type="button" class="btn" data-pick="he">+ HE 点を打つ</button>
                 <button type="button" class="btn" data-pick="msi">+ MSI 点を打つ</button>
                 <button type="button" class="btn primary" data-solve disabled>Solve</button>
+                <button type="button" class="btn" data-auto-align title="HE と MSI の組織シルエットから位置合わせを自動推定します。適用前にプレビューが出ます。">自動整合 (シルエット)</button>
                 <span data-pick-status style="color:#64748b;">点: HE 0 / MSI 0</span>
                 <button type="button" class="btn danger" data-clear-lm style="margin-left:auto;">Clear all</button>
               </div>
+              <!-- QC: 現在の T に対するランドマーク残差。読み取り専用で T は触らない。 -->
+              <div data-qc style="margin-top:6px;font-size:11px;"></div>
+              <!-- 自動整合の結果プレビュー。適用するまで state は変えない。 -->
+              <div data-auto-result style="margin-top:6px;font-size:11px;display:none;"></div>
               <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px;align-items:start;">
                 <div data-thumb-wrap="he" style="position:relative;border:1px solid #cbd5e1;border-radius:4px;overflow:hidden;background:#0f172a;min-height:160px;">
                   <div style="position:absolute;top:2px;left:6px;color:#fff;font-size:10px;background:rgba(0,0,0,0.5);padding:1px 5px;border-radius:3px;z-index:2;pointer-events:none;">HE</div>
@@ -11276,6 +11973,9 @@ const Wizards = {
         const clearLmBtn = $('[data-clear-lm]');
         const pickStatus= $('[data-pick-status]');
         const lmTable  = $('[data-lm-table]');
+        const qcBox    = $('[data-qc]');
+        const autoBtn  = $('[data-auto-align]');
+        const autoBox  = $('[data-auto-result]');
         const resetBtn = $('[data-reset]');
         const saveBtn  = $('[data-save]');
         const applyAllBtn = $('[data-apply-all]');
@@ -11475,12 +12175,18 @@ const Wizards = {
         // (otherwise switching back would silently lose them) and *loads*
         // the incoming source's saved record so HE / MSI landmarks reflect
         // that source.
-        const captureSliderState = () => ({
-            flip_lr: state.flip_lr, flip_ud: state.flip_ud,
-            scale_pct: state.scale_pct, rotate_deg: state.rotate_deg,
-            offx: state.offx, offy: state.offy,
-            landmarks: { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() },
-        });
+        const captureSliderState = () => {
+            const snap = {
+                flip_lr: state.flip_lr, flip_ud: state.flip_ud,
+                scale_pct: state.scale_pct, rotate_deg: state.rotate_deg,
+                offx: state.offx, offy: state.offy,
+                landmarks: { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() },
+            };
+            // Only attach the marker when it exists, so records written before
+            // this feature keep exactly the same shape.
+            if (state.autoAligned) snap.autoAligned = state.autoAligned;
+            return snap;
+        };
         const applyToState = (src) => {
             if (!src) return false;
             state.flip_lr = !!src.flip_lr;
@@ -11493,6 +12199,7 @@ const Wizards = {
                 state.landmarks.he  = src.landmarks.he  ? src.landmarks.he.slice()  : [];
                 state.landmarks.msi = src.landmarks.msi ? src.landmarks.msi.slice() : [];
             }
+            state.autoAligned = src.autoAligned || null;
             return true;
         };
         const applyLegacyTopLevel = () => {
@@ -11920,6 +12627,46 @@ const Wizards = {
             renderLandmarks();
         });
 
+        // ---- QC readout ------------------------------------------------------
+        // ★ 文言の数値根拠 (合成グラウンドトゥルース、MSI クリック誤差 1px、200試行):
+        //   広く分散 2点=中央値105µm/最悪1647µm、3点=66/225、4点=52/443、8点=36/89。
+        //   中央に固まると 3点=113/830、8点=53/151。点数と分布の両方を警告する理由。
+        const pillHtml = (bg, fg, txt) =>
+            `<span style="display:inline-block;padding:1px 7px;border-radius:10px;background:${bg};color:${fg};margin-right:5px;">${txt}</span>`;
+        const renderQcBox = (resid) => {
+            if (!qcBox) return;
+            const ref = panel.getMsiRefSize && panel.getMsiRefSize();
+            const geo = assessLandmarkGeometry(state.landmarks.msi, (ref && ref.w) || 1, (ref && ref.h) || 1);
+            const notes = [];
+            let head = '';
+            if (resid && resid.n) {
+                const hasUm = Number.isFinite(resid.rmse_um);
+                head = `<b>整合誤差</b> RMSE ${hasUm ? resid.rmse_um.toFixed(0) + ' µm' : '—'} (${resid.rmse_px.toFixed(2)} px)`
+                     + ` ／ 最大 ${hasUm ? resid.max_um.toFixed(0) + ' µm' : '—'} (${resid.max_px.toFixed(2)} px)`;
+            }
+            const n = geo.n;
+            if (n > 0 && n < 3) {
+                notes.push(pillHtml('#fee2e2', '#991b1b', '点が少なすぎます')
+                    + '2 点では最悪 1.6 mm ずれます。最低 3 点、推奨 6–8 点。');
+            } else if (n >= 3 && n < 6) {
+                notes.push(pillHtml('#fef3c7', '#92400e', '点を増やすと安定します')
+                    + '6–8 点まで増やすと最悪誤差がおよそ 1/5 になります。');
+            }
+            if (n >= 2 && geo.spread < 0.33) {
+                notes.push(pillHtml('#fef3c7', '#92400e', '点が中央に偏っています')
+                    + '周辺部にも打ってください (中央集中は最悪誤差が約 4 倍)。');
+            }
+            if (state.autoAligned) {
+                const d = Number(state.autoAligned.dice);
+                notes.push(pillHtml('#e0e7ff', '#3730a3', '⊙ 自動整合済み')
+                    + `シルエット Dice ${Number.isFinite(d) ? d.toFixed(3) : '—'}`
+                    + (state.autoAligned.reliableRotation === false
+                        ? ' ／ <b style="color:#b91c1c;">回転は要確認 (組織が回転対称に近い)</b>' : ''));
+            }
+            qcBox.innerHTML = (head ? `<div style="color:#0f172a;">${head}</div>` : '')
+                + notes.map(t => `<div style="margin-top:3px;color:#475569;">${t}</div>`).join('');
+        };
+
         const renderLandmarks = () => {
             const drawDots = (svg, pts, imgEl) => {
                 if (!imgEl.naturalWidth) { svg.innerHTML = ''; return; }
@@ -11962,18 +12709,37 @@ const Wizards = {
             pickStatus.textContent = `点: HE ${nHe} / MSI ${nMsi}`;
             const ready = nHe >= 2 && nHe === nMsi;
             solveBtn.disabled = !ready;
+
+            // ---- QC: residual of the CURRENT transform (read-only) ----------
+            // 現状ここが唯一の「どれくらい合っているか」の手掛かりになる。
+            // Dice ではなくランドマーク残差を主指標にするのは、Dice が 0.95 でも
+            // 実際には 120–190 µm ずれうるため (シルエット一致度は精度保証にならない)。
+            const resid = computeLandmarkResiduals(
+                state.landmarks, buildHeToMsiAffine(state),
+                { x: state.msi_um_x, y: state.msi_um_y });
+            renderQcBox(resid);
+
             // Table
             const rows = Math.max(nHe, nMsi);
+            const outlierCut = (resid && resid.n >= 3) ? resid.rmse_px * 2.5 : Infinity;
             let html = '<thead><tr style="background:#f1f5f9;"><th style="border:1px solid #cbd5e1;padding:2px 4px;">#</th>'
                      + '<th style="border:1px solid #cbd5e1;padding:2px 4px;">HE (x, y)</th>'
                      + '<th style="border:1px solid #cbd5e1;padding:2px 4px;">MSI (x, y)</th>'
+                     + '<th style="border:1px solid #cbd5e1;padding:2px 4px;">Δ</th>'
                      + '<th style="border:1px solid #cbd5e1;padding:2px 4px;"></th></tr></thead><tbody>';
             for (let i = 0; i < rows; i++) {
                 const he = state.landmarks.he[i];
                 const ms = state.landmarks.msi[i];
-                html += `<tr><td style="border:1px solid #e2e8f0;padding:2px 4px;text-align:center;">${i+1}</td>`
+                const r = resid && resid.perPoint[i];
+                const bad = !!(r && r.d > outlierCut);
+                const dTxt = r
+                    ? (Number.isFinite(r.dUm) ? `${r.dUm.toFixed(0)} µm` : `${r.d.toFixed(2)} px`)
+                    : '—';
+                html += `<tr${bad ? ' style="background:#fee2e2;"' : ''}>`
+                     +  `<td style="border:1px solid #e2e8f0;padding:2px 4px;text-align:center;">${i+1}</td>`
                      +  `<td style="border:1px solid #e2e8f0;padding:2px 4px;">${he ? '('+he[0].toFixed(1)+', '+he[1].toFixed(1)+')' : '—'}</td>`
                      +  `<td style="border:1px solid #e2e8f0;padding:2px 4px;">${ms ? '('+ms[0].toFixed(1)+', '+ms[1].toFixed(1)+')' : '—'}</td>`
+                     +  `<td style="border:1px solid #e2e8f0;padding:2px 4px;text-align:right;${bad ? 'font-weight:700;color:#b91c1c;' : ''}" title="この点の現在の変換に対する残差">${dTxt}</td>`
                      +  `<td style="border:1px solid #e2e8f0;padding:2px 4px;text-align:center;"><button type="button" class="btn danger" data-rm-lm="${i}" style="font-size:10px;padding:0 6px;">×</button></td></tr>`;
             }
             html += '</tbody>';
@@ -12021,6 +12787,187 @@ const Wizards = {
                 updatePreview();
             } catch (e) {
                 alert('Solve に失敗しました: ' + (e.message || e));
+            }
+        });
+
+        // ---- Automatic silhouette alignment ---------------------------------
+        // 組織シルエットのモーメント初期化 (連続角) + 粗密 Dice 精緻化。
+        // ★ 決して即適用しない。Dice は 0.95 でも 120–190 µm ずれうるので、
+        //   推定値・現在との差・異方性をユーザに見せてから適用させる。
+        //   適用してもスライダーに入るだけなので、モーダルの Cancel
+        //   (restoreSnapshot) がそのまま undo になる。
+        const manualFitFromLandmarks = () => {
+            if (state.landmarks.he.length < 2 || state.landmarks.he.length !== state.landmarks.msi.length) return null;
+            try {
+                const sgnx = state.flip_lr ? -1 : 1;
+                const sgny = state.flip_ud ? -1 : 1;
+                const heAdj = state.landmarks.he.map(p => [sgnx * p[0], sgny * p[1]]);
+                const r = solveSimilarity(heAdj, state.landmarks.msi);
+                return {
+                    flip_lr: state.flip_lr, flip_ud: state.flip_ud,
+                    scale_pct: r.s * 100, rotate_deg: r.theta * 180 / Math.PI,
+                    offx: r.tx, offy: r.ty,
+                };
+            } catch (e) { return null; }
+        };
+        const applyAlignState = (st, autoMeta) => {
+            state.flip_lr = !!st.flip_lr;
+            state.flip_ud = !!st.flip_ud;
+            state.scale_pct = st.scale_pct;
+            state.rotate_deg = st.rotate_deg;
+            state.offx = st.offx;
+            state.offy = st.offy;
+            state.autoAligned = autoMeta || null;
+            syncUiFromState();
+            updatePreview();
+        };
+        const waitForImg = (img) => new Promise((resolve) => {
+            if (!img) { resolve(null); return; }
+            if (img.complete && img.naturalWidth) { resolve(img); return; }
+            img.addEventListener('load', () => resolve(img), { once: true });
+            img.addEventListener('error', () => resolve(null), { once: true });
+        });
+        const umPerPxNow = () => ({ x: state.msi_um_x, y: state.msi_um_y });
+        // px → µm using the mean pitch (a single scalar distance has no axis).
+        const pxToUm = (px) => {
+            const u = umPerPxNow();
+            const m = (Number(u.x) > 0 && Number(u.y) > 0) ? (Number(u.x) + Number(u.y)) / 2 : 0;
+            return m > 0 ? px * m : NaN;
+        };
+        const fmtDist = (px) => {
+            if (!Number.isFinite(px)) return '—';
+            const um = pxToUm(px);
+            return Number.isFinite(um) ? `${um.toFixed(0)} µm (${px.toFixed(2)} px)` : `${px.toFixed(2)} px`;
+        };
+
+        if (autoBtn) autoBtn.addEventListener('click', async () => {
+            if (!autoBox) return;
+            autoBtn.disabled = true;
+            autoBox.style.display = '';
+            autoBox.innerHTML = '<span style="color:#64748b;">組織シルエットを抽出しています…</span>';
+            // Let the message paint before the synchronous solve blocks the thread.
+            await new Promise(r => requestAnimationFrame(() => r()));
+            try {
+                const heRaw = panel.imageSources && panel.imageSources[state.layerKey];
+                if (!heRaw || !heRaw.complete || !heRaw.naturalWidth) {
+                    throw new Error('HE/IF 画像がまだ読み込まれていません');
+                }
+                const heM = heTissueMask(heRaw);
+                if (!heM) throw new Error('HE から組織領域を抽出できませんでした (背景との彩度差が小さい可能性があります)');
+                const ticImg = isTicKey(state.msiKey)
+                    ? computeSyntheticTicForKey(state.msiKey)
+                    : (panel.imageSources && panel.imageSources[state.msiKey]);
+                await waitForImg(ticImg);
+                const msiM = msiTissueMaskForAlign(sec, panel, state.msiKey, ticImg);
+                if (!msiM) throw new Error('MSI から組織領域を抽出できませんでした (背景除去の閾値を確認してください)');
+                // If both physical pitches are known the scale is not a free
+                // parameter — lock it. This removes the solver's only real
+                // weakness (mask-boundary bias leaking into the area ratio).
+                const heUm = (sec.meta.world_coords && sec.meta.world_coords.he_um_per_px) || null;
+                const heUmMean = heUm && Number(heUm.x) > 0 && Number(heUm.y) > 0
+                    ? (Number(heUm.x) + Number(heUm.y)) / 2 : 0;
+                const msiUmMean = (Number(state.msi_um_x) > 0 && Number(state.msi_um_y) > 0)
+                    ? (Number(state.msi_um_x) + Number(state.msi_um_y)) / 2 : 0;
+                const lockScale = (heUmMean > 0 && msiUmMean > 0) ? (heUmMean / msiUmMean) : 0;
+                const auto = autoAlignSilhouette(heM, msiM, lockScale ? { lockScale } : null);
+                if (!auto) throw new Error('シルエットからの推定に失敗しました');
+
+                const Tcur  = buildHeToMsiAffine(state);
+                const Tauto = buildHeToMsiAffine(auto.state);
+                const dCur  = transformDisagreementPx(heM, Tcur, Tauto);
+
+                // Hybrid: inverse-variance combination with the landmark fit.
+                const manual = manualFitFromLandmarks();
+                let hybrid = null, sigMan = null, sigHyb = null, dManAuto = NaN;
+                if (manual) {
+                    const manResid = computeLandmarkResiduals(state.landmarks, buildHeToMsiAffine(manual), umPerPxNow());
+                    sigMan = estimateLandmarkFitSigmaPx(manResid);
+                    dManAuto = transformDisagreementPx(heM, buildHeToMsiAffine(manual), Tauto);
+                    if (sigMan) {
+                        const wMan  = 1 / (sigMan * sigMan);
+                        const wAuto = 1 / (auto.sigmaPx * auto.sigmaPx);
+                        // ★ 一貫性チェック: 手動解と自動解が合成不確かさの 3 倍より
+                        //   離れていたらどちらかが壊れている。平均せず両方見せる。
+                        const tol = 3 * Math.sqrt(sigMan * sigMan + auto.sigmaPx * auto.sigmaPx);
+                        if (Number.isFinite(dManAuto) && dManAuto <= tol) {
+                            hybrid = blendAlignStates(manual, wMan, auto.state, wAuto);
+                            if (hybrid) sigHyb = Math.sqrt(1 / (wMan + wAuto));
+                        }
+                    }
+                }
+
+                const rot = ((auto.state.rotate_deg % 360) + 540) % 360 - 180;
+                const warn = [];
+                if (!auto.reliableRotation) {
+                    warn.push(`<div style="margin-top:4px;padding:5px 7px;border-radius:4px;background:#fee2e2;color:#991b1b;">`
+                        + `<b>回転が決められません</b>：この組織は回転対称に近く (異方性 ${auto.aniso.toFixed(3)})、`
+                        + `シルエットには回転の情報がありません。Dice が高くても回転は信用できないので、ランドマークを打ってください。</div>`);
+                }
+                if (manual && !hybrid) {
+                    warn.push(`<div style="margin-top:4px;padding:5px 7px;border-radius:4px;background:#fef3c7;color:#92400e;">`
+                        + `<b>手動の対応点と大きく食い違っています</b>（差 ${fmtDist(dManAuto)}）。`
+                        + `どちらかが誤っている可能性があるため合成は行いません。両方を見比べて選んでください。</div>`);
+                }
+
+                autoBox.innerHTML =
+                    `<div style="border:1px solid #cbd5e1;border-radius:5px;padding:7px 9px;background:#f8fafc;">`
+                  + `<div><b>自動整合の推定結果</b>　シルエット Dice <b>${auto.dice.toFixed(3)}</b>`
+                  + `　<span style="color:#64748b;">(${auto.evals} 回評価)</span></div>`
+                  + `<div style="margin-top:3px;color:#334155;">回転 ${rot.toFixed(2)}° ／ スケール ${auto.state.scale_pct.toFixed(2)}%`
+                  + `${auto.scaleLocked ? '<span style="color:#166534;"> (µm/px から固定)</span>' : '<span style="color:#64748b;"> (面積比から推定)</span>'}`
+                  + ` ／ 鏡映 ${auto.state.flip_lr ? 'あり' : 'なし'}</div>`
+                  + `<div style="margin-top:3px;color:#334155;">いまの合わせとの差： <b>${fmtDist(dCur)}</b>`
+                  + `　見込み誤差： <b>${fmtDist(auto.sigmaPx)}</b></div>`
+                  + (auto.scaleLocked && Math.abs(auto.areaScaleRatio - 1) > 0.05
+                      ? `<div style="margin-top:3px;color:#92400e;">組織面積から出るスケールは固定値の ${(auto.areaScaleRatio * 100).toFixed(0)}% です。`
+                        + `HE と MSI の組織抽出が食い違っているか、µm/px の設定が誤っている可能性があります。</div>`
+                      : '')
+                  + (hybrid
+                      ? `<div style="margin-top:3px;color:#334155;">ハイブリッド合成の見込み誤差： <b>${fmtDist(sigHyb)}</b>`
+                        + `<span style="color:#64748b;">（対応点のみ ${fmtDist(sigMan)} / 自動のみ ${fmtDist(auto.sigmaPx)}）</span></div>`
+                      : '')
+                  + warn.join('')
+                  + `<div style="margin-top:3px;color:#64748b;font-size:10px;">`
+                  + `同一切片の post-MSI H&amp;E 用です。隣接切片 (IF/4HNE など) では内部構造が異なるため、`
+                  + `シルエット一致は broad-domain 比較の目安にとどまります。Dice は精度保証ではありません。</div>`
+                  + `<div style="display:flex;gap:6px;margin-top:7px;flex-wrap:wrap;">`
+                  + (hybrid ? `<button type="button" class="btn primary" data-auto-apply="hybrid">ハイブリッドを適用</button>` : '')
+                  + `<button type="button" class="btn${hybrid ? '' : ' primary'}" data-auto-apply="auto">自動解のみを適用</button>`
+                  + `<button type="button" class="btn" data-auto-cancel>取消</button>`
+                  + `</div></div>`;
+
+                const meta = {
+                    method: 'silhouette-v1',
+                    dice: auto.dice,
+                    aniso: auto.aniso,
+                    reliableRotation: auto.reliableRotation,
+                    scaleLocked: auto.scaleLocked,
+                    sigmaPx: auto.sigmaPx,
+                    ts: Date.now(),
+                };
+                autoBox.querySelectorAll('[data-auto-apply]').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const which = btn.getAttribute('data-auto-apply');
+                        if (which === 'hybrid' && hybrid) {
+                            applyAlignState(hybrid, Object.assign({}, meta, { blended: true }));
+                        } else {
+                            applyAlignState(auto.state, meta);
+                        }
+                        autoBox.style.display = 'none';
+                        autoBox.innerHTML = '';
+                    });
+                });
+                const cancelAuto = autoBox.querySelector('[data-auto-cancel]');
+                if (cancelAuto) cancelAuto.addEventListener('click', () => {
+                    autoBox.style.display = 'none';
+                    autoBox.innerHTML = '';
+                });
+            } catch (e) {
+                console.warn('auto align failed', e);
+                autoBox.innerHTML = `<div style="padding:5px 7px;border-radius:4px;background:#fee2e2;color:#991b1b;">`
+                    + `自動整合できません: ${safe(e && e.message ? e.message : e)}</div>`;
+            } finally {
+                autoBtn.disabled = false;
             }
         });
 
@@ -12078,17 +13025,25 @@ const Wizards = {
             aRef.scale_pct = state.scale_pct; aRef.rotate_deg = state.rotate_deg;
             aRef.offx = state.offx; aRef.offy = state.offy;
             aRef.landmarks = { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() };
+            if (state.autoAligned) aRef.autoAligned = state.autoAligned;
+            else delete aRef.autoAligned;
             // New: also persist the per-source slider record so the next
             // modal open repopulates correctly when the user re-picks the
             // same MSI source. In '__all__' mode broadcast to every source
             // so any of them re-opens with the saved state, matching the
             // bySource T broadcast in writeWorldCoords.
-            const buildBySrcEntry = () => ({
-                flip_lr: state.flip_lr, flip_ud: state.flip_ud,
-                scale_pct: state.scale_pct, rotate_deg: state.rotate_deg,
-                offx: state.offx, offy: state.offy,
-                landmarks: { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() },
-            });
+            const buildBySrcEntry = () => {
+                const e = {
+                    flip_lr: state.flip_lr, flip_ud: state.flip_ud,
+                    scale_pct: state.scale_pct, rotate_deg: state.rotate_deg,
+                    offx: state.offx, offy: state.offy,
+                    landmarks: { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() },
+                };
+                // ★ これが無いと _sourceHasGenuineAlignment が自動整合を
+                //   △(暫定) と判定し、レガシー共有 T に覆い隠される。
+                if (state.autoAligned) e.autoAligned = state.autoAligned;
+                return e;
+            };
             if (state.sourceMode === '__all__') {
                 aRef.bySource = aRef.bySource || {};
                 for (const fid of sourceFids) aRef.bySource[fid] = buildBySrcEntry();

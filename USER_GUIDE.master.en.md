@@ -136,6 +136,7 @@ Click **`Align`** on a section panel to open a modal that aligns HE/IF layers to
 The Align modal shows a **Source** dropdown at the top whenever a section has more than one MSI source. Each source name is prefixed with an **alignment-status icon**:
 
 - **✓** = aligned with landmarks
+- **⊙** = silhouette auto-aligned (no landmarks, but not provisional)
 - **△** = provisional (sliders only, no landmarks)
 - **−** = not aligned yet
 
@@ -165,13 +166,53 @@ Both the slider and the numeric input edit the same value. The Section panel beh
 
 ### 5-4. Landmark mode
 
-Click ≥ 3 corresponding points on each thumbnail, then **`Solve`** runs a complex-LSE similarity transform (rotation + isotropic scale + translation) and pushes the result into the Manual sliders.
+Click corresponding points on each thumbnail, then **`Solve`** runs a complex-LSE similarity transform (rotation + isotropic scale + translation) and pushes the result into the Manual sliders.
 
 | Button | Action |
 |---|---|
 | `Reset to identity` | Reset all Manual fields |
 | `Clear all` | Remove every landmark on both sides |
-| `Solve` | Estimate the affine and populate Manual |
+| `Solve` | Estimate the similarity and populate Manual |
+| `自動整合 (シルエット)` | Estimate it automatically from the tissue outlines (§5-4-bis) |
+
+#### How many points do you need?
+
+The correspondence table has a **`Δ` column** with each point's residual, and the **RMSE / maximum** above it, in µm. Accuracy depends strongly on both the count and the spread (measured on synthetic ground truth, 1 px MSI click noise, 200 trials):
+
+| Spread | N | Median | Worst |
+|---|---|---|---|
+| Wide | 2 | 105 µm | **1647 µm** |
+| Wide | 3 | 66 µm | 225 µm |
+| Wide | 6 | 44 µm | 103 µm |
+| Wide | 8 | **36 µm** | 89 µm |
+| Clustered | 3 | 113 µm | **830 µm** |
+| Clustered | 8 | 53 µm | 151 µm |
+
+- **Two points are dangerous.** A similarity has 4 DOF, so two points always fit with zero residual while the true error remains — an all-zero `Δ` column is not reassurance.
+- **Use 6–8 well-spread points.** Clustering them near the centre multiplies the worst-case error by roughly 4, so place some near the periphery.
+- Warning badges appear in the QC line when the count or spread is insufficient.
+- Points whose residual exceeds 2.5× the RMSE are highlighted in red — good candidates to re-place.
+
+### 5-4-bis. Automatic silhouette alignment
+
+**`自動整合 (シルエット)`** matches the HE tissue outline (saturation threshold) against the MSI tissue outline (the existing Otsu background-removal mask, computed on the fly if absent) and estimates the alignment automatically.
+
+The pipeline is: moment initialisation (centroid, principal axis, area — with a **continuous rotation angle**) → pick among the 4 branches (principal-axis 180° ambiguity × chirality) by Dice → coarse-to-fine coordinate descent. It converges in ~50 evaluations, so it finishes in tens of milliseconds.
+
+- **Nothing is applied immediately.** You get the Dice, the estimated parameters, the distance from the current alignment and the expected error, then choose `適用` (apply). Applying only writes the Manual sliders, so the modal's `Cancel` still rolls everything back.
+- **With landmarks present, a hybrid blend is the default** — the auto solution and the landmark fit are combined by inverse-variance weighting. Measured, this beats landmarks alone at every count (2 points 92→33 µm, 8 points 36→25 µm). Applying the pure auto solution is also offered.
+- If the auto solution and the landmark fit disagree by more than 3× their combined uncertainty, **no blend is produced** and both are shown instead — one of them is likely wrong.
+- When both `he_um_per_px` and `msi_um_per_px` are known, **the scale is locked to the physical ratio** (one fewer free parameter). If the area-implied scale then differs from it by more than 5%, a warning appears — which catches a wrong µm/px setting.
+
+#### Limitations (please read)
+
+- **Dice is not an accuracy guarantee.** A Dice of 0.95 can still mean 120–190 µm of real misalignment. Always read the `Δ` column and RMSE alongside it.
+- **A near-rotationally-symmetric section has no recoverable rotation.** A perfect disc silhouette carries no rotation information at all, and Dice reads 0.997 for every angle, so it cannot be detected after the fact. This one case is flagged in advance from the shape anisotropy with a red warning — place landmarks when you see it.
+- **The accuracy ceiling is one MSI pixel** (50 µm at 50 µm/px); anything finer is meaningless for the measurement. Measured expected error is 5–30 µm under clean conditions and up to ~60 µm when the HE and MSI segmentations disagree by one MSI pixel.
+- **It stays a 4-DOF similarity**, so shear and non-linear distortion are not corrected. That is normally fine for a same-section post-MSI H&E; use landmarks when there is strong stretching.
+- **Serial sections (IF / 4HNE) genuinely differ inside.** Matching the silhouette does not guarantee that the interiors correspond, so treat it as a broad-domain comparison only.
+
+> **For developers**: run `__alignSelfTest()` in the browser console to verify the registration math against synthetic ground truth — RMS < 1 MSI px for every rotation from 0–35° with and without mirroring, exact agreement of the decomposition identity, and the anisotropy guard firing on a perfect disc.
 
 ### 5-5. Cancel / Save
 
