@@ -40,6 +40,23 @@
   .row .inline { display:flex; gap:8px; }
   .row .inline > label { flex:1; }
   .row textarea { font-family:ui-monospace, SFMono-Regular, monospace; min-height:54px; }
+  /* Editable import grid. Cells look like plain text until hovered/focused so a
+     dense table stays readable, but every cell is a real input. */
+  .pgrid { width:100%; border-collapse:collapse; font-size:12px; }
+  .pgrid th { background:#f8fafc; font-weight:600; color:#475569; padding:5px 4px; text-align:left;
+      border-bottom:1px solid #e5e7eb; position:sticky; top:0; z-index:1; white-space:nowrap; }
+  .pgrid td { border-bottom:1px solid #f1f5f9; padding:1px 2px; }
+  .pgrid .pgrid-n { width:28px; text-align:right; color:#94a3b8; font-size:11px; padding-right:5px; }
+  .pgrid input, .pgrid select { width:100%; border:1px solid transparent; background:transparent;
+      padding:3px 4px; font-size:12px; border-radius:3px; color:#0f172a; }
+  .pgrid input:hover, .pgrid select:hover { border-color:#e2e8f0; }
+  .pgrid input:focus, .pgrid select:focus { border-color:#2563eb; background:#fff; outline:none; }
+  .pgrid input.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .pgrid tr.bad { background:#fef2f2; }
+  .pgrid-bulk { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:8px;
+      padding:6px 8px; background:#f8fafc; border:1px solid #e5e7eb; border-radius:6px; }
+  .pgrid-bulk input, .pgrid-bulk select { padding:3px 6px; border:1px solid #cbd5e1; border-radius:4px;
+      font-size:12px; background:#fff; }
   .modal-backdrop { position:fixed; inset:0; background:rgba(15,23,42,0.55); z-index:60; display:flex; align-items:center; justify-content:center; }
   .modal-card { background:#fff; border-radius:8px; box-shadow:0 12px 30px rgba(0,0,0,0.2); padding:18px 22px; width:520px; max-width:94vw; max-height:90vh; overflow-y:auto; }
   .modal-card h2 { font-size:14px; font-weight:600; margin-bottom:8px; }
@@ -144,7 +161,7 @@
     <div class="flex items-center justify-between gap-3 flex-wrap">
       <div class="flex gap-2 flex-wrap">
         <button id="btn-add-compound" class="btn primary">+ 化合物</button>
-        <button id="btn-import-excel" class="btn" title="Excel ファイル、または Excel からコピーした表の貼り付けで MRM を一括登録">一括取り込み</button>
+        <button id="btn-import-excel" class="btn" title="表に直接入力、Excel からの貼り付け、または Excel ファイルで MRM をまとめて登録">一括登録</button>
         <input id="excel-input" type="file" accept=".xlsx,.xls" style="display:none">
         <button id="btn-reload" class="btn">再読込</button>
         <button id="btn-exp-template" class="btn" title="出力用テンプレート .exp を設定/確認">テンプレ設定</button>
@@ -1239,14 +1256,49 @@ function _parseSheetBlocks(aoa, sheetName) {
     return blocks;
 }
 
-// ---- Paste import ---------------------------------------------------------
-// Rows copied straight out of Excel arrive as plain text, not a workbook, so
-// there is no sheet to hand to _parseSheetBlocks(). Rather than write a second
-// parser we rebuild the array-of-arrays it already expects. That keeps
-// header-name mapping (CV/CE in either order), same-name grouping and the
-// NEG/POS polarity guess identical between the two import routes.
-const PASTE_HEADER = ['CompoundName', 'Precursor', 'Product', 'CV', 'CE'];
-const PASTE_PREVIEW_MAX = 50;
+// ---- Paste / cell-entry import --------------------------------------------
+// The bulk-import dialog is an editable grid rather than a text box: every MRM
+// needs its own polarity, tag, check level and shelf, which one bulk setting
+// could not express. Cells still take a paste straight out of Excel — a
+// multi-cell paste spills right and down from the cell it lands in, growing the
+// grid as needed, so copying a block from a sheet fills the table in one go.
+//
+// CV and CE are both small integers, so a swapped pair produces a library that
+// looks plausible and is silently wrong. Hence the explicit column labels.
+const PASTE_COLS = [
+    { key: 'name',        label: '化合物名',    kind: 'text',   width: '16%' },
+    { key: 'precursor',   label: 'Precursor',   kind: 'num',    width: '9%'  },
+    { key: 'product',     label: 'Product',     kind: 'num',    width: '9%'  },
+    { key: 'cv',          label: 'CV (コーン)', kind: 'num',    width: '9%'  },
+    { key: 'ce',          label: 'CE (衝突)',   kind: 'num',    width: '9%'  },
+    { key: 'tags',        label: 'タグ (分類)', kind: 'text',   width: '18%' },
+    { key: 'polarity',    label: '極性',        kind: 'select', width: '10%' },
+    { key: 'check_level', label: '確認レベル',  kind: 'select', width: '10%' },
+    { key: 'shelf',       label: '登録先',      kind: 'select', width: '10%' },
+];
+// Only the text/number columns take part in a spill — a <select> cannot hold
+// arbitrary pasted text. 'tags' therefore sits before the selects, so pasting
+// six columns fills the tag column too.
+const PASTE_SPILL_COLS = PASTE_COLS.filter(c => c.kind !== 'select').length;
+const PASTE_MIN_ROWS = 4;
+
+const PASTE_SELECT_OPTS = {
+    polarity: [
+        { v: '',  t: '— 自動' },
+        { v: '+', t: '+' },
+        { v: '-', t: '−' },
+    ],
+    check_level: [
+        { v: '',          t: '変更しない' },
+        { v: 'std',       t: '標準品✓' },
+        { v: 'lit',       t: '文献のみ' },
+        { v: 'unchecked', t: '未確認' },
+    ],
+    shelf: [
+        { v: 'main',    t: '検証済み' },
+        { v: 'archive', t: 'アーカイブ' },
+    ],
+};
 
 // Split one pasted line into cells. Excel puts tabs between columns; text
 // pasted from somewhere else may use commas or aligned spaces. Space splitting
@@ -1262,31 +1314,44 @@ function _pasteDelimiter(lines) {
     return ' ';
 }
 
-function parsePastedMrm(text) {
-    // Blank lines have to go before _parseSheetBlocks sees them: it ends a block
-    // at the first empty name cell, so one stray blank line in the middle would
-    // silently drop every row after it.
-    const lines = String(text || '').split(/\r?\n/).filter(l => l.trim() !== '');
-    if (!lines.length) return [];
-    const delim = _pasteDelimiter(lines);
-    const aoa = lines.map(l => _pasteSplit(l, delim).map(c => String(c == null ? '' : c).trim()));
-    // A header row is honoured when it is pasted along with the data (columns
-    // are matched by name, so CV/CE in the opposite order still lands
-    // correctly). Without one we prepend the documented default order.
-    const hasHeader = (aoa[0] || []).some(c => _mrmField(c) === 'name');
-    if (!hasHeader) aoa.unshift(PASTE_HEADER.slice());
-    return _parseSheetBlocks(aoa, '(貼り付け)');
+// parseTags() also splits on whitespace, which would turn a real tag such as
+// "Amino acid" into two. Tag cells are comma-separated only.
+function _pasteParseTags(s) {
+    const out = [];
+    for (const raw of String(s || '').split(/[,、]/)) {
+        const t = raw.trim();
+        if (t && !out.includes(t)) out.push(t);
+    }
+    return out;
 }
 
-// Flatten parsed blocks to one row per transition — the shape the import loop
-// and the preview table both want.
-function _pasteRowsFromBlocks(blocks) {
-    const rows = [];
-    for (const b of (blocks || []))
-        for (const c of b.compounds)
-            for (const tr of c.transitions)
-                rows.push({ name: c.name, precursor: tr.precursor, product: tr.product, cv: tr.cv, ce: tr.ce });
-    return rows;
+// Turn pasted text into a block of cells. Blank lines are dropped instead of
+// becoming empty rows, and a header row pasted along with the data is consumed
+// to REMAP the columns — that is what lets a sheet whose CE column comes before
+// CV import correctly instead of silently swapping the two voltages.
+// Returns { cells, colMap }; colMap[i] is the grid column pasted column i maps
+// to (null = ignore), or null when there was no header row.
+function parsePastedGrid(text) {
+    const lines = String(text || '').split(/\r?\n/).filter(l => l.trim() !== '');
+    if (!lines.length) return { cells: [], colMap: null };
+    const delim = _pasteDelimiter(lines);
+    const cells = lines.map(l => _pasteSplit(l, delim).map(c => String(c == null ? '' : c).trim()));
+    let colMap = null;
+    if ((cells[0] || []).some(c => _mrmField(c) === 'name')) {
+        colMap = cells[0].map(c => {
+            const f = _mrmField(c);
+            if (f === 'name') return 0;
+            if (f === 'precursor') return 1;
+            if (f === 'product') return 2;
+            if (f === 'cv') return 3;
+            if (f === 'ce') return 4;
+            const n = _normHeader(c);
+            if (n === 'tag' || n === 'tags' || n === 'category' || n === 'タグ' || n === '分類') return 5;
+            return null;
+        });
+        cells.shift();
+    }
+    return { cells, colMap };
 }
 
 function parseMrmWorkbook(buf) {
@@ -1437,93 +1502,169 @@ async function runMrmImport(groups, shelf, checkLevel) {
         + (fail ? '（失敗 ' + fail + ' 件、詳細はブラウザのコンソール）' : ''));
 }
 
-// Live-parse whatever is in the textarea and redraw the preview table. The
-// point of showing every value (rather than a block summary like the Excel
-// preview) is that CV and CE are both small integers: swapping them produces a
-// plausible-looking library that is silently wrong, so the operator has to be
-// able to see which column each number landed in before committing.
-function _renderPastePreview(card) {
-    const ta = card.querySelector('[data-paste-src]');
-    const box = card.querySelector('[data-paste-preview]');
+// ---- Bulk import dialog (editable grid) -----------------------------------
+
+function _pasteCellHtml(col) {
+    const at = ' data-cell="' + col.key + '"';
+    if (col.kind === 'select') {
+        return '<select' + at + '>'
+            + PASTE_SELECT_OPTS[col.key].map(o =>
+                '<option value="' + safe(o.v) + '">' + safe(o.t) + '</option>').join('')
+            + '</select>';
+    }
+    return '<input type="text"' + at + (col.key === 'tags' ? ' list="paste-tag-list"' : '')
+        + (col.kind === 'num' ? ' class="num"' : '') + '>';
+}
+
+function _pasteRowHtml() {
+    return '<tr>'
+        + '<td data-prow-n class="pgrid-n"></td>'
+        + PASTE_COLS.map(c => '<td>' + _pasteCellHtml(c) + '</td>').join('')
+        + '<td><button type="button" class="btn mini" data-prow-del title="この行を削除">✕</button></td>'
+        + '</tr>';
+}
+
+function _pasteRenumber(tbody) {
+    Array.from(tbody.children).forEach((tr, i) => {
+        const c = tr.querySelector('[data-prow-n]');
+        if (c) c.textContent = String(i + 1);
+    });
+}
+
+function _pasteAddRows(tbody, n) {
+    let html = '';
+    for (let i = 0; i < n; i++) html += _pasteRowHtml();
+    tbody.insertAdjacentHTML('beforeend', html);
+    _pasteRenumber(tbody);
+}
+
+// Read the grid into row objects. Cells are addressed by key within each <tr>,
+// so adding or deleting rows never has to keep an index in sync.
+function _pasteReadGrid(card) {
+    const tbody = card.querySelector('[data-pgrid-body]');
+    return Array.from(tbody.children).map(tr => {
+        const get = (k) => {
+            const el = tr.querySelector('[data-cell="' + k + '"]');
+            return el ? String(el.value || '').trim() : '';
+        };
+        const r = {
+            name: get('name'),
+            precursor: _toNum(get('precursor')),
+            product: _toNum(get('product')),
+            cv: _toNum(get('cv')),
+            ce: _toNum(get('ce')),
+            tags: _pasteParseTags(get('tags')),
+            polarity: get('polarity') || null,
+            check_level: get('check_level') || null,
+            shelf: get('shelf') === 'archive' ? 'archive' : 'main',
+        };
+        r.blank = !r.name && r.precursor == null && r.product == null
+               && r.cv == null && r.ce == null && !r.tags.length;
+        // Same rule as the Excel route: a name with no m/z at all is a stray
+        // title, not a transition.
+        r.valid = !!r.name && (r.precursor != null || r.product != null);
+        if (!r.polarity) r.polarity = inferPolarityFromName(r.name) || null;
+        return r;
+    });
+}
+
+// Recount, flag the rows that are filled in but unusable, and cache the result
+// for _collect(). Called on every edit, so it stays cheap.
+function _pasteRefresh(card) {
+    const tbody = card.querySelector('[data-pgrid-body]');
+    const rows = _pasteReadGrid(card);
+    const names = new Set();
+    let nT = 0, bad = 0;
+    Array.from(tbody.children).forEach((tr, i) => {
+        const r = rows[i];
+        const problem = !r.blank && !r.valid;
+        tr.classList.toggle('bad', problem);
+        if (problem) bad++;
+        if (r.valid) { nT++; names.add(r.name); }
+    });
     const sum = card.querySelector('[data-paste-summary]');
-    let blocks = [];
-    try { blocks = parsePastedMrm(ta ? ta.value : ''); }
-    catch (e) { blocks = []; console.warn('paste parse failed', e); }
-    card._pasteBlocks = blocks;
-    const rows = _pasteRowsFromBlocks(blocks);
-    const nC = blocks.reduce((a, b) => a + b.compounds.length, 0);
-    if (sum) sum.textContent = rows.length ? (nC + ' 化合物 / ' + rows.length + ' トランジション') : '';
-    if (!box) return;
-    if (!rows.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
-    box.style.display = '';
-    const shown = rows.slice(0, PASTE_PREVIEW_MAX);
-    const body = shown.map(r => '<tr>'
-        + '<td style="padding:2px 6px;">' + safe(r.name) + '</td>'
-        + '<td style="padding:2px 6px;text-align:right;">' + fmtNum(r.precursor) + '</td>'
-        + '<td style="padding:2px 6px;text-align:right;">' + fmtNum(r.product) + '</td>'
-        + '<td style="padding:2px 6px;text-align:right;">' + fmtNum(r.cv) + '</td>'
-        + '<td style="padding:2px 6px;text-align:right;">' + fmtNum(r.ce) + '</td>'
-        + '</tr>').join('');
-    box.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
-        + '<thead><tr style="text-align:left;background:#f8fafc;position:sticky;top:0;">'
-        + '<th style="padding:3px 6px;">化合物名</th>'
-        + '<th style="padding:3px 6px;text-align:right;">Precursor</th>'
-        + '<th style="padding:3px 6px;text-align:right;">Product</th>'
-        + '<th style="padding:3px 6px;text-align:right;">CV (コーン)</th>'
-        + '<th style="padding:3px 6px;text-align:right;">CE (衝突)</th>'
-        + '</tr></thead><tbody>' + body + '</tbody></table>'
-        + (rows.length > shown.length
-            ? '<p class="muted" style="font-size:11px;padding:4px 6px;margin:0;">…他 ' + (rows.length - shown.length) + ' 行</p>'
-            : '');
+    if (sum) {
+        sum.textContent = nT
+            ? (names.size + ' 化合物 / ' + nT + ' トランジション'
+               + (bad ? '  ・ 赤い行 ' + bad + ' 件は化合物名か m/z が無いため登録されません' : ''))
+            : (bad ? '登録できる行がありません。化合物名と m/z (Precursor か Product) を入れてください。' : '');
+    }
+    card._pasteRows = rows;
+    return rows;
+}
+
+// Excel-style spill: write a pasted block into the grid starting at the cell it
+// was dropped on, adding rows as needed.
+function _pasteSpill(card, targetEl, text) {
+    const tbody = card.querySelector('[data-pgrid-body]');
+    const tr0 = targetEl.closest('tr');
+    const r0 = Array.from(tbody.children).indexOf(tr0);
+    if (r0 < 0) return false;
+    const c0 = PASTE_COLS.findIndex(c => c.key === targetEl.getAttribute('data-cell'));
+    const parsed = parsePastedGrid(text);
+    if (!parsed.cells.length) return false;
+    const need = r0 + parsed.cells.length - tbody.children.length;
+    if (need > 0) _pasteAddRows(tbody, need);
+    const trs = Array.from(tbody.children);
+    parsed.cells.forEach((line, i) => {
+        const tr = trs[r0 + i];
+        if (!tr) return;
+        line.forEach((val, j) => {
+            // A header row gives absolute grid columns; without one the block
+            // simply spills rightward from the cell that was pasted into.
+            const gc = parsed.colMap ? parsed.colMap[j] : (c0 + j);
+            if (gc == null || gc < 0 || gc >= PASTE_SPILL_COLS) return;
+            const el = tr.querySelector('[data-cell="' + PASTE_COLS[gc].key + '"]');
+            if (el) el.value = val;
+        });
+    });
+    _pasteRefresh(card);
+    return true;
 }
 
 // Bulk import entry point. The toolbar button used to fire the file picker
-// straight away; pasting a handful of rows out of Excel is now the common case,
-// so both routes sit behind one dialog with pasting first.
+// straight away; filling in a few MRMs by hand or pasting them out of Excel is
+// now the common case, so both routes sit behind one dialog with the grid first.
 function openBulkImportModal() {
     const tagOpts = allLibraryTags().map(t => '<option value="' + safe(t) + '"></option>').join('');
+    const bulkSel = (key, keepLabel) => '<select data-bulk-' + key + '>'
+        + '<option value="__keep__">' + safe(keepLabel) + '</option>'
+        + PASTE_SELECT_OPTS[key].map(o =>
+            '<option value="' + safe(o.v) + '">' + safe(o.t) + '</option>').join('')
+        + '</select>';
     const html = `
-      <h2>MRM を一括取り込み</h2>
+      <h2>MRM を一括登録</h2>
       <div class="shelf-tabs" style="margin-top:4px;">
-        <span class="shelf-tab on" data-bulk-tab="paste">貼り付け</span>
+        <span class="shelf-tab on" data-bulk-tab="grid">表に入力 / 貼り付け</span>
         <span class="shelf-tab" data-bulk-tab="excel">Excel ファイル</span>
       </div>
-      <div data-bulk-panel="paste">
-        <p class="muted" style="font-size:12px;margin:10px 0 6px;">Excel で <b>化合物名 / Precursor / Product / CV / CE</b> の5列を選んでコピーし、そのまま貼り付けてください。<br><b style="color:#b45309;">4列目が CV (コーン電圧)、5列目が CE (衝突エネルギー)</b> です。1行目にヘッダ行ごと貼り付けた場合は、列名から順序を自動判別します。</p>
-        <pre style="margin:0 0 6px;padding:6px 8px;background:#f8fafc;border:1px solid #e5e7eb;border-radius:4px;font-size:11px;color:#475569;overflow-x:auto;">NAD-POS\t664.1\t428\t20\t26\nNADH\t666.1\t649\t20\t17</pre>
-        <div class="row"><textarea data-paste-src rows="6" placeholder="ここに貼り付け" style="min-height:96px;"></textarea></div>
-        <p class="muted" data-paste-summary style="font-size:12px;margin:6px 2px;"></p>
-        <div data-paste-preview style="display:none;max-height:32vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;"></div>
-        <div class="row" style="display:flex;gap:10px;flex-wrap:wrap;">
-          <label style="flex:2 1 180px;">タグ (分類)
-            <input type="text" data-paste-tag list="paste-tag-list" placeholder="例: Amino acid">
-            <datalist id="paste-tag-list">${tagOpts}</datalist>
-          </label>
-          <label style="flex:1 1 110px;">極性
-            <select data-paste-pol>
-              <option value="">— (名前から推定)</option>
-              <option value="+">+</option>
-              <option value="-">−</option>
-            </select>
-          </label>
+      <div data-bulk-panel="grid">
+        <p class="muted" style="font-size:12px;margin:10px 0 6px;">セルに直接入力するか、Excel で範囲を選んでコピーし、貼り付けたい先頭のセルに貼り付けてください。<b>複数セルはそのまま右下へ流し込まれます</b>（行は自動で足ります）。<br><b style="color:#b45309;">CV はコーン電圧、CE は衝突エネルギー</b>です。1 行目にヘッダ行ごと貼り付けた場合は、列名から対応を自動判別します（CE と CV が逆順でも正しく入ります）。<br>タグはカンマ区切りで複数指定できます。極性の <b>「— 自動」</b> は化合物名の <code>NEG</code> / <code>POS</code> から判定します。</p>
+        <div style="max-height:44vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">
+          <table class="pgrid">
+            <thead><tr>
+              <th class="pgrid-n"></th>
+              ${PASTE_COLS.map(c => '<th style="width:' + c.width + ';">' + safe(c.label) + '</th>').join('')}
+              <th style="width:32px;"></th>
+            </tr></thead>
+            <tbody data-pgrid-body></tbody>
+          </table>
         </div>
-        <div class="row" style="display:flex;gap:10px;flex-wrap:wrap;">
-          <label style="flex:2 1 220px;">登録先
-            <select data-paste-shelf>
-              <option value="main">検証済みライブラリ — そのまま使えるMRM</option>
-              <option value="archive">使用実績アーカイブ — 使用歴はあるが未最適化</option>
-            </select>
-          </label>
-          <label style="flex:1 1 170px;">確認レベル
-            <select data-paste-level>
-              <option value="">変更しない (新規は未確認)</option>
-              <option value="std">標準品確認済み</option>
-              <option value="lit">文献のみ</option>
-              <option value="unchecked">未確認</option>
-            </select>
-          </label>
+        <datalist id="paste-tag-list">${tagOpts}</datalist>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
+          <button type="button" class="btn mini" data-prow-add>+ 行を追加</button>
+          <button type="button" class="btn mini" data-prow-clear>すべて消す</button>
+          <span class="muted" data-paste-summary style="font-size:12px;margin-left:4px;"></span>
         </div>
-        <p class="muted" style="font-size:11px;margin:6px 2px 0;">既に登録済みの化合物はタグが<b>追記</b>され、★推奨・役割・強度メモはそのまま残ります。同じ内容を貼り直しても重複しません。<b>登録先</b>は新規に作られる化合物にのみ適用されます。</p>
+        <div class="pgrid-bulk">
+          <span class="muted" style="font-size:11px;">一括設定</span>
+          <input type="text" data-bulk-tags list="paste-tag-list" placeholder="タグ (カンマ区切り)" style="flex:1 1 150px;min-width:120px;">
+          ${bulkSel('polarity', '極性: そのまま')}
+          ${bulkSel('check_level', '確認レベル: そのまま')}
+          ${bulkSel('shelf', '登録先: そのまま')}
+          <button type="button" class="btn mini" data-bulk-apply>全行に適用</button>
+        </div>
+        <p class="muted" style="font-size:11px;margin:6px 2px 0;">既に登録済みの化合物はタグが<b>追記</b>され、★推奨・役割・強度メモはそのまま残ります。同じ内容を入れ直しても重複しません。<b>登録先</b>は新規に作られる化合物にのみ適用され、確認レベルは「変更しない」なら既存の値を保ちます。</p>
       </div>
       <div data-bulk-panel="excel" style="display:none;">
         <p class="muted" style="font-size:12px;margin:10px 0;">既存の MRM リスト (.xlsx / .xls) をシートごと解析して取り込みます。カテゴリ見出しがタグになり、複数のブロックが縦横に並んでいてもまとめて検出します。</p>
@@ -1532,90 +1673,138 @@ function openBulkImportModal() {
       <p class="err" data-err></p>
       <div class="actions">
         <button type="button" class="btn" data-modal-cancel>Cancel</button>
-        <button type="button" class="btn primary" data-modal-ok>取り込み実行</button>
+        <button type="button" class="btn primary" data-modal-ok>登録する</button>
       </div>`;
     const p = openModal(html);
     const card = openModal._card;
-    card.style.width = '90vw';
-    card.style.maxWidth = '760px';
+    card.style.width = '96vw';
+    card.style.maxWidth = '1080px';
+    const tbody = card.querySelector('[data-pgrid-body]');
+    _pasteAddRows(tbody, PASTE_MIN_ROWS);
+
     const okBtn = card.querySelector('[data-modal-ok]');
-    // Tab switching. openModal() wires exactly one [data-modal-ok], so that
-    // button belongs to the paste panel; the Excel panel carries its own and
-    // this one is hidden rather than the two competing for the same hook.
+    // openModal() wires exactly one [data-modal-ok], so that button belongs to
+    // the grid panel; the Excel panel carries its own and this one is hidden
+    // rather than the two competing for the same hook.
     card.querySelectorAll('[data-bulk-tab]').forEach(t => t.addEventListener('click', () => {
         const which = t.getAttribute('data-bulk-tab');
         card.querySelectorAll('[data-bulk-tab]').forEach(x => x.classList.toggle('on', x === t));
         card.querySelectorAll('[data-bulk-panel]').forEach(x => {
             x.style.display = (x.getAttribute('data-bulk-panel') === which) ? '' : 'none';
         });
-        if (okBtn) okBtn.style.display = (which === 'paste') ? '' : 'none';
+        if (okBtn) okBtn.style.display = (which === 'grid') ? '' : 'none';
     }));
-    const ta = card.querySelector('[data-paste-src]');
-    if (ta) {
-        const redraw = () => _renderPastePreview(card);
-        ta.addEventListener('input', redraw);
-        // 'paste' fires before the value lands, so re-read on the next tick.
-        ta.addEventListener('paste', () => setTimeout(redraw, 0));
-    }
+
+    card.addEventListener('input', (e) => {
+        if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-cell')) _pasteRefresh(card);
+    });
+    card.addEventListener('change', (e) => {
+        if (e.target && e.target.hasAttribute && e.target.hasAttribute('data-cell')) _pasteRefresh(card);
+    });
+    card.addEventListener('paste', (e) => {
+        const el = e.target;
+        if (!el || !el.hasAttribute || !el.hasAttribute('data-cell')) return;
+        const cd = e.clipboardData || window.clipboardData;
+        const text = cd ? cd.getData('text') : '';
+        // Only a genuinely multi-cell paste is spilled. A single value is left
+        // to the browser so ordinary editing (and undo) keeps working — and a
+        // tag cell holding "Amino acid, Lipid" is not mistaken for two columns.
+        if (!text || (text.indexOf('\t') < 0 && !/\r?\n/.test(text.trim()))) return;
+        if (_pasteSpill(card, el, text)) e.preventDefault();
+    });
+    card.addEventListener('click', (e) => {
+        const del = e.target.closest && e.target.closest('[data-prow-del]');
+        if (del) {
+            const tr = del.closest('tr');
+            if (tr) tr.remove();
+            if (!tbody.children.length) _pasteAddRows(tbody, PASTE_MIN_ROWS);
+            _pasteRenumber(tbody);
+            _pasteRefresh(card);
+            return;
+        }
+        if (e.target.closest && e.target.closest('[data-prow-add]')) {
+            _pasteAddRows(tbody, 3);
+            return;
+        }
+        if (e.target.closest && e.target.closest('[data-prow-clear]')) {
+            tbody.innerHTML = '';
+            _pasteAddRows(tbody, PASTE_MIN_ROWS);
+            _pasteRefresh(card);
+            return;
+        }
+        if (e.target.closest && e.target.closest('[data-bulk-apply]')) {
+            const tags = card.querySelector('[data-bulk-tags]').value.trim();
+            const sels = ['polarity', 'check_level', 'shelf'].map(k =>
+                [k, card.querySelector('[data-bulk-' + k + ']').value]);
+            Array.from(tbody.children).forEach(tr => {
+                if (tags) {
+                    const el = tr.querySelector('[data-cell="tags"]');
+                    if (el) el.value = tags;
+                }
+                for (const [k, v] of sels) {
+                    if (v === '__keep__') continue;
+                    const el = tr.querySelector('[data-cell="' + k + '"]');
+                    if (el) el.value = v;
+                }
+            });
+            _pasteRefresh(card);
+            return;
+        }
+    });
+
     const fileBtn = card.querySelector('[data-bulk-file]');
     if (fileBtn) fileBtn.addEventListener('click', () => {
         if (card._close) card._close(null);
         const fi = document.getElementById('excel-input');
         if (fi) fi.click();
     });
+
+    _pasteRefresh(card);
     card._collect = () => {
         const err = card.querySelector('[data-err]');
-        const rows = _pasteRowsFromBlocks(card._pasteBlocks || []);
+        const rows = _pasteRefresh(card).filter(r => r.valid);
         if (!rows.length) {
-            if (err) err.textContent = '取り込める行がありません。化合物名と m/z を含む行を貼り付けてください。';
+            if (err) err.textContent = '登録できる行がありません。化合物名と m/z (Precursor か Product) を入れてください。';
             return null;
         }
-        const polDefault = card.querySelector('[data-paste-pol]').value || '';
-        return {
-            rows: rows.map(r => Object.assign({}, r, {
-                polarity: polDefault !== '' ? polDefault : (inferPolarityFromName(r.name) || null),
-            })),
-            tags: parseTags(card.querySelector('[data-paste-tag]').value || ''),
-            shelf: card.querySelector('[data-paste-shelf]').value || 'main',
-            check_level: card.querySelector('[data-paste-level]').value || null,
-        };
+        return rows;
     };
     return p;
 }
 
 async function startBulkImport() {
-    const opts = await openBulkImportModal();
-    if (!opts) return;      // cancelled, or switched to the Excel file picker
-    await runPasteImport(opts);
+    const rows = await openBulkImportModal();
+    if (!rows || !rows.length) return;   // cancelled, or switched to the file picker
+    await runPasteImport(rows);
 }
 
 // Written against register_measured_compound rather than the Excel route's
 // upsert_compound / upsert_transition pair. Those two replace an existing
 // compound's tags wholesale (mrm_library.sql: tags = excluded.tags) and blank a
 // matching transition's role / ★ / intensity note, which is tolerable for a
-// one-off workbook import but not for a paste flow whose whole point is topping
-// up a library that is already in use. register_measured_compound merges tags,
-// keeps the existing polarity, sets the shelf only on insert and leaves
-// transition annotations alone — and does it in one RPC per row instead of two.
-async function runPasteImport(opts) {
-    const rows = opts.rows || [];
+// one-off workbook import but not for a grid whose whole point is topping up a
+// library that is already in use. register_measured_compound merges tags, keeps
+// the existing polarity, sets the shelf only on insert and leaves transition
+// annotations alone — and does it in one RPC per row instead of two.
+async function runPasteImport(rows) {
     const pw = _readCachedMasterPw();
-    openModal('<h2>取り込み中…</h2><p data-prog style="font-size:12px;color:#475569;">0 / ' + rows.length + '</p>');
+    openModal('<h2>登録中…</h2><p data-prog style="font-size:12px;color:#475569;">0 / ' + rows.length + '</p>');
     const pcard = openModal._card;
-    let ok = 0, fail = 0, firstErr = null;
+    const okBy = { main: 0, archive: 0 };
+    let fail = 0, firstErr = null;
     for (let i = 0; i < rows.length; i++) {
         const r = rows[i];
         try {
             await SupabaseClient.registerMeasuredCompound(pw, {
-                name: r.name, tags: opts.tags || [], polarity: r.polarity || null,
+                name: r.name, tags: r.tags || [], polarity: r.polarity || null,
                 precursor: r.precursor, product: r.product, ce: r.ce, cv: r.cv,
-                check_level: opts.check_level || null,
-                shelf: opts.shelf || 'main',
+                check_level: r.check_level || null,
+                shelf: r.shelf || 'main',
             });
-            ok++;
+            okBy[r.shelf === 'archive' ? 'archive' : 'main']++;
         } catch (e) {
             if (!firstErr) firstErr = e;
-            console.warn('paste import failed', r.name, e);
+            console.warn('bulk register failed', r.name, e);
             fail++;
         }
         const pe = pcard.querySelector('[data-prog]');
@@ -1623,10 +1812,14 @@ async function runPasteImport(opts) {
     }
     if (pcard._close) pcard._close(true);
     await loadLibrary();
+    const ok = okBy.main + okBy.archive;
     // Nothing landed at all — almost always a stale master password, so surface
     // the real reason instead of a bare "0 件" that looks like a no-op.
-    if (!ok && firstErr) { reportError(firstErr, '貼り付け取り込み'); return; }
-    alert((SHELVES[opts.shelf] || SHELVES.main).label + 'へ取り込み完了: ' + ok + ' 件'
+    if (!ok && firstErr) { reportError(firstErr, 'MRM の一括登録'); return; }
+    const parts = [];
+    if (okBy.main) parts.push(SHELVES.main.label + ' ' + okBy.main + ' 件');
+    if (okBy.archive) parts.push(SHELVES.archive.label + ' ' + okBy.archive + ' 件');
+    alert('登録完了: ' + parts.join(' / ')
         + (fail ? '（失敗 ' + fail + ' 件、詳細はブラウザのコンソール）' : ''));
 }
 

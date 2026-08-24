@@ -53,7 +53,7 @@ python3 -m http.server 8000
 
 - `index.html` — プロジェクト管理画面 (ルート)
 - `viewer/index.html` — シングルファイルのビューア本体
-- `mrm.html` — MRM 管理ライブラリ (admin 専用。化合物 / トランジション / 一括取り込み: 貼り付け・Excel)
+- `mrm.html` — MRM 管理ライブラリ (admin 専用。化合物 / トランジション / 一括登録: 表への入力・貼り付け・Excel)
 - `USER_GUIDE.md`, `USER_GUIDE.en.md` — 共有受け手向けガイド (**共有モードのアプリ内 Help はこれのみ表示**)
 - `USER_GUIDE.manage.md`, `USER_GUIDE.manage.en.md` — プロジェクト管理ガイド (master/admin 用)
 - `USER_GUIDE.master.md`, `USER_GUIDE.master.en.md` — 管理者 (admin) 向けガイド (master/admin 用)
