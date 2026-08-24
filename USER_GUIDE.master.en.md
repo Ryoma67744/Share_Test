@@ -646,29 +646,33 @@ The **`実測棚卸し`** toolbar button finds **every compound actually measure
 
 > **A compound that is already registered never moves shelf when re-registered from the stock-take.** Entries in the validated library cannot be accidentally demoted into the archive.
 
-### 19-4. Bulk-import MRM by pasting or from Excel
+### 19-4. Register MRMs in bulk — type into the grid, paste, or import an Excel file
 
-The toolbar's **`一括取り込み`** (bulk import) button opens a dialog with two tabs: **貼り付け** (paste) and **Excel ファイル** (Excel file).
+The toolbar's **`一括登録`** (bulk register) button opens a dialog with two tabs: **表に入力 / 貼り付け** (grid / paste) and **Excel ファイル** (Excel file).
 
-#### Paste (cells copied straight out of Excel)
+#### Grid / paste
 
-Select the five columns **compound name / Precursor / Product / CV / CE** in Excel, copy them, and paste into the `貼り付け` tab.
+The grid is **editable like a spreadsheet**. Columns, left to right: **compound name / Precursor / Product / CV / CE / tag / polarity / check level / destination shelf**.
+
+To bring rows over from Excel, **select the range, copy, and paste onto the first cell you want it in**. A multi-cell paste spills right and down, and **rows are added automatically** when there are not enough.
 
 ```
 NAD-POS	664.1	428	20	26
 NADH	666.1	649	20	17
 ```
 
-- The **4th column is CV (cone voltage) and the 5th is CE (collision energy)**.
-- A **parsed preview table** appears as soon as you paste. **Check which column each number landed in.**
-  CV and CE are both small integers, so a swap still looks plausible.
-- If you **paste a header row along with the data, the column order is detected by name** — `CE` and `CV` in the opposite order are still read correctly.
-- Besides tabs, commas and runs of two or more spaces work as separators. Blank lines in the middle are ignored.
-- Several rows with the same compound name are merged into **one compound with several transitions**.
-- **Tag (category)** and **polarity** are set once, below the table. Leaving polarity on "— (infer from name)" reads `NEG` / `POS` out of the compound name (`NAD-POS` → `+`).
-- Pick the **destination shelf** (validated library / usage archive) and **check level**, then press **`取り込み実行`**.
+- The **4th column is CV (cone voltage) and the 5th is CE (collision energy)**. **Check which column each number landed in** — both are small integers, so a swap still looks plausible.
+- If you **paste a header row along with the data, the columns are mapped by name**, so `CE` before `CV` still lands correctly. Aliases such as `Compound` / `Q1` / `Q3` / `タグ` are understood too.
+- Pasting onto a cell partway across (e.g. the `CV` column) spills rightward from there. Paste six columns and the **tag column is filled as well**.
+- Besides tabs, commas and runs of two or more spaces work as separators. Blank lines do not become rows.
+- **Polarity, tag, check level and destination shelf are set per row.** NEG and POS, Amino acid and Lipid, validated and archived entries can all be registered together in one go.
+- Polarity **`— 自動`** infers from `NEG` / `POS` in the compound name (`NAD-POS` → `+`).
+- Tags are **comma-separated** (`Amino acid, Lipid`). They are not split on spaces, so a two-word tag like `Amino acid` stays intact.
+- Fill in the **一括設定** (bulk settings) row and press **`全行に適用`** to overwrite every row at once. Fields left on "そのまま" (leave as-is) are not touched.
+- Rows missing a compound name or any m/z are **shown in red and skipped**. Empty rows are ignored, so there is no need to delete them.
+- Press **`登録する`** to register.
 
-> **Nothing existing is clobbered.** For a compound that is already registered the **tags are merged** (not replaced), and its **★ recommended flag, role (quantifier/qualifier), intensity note and note are left alone**. An existing polarity also wins over the inferred one. Pasting the same rows again never creates duplicates.
+> **Nothing existing is clobbered.** For a compound that is already registered the **tags are merged** (not replaced), and its **★ recommended flag, role (quantifier/qualifier), intensity note and note are left alone**. An existing polarity also wins over the inferred one. Entering the same rows again never creates duplicates.
 >
 > **The check level defaults to "leave unchanged"**, so an existing 標準品✓ is never quietly written back to 未確認. It is only overwritten when you pick a level explicitly.
 >
@@ -676,7 +680,7 @@ NADH	666.1	649	20	17
 
 #### Excel file
 
-You can import an existing MRM list (xlsx) as-is. Use **`ファイルを選択…`** on the `Excel ファイル` tab:
+You can import an existing MRM list (xlsx) sheet by sheet. Use **`ファイルを選択…`** on the `Excel ファイル` tab:
 
 1. Pick a `.xlsx` / `.xls` file.
 2. The whole sheet is parsed automatically, detecting **blocks that have a category title plus a `CompoundName / Precursor / Product / CV / CE` header row**.
