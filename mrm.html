@@ -144,7 +144,7 @@
     <div class="flex items-center justify-between gap-3 flex-wrap">
       <div class="flex gap-2 flex-wrap">
         <button id="btn-add-compound" class="btn primary">+ 化合物</button>
-        <button id="btn-import-excel" class="btn" title="Excel (.xlsx/.xls) の MRM リストを一括取り込み">Excel取り込み</button>
+        <button id="btn-import-excel" class="btn" title="Excel ファイル、または Excel からコピーした表の貼り付けで MRM を一括登録">一括取り込み</button>
         <input id="excel-input" type="file" accept=".xlsx,.xls" style="display:none">
         <button id="btn-reload" class="btn">再読込</button>
         <button id="btn-exp-template" class="btn" title="出力用テンプレート .exp を設定/確認">テンプレ設定</button>
@@ -585,6 +585,15 @@ function availableTags() {
     }
     return Array.from(s).sort((a, b) => a.localeCompare(b, 'ja'));
 }
+// Tag suggestions for the paste-import datalist. availableTags() narrows to the
+// shelf currently being viewed, but a paste can be filed onto either shelf, so
+// offer every tag the library knows regardless of which tab happens to be open.
+function allLibraryTags() {
+    const s = new Set();
+    for (const c of (library || [])) for (const t of (c.tags || [])) if (t) s.add(t);
+    return Array.from(s).sort((a, b) => a.localeCompare(b, 'ja'));
+}
+
 function availableSampleTypes() {
     const s = new Set();
     for (const c of (library || [])) {
@@ -1230,6 +1239,56 @@ function _parseSheetBlocks(aoa, sheetName) {
     return blocks;
 }
 
+// ---- Paste import ---------------------------------------------------------
+// Rows copied straight out of Excel arrive as plain text, not a workbook, so
+// there is no sheet to hand to _parseSheetBlocks(). Rather than write a second
+// parser we rebuild the array-of-arrays it already expects. That keeps
+// header-name mapping (CV/CE in either order), same-name grouping and the
+// NEG/POS polarity guess identical between the two import routes.
+const PASTE_HEADER = ['CompoundName', 'Precursor', 'Product', 'CV', 'CE'];
+const PASTE_PREVIEW_MAX = 50;
+
+// Split one pasted line into cells. Excel puts tabs between columns; text
+// pasted from somewhere else may use commas or aligned spaces. Space splitting
+// needs TWO or more spaces — a single one can sit inside a compound name.
+function _pasteSplit(line, delim) {
+    if (delim === '\t') return line.split('\t');
+    if (delim === ',') return line.split(',');
+    return line.trim().split(/\s{2,}/);
+}
+function _pasteDelimiter(lines) {
+    if (lines.some(l => l.indexOf('\t') >= 0)) return '\t';
+    if (lines.some(l => l.indexOf(',') >= 0)) return ',';
+    return ' ';
+}
+
+function parsePastedMrm(text) {
+    // Blank lines have to go before _parseSheetBlocks sees them: it ends a block
+    // at the first empty name cell, so one stray blank line in the middle would
+    // silently drop every row after it.
+    const lines = String(text || '').split(/\r?\n/).filter(l => l.trim() !== '');
+    if (!lines.length) return [];
+    const delim = _pasteDelimiter(lines);
+    const aoa = lines.map(l => _pasteSplit(l, delim).map(c => String(c == null ? '' : c).trim()));
+    // A header row is honoured when it is pasted along with the data (columns
+    // are matched by name, so CV/CE in the opposite order still lands
+    // correctly). Without one we prepend the documented default order.
+    const hasHeader = (aoa[0] || []).some(c => _mrmField(c) === 'name');
+    if (!hasHeader) aoa.unshift(PASTE_HEADER.slice());
+    return _parseSheetBlocks(aoa, '(貼り付け)');
+}
+
+// Flatten parsed blocks to one row per transition — the shape the import loop
+// and the preview table both want.
+function _pasteRowsFromBlocks(blocks) {
+    const rows = [];
+    for (const b of (blocks || []))
+        for (const c of b.compounds)
+            for (const tr of c.transitions)
+                rows.push({ name: c.name, precursor: tr.precursor, product: tr.product, cv: tr.cv, ce: tr.ce });
+    return rows;
+}
+
 function parseMrmWorkbook(buf) {
     if (typeof XLSX === 'undefined') throw new Error('SheetJS (XLSX) が読み込まれていません');
     const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
@@ -1375,6 +1434,199 @@ async function runMrmImport(groups, shelf, checkLevel) {
     if (progCard && progCard._close) progCard._close(true);
     await loadLibrary();
     alert((SHELVES[shelf] || SHELVES.main).label + 'へ取り込み完了: 化合物 ' + okC + ' 件 / トランジション ' + okT + ' 件'
+        + (fail ? '（失敗 ' + fail + ' 件、詳細はブラウザのコンソール）' : ''));
+}
+
+// Live-parse whatever is in the textarea and redraw the preview table. The
+// point of showing every value (rather than a block summary like the Excel
+// preview) is that CV and CE are both small integers: swapping them produces a
+// plausible-looking library that is silently wrong, so the operator has to be
+// able to see which column each number landed in before committing.
+function _renderPastePreview(card) {
+    const ta = card.querySelector('[data-paste-src]');
+    const box = card.querySelector('[data-paste-preview]');
+    const sum = card.querySelector('[data-paste-summary]');
+    let blocks = [];
+    try { blocks = parsePastedMrm(ta ? ta.value : ''); }
+    catch (e) { blocks = []; console.warn('paste parse failed', e); }
+    card._pasteBlocks = blocks;
+    const rows = _pasteRowsFromBlocks(blocks);
+    const nC = blocks.reduce((a, b) => a + b.compounds.length, 0);
+    if (sum) sum.textContent = rows.length ? (nC + ' 化合物 / ' + rows.length + ' トランジション') : '';
+    if (!box) return;
+    if (!rows.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
+    box.style.display = '';
+    const shown = rows.slice(0, PASTE_PREVIEW_MAX);
+    const body = shown.map(r => '<tr>'
+        + '<td style="padding:2px 6px;">' + safe(r.name) + '</td>'
+        + '<td style="padding:2px 6px;text-align:right;">' + fmtNum(r.precursor) + '</td>'
+        + '<td style="padding:2px 6px;text-align:right;">' + fmtNum(r.product) + '</td>'
+        + '<td style="padding:2px 6px;text-align:right;">' + fmtNum(r.cv) + '</td>'
+        + '<td style="padding:2px 6px;text-align:right;">' + fmtNum(r.ce) + '</td>'
+        + '</tr>').join('');
+    box.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:12px;">'
+        + '<thead><tr style="text-align:left;background:#f8fafc;position:sticky;top:0;">'
+        + '<th style="padding:3px 6px;">化合物名</th>'
+        + '<th style="padding:3px 6px;text-align:right;">Precursor</th>'
+        + '<th style="padding:3px 6px;text-align:right;">Product</th>'
+        + '<th style="padding:3px 6px;text-align:right;">CV (コーン)</th>'
+        + '<th style="padding:3px 6px;text-align:right;">CE (衝突)</th>'
+        + '</tr></thead><tbody>' + body + '</tbody></table>'
+        + (rows.length > shown.length
+            ? '<p class="muted" style="font-size:11px;padding:4px 6px;margin:0;">…他 ' + (rows.length - shown.length) + ' 行</p>'
+            : '');
+}
+
+// Bulk import entry point. The toolbar button used to fire the file picker
+// straight away; pasting a handful of rows out of Excel is now the common case,
+// so both routes sit behind one dialog with pasting first.
+function openBulkImportModal() {
+    const tagOpts = allLibraryTags().map(t => '<option value="' + safe(t) + '"></option>').join('');
+    const html = `
+      <h2>MRM を一括取り込み</h2>
+      <div class="shelf-tabs" style="margin-top:4px;">
+        <span class="shelf-tab on" data-bulk-tab="paste">貼り付け</span>
+        <span class="shelf-tab" data-bulk-tab="excel">Excel ファイル</span>
+      </div>
+      <div data-bulk-panel="paste">
+        <p class="muted" style="font-size:12px;margin:10px 0 6px;">Excel で <b>化合物名 / Precursor / Product / CV / CE</b> の5列を選んでコピーし、そのまま貼り付けてください。<br><b style="color:#b45309;">4列目が CV (コーン電圧)、5列目が CE (衝突エネルギー)</b> です。1行目にヘッダ行ごと貼り付けた場合は、列名から順序を自動判別します。</p>
+        <pre style="margin:0 0 6px;padding:6px 8px;background:#f8fafc;border:1px solid #e5e7eb;border-radius:4px;font-size:11px;color:#475569;overflow-x:auto;">NAD-POS\t664.1\t428\t20\t26\nNADH\t666.1\t649\t20\t17</pre>
+        <div class="row"><textarea data-paste-src rows="6" placeholder="ここに貼り付け" style="min-height:96px;"></textarea></div>
+        <p class="muted" data-paste-summary style="font-size:12px;margin:6px 2px;"></p>
+        <div data-paste-preview style="display:none;max-height:32vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;"></div>
+        <div class="row" style="display:flex;gap:10px;flex-wrap:wrap;">
+          <label style="flex:2 1 180px;">タグ (分類)
+            <input type="text" data-paste-tag list="paste-tag-list" placeholder="例: Amino acid">
+            <datalist id="paste-tag-list">${tagOpts}</datalist>
+          </label>
+          <label style="flex:1 1 110px;">極性
+            <select data-paste-pol>
+              <option value="">— (名前から推定)</option>
+              <option value="+">+</option>
+              <option value="-">−</option>
+            </select>
+          </label>
+        </div>
+        <div class="row" style="display:flex;gap:10px;flex-wrap:wrap;">
+          <label style="flex:2 1 220px;">登録先
+            <select data-paste-shelf>
+              <option value="main">検証済みライブラリ — そのまま使えるMRM</option>
+              <option value="archive">使用実績アーカイブ — 使用歴はあるが未最適化</option>
+            </select>
+          </label>
+          <label style="flex:1 1 170px;">確認レベル
+            <select data-paste-level>
+              <option value="">変更しない (新規は未確認)</option>
+              <option value="std">標準品確認済み</option>
+              <option value="lit">文献のみ</option>
+              <option value="unchecked">未確認</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted" style="font-size:11px;margin:6px 2px 0;">既に登録済みの化合物はタグが<b>追記</b>され、★推奨・役割・強度メモはそのまま残ります。同じ内容を貼り直しても重複しません。<b>登録先</b>は新規に作られる化合物にのみ適用されます。</p>
+      </div>
+      <div data-bulk-panel="excel" style="display:none;">
+        <p class="muted" style="font-size:12px;margin:10px 0;">既存の MRM リスト (.xlsx / .xls) をシートごと解析して取り込みます。カテゴリ見出しがタグになり、複数のブロックが縦横に並んでいてもまとめて検出します。</p>
+        <button type="button" class="btn primary" data-bulk-file>ファイルを選択…</button>
+      </div>
+      <p class="err" data-err></p>
+      <div class="actions">
+        <button type="button" class="btn" data-modal-cancel>Cancel</button>
+        <button type="button" class="btn primary" data-modal-ok>取り込み実行</button>
+      </div>`;
+    const p = openModal(html);
+    const card = openModal._card;
+    card.style.width = '90vw';
+    card.style.maxWidth = '760px';
+    const okBtn = card.querySelector('[data-modal-ok]');
+    // Tab switching. openModal() wires exactly one [data-modal-ok], so that
+    // button belongs to the paste panel; the Excel panel carries its own and
+    // this one is hidden rather than the two competing for the same hook.
+    card.querySelectorAll('[data-bulk-tab]').forEach(t => t.addEventListener('click', () => {
+        const which = t.getAttribute('data-bulk-tab');
+        card.querySelectorAll('[data-bulk-tab]').forEach(x => x.classList.toggle('on', x === t));
+        card.querySelectorAll('[data-bulk-panel]').forEach(x => {
+            x.style.display = (x.getAttribute('data-bulk-panel') === which) ? '' : 'none';
+        });
+        if (okBtn) okBtn.style.display = (which === 'paste') ? '' : 'none';
+    }));
+    const ta = card.querySelector('[data-paste-src]');
+    if (ta) {
+        const redraw = () => _renderPastePreview(card);
+        ta.addEventListener('input', redraw);
+        // 'paste' fires before the value lands, so re-read on the next tick.
+        ta.addEventListener('paste', () => setTimeout(redraw, 0));
+    }
+    const fileBtn = card.querySelector('[data-bulk-file]');
+    if (fileBtn) fileBtn.addEventListener('click', () => {
+        if (card._close) card._close(null);
+        const fi = document.getElementById('excel-input');
+        if (fi) fi.click();
+    });
+    card._collect = () => {
+        const err = card.querySelector('[data-err]');
+        const rows = _pasteRowsFromBlocks(card._pasteBlocks || []);
+        if (!rows.length) {
+            if (err) err.textContent = '取り込める行がありません。化合物名と m/z を含む行を貼り付けてください。';
+            return null;
+        }
+        const polDefault = card.querySelector('[data-paste-pol]').value || '';
+        return {
+            rows: rows.map(r => Object.assign({}, r, {
+                polarity: polDefault !== '' ? polDefault : (inferPolarityFromName(r.name) || null),
+            })),
+            tags: parseTags(card.querySelector('[data-paste-tag]').value || ''),
+            shelf: card.querySelector('[data-paste-shelf]').value || 'main',
+            check_level: card.querySelector('[data-paste-level]').value || null,
+        };
+    };
+    return p;
+}
+
+async function startBulkImport() {
+    const opts = await openBulkImportModal();
+    if (!opts) return;      // cancelled, or switched to the Excel file picker
+    await runPasteImport(opts);
+}
+
+// Written against register_measured_compound rather than the Excel route's
+// upsert_compound / upsert_transition pair. Those two replace an existing
+// compound's tags wholesale (mrm_library.sql: tags = excluded.tags) and blank a
+// matching transition's role / ★ / intensity note, which is tolerable for a
+// one-off workbook import but not for a paste flow whose whole point is topping
+// up a library that is already in use. register_measured_compound merges tags,
+// keeps the existing polarity, sets the shelf only on insert and leaves
+// transition annotations alone — and does it in one RPC per row instead of two.
+async function runPasteImport(opts) {
+    const rows = opts.rows || [];
+    const pw = _readCachedMasterPw();
+    openModal('<h2>取り込み中…</h2><p data-prog style="font-size:12px;color:#475569;">0 / ' + rows.length + '</p>');
+    const pcard = openModal._card;
+    let ok = 0, fail = 0, firstErr = null;
+    for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        try {
+            await SupabaseClient.registerMeasuredCompound(pw, {
+                name: r.name, tags: opts.tags || [], polarity: r.polarity || null,
+                precursor: r.precursor, product: r.product, ce: r.ce, cv: r.cv,
+                check_level: opts.check_level || null,
+                shelf: opts.shelf || 'main',
+            });
+            ok++;
+        } catch (e) {
+            if (!firstErr) firstErr = e;
+            console.warn('paste import failed', r.name, e);
+            fail++;
+        }
+        const pe = pcard.querySelector('[data-prog]');
+        if (pe) pe.textContent = (i + 1) + ' / ' + rows.length;
+    }
+    if (pcard._close) pcard._close(true);
+    await loadLibrary();
+    // Nothing landed at all — almost always a stale master password, so surface
+    // the real reason instead of a bare "0 件" that looks like a no-op.
+    if (!ok && firstErr) { reportError(firstErr, '貼り付け取り込み'); return; }
+    alert((SHELVES[opts.shelf] || SHELVES.main).label + 'へ取り込み完了: ' + ok + ' 件'
         + (fail ? '（失敗 ' + fail + ' 件、詳細はブラウザのコンソール）' : ''));
 }
 
@@ -2189,8 +2441,8 @@ async function init() {
     (() => {
         const fi = document.getElementById('excel-input');
         const btn = document.getElementById('btn-import-excel');
-        if (fi && btn) {
-            btn.addEventListener('click', () => fi.click());
+        if (btn) btn.addEventListener('click', () => startBulkImport());
+        if (fi) {
             fi.addEventListener('change', async () => {
                 const f = fi.files && fi.files[0];
                 fi.value = '';   // allow re-selecting the same file later

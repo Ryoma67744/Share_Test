@@ -646,8 +646,37 @@ The **`実測棚卸し`** toolbar button finds **every compound actually measure
 
 > **A compound that is already registered never moves shelf when re-registered from the stock-take.** Entries in the validated library cannot be accidentally demoted into the archive.
 
-### 19-4. Bulk-import MRM from Excel
-You can import an existing MRM list (xlsx) as-is. Use the **`Excel取り込み`** button on the toolbar:
+### 19-4. Bulk-import MRM by pasting or from Excel
+
+The toolbar's **`一括取り込み`** (bulk import) button opens a dialog with two tabs: **貼り付け** (paste) and **Excel ファイル** (Excel file).
+
+#### Paste (cells copied straight out of Excel)
+
+Select the five columns **compound name / Precursor / Product / CV / CE** in Excel, copy them, and paste into the `貼り付け` tab.
+
+```
+NAD-POS	664.1	428	20	26
+NADH	666.1	649	20	17
+```
+
+- The **4th column is CV (cone voltage) and the 5th is CE (collision energy)**.
+- A **parsed preview table** appears as soon as you paste. **Check which column each number landed in.**
+  CV and CE are both small integers, so a swap still looks plausible.
+- If you **paste a header row along with the data, the column order is detected by name** — `CE` and `CV` in the opposite order are still read correctly.
+- Besides tabs, commas and runs of two or more spaces work as separators. Blank lines in the middle are ignored.
+- Several rows with the same compound name are merged into **one compound with several transitions**.
+- **Tag (category)** and **polarity** are set once, below the table. Leaving polarity on "— (infer from name)" reads `NEG` / `POS` out of the compound name (`NAD-POS` → `+`).
+- Pick the **destination shelf** (validated library / usage archive) and **check level**, then press **`取り込み実行`**.
+
+> **Nothing existing is clobbered.** For a compound that is already registered the **tags are merged** (not replaced), and its **★ recommended flag, role (quantifier/qualifier), intensity note and note are left alone**. An existing polarity also wins over the inferred one. Pasting the same rows again never creates duplicates.
+>
+> **The check level defaults to "leave unchanged"**, so an existing 標準品✓ is never quietly written back to 未確認. It is only overwritten when you pick a level explicitly.
+>
+> **The destination shelf applies only to newly created compounds.**
+
+#### Excel file
+
+You can import an existing MRM list (xlsx) as-is. Use **`ファイルを選択…`** on the `Excel ファイル` tab:
 
 1. Pick a `.xlsx` / `.xls` file.
 2. The whole sheet is parsed automatically, detecting **blocks that have a category title plus a `CompoundName / Precursor / Product / CV / CE` header row**.
@@ -664,6 +693,8 @@ You can import an existing MRM list (xlsx) as-is. Use the **`Excel取り込み`*
 > **The destination applies only to newly created compounds.** Already-registered compounds keep their current shelf, so re-importing with the wrong destination selected can never sweep the validated library into the archive.
 >
 > The import writes to the production Supabase. For the first run, verify the result with a **small test file** before importing the full list.
+>
+> **Unlike the paste route, an Excel import *replaces* an existing compound's tags**, and re-importing a transition that is already there **also clears its ★ recommended flag, role, intensity note and note**. To top up a library that is already in use with a few rows, prefer **paste**.
 
 ### 19-5. `.exp` export and what the AI (Custom GPT) can see
 
