@@ -383,11 +383,11 @@ The header **Preview** button opens a side-by-side overlay that shows every sect
 | --- | --- |
 | **Method panel (left)** | Compound list. Click or ↑↓ keys to change focus. The right-edge splitter is **draggable** — pull it horizontally to resize the panel; the chosen width is remembered on next open. |
 | **Image grid (center)** | One MSI cell per section. Each cell has a **dynamic scalebar** at the bottom and a **Section name + Pixel pitch** caption at the top. Drag to pan, wheel to zoom inside each cell. |
-| **Range slider (top)** | **Project-wide vmin / vmax** so every section uses the same colour scale. The chosen range survives closing and reopening Preview. |
+| **Range (top)** | **Project-wide vmin / vmax** so every section uses the same colour scale. **Reset** returns the selected MRM to its automatic range. |
 | **Stats / Colorbar (right)** | Statistics for the focus compound + the Plasma colour bar. |
 | **🔑 Admin (top-right)** | When opened with a viewer password, this **escalates** to admin without closing Preview — the admin password modal now appears on top of the overlay. |
 
-> The Preview Range is independent from the per-section toolbar Range; closing Preview reverts the toolbar values.
+> Preview Range and the main toolbar use the same values. Closing Preview keeps the current values; reloading restores the master's published values.
 > Sections with multiple sources can flip between `TIC_<filename>` rows to inspect each source's TIC separately.
 
 ---

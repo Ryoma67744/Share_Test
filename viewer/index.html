@@ -416,13 +416,18 @@ body.share-mode .thumb-file-group .file-actions [data-action="rename"] { display
     font-size:12px; padding:2px 6px; border:1px solid #cbd5e1;
     border-radius:3px; background:#fff;
 }
+#share-preview-overlay .preview-controls .preview-reset-range,
 #share-preview-overlay .preview-controls .preview-reset-zoom,
 #share-preview-overlay .preview-controls .preview-admin-login {
     padding:3px 10px; border:1px solid #cbd5e1; background:#fff;
     border-radius:3px; cursor:pointer; font-size:12px;
 }
+#share-preview-overlay .preview-controls .preview-reset-range:hover,
 #share-preview-overlay .preview-controls .preview-reset-zoom:hover {
     background:#eef2ff; color:#1d4ed8; border-color:#93c5fd;
+}
+#share-preview-overlay .preview-controls .preview-reset-range:disabled {
+    cursor:default; opacity:0.5; background:#f8fafc; color:#64748b;
 }
 #share-preview-overlay .preview-controls .preview-admin-login {
     border-color:#fbbf24; background:#fef3c7; color:#92400e;
@@ -539,6 +544,15 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
 #share-preview-overlay .preview-image-cell .cell-empty {
     color:#64748b; font-size:11px; padding:12px;
 }
+#share-preview-overlay .preview-image-cell .cell-empty.preview-loading {
+    color:#cbd5e1; display:flex; align-items:center; gap:8px;
+}
+#share-preview-overlay .preview-image-cell .cell-empty.preview-loading::before {
+    content:''; width:10px; height:10px; border:2px solid #64748b;
+    border-top-color:#e2e8f0; border-radius:50%;
+    animation:preview-spin 0.8s linear infinite;
+}
+@keyframes preview-spin { to { transform:rotate(360deg); } }
 #share-preview-overlay .cell-scalebar {
     position:absolute; left:8px; bottom:8px; z-index:5;
     background:rgba(255,255,255,0.85); color:#0f172a;
@@ -3743,13 +3757,22 @@ function msiTissueMaskForAlign(section, panel, layerKey, fallbackImg) {
 
 // Pure parse (no DOM/canvas): xlsx ArrayBuffer → [{x,y,v}] rows. Shared verbatim
 // by the main thread and the parse Web Worker.
-function parseXlsxToRows(buf, def) {
+function parseXlsxSheet(buf, def) {
     if (typeof XLSX === 'undefined') throw new Error('SheetJS (XLSX) not loaded');
     const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
     const sheetName = def.sheet || wb.SheetNames[0];
     const sheet = wb.Sheets[sheetName];
     if (!sheet) throw new Error("sheet '" + sheetName + "' not found");
     const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: true, defval: null });
+    return { sheetName, aoa };
+}
+
+// Extract one compound column from a sheet already decoded by SheetJS. The
+// parse worker caches this intermediate per source file so switching MRM in
+// the same workbook does not repeat XLSX.read + sheet_to_json every time.
+function rowsFromParsedXlsx(parsed, def) {
+    const aoa = parsed && parsed.aoa;
+    if (!Array.isArray(aoa)) throw new Error('invalid parsed xlsx sheet');
     const startIdx = Math.max(0, (def.data_start_row || 1) - 1);
     const xi = a1ColToIndex(def.col_x);
     const yi = a1ColToIndex(def.col_y);
@@ -3765,6 +3788,10 @@ function parseXlsxToRows(buf, def) {
     }
     if (!rows.length) throw new Error('no numeric rows in xlsx');
     return rows;
+}
+
+function parseXlsxToRows(buf, def) {
+    return rowsFromParsedXlsx(parseXlsxSheet(buf, def), def);
 }
 
 // Main-thread fallback (worker path calls parseXlsxToRows + computeRasterPixels
@@ -4023,10 +4050,35 @@ async function _parseWorkerOnMessage(e) {
     const id = msg.id;
     try {
         const p = msg.payload || {};
-        const buf = p.blob ? await p.blob.arrayBuffer() : null;
+        let buf = null;
         let result;
         if (msg.op === 'xlsx-raster' || msg.op === 'txt-raster') {
-            const rows = (msg.op === 'txt-raster') ? parseTxtToRows(buf, p.def) : parseXlsxToRows(buf, p.def);
+            let rows;
+            if (msg.op === 'xlsx-raster') {
+                // Keep decoded sheets inside the long-lived worker. Blob
+                // structured-cloning is cheap; arrayBuffer/XLSX decoding is
+                // skipped entirely on a cache hit. The bounded LRU prevents
+                // projects with many source files from growing without limit.
+                const cache = self.__xlsxSheetCache || (self.__xlsxSheetCache = new Map());
+                const cacheKey = p.cacheKey || '';
+                let parsed = cacheKey ? cache.get(cacheKey) : null;
+                if (!parsed) {
+                    buf = p.blob ? await p.blob.arrayBuffer() : null;
+                    parsed = parseXlsxSheet(buf, p.def);
+                    if (cacheKey) {
+                        cache.set(cacheKey, parsed);
+                        while (cache.size > 8) cache.delete(cache.keys().next().value);
+                    }
+                } else {
+                    // Map insertion order is the LRU order; touch on every hit.
+                    cache.delete(cacheKey);
+                    cache.set(cacheKey, parsed);
+                }
+                rows = rowsFromParsedXlsx(parsed, p.def);
+            } else {
+                buf = p.blob ? await p.blob.arrayBuffer() : null;
+                rows = parseTxtToRows(buf, p.def);
+            }
             const px = computeRasterPixels(rows, p.def && p.def.range, p.def && p.def.bakeMode);
             const dataUrl = await _encodePixelsToDataUrl(px.width, px.height, px.pixels);
             // values は Float32Array。転送リストに載せてコピーを避ける (下の
@@ -4034,8 +4086,10 @@ async function _parseWorkerOnMessage(e) {
             result = { dataUrl: dataUrl, values: px.values, width: px.width, height: px.height,
                        rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax, rawDispMax: px.rawDispMax, diag: px.diag };
         } else if (msg.op === 'tiff-decode') {
+            buf = p.blob ? await p.blob.arrayBuffer() : null;
             result = { dataUrl: await decodeTiffArrayBufferToDataUrl(buf) };
         } else if (msg.op === 'xlsx-columns') {
+            buf = p.blob ? await p.blob.arrayBuffer() : null;
             result = inspectXlsxColumns(buf, p.sheet, p.headerRow);
         } else {
             throw new Error('unknown op: ' + msg.op);
@@ -4067,7 +4121,7 @@ function _buildParseWorkerSource() {
         a1ColToIndex, indexToA1Col, percentileSorted, percentileOfSorted, buildMsiGrid,
         labToSrgb, get2dContext, _mkCanvas, _canvasToDataUrl, _encodePixelsToDataUrl,
         deriveBakeStats, blankStats, bakeRasterFromValues, computeRasterPixels,
-        parseXlsxToRows, parseTxtToRows,
+        parseXlsxSheet, rowsFromParsedXlsx, parseXlsxToRows, parseTxtToRows,
         decodeJpegInTiffToDataUrl, decodeTiffArrayBufferToDataUrl, inspectXlsxColumns,
         _parseWorkerOnMessage,
     ];
@@ -5716,7 +5770,13 @@ class SectionPanel {
             if (parseWorkerAvailable()) {
                 try {
                     const op = (ent.kind === 'txt') ? 'txt-raster' : 'xlsx-raster';
-                    result = await callParseWorker(op, { blob: rec.blob, def: ent }, 120000);
+                    // blobId + sheet identifies the expensive workbook decode.
+                    // col_v is intentionally excluded: every MRM column in the
+                    // same sheet should reuse the decoded cell matrix.
+                    const cacheKey = (op === 'xlsx-raster')
+                        ? String(ent.blobId || '') + '|' + String(ent.sheet || '')
+                        : '';
+                    result = await callParseWorker(op, { blob: rec.blob, def: ent, cacheKey }, 120000);
                 } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
             }
             if (!result) {
@@ -15260,10 +15320,19 @@ const SharePreview = {
     _visibilitySnapshot: null,  // Array<{pid, live: string[], persisted: string[]|null}>
     _grayscaleSnapshot: null,   // Array<{pid, byKey: {[heKey]: bool}}>
     _syntheticHeKeys: null,     // Map<panelId, syntheticKey> — TIC backdrops we injected
+    _focusLoadSeq: 0,           // invalidates late completions after another MRM wins
+    _loadingFocusKey: null,
+    _focusLoadStatus: null,     // Map<sectionId, 'ready'|'loading'|'failed'>
+    _prefetchHandle: null,
+    _prefetchKind: null,
 
     isOpen() { return !!(this.overlay && document.body.contains(this.overlay)); },
 
     close() {
+        this._focusLoadSeq++;
+        this._loadingFocusKey = null;
+        this._focusLoadStatus = null;
+        this._cancelAdjacentPrefetch();
         if (!this.overlay) return;
         // Order matters: restore HE grayscale flags first (no DOM impact),
         // then drop synthetic TIC backdrops (mutates imageSources +
@@ -15274,13 +15343,11 @@ const SharePreview = {
         try { this._removeTicBackdrop(); } catch (e) { console.warn('SharePreview remove TIC failed', e); }
         try { this._restoreOpacity(); } catch (e) { console.warn('SharePreview restore opacity failed', e); }
         try { this._restoreVisibility(); } catch (e) { console.warn('SharePreview restore visibility failed', e); }
-        // Restore the main view's ROI-only state (the preview drove it) and
-        // clear the preview-local organ filter.
+        // Restore the main view's ROI-only state (the preview drove it).
         if (this._roiSnapshot) {
             App.roiOnlyMode = this._roiSnapshot.mode;
             this._roiSnapshot = null;
         }
-        this._previewOrgan = null;
         this._hiddenSectionIds = null;
         App.activeSectionScope = null;   // stop scoping the main view's window
         // サムネイルの焼き直しは 1 枚ずつ同期の toDataURL() なので、配色が
@@ -15696,10 +15763,6 @@ const SharePreview = {
         const desiredFocus = (App.focusCompoundKey && allKeys.has(App.focusCompoundKey))
             ? App.focusCompoundKey
             : this.compoundKeys[0];
-        // Always call setFocusCompoundKey so every panel runs renderComposite
-        // once more — guarantees the cdisp canvases reflect the current focus
-        // before we sample them with toDataURL().
-        App.setFocusCompoundKey(desiredFocus);
 
         const overlay = document.createElement('div');
         overlay.id = 'share-preview-overlay';
@@ -15718,6 +15781,7 @@ const SharePreview = {
                         <input type="number" data-preview-range-max step="any" placeholder="max"
                                style="width:80px;font-size:11px;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;">
                     </label>
+                    <button type="button" class="preview-reset-range" data-preview-range-reset disabled>Reset</button>
                     <label>Colormap
                         <select data-colormap-select>
                             <option value="plasma">Plasma</option>
@@ -15730,9 +15794,6 @@ const SharePreview = {
                     </label>
                     <label>
                         <input type="checkbox" data-he-mono> HE モノクロ
-                    </label>
-                    <label data-organ-wrap style="display:none;">臓器
-                        <select data-organ-select style="font-size:11px;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;"></select>
                     </label>
                     <label data-roi-only-wrap style="display:none;">
                         <input type="checkbox" data-roi-only> ROIのみ
@@ -15838,32 +15899,10 @@ const SharePreview = {
             });
         }
 
-        // ② Organ filter — preview-local; filters which section cells render.
-        this._previewOrgan = null;
         this._hiddenSectionIds = new Set();   // per-cell deselection (share view)
         App.activeSectionScope = null;        // start with all sections in scope
-        const organWrap = overlay.querySelector('[data-organ-wrap]');
-        const organSel = overlay.querySelector('[data-organ-select]');
-        if (organWrap && organSel) {
-            const organs = [];
-            for (const s of (project.sections || [])) {
-                const k = sectionOrganKey(s);
-                if (!organs.includes(k)) organs.push(k);
-            }
-            if (organs.length >= 2) {
-                const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-                organSel.innerHTML = '<option value="__all__">すべて</option>'
-                    + organs.map(o => `<option value="${esc(o)}">${esc(o)}</option>`).join('');
-                organWrap.style.display = '';
-                organSel.addEventListener('change', () => {
-                    this._previewOrgan = (organSel.value === '__all__') ? null : organSel.value;
-                    this._hiddenSectionIds = new Set();   // fresh selection for the new organ
-                    this._applySectionScope();            // scope → re-scale Range → refresh
-                });
-            }
-        }
 
-        // ③ ROIのみ — preview-local toggle of App.roiOnlyMode. renderComposite
+        // ROIのみ — preview-local toggle of App.roiOnlyMode. renderComposite
         // clips MSI to the UNION of all ROIs in the ROI LIST per section, so no
         // per-ROI selection is needed. Snapshot/restore roiOnlyMode in open/close.
         this._roiSnapshot = { mode: App.roiOnlyMode };
@@ -15907,7 +15946,10 @@ const SharePreview = {
 
         this._drawColorbar();
         this._renderMethodList(project);
-        this.refresh(project);
+        // The first Preview render follows the same await/rebake path as every
+        // later MRM selection, so an uncached initial compound cannot snapshot
+        // the previous HE/TIC-only canvas and remain stale indefinitely.
+        this._selectCompound(desiredFocus).catch(e => console.warn('Preview initial MRM load failed', e));
     },
 
     // Elevate the current share-mode viewer session to admin. Reuses the
@@ -15971,6 +16013,130 @@ const SharePreview = {
         this._refreshRangeInputs(project, focusKey);
     },
 
+    _cancelAdjacentPrefetch() {
+        if (this._prefetchHandle == null) return;
+        if (this._prefetchKind === 'idle' && typeof cancelIdleCallback === 'function') {
+            cancelIdleCallback(this._prefetchHandle);
+        } else {
+            clearTimeout(this._prefetchHandle);
+        }
+        this._prefetchHandle = null;
+        this._prefetchKind = null;
+    },
+
+    // Warm exactly one neighbouring MRM after the selected one is fully shown.
+    // The normal per-panel LRU still owns raster eviction; this merely uses idle
+    // time to make the most likely next click a cache hit. Parquet projects are
+    // already column-addressable and large method lists are left alone.
+    _scheduleAdjacentPrefetch(focusKey, loadSeq) {
+        this._cancelAdjacentPrefetch();
+        const project = App && App.project;
+        if (!project || App.activeOverlay || projectHasNonTargetSection(project)) return;
+        if (!Array.isArray(this.compoundKeys) || this.compoundKeys.length > 100) return;
+        const idx = this.compoundKeys.indexOf(focusKey);
+        if (idx < 0) return;
+        const nextKey = this.compoundKeys[idx + 1] || this.compoundKeys[idx - 1];
+        if (!nextKey) return;
+        const run = async () => {
+            this._prefetchHandle = null;
+            this._prefetchKind = null;
+            if (!this.isOpen() || loadSeq !== this._focusLoadSeq || App.activeOverlay) return;
+            for (const sec of (project.sections || [])) {
+                // Start one section at a time so a real click can stop the
+                // remaining speculative work instead of sitting behind an
+                // already-queued batch of worker jobs.
+                if (!this.isOpen() || loadSeq !== this._focusLoadSeq || App.activeOverlay) return;
+                const panel = App.panels && App.panels.get(sec.id);
+                const ent = (sec.msiSeries || {})[nextKey];
+                if (!panel || !ent || panel.imageSources[nextKey]) continue;
+                if (!ent.blobId && !ent.sourceUrl) continue;
+                try { await panel.ensureMsiLayerLoaded(nextKey); } catch (e) {}
+            }
+        };
+        if (typeof requestIdleCallback === 'function') {
+            this._prefetchKind = 'idle';
+            this._prefetchHandle = requestIdleCallback(() => { run().catch(() => {}); }, { timeout: 1500 });
+        } else {
+            this._prefetchKind = 'timeout';
+            this._prefetchHandle = setTimeout(() => { run().catch(() => {}); }, 300);
+        }
+    },
+
+    // Replace one loading placeholder as soon as that section finishes, while
+    // the other sections may still be parsing. This avoids making a fast XLSX
+    // wait for the slowest source before any result becomes visible.
+    _showLoadedPreviewCell(project, focusKey, sectionId) {
+        if (!this.isOpen() || !project || App.focusCompoundKey !== focusKey) return;
+        const sections = this._sectionsForGrid(project);
+        const idx = sections.findIndex(sec => String(sec.id) === String(sectionId));
+        if (idx < 0) return;
+        const grid = this.overlay.querySelector('[data-image-grid]');
+        const wrap = grid && grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
+        const stage = wrap && wrap.querySelector('[data-cell-stage]');
+        const sec = sections[idx];
+        const panel = App.panels && App.panels.get(sec.id);
+        if (!stage || !panel || !panel.dom || !panel.dom.cdisp || panel.dom.cdisp.width === 0) return;
+        try {
+            const rotDeg = (this._sectionRotations[idx] || 0) - 90;
+            const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
+            const safeName = String(sec.displayName || '')
+                .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+            stage.innerHTML = `<img src="${baked.toDataURL('image/png')}" alt="${safeName}" data-cell-img data-nat-w="${baked.width}" data-nat-h="${baked.height}">`;
+            this._applyCellTransform(idx);
+            this._wireCellInteractions(idx, wrap, stage);
+        } catch (e) { console.warn('Preview progressive bake failed', sectionId, e); }
+    },
+
+    // Select an MRM and wait for every missing section raster before baking
+    // Preview's canvas snapshots. A monotonically increasing sequence rejects
+    // late completions from an older click, which prevents stale MRM images
+    // from overwriting the newest selection.
+    async _selectCompound(key) {
+        if (!key || !App || !App.project || !App.panels) return;
+        const seq = ++this._focusLoadSeq;
+        this._cancelAdjacentPrefetch();
+        const status = new Map();
+        const pending = [];
+        for (const sec of (App.project.sections || [])) {
+            const sid = String(sec.id);
+            const panel = App.panels.get(sec.id);
+            const ent = (sec.msiSeries || {})[key];
+            if (!ent || !panel) continue;
+            if (panel.imageSources[key]) status.set(sid, 'ready');
+            else if (ent.blobId || ent.sourceUrl) {
+                status.set(sid, 'loading');
+                pending.push({ sid, panel });
+            } else status.set(sid, 'failed');
+        }
+        this._loadingFocusKey = key;
+        this._focusLoadStatus = status;
+
+        // This synchronously updates focus/highlight and starts the normal lazy
+        // loads. The explicit awaits below join those same in-flight Promises.
+        App.setFocusCompoundKey(key);
+        this.refresh(App.project);
+
+        if (pending.length) {
+            await Promise.allSettled(pending.map(async ({ sid, panel }) => {
+                const ok = await panel.ensureMsiLayerLoaded(key);
+                if (seq !== this._focusLoadSeq) return;
+                status.set(sid, ok ? 'ready' : 'failed');
+                if (ok) {
+                    // Do not depend on renderComposite's background callback
+                    // ordering: explicitly put the newly loaded focus on cdisp.
+                    try { if (!panel.setupCanvasSize()) panel.renderComposite(); } catch (e) {}
+                    this._showLoadedPreviewCell(App.project, key, sid);
+                }
+            }));
+        }
+        if (seq !== this._focusLoadSeq || !this.isOpen() || App.focusCompoundKey !== key) return;
+        const anyFailed = Array.from(status.values()).some(value => value === 'failed');
+        this._loadingFocusKey = anyFailed ? key : null;
+        this._focusLoadStatus = anyFailed ? status : null;
+        this.refresh(App.project);
+        if (!anyFailed) this._scheduleAdjacentPrefetch(key, seq);
+    },
+
     // Range min/max inputs in the preview header. Mirror the master
     // toolbar's tb-range-min / tb-range-max, applied to every panel that
     // holds the focus compound so all sections share the same intensity
@@ -15978,30 +16144,48 @@ const SharePreview = {
     _wireRangeInputs() {
         const minEl = this.overlay.querySelector('[data-preview-range-min]');
         const maxEl = this.overlay.querySelector('[data-preview-range-max]');
+        const resetEl = this.overlay.querySelector('[data-preview-range-reset]');
         if (!minEl || !maxEl) return;
-        const apply = (edge, raw) => {
-            const focusKey = App.focusCompoundKey;
-            if (!focusKey) return;
+        const repaint = (focusKey) => {
             for (const p of App.panels.values()) {
-                if (p.imageSettings && p.imageSettings[focusKey]) {
-                    try { p.applyRangeRaw(edge, raw); } catch (e) {}
-                }
+                try {
+                    p.renderComposite();
+                    if (p.msiThumbRefs && p.msiThumbRefs.has(focusKey)) p.renderMsiThumbnail(focusKey);
+                } catch (e) {}
             }
-            // applyRangeRaw runs renderComposite synchronously per panel
-            // which updates each cdisp canvas, but the preview's <img>
-            // dataURLs are baked snapshots — without this rebake the
-            // image visible in the overlay stays at its open()-time
-            // contents. Rebake on the next animation frame (mirrors
-            // _applyPreviewOpacity) so a rapid min-then-max Enter coalesces
-            // into one bake and the <img> src swap lands on a real paint.
+            try { Toolbar.refreshRange(); } catch (e) {}
+            this._refreshRangeInputs(App.project, focusKey);
+            // cdisp updates synchronously, but Preview uses baked data URLs.
+            // Coalesce a rapid min/max pair into one rebake.
             if (this._rangeRebakeRaf) cancelAnimationFrame(this._rangeRebakeRaf);
             this._rangeRebakeRaf = requestAnimationFrame(() => {
                 this._rangeRebakeRaf = 0;
                 this._rebakeCellImages(App.project, App.focusCompoundKey);
             });
         };
+        const apply = (edge, raw) => {
+            const focusKey = App.focusCompoundKey;
+            if (!focusKey) return;
+            const v = parseFloat(raw);
+            if (!Number.isFinite(v)) return;
+            App.msiUserWindow = App.msiUserWindow || {};
+            const cur = Object.assign({}, App.msiUserWindow[focusKey] || {});
+            if (edge === 'min') cur.min = v; else cur.max = v;
+            if (Number.isFinite(cur.min) && Number.isFinite(cur.max) && !(cur.min < cur.max)) {
+                if (edge === 'min') cur.min = cur.max - Math.abs(cur.max || 1) * 1e-6 - 1e-9;
+                else cur.max = cur.min + Math.abs(cur.min || 1) * 1e-6 + 1e-9;
+            }
+            App.msiUserWindow[focusKey] = cur;
+            repaint(focusKey);
+        };
         minEl.addEventListener('change', () => apply('min', minEl.value));
         maxEl.addEventListener('change', () => apply('max', maxEl.value));
+        if (resetEl) resetEl.addEventListener('click', () => {
+            const focusKey = App.focusCompoundKey;
+            if (!focusKey) return;
+            if (App.msiUserWindow) delete App.msiUserWindow[focusKey];
+            repaint(focusKey);
+        });
     },
 
     // Drag-to-resize the Method panel column. Width is written into the
@@ -16061,6 +16245,7 @@ const SharePreview = {
     _refreshRangeInputs(project, focusKey) {
         const minEl = this.overlay.querySelector('[data-preview-range-min]');
         const maxEl = this.overlay.querySelector('[data-preview-range-max]');
+        const resetEl = this.overlay.querySelector('[data-preview-range-reset]');
         if (!minEl || !maxEl) return;
         const fmt = (typeof formatRawForInput === 'function')
             ? formatRawForInput
@@ -16085,11 +16270,13 @@ const SharePreview = {
             if (document.activeElement !== minEl) minEl.value = '';
             if (document.activeElement !== maxEl) maxEl.value = '';
             minEl.disabled = true; maxEl.disabled = true;
+            if (resetEl) resetEl.disabled = true;
             minEl.title = maxEl.title = '';
             return;
         }
         const win = App.getMsiWindow(focusKey, rawRange, rawDispMax);
         minEl.disabled = false; maxEl.disabled = false;
+        if (resetEl) resetEl.disabled = !(App.msiUserWindow && App.msiUserWindow[focusKey]);
         minEl.title = '表示ウィンドウ 下限 (生単位)';
         maxEl.title = '表示ウィンドウ 上限 (生単位)';
         if (document.activeElement !== minEl) minEl.value = fmt(win.min);
@@ -16220,15 +16407,24 @@ const SharePreview = {
             tr.addEventListener('click', () => {
                 const key = tr.getAttribute('data-key');
                 if (!key) return;
-                if (!App.activeOverlay && key === App.focusCompoundKey) return;
-                App.setFocusCompoundKey(key);   // also clears any active overlay
-                this.refresh(App.project);
+                if (!App.activeOverlay && key === App.focusCompoundKey) {
+                    // A failed current row is clickable again to retry. An
+                    // already-ready or still-loading row remains a no-op.
+                    const retryable = this._focusLoadStatus
+                        && Array.from(this._focusLoadStatus.values()).some(value => value === 'failed');
+                    if (!retryable) return;
+                }
+                this._selectCompound(key).catch(e => console.warn('Preview MRM load failed', e));
             });
         });
         body.querySelectorAll('tr[data-overlay-id]').forEach(tr => {
             tr.addEventListener('click', () => {
                 const ov = ((project.overlays) || []).find(o => o.id === tr.getAttribute('data-overlay-id'));
                 if (!ov) return;
+                this._focusLoadSeq++;
+                this._loadingFocusKey = null;
+                this._focusLoadStatus = null;
+                this._cancelAdjacentPrefetch();
                 App.setActiveOverlay(ov);
                 this.refresh(App.project);
             });
@@ -16246,17 +16442,16 @@ const SharePreview = {
         });
     },
 
-    // Sections shown in the grid/stats, honoring the preview-local organ filter.
+    // Sections shown in the grid/stats. Preview intentionally has no separate
+    // organ selector; per-cell checkboxes are the single display/scope control.
     // Used by _renderImageGrid / _renderStatsTable / _rebakeCellImages so the
     // cell index (and _cellTransforms / _sectionRotations) stay aligned.
     _sectionsForGrid(project) {
-        const all = (project && project.sections) || [];
-        if (!this._previewOrgan) return all;
-        return all.filter(s => sectionOrganKey(s) === this._previewOrgan);
+        return (project && project.sections) || [];
     },
 
-    // Sections currently SELECTED for display = organ-filtered minus the ones the
-    // user deselected via the per-cell checkbox. Drives the intensity-window
+    // Sections currently SELECTED for display = all minus the ones the user
+    // deselected via the per-cell checkbox. Drives the intensity-window
     // scope (App.activeSectionScope) and the stats table.
     _selectedSections(project) {
         const hidden = this._hiddenSectionIds || new Set();
@@ -16310,6 +16505,9 @@ const SharePreview = {
             // this section; the panel's cdisp already shows the overlay
             // (setActiveOverlay re-rendered all panels before this bake).
             const _ov = App.activeOverlay;
+            const loadStatus = (!_ov && this._loadingFocusKey === focusKey && this._focusLoadStatus)
+                ? this._focusLoadStatus.get(String(sec.id))
+                : null;
             const hasContent = _ov
                 ? (_ov.layers || []).some(l => (sec.msiSeries || {})[l.key])
                 : !!(sec.msiSeries || {})[focusKey];
@@ -16318,7 +16516,11 @@ const SharePreview = {
             const caption = safePitch ? (safeName + ' · ' + safePitch) : safeName;
             const panel = App.panels && App.panels.get(sec.id);
             let body;
-            if (!hasContent || !panel || !panel.dom || !panel.dom.cdisp || panel.dom.cdisp.width === 0) {
+            if (loadStatus === 'loading') {
+                body = '<div class="cell-empty preview-loading">Loading MSI…</div>';
+            } else if (loadStatus === 'failed') {
+                body = '<div class="cell-empty">MSI load failed</div>';
+            } else if (!hasContent || !panel || !panel.dom || !panel.dom.cdisp || panel.dom.cdisp.width === 0) {
                 body = '<div class="cell-empty">No data for this compound</div>';
             } else {
                 // Bake the master-saved rotation into a fresh canvas so the
@@ -16535,8 +16737,7 @@ const SharePreview = {
             : Math.max(baseIdx - 1, 0);
         e.preventDefault();
         if (next === idx) return;
-        App.setFocusCompoundKey(this.compoundKeys[next]);
-        this.refresh(App.project);
+        this._selectCompound(this.compoundKeys[next]).catch(err => console.warn('Preview MRM load failed', err));
     },
 
     // Re-bake every preview cell's <img> from its panel's current cdisp
