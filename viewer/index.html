@@ -3856,8 +3856,13 @@ async function inspectXlsxColumns(buf, sheetName, headerRow1based) {
 //      becomes the compound-name row.
 //   4. Data rows start immediately after the product row.
 //
-// Returns { compounds: [{ index, name, precursor, product }], dataStartLine,
-//           precIdx, prodIdx, nameIdx }.
+// A file may have no name row at all — Waters' own .raw/imaging export is one:
+// its header is padding / channel index / precursor / product and nothing else.
+// Those channels get a name synthesised from the transition and are flagged
+// `synthesizedName` so the caller can insist the user names them properly.
+//
+// Returns { compounds: [{ index, name, precursor, product, synthesizedName }],
+//           dataStartLine, precIdx, prodIdx, nameIdx }.
 function parseAnalyteHeader(buf) {
     const raw = (typeof buf === 'string') ? buf : new TextDecoder('utf-8').decode(buf);
     const linesAll = raw.split(/\r?\n/);
@@ -3922,6 +3927,16 @@ function parseAnalyteHeader(buf) {
     const prodRow = splitTab(linesAll[prodIdx]).slice(3);
     const nameRow = nameIdx >= 0 ? splitTab(linesAll[nameIdx]).slice(3) : [];
 
+    // "Compound3" says nothing; "mz146.1_87.1" identifies the channel, which
+    // matters because this label becomes the compound name in the shared MRM
+    // library, and mrm_compounds.name is UNIQUE — two experiments both
+    // registering a "Compound1" would silently merge into one compound.
+    //
+    // Exactly one underscore, so splitCeCv (which needs _<int>_<int>) can never
+    // read the transition back as a collision / cone voltage.
+    const nameFromTransition = (pre, pro) =>
+        'mz' + String(pre) + (Number.isFinite(pro) && pro > 0 ? '_' + String(pro) : '');
+
     const compounds = [];
     let ordinal = 0;
     for (let i = 0; i < precRow.length; i++) {
@@ -3934,7 +3949,8 @@ function parseAnalyteHeader(buf) {
         const pro = Number((prodRow[i] || '').trim());
         let name = (nameRow[i] || '').trim();
         ordinal++;
-        if (!name) name = 'Compound' + ordinal;
+        const synthesizedName = !name;
+        if (synthesizedName) name = nameFromTransition(pre, pro);
         const split = splitCeCv(name);
         compounds.push({
             // Column offset within the slice(3) view; data rows have value at tok[3 + index].
@@ -3947,6 +3963,7 @@ function parseAnalyteHeader(buf) {
             cv: split.cv,
             precursor: pre,
             product: (Number.isFinite(pro) && pro > 0) ? pro : null,
+            synthesizedName,
         });
     }
     if (!compounds.length) throw new Error('no compounds detected');
@@ -14634,11 +14651,27 @@ const Wizards = {
                 name.value = 'MSI_' + sanitizeCompoundName(c.name);
                 name.className = 'analyte-name';
                 name.style.cssText = 'flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;';
+                if (c.synthesizedName) {
+                    // The file carries no name for this channel; the value above is
+                    // only the transition. Make that visible rather than letting it
+                    // pass for a compound name.
+                    name.dataset.synthesized = '1';
+                    name.style.borderColor = '#f59e0b';
+                    name.style.background = '#fffbeb';
+                    name.title = 'このファイルには化合物名がありません。m/z から仮の名前を付けています';
+                }
                 row.appendChild(name);
                 txtList.appendChild(row);
             }
             txtTools.style.display = '';
-            txtSummary.textContent = '検出: ' + analyteCache.compounds.length + ' 化合物';
+            const noName = analyteCache.compounds.filter(c => c.synthesizedName).length;
+            txtSummary.innerHTML = '検出: ' + analyteCache.compounds.length + ' 化合物'
+                + (noName
+                    ? '<br><span style="color:#b45309;">⚠ このファイルには化合物名が入っていません ('
+                      + noName + ' 件)。m/z から仮の名前を付けているので、'
+                      + '登録前に正しい名前に直してください'
+                      + '<br>（.raw フォルダごと登録すれば化合物名も読み取れます）</span>'
+                    : '');
         };
 
         const loadColumns = async () => {
@@ -14750,15 +14783,27 @@ const Wizards = {
             if (analyteCache && analyteCache.compounds.length) {
                 const rows = txtList.querySelectorAll('[data-idx]');
                 const picks = [];
+                let unnamed = 0;
                 rows.forEach(row => {
                     const chk = row.querySelector('.analyte-chk');
                     if (!chk || !chk.checked) return;
                     const idx = parseInt(row.dataset.idx, 10);
                     const nameInput = row.querySelector('.analyte-name');
-                    const layer = (nameInput.value || '').trim() || ('MSI_Compound' + (idx + 1));
+                    const c = analyteCache.compounds.find(cc => cc.index === idx);
+                    const fallback = 'MSI_' + sanitizeCompoundName((c && c.name) || ('Compound' + (idx + 1)));
+                    const layer = (nameInput.value || '').trim() || fallback;
+                    // Still the name we made up from the transition = nobody named it.
+                    if (nameInput.dataset.synthesized === '1' && layer === fallback) unnamed++;
                     picks.push({ index: idx, layer });
                 });
                 if (!picks.length) { err.textContent = 'チェックされた化合物がありません'; return false; }
+                // The label becomes the compound name in the shared MRM library,
+                // where mrm_compounds.name is UNIQUE — registering placeholders
+                // there merges unrelated transitions under one compound.
+                if (unnamed && !confirm(
+                    unnamed + ' 件が m/z のままの仮の名前です。\n\n'
+                    + 'この名前は MRM ライブラリに登録するとそのまま化合物名になります。\n'
+                    + 'このまま登録しますか?')) return false;
                 return { kind: 'txt-analyte', file: f, displayName, picks, dataStartLine: analyteCache.dataStartLine };
             }
             // generic TSV/CSV fallback (header from line 0)

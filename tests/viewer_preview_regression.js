@@ -301,6 +301,18 @@ function testAnalyteHeaderShapes() {
   assert.equal(rawHeader.dataStartLine, 5);
   assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.precursor), [104, 137.1, 146.1, 798.55]);
   assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.product), [87, 91.1, 87.1, 163]);
+  // This shape has no name row at all, so every channel is named from its
+  // transition and flagged. "Compound3" would say nothing, and the label becomes
+  // the compound name in the shared MRM library where the name is UNIQUE.
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.name),
+    ['mz104_87', 'mz137.1_91.1', 'mz146.1_87.1', 'mz798.55_163']);
+  assert.ok(Array.from(rawHeader.compounds).every((c) => c.synthesizedName === true));
+  // Exactly one underscore, so splitCeCv can never read the transition back as
+  // a _<CE>_<CV> suffix (that is how renaming used to invent voltages).
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.ce), [null, null, null, null]);
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.cv), [null, null, null, null]);
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.base),
+    ['mz104_87', 'mz137.1_91.1', 'mz146.1_87.1', 'mz798.55_163']);
 
   // (b) the HDI-converted shape with a compound-name row still parses unchanged,
   //     including the _<CE>_<CV> suffix split.
@@ -317,6 +329,20 @@ function testAnalyteHeaderShapes() {
   assert.deepEqual(Array.from(convHeader.compounds, (c) => c.base), ['GABA', 'Dopamine', 'ACh']);
   assert.deepEqual(Array.from(convHeader.compounds, (c) => c.ce), [10, 18, 10]);
   assert.deepEqual(Array.from(convHeader.compounds, (c) => c.cv), [10, 50, 15]);
+  assert.ok(Array.from(convHeader.compounds).every((c) => c.synthesizedName === false),
+    'a real name row must not be reported as synthesised');
+
+  // (c) a name row with a hole: only the blank entry is synthesised.
+  const partial = [
+    'Analyte (converted from imzML)',
+    '\t\t\tGABA\t\tACh',
+    '\t\t\t104.0000\t137.1000\t146.1000',
+    '\t\t\t87.0000\t91.1000\t87.1000',
+    '1\t0\t0\t1\t2\t3',
+  ].join('\n');
+  const partialHeader = parse(partial);
+  assert.deepEqual(Array.from(partialHeader.compounds, (c) => c.name), ['GABA', 'mz137.1_91.1', 'ACh']);
+  assert.deepEqual(Array.from(partialHeader.compounds, (c) => c.synthesizedName), [false, true, false]);
 }
 
 // ---------------------------------------------------------------------------
