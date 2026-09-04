@@ -3984,6 +3984,11 @@ async function buildPngFromTxtArrayBuffer(buf, def) {
     return rasterRowsToPngDataUrl(parseTxtToRows(buf, def), def.range, def.bakeMode);
 }
 
+// Main-thread fallback for kind:'raw' (worker unavailable or it threw).
+async function buildPngFromRawArrayBuffer(buf, def) {
+    return rasterRowsToPngDataUrl(await parseRawToRows(buf, def), def.range, def.bakeMode);
+}
+
 // ==== BEGIN waters-raw parser (ported VERBATIM to connector/src/raw.js) ====
 // Waters MassLynx .raw reader (Xevo TQ Absolute / DESI-MSI, MRM functions).
 //
@@ -4218,8 +4223,9 @@ function rawExternValue(block, key) {
 // former and scans in the latter; only the descriptor table tells them apart.
 //   u16 dataOffset, u16 version, u16 stride, u16 nParams
 //   descriptors from byte 32, 48 bytes each:
-//     u16 paramId, u16 flag, u16 offsetInStride, NUL-padded ASCII name at +6,
-//     u16 size at +32 (1/2/4/8 -> u8 / u16 / f32|u32 / f64; flag 3 means float)
+//     u16 paramId, u16 flag, u16 offsetInStride, NUL-padded ASCII name at +6
+//     (26 bytes), u16 size at +32 (1/2/4/8 -> u8 / u16 / f32|u32 / f64;
+//     flag 3 means float)
 function parseWatersParamTable(buf) {
     const dv = new DataView(buf);
     const dataOffset = dv.getUint16(0, true);
@@ -4230,9 +4236,13 @@ function parseWatersParamTable(buf) {
     for (let i = 0; i < nParams; i++) {
         const b = 32 + i * 48;
         if (b + 48 > buf.byteLength) break;
-        const nameBytes = new Uint8Array(buf, b + 6, 32);
+        // The name field is 26 bytes (b+6 .. b+31); b+32 is the size that
+        // follows it. Real tables bear this out — Waters truncates names to fit
+        // ("Reflectron Detector Volta"), and reading 32 here would let a long
+        // name swallow the size field.
+        const nameBytes = new Uint8Array(buf, b + 6, 26);
         let end = nameBytes.indexOf(0);
-        if (end < 0) end = 32;
+        if (end < 0) end = 26;
         params.push({
             id: dv.getUint16(b, true),
             flag: dv.getUint16(b + 2, true),
@@ -4362,7 +4372,9 @@ function rawPitchOf(values) {
     };
 }
 
-const rawFuncTag = (n) => '_func' + String(n).padStart(3, '0');
+// A declaration, not a const arrow: _buildParseWorkerSource stringifies these
+// with Function.prototype.toString, which drops the binding name for arrows.
+function rawFuncTag(n) { return '_func' + String(n).padStart(3, '0'); }
 
 // Decode one function to raster-ready columns. This is the unit the worker
 // caches (keyed by blobId + function, NOT by channel) so registering N channels
@@ -4543,16 +4555,16 @@ async function parseRawArchiveMeta(bundle) {
     };
 }
 
-// Rows for one channel, same shape as parseTxtToRows so buildMsiGrid and
-// computeRasterPixels need no changes. Async because ZIP inflation is.
+// Rows for one channel of an ALREADY-decoded function, shaped exactly like
+// parseTxtToRows output so buildMsiGrid and computeRasterPixels need no changes.
+// Split out from parseRawToRows so the parse worker can cache the decode per
+// (blob, function) and pay for it once however many channels were registered.
 //
 // Coordinates are snapped to the derived lattice: buildMsiGrid keys a Map on
 // the exact float, and float32 stage jitter would inflate the distinct-value
 // count past its guard, which falls back to ordinal indexing and SILENTLY
 // changes the image geometry by collapsing gaps.
-async function parseRawToRows(buf, def) {
-    const bundle = (buf && typeof buf.names === 'function') ? buf : rawBundleFromZip(buf);
-    const decoded = await rawDecodeFunction(bundle, (def && def.func) || 1);
+function rawRowsFromDecoded(decoded, def) {
     const channel = (def && def.channel) || 0;
     if (channel >= decoded.nCh) throw new Error('raw: channel ' + channel + ' out of range');
     const col = decoded.chans[channel];
@@ -4573,6 +4585,14 @@ async function parseRawToRows(buf, def) {
     }
     if (!rows.length) throw new Error('raw: no rows decoded');
     return rows;
+}
+
+// Same signature and return shape as parseTxtToRows, except async (ZIP
+// inflation is). `buf` may also be a RawBundle, which is how the wizard reads
+// the loose files before anything has been zipped.
+async function parseRawToRows(buf, def) {
+    const bundle = (buf && typeof buf.names === 'function') ? buf : rawBundleFromZip(buf);
+    return rawRowsFromDecoded(await rawDecodeFunction(bundle, (def && def.func) || 1), def);
 }
 
 // Bundle over the loose files the user picked/dropped. Registration parses from
@@ -4726,7 +4746,7 @@ async function _parseWorkerOnMessage(e) {
         const p = msg.payload || {};
         let buf = null;
         let result;
-        if (msg.op === 'xlsx-raster' || msg.op === 'txt-raster') {
+        if (msg.op === 'xlsx-raster' || msg.op === 'txt-raster' || msg.op === 'raw-raster') {
             let rows;
             if (msg.op === 'xlsx-raster') {
                 // Keep decoded sheets inside the long-lived worker. Blob
@@ -4749,6 +4769,29 @@ async function _parseWorkerOnMessage(e) {
                     cache.set(cacheKey, parsed);
                 }
                 rows = rowsFromParsedXlsx(parsed, p.def);
+            } else if (msg.op === 'raw-raster') {
+                // One .raw carries every MRM channel, so what is cached is the
+                // decoded FUNCTION (coordinates + all channel columns) keyed on
+                // blobId + function number only — `channel` is excluded for the
+                // same reason `col_v` is excluded above, so registering 8
+                // channels from one file costs one unzip+decode, not eight.
+                // These payloads are megabytes rather than a parsed sheet, so
+                // the LRU is much smaller than the xlsx one.
+                const cache = self.__rawDecodeCache || (self.__rawDecodeCache = new Map());
+                const cacheKey = p.cacheKey || '';
+                let decoded = cacheKey ? cache.get(cacheKey) : null;
+                if (!decoded) {
+                    buf = p.blob ? await p.blob.arrayBuffer() : null;
+                    decoded = await rawDecodeFunction(rawBundleFromZip(buf), (p.def && p.def.func) || 1);
+                    if (cacheKey) {
+                        cache.set(cacheKey, decoded);
+                        while (cache.size > 2) cache.delete(cache.keys().next().value);
+                    }
+                } else {
+                    cache.delete(cacheKey);
+                    cache.set(cacheKey, decoded);
+                }
+                rows = rawRowsFromDecoded(decoded, p.def);
             } else {
                 buf = p.blob ? await p.blob.arrayBuffer() : null;
                 rows = parseTxtToRows(buf, p.def);
@@ -4797,6 +4840,10 @@ function _buildParseWorkerSource() {
         deriveBakeStats, blankStats, bakeRasterFromValues, computeRasterPixels,
         parseXlsxSheet, rowsFromParsedXlsx, parseXlsxToRows, parseTxtToRows,
         decodeJpegInTiffToDataUrl, decodeTiffArrayBufferToDataUrl, inspectXlsxColumns,
+        rawDecodeText, rawInflate, rawZipIndex, rawZipRead, rawBundleFromZip,
+        rawFindMember, rawFuncTag, parseWatersParamTable, parseWatersIdx,
+        decodeWatersIntensity, rawPitchOf, rawDecodeFunction, rawRowsFromDecoded,
+        parseRawToRows,
         _parseWorkerOnMessage,
     ];
     return [
@@ -4845,7 +4892,7 @@ function _getParseWorker() {
     }
 }
 
-// op: 'xlsx-raster' | 'txt-raster' | 'tiff-decode' | 'xlsx-columns'.
+// op: 'xlsx-raster' | 'txt-raster' | 'raw-raster' | 'tiff-decode' | 'xlsx-columns'.
 // payload carries a Blob (posted by reference; the worker reads its bytes) plus
 // op-specific params. Rejects on worker-unavailable / error / timeout so the
 // caller can fall back to the main-thread parser.
@@ -6443,19 +6490,26 @@ class SectionPanel {
             }
             if (parseWorkerAvailable()) {
                 try {
-                    const op = (ent.kind === 'txt') ? 'txt-raster' : 'xlsx-raster';
+                    const op = (ent.kind === 'txt') ? 'txt-raster'
+                        : (ent.kind === 'raw') ? 'raw-raster' : 'xlsx-raster';
                     // blobId + sheet identifies the expensive workbook decode.
                     // col_v is intentionally excluded: every MRM column in the
                     // same sheet should reuse the decoded cell matrix.
+                    // .raw is the same idea one level up: blobId + function
+                    // identifies the unzip+decode, and `channel` is excluded so
+                    // every MRM channel of that function reuses it.
                     const cacheKey = (op === 'xlsx-raster')
                         ? String(ent.blobId || '') + '|' + String(ent.sheet || '')
-                        : '';
+                        : (op === 'raw-raster')
+                            ? String(ent.blobId || '') + '|F' + String(ent.func || 1)
+                            : '';
                     result = await callParseWorker(op, { blob: rec.blob, def: ent, cacheKey }, 120000);
                 } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
             }
             if (!result) {
                 const buf = await rec.blob.arrayBuffer();
                 if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
+                else if (ent.kind === 'raw') result = await buildPngFromRawArrayBuffer(buf, ent);
                 else result = await buildPngFromXlsxArrayBuffer(buf, ent);
             }
         }
@@ -8810,7 +8864,8 @@ class SectionPanel {
         opts = opts || {};
         const origName = blob.name || '';
         const dot = origName.lastIndexOf('.');
-        const ext = dot >= 0 ? origName.slice(dot) : (def.kind === 'txt' ? '.txt' : '.xlsx');
+        const ext = dot >= 0 ? origName.slice(dot)
+            : (def.kind === 'txt' ? '.txt' : def.kind === 'raw' ? '.raw.zip' : '.xlsx');
         const safeBase = String(opts.displayBaseName || '').trim().replace(/[\\/:*?"<>|\x00-\x1f]/g, '_');
         const finalName = safeBase ? (safeBase + ext) : (origName || (key + ext));
         let blobId = opts.sharedBlobId || null;
@@ -15020,6 +15075,7 @@ function guessMimeFromPath(path) {
         case 'png':  return 'image/png';
         case 'jpg':
         case 'jpeg': return 'image/jpeg';
+        case 'zip':  return 'application/zip';
         default:     return 'application/octet-stream';
     }
 }

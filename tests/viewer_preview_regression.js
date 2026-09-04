@@ -319,6 +319,264 @@ function testAnalyteHeaderShapes() {
   assert.deepEqual(Array.from(convHeader.compounds, (c) => c.cv), [10, 50, 15]);
 }
 
+// ---------------------------------------------------------------------------
+// Synthetic Waters .raw, written byte by byte so this doubles as executable
+// documentation of the layout the viewer reads. 3x2 pixels, 2 MRM channels.
+// ---------------------------------------------------------------------------
+const RAW_FX = {
+  xs: [1.0, 1.1, 1.2, 1.0, 1.1, 1.2],
+  ys: [5.0, 5.0, 5.0, 5.2, 5.2, 5.2],
+  chan: [[100, 200, 300, 400, 500, 600], [7, 8, 9, 10, 11, 12]],
+  names: ['Alpha', 'Beta'],
+  precursor: [104, 146.1],
+  product: [87, 87.1],
+  cv: [10, 15],
+  ce: [22, 35],
+  dwell: 0.0098889,
+  // .STS deliberately gets an ODD stride so the fixture exercises the
+  // unaligned reads that make DataView (not typed-array views) mandatory.
+  stsStride: 9,
+};
+
+// intensity = (w & 0x3FFFFF) * 2 ** ((w >>> 22) - 21); exponent 21 stores an
+// integer mantissa verbatim.
+function rawWord(v) { return (((21 << 22) >>> 0) | v) >>> 0; }
+
+function putParamTable({ stride, params, records, write }) {
+  const dataOffset = 32 + params.length * 48;
+  const buf = new ArrayBuffer(dataOffset + records * stride);
+  const dv = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+  dv.setUint16(0, dataOffset, true);
+  dv.setUint16(2, 1, true);
+  dv.setUint16(4, stride, true);
+  dv.setUint16(6, params.length, true);
+  params.forEach((p, i) => {
+    const b = 32 + i * 48;
+    dv.setUint16(b, p.id, true);
+    dv.setUint16(b + 2, p.flag, true);
+    dv.setUint16(b + 4, p.offset, true);
+    for (let k = 0; k < p.name.length && k < 26; k++) u8[b + 6 + k] = p.name.charCodeAt(k);
+    dv.setUint16(b + 32, p.size, true);
+  });
+  for (let r = 0; r < records; r++) write(dv, dataOffset + r * stride, r);
+  return buf;
+}
+
+function buildSyntheticRawMembers() {
+  const n = RAW_FX.xs.length;
+  const nCh = RAW_FX.chan.length;
+
+  const dat = new ArrayBuffer(n * nCh * 4);
+  const datDv = new DataView(dat);
+  for (let i = 0; i < n; i++) {
+    for (let c = 0; c < nCh; c++) datDv.setUint32((i * nCh + c) * 4, rawWord(RAW_FX.chan[c][i]), true);
+  }
+
+  const idx = new ArrayBuffer(n * 22);
+  const idxDv = new DataView(idx);
+  for (let i = 0; i < n; i++) {
+    idxDv.setUint32(i * 22, i * nCh * 4, true);          // offset into .DAT
+    idxDv.setUint32(i * 22 + 4, (0x08000000 | nCh) >>> 0, true); // nPeaks + calibrated bit
+    idxDv.setFloat32(i * 22 + 8, RAW_FX.chan.reduce((a, c) => a + c[i], 0), true); // TIC
+    idxDv.setFloat32(i * 22 + 12, (i + 1) * 0.00185, true);      // retention time, minutes
+  }
+
+  const sts = putParamTable({
+    stride: RAW_FX.stsStride,
+    params: [
+      { id: 9, flag: 3, offset: 1, size: 4, name: 'Aim X Position' },
+      { id: 10, flag: 3, offset: 5, size: 4, name: 'Aim Y Position' },
+    ],
+    records: n,
+    write: (dv, at, r) => { dv.setFloat32(at + 1, RAW_FX.xs[r], true); dv.setFloat32(at + 5, RAW_FX.ys[r], true); },
+  });
+
+  const ee = putParamTable({
+    stride: 4,
+    params: [
+      { id: 110, flag: 1, offset: 0, size: 2, name: 'Cone Voltage' },
+      { id: 111, flag: 1, offset: 2, size: 2, name: 'Collision Energy' },
+    ],
+    records: nCh,
+    write: (dv, at, c) => { dv.setUint16(at, RAW_FX.cv[c], true); dv.setUint16(at + 2, RAW_FX.ce[c], true); },
+  });
+
+  const REC = 16;
+  const cmp = new ArrayBuffer(12 + nCh * REC);
+  const cmpDv = new DataView(cmp);
+  const cmpU8 = new Uint8Array(cmp);
+  cmpDv.setUint32(0, 1, true);
+  cmpDv.setUint32(4, nCh, true);
+  RAW_FX.names.forEach((nm, c) => {
+    for (let k = 0; k < nm.length; k++) cmpU8[12 + c * REC + k] = nm.charCodeAt(k);
+  });
+
+  const fns = new ArrayBuffer(416);
+  const fnsDv = new DataView(fns);
+  fnsDv.setUint8(0, 9);              // function type 9 = MRM
+  fnsDv.setFloat32(10, 0, true);     // rt start
+  fnsDv.setFloat32(14, 3000, true);  // rt end
+  for (let c = 0; c < nCh; c++) {
+    fnsDv.setFloat32(32 + c * 4, RAW_FX.dwell, true);
+    fnsDv.setFloat32(160 + c * 4, RAW_FX.precursor[c], true);
+    fnsDv.setFloat32(288 + c * 4, RAW_FX.product[c], true);
+  }
+
+  const enc = (t) => new TextEncoder().encode(t);
+  return [
+    ['SYNTH.raw/_HEADER.TXT', enc('$$ Instrument: SYNTH-TQ\r\n$$ Acquired Date: 04-Sep-2026\r\n')],
+    // windows-1252 degree sign (0xB0) - decoding this as UTF-8 corrupts the key.
+    ['SYNTH.raw/_extern.inf', Uint8Array.from([
+      ...enc('[DESI Experiment Parameters]\r\nDesiXStep\t0.05\r\nDesiYStep\t0.2\r\n\r\n'),
+      ...enc('Instrument Parameters - Function 1:\r\nPolarity\tES+\r\nSource Temperature ('), 0xB0,
+      ...enc('C)\t150\t150\r\n'),
+    ])],
+    ['SYNTH.raw/_FUNCTNS.INF', new Uint8Array(fns)],
+    ['SYNTH.raw/_FUNC001.IDX', new Uint8Array(idx)],
+    ['SYNTH.raw/_FUNC001.DAT', new Uint8Array(dat)],
+    ['SYNTH.raw/_FUNC001.STS', new Uint8Array(sts)],
+    ['SYNTH.raw/_FUNC001.EE', new Uint8Array(ee)],
+    ['SYNTH.raw/_FUNC001.CMP', new Uint8Array(cmp)],
+  ];
+}
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+// STORE-only writer, so the fixture needs no compressor and stays byte-stable.
+function buildZip(members) {
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const [name, bytes] of members) {
+    const nameBytes = new TextEncoder().encode(name);
+    const crc = crc32(bytes);
+    const local = new Uint8Array(30 + nameBytes.length);
+    const ldv = new DataView(local.buffer);
+    ldv.setUint32(0, 0x04034b50, true);
+    ldv.setUint16(4, 20, true);
+    ldv.setUint16(8, 0, true);            // method 0 = STORE
+    ldv.setUint32(14, crc, true);
+    ldv.setUint32(18, bytes.length, true);
+    ldv.setUint32(22, bytes.length, true);
+    ldv.setUint16(26, nameBytes.length, true);
+    local.set(nameBytes, 30);
+    const cd = new Uint8Array(46 + nameBytes.length);
+    const cdv = new DataView(cd.buffer);
+    cdv.setUint32(0, 0x02014b50, true);
+    cdv.setUint16(6, 20, true);
+    cdv.setUint16(10, 0, true);
+    cdv.setUint32(16, crc, true);
+    cdv.setUint32(20, bytes.length, true);
+    cdv.setUint32(24, bytes.length, true);
+    cdv.setUint16(28, nameBytes.length, true);
+    cdv.setUint32(42, offset, true);
+    cd.set(nameBytes, 46);
+    central.push(cd);
+    parts.push(local, bytes);
+    offset += local.length + bytes.length;
+  }
+  const cdStart = offset;
+  let cdSize = 0;
+  for (const cd of central) { parts.push(cd); cdSize += cd.length; }
+  const eocd = new Uint8Array(22);
+  const edv = new DataView(eocd.buffer);
+  edv.setUint32(0, 0x06054b50, true);
+  edv.setUint16(8, central.length, true);
+  edv.setUint16(10, central.length, true);
+  edv.setUint32(12, cdSize, true);
+  edv.setUint32(16, cdStart, true);
+  parts.push(eocd);
+  const total = parts.reduce((a, b) => a + b.length, 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const part of parts) { out.set(part, at); at += part.length; }
+  return out.buffer;
+}
+
+// Anchored so a mention of the name in a comment can never be mistaken for the
+// declaration.
+function extractTopLevelFunction(name) {
+  const re = new RegExp(`(^|\\n)(async )?function ${name}\\s*\\(`);
+  const m = re.exec(html);
+  assert.ok(m, `missing top-level function ${name}`);
+  const startAt = m.index + (m[1] ? m[1].length : 0);
+  const openAt = html.indexOf('{', m.index + m[0].length - 1);
+  return html.slice(startAt, scanBalanced(html, openAt) + 1);
+}
+
+// The parse worker is assembled by stringifying the functions named in the
+// `fns` array. A name missing from that array does NOT fail node --check: the
+// worker throws ReferenceError at run time and every caller silently falls back
+// to the main thread, so the picture still appears and only the off-main-thread
+// benefit dies. This test assembles the SAME list and actually runs the .raw
+// path through it, so an omitted helper fails loudly here instead.
+async function testWorkerRawDecodePath() {
+  const listMatch = /const fns = \[([\s\S]*?)\n {4}\];/.exec(html);
+  assert.ok(listMatch, 'missing parse-worker fns list');
+  const names = listMatch[1].split(/[,\s]+/).filter(Boolean);
+  assert.ok(names.includes('rawDecodeFunction') && names.includes('rawRowsFromDecoded'),
+    '.raw decode helpers must be in the parse-worker fns list');
+
+  const context = vm.createContext({
+    console, TextDecoder, TextEncoder, Blob, Response, DecompressionStream, out: {},
+  });
+  // Declarations hoist and their bodies are not evaluated, so the xlsx/TIFF
+  // entries can be defined here without XLSX/UTIF being present.
+  vm.runInContext(
+    names.map(extractTopLevelFunction).join('\n\n')
+    + '\nout.api = { rawBundleFromZip, rawDecodeFunction, rawRowsFromDecoded, parseRawToRows,'
+    + ' parseWatersParamTable, buildMsiGrid };',
+    context,
+  );
+  const api = context.out.api;
+
+  const zip = buildZip(buildSyntheticRawMembers());
+  const bundle = api.rawBundleFromZip(zip);
+  assert.equal(bundle.rootName, 'SYNTH', 'the *.raw/ prefix names the bundle');
+
+  const decoded = await api.rawDecodeFunction(bundle, 1);
+  assert.equal(decoded.nScans, 6);
+  assert.equal(decoded.nCh, 2);
+  // Odd .STS stride (9) means every record after the first is unaligned; this
+  // is the read that a typed-array view would throw RangeError on.
+  assert.deepEqual(Array.from(decoded.xs, (v) => +v.toFixed(4)), [1, 1.1, 1.2, 1, 1.1, 1.2]);
+  assert.deepEqual(Array.from(decoded.ys, (v) => +v.toFixed(4)), [5, 5, 5, 5.2, 5.2, 5.2]);
+  assert.deepEqual(Array.from(decoded.chans[0]), [100, 200, 300, 400, 500, 600]);
+  assert.deepEqual(Array.from(decoded.chans[1]), [7, 8, 9, 10, 11, 12]);
+  assert.equal(decoded.gridX.count, 3);
+  assert.equal(decoded.gridY.count, 2);
+  assert.ok(Math.abs(decoded.gridX.pitch - 0.1) < 1e-9, 'X pitch from the stage coordinates');
+  assert.ok(Math.abs(decoded.gridY.pitch - 0.2) < 1e-9, 'Y pitch from the stage coordinates');
+
+  const rows = api.rawRowsFromDecoded(decoded, { channel: 1 });
+  assert.equal(rows.length, 6);
+  assert.deepEqual(Array.from(rows, (r) => r.v), [7, 8, 9, 10, 11, 12]);
+  // Snapped coordinates must land buildMsiGrid on the true 3x2 raster rather
+  // than tripping its inflation guard and collapsing the geometry.
+  const grid = api.buildMsiGrid(rows);
+  assert.equal(grid.W, 3);
+  assert.equal(grid.H, 2);
+  assert.equal(grid.gridFallback && (grid.gridFallback.x || grid.gridFallback.y), null);
+
+  // parseRawToRows must accept a raw ArrayBuffer as well as a bundle.
+  const viaBuffer = await api.parseRawToRows(zip, { func: 1, channel: 0 });
+  assert.deepEqual(Array.from(viaBuffer, (r) => r.v), [100, 200, 300, 400, 500, 600]);
+}
+
 async function main() {
   compileInlineScripts();
   assert.match(html, /data-preview-range-reset/);
@@ -329,6 +587,7 @@ async function main() {
   testRangeResetAndSingleRepaint();
   await testWorkerXlsxDecodeCache();
   testAnalyteHeaderShapes();
+  await testWorkerRawDecodePath();
   console.log('viewer preview regression tests: PASS');
 }
 
