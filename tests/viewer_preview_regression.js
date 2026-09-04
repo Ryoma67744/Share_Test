@@ -524,25 +524,62 @@ function extractTopLevelFunction(name) {
 // to the main thread, so the picture still appears and only the off-main-thread
 // benefit dies. This test assembles the SAME list and actually runs the .raw
 // path through it, so an omitted helper fails loudly here instead.
-async function testWorkerRawDecodePath() {
+// Assemble the worker exactly as _buildParseWorkerSource does — the same `fns`
+// list, the same injected constants — and hand back whichever of them the
+// caller wants to CALL. Defining a function does not evaluate its body, so the
+// xlsx/TIFF entries can be defined without XLSX/UTIF present; only what a test
+// actually calls has to resolve.
+function assembleWorkerFns(wanted) {
   const listMatch = /const fns = \[([\s\S]*?)\n {4}\];/.exec(html);
   assert.ok(listMatch, 'missing parse-worker fns list');
   const names = listMatch[1].split(/[,\s]+/).filter(Boolean);
-  assert.ok(names.includes('rawDecodeFunction') && names.includes('rawRowsFromDecoded'),
-    '.raw decode helpers must be in the parse-worker fns list');
-
+  const constOf = (name) => {
+    const m = new RegExp('const ' + name + ' = ([0-9.]+);').exec(html);
+    assert.ok(m, 'missing constant ' + name);
+    return m[1];
+  };
   const context = vm.createContext({
     console, TextDecoder, TextEncoder, Blob, Response, DecompressionStream, out: {},
   });
-  // Declarations hoist and their bodies are not evaluated, so the xlsx/TIFF
-  // entries can be defined here without XLSX/UTIF being present.
   vm.runInContext(
-    names.map(extractTopLevelFunction).join('\n\n')
-    + '\nout.api = { rawBundleFromZip, rawDecodeFunction, rawRowsFromDecoded, parseRawToRows,'
-    + ' parseWatersParamTable, buildMsiGrid };',
+    'const MSI_ROBUST_PERCENTILE = ' + constOf('MSI_ROBUST_PERCENTILE') + ';\n'
+    + 'const MSI_DEFAULT_DISPLAY_PERCENTILE = ' + constOf('MSI_DEFAULT_DISPLAY_PERCENTILE') + ';\n'
+    + names.map(extractTopLevelFunction).join('\n\n')
+    + '\nout.api = { ' + wanted.join(', ') + ' };',
     context,
   );
-  const api = context.out.api;
+  return { names, api: context.out.api };
+}
+
+// The bake chain the worker runs for EVERY MSI layer, whatever the format.
+// This is the omission that actually happened once: deriveBakeStats and
+// percentileOfSorted were dropped from the list when "sort only once" split them
+// out, so the worker threw ReferenceError on every bake and silently fell back
+// to the main thread — the picture still appeared, only the off-main-thread
+// benefit died. Running the chain here makes that fail loudly instead.
+function testWorkerBakePath() {
+  const { api } = assembleWorkerFns(['computeRasterPixels']);
+  const rows = [];
+  for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) rows.push({ x, y, v: y * 5 + x });
+  const px = api.computeRasterPixels(rows, null, 'robust');
+  assert.equal(px.width, 5);
+  assert.equal(px.height, 4);
+  assert.equal(px.values.length, 20);
+  assert.equal(px.pixels.length, 20 * 4);
+  assert.equal(px.rawTrueMax, 19);
+  assert.ok(Array.isArray(px.rawRange) && px.rawRange.length === 2, px.rawRange);
+  assert.equal(px.diag.gridFallback, null);
+  // 'full' must bake to the true maximum rather than the robust percentile.
+  assert.equal(api.computeRasterPixels(rows, null, 'full').rawRange[1], 19);
+}
+
+async function testWorkerRawDecodePath() {
+  const { names, api } = assembleWorkerFns([
+    'rawBundleFromZip', 'rawDecodeFunction', 'rawRowsFromDecoded', 'parseRawToRows',
+    'parseWatersParamTable', 'buildMsiGrid',
+  ]);
+  assert.ok(names.includes('rawDecodeFunction') && names.includes('rawRowsFromDecoded'),
+    '.raw decode helpers must be in the parse-worker fns list');
 
   const zip = buildZip(buildSyntheticRawMembers());
   const bundle = api.rawBundleFromZip(zip);
@@ -587,6 +624,7 @@ async function main() {
   testRangeResetAndSingleRepaint();
   await testWorkerXlsxDecodeCache();
   testAnalyteHeaderShapes();
+  testWorkerBakePath();
   await testWorkerRawDecodePath();
   console.log('viewer preview regression tests: PASS');
 }
