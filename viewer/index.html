@@ -2381,6 +2381,8 @@ const ProjectStorage = (() => {
             createdAt: project.createdAt || '',
             memo: project.memo || null,
             shareInfo: (si.slug || si.url) ? { slug: si.slug || '', url: si.url || '' } : null,
+            // 切片が 0 のローカル記録を一覧で見分けるため (管理画面の「空」バッジ)。
+            sectionCount: (project.sections || []).length,
         };
     }
 
@@ -2432,7 +2434,11 @@ const ProjectStorage = (() => {
             const t = await tx(['projects', 'project_index'], 'readonly');
             const keys = await pr(t.objectStore('projects').getAllKeys());
             const idx = await pr(t.objectStore('project_index').getAll());
-            if ((idx || []).length === (keys || []).length) return sortRows(idx || []);
+            // 件数だけでなく「今の indexRowFor が持つ列が揃っているか」も見る。
+            // 列を足しても件数は合ったままなので、これが無いと古いインデックスが
+            // 永久に使われ続ける。
+            if ((idx || []).length === (keys || []).length
+                && (idx || []).every(r => r && typeof r.sectionCount === 'number')) return sortRows(idx || []);
         } catch (e) {
             console.warn('project_index read failed; falling back to a full scan', e);
         }
