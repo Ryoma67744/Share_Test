@@ -98,6 +98,36 @@ Click `+ HE/IF` on a section panel:
 - Analyte (`Analyte (converted from imzML)`) or generic TSV/CSV
 - Specify a layer name (e.g. `MSI_DA`) and the value column index
 
+### 4-3. Waters `.raw` (DESI-TQ-MSI / Xevo TQ Absolute)
+
+`+ .raw` registers the instrument's `.raw` **directory** as-is. Unlike xlsx / txt, **no acquisition parameters have to be typed in**.
+
+1. **Drag and drop** the `.raw` folder (a folder-picker button and `.raw.zip` also work)
+2. The wizard shows what it read
+   - sample name / scan count / pixel grid / pitch
+   - **Machine** — auto-selects `DESI` (changeable); the instrument's own name (`XEVO-TQAbs#WDA0428`) is shown alongside
+   - **Experiment date** — taken from the date the instrument recorded in the `.raw`; falling back to a leading 6/8-digit date in the name (`260904_...` → 2026-09-04); blank if neither can be read
+   - **Channel list** — compound name / Precursor > Product / CV / CE / dwell, all checked by default
+3. Uncheck what you don't want and press `登録` (Register)
+
+What gets filled in:
+
+| Field | Source |
+| --- | --- |
+| Precursor / Product | `_FUNCTNS.INF` |
+| **CV (cone voltage) / CE (collision energy)** | `_FUNCnnn.EE` — no more encoding them as a `_45_14` suffix on the compound name |
+| Polarity | `Polarity` in `_extern.inf` (the real value, not a guess; left blank if unreadable so the existing `_POS`/`_NEG` heuristic still applies) |
+| Pixel pitch (μm/px) | stage coordinates in `_FUNCnnn.STS` — replaces the manual entry in §5 |
+| dwell / source conditions / DESI stage settings / method file | stored in `section.meta.raw` (display only) |
+
+The `Method (MRM)` table then shows the measured Precursor / Fragment / CE / CV, and **`選択を管理へ登録`** pushes them straight to the MRM library.
+
+> **Raw data retention**: the `.raw` folder is zipped in the browser at registration time and kept as the layer's source. Unzipping gives back the original `.raw` folder, which MassLynx opens directly. It travels with both Publish and Export ZIP (under `Source/`). Display, ROI statistics and CSV are all re-read from that original, so the numbers on screen can never drift from it.
+
+> **About pitch**: `DesiXStep` in `_extern.inf` is **not** the pixel pitch — it is how far the stage travels during ONE MRM channel (X pitch = `DesiXStep` × channel count). The app measures the pitch from the stage coordinates and uses `DesiXStep` only as a cross-check, warning when they disagree.
+
+> **More than 32 channels**: one `.raw` function holds at most 32 channels. Acquire larger methods as several `.raw` files and **register them into the same section**. Grid mismatches and layer-name collisions are warned about but never block registration; a colliding layer is renamed automatically, so nothing already registered is overwritten.
+
 ---
 
 ## 5. Align — overlaying HE/IF on MSI
