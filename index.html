@@ -35,6 +35,7 @@
   .badge.local { background:#dbeafe; color:#1d4ed8; }
   .badge.both  { background:#dcfce7; color:#166534; }
   .badge.server{ background:#fef3c7; color:#92400e; }
+  .badge.empty { background:#f1f5f9; color:#64748b; }
   .row label { display:block; font-size:11px; color:#475569; margin-top:8px; }
   .row input, .row select, .row textarea {
       width:100%; padding:5px 7px; border:1px solid #cbd5e1; border-radius:4px;
@@ -167,6 +168,10 @@ const ProjectStorage = (() => {
             createdAt: project.createdAt || '',
             memo: project.memo || null,
             shareInfo: (si.slug || si.url) ? { slug: si.slug || '', url: si.url || '' } : null,
+            // 切片が 0 のローカル記録 (管理画面で作っただけ、まだ何も登録して
+            // いない) を一覧で見分けるため。開いても「レイヤーがありません」に
+            // しかならないので、"画像が空" の問い合わせの原因になっていた。
+            sectionCount: (project.sections || []).length,
         };
     }
     function _req(r) { return new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); }
@@ -180,7 +185,11 @@ const ProjectStorage = (() => {
             const tx = db.transaction(['projects', 'project_index'], 'readonly');
             const keys = await _req(tx.objectStore('projects').getAllKeys());
             const idx  = await _req(tx.objectStore('project_index').getAll());
-            if ((idx || []).length === (keys || []).length) return idx || [];
+            // 件数だけでなく「今の indexRowFor が持つ列が揃っているか」も見る。
+            // 列を足したときに古いインデックスが使われ続けるのを防ぐ (件数は
+            // 合ったままなので、これが無いと永久に埋め直されない)。
+            if ((idx || []).length === (keys || []).length
+                && (idx || []).every(r => r && typeof r.sectionCount === 'number')) return idx || [];
         } catch (e) {
             console.warn('project_index read failed; falling back to a full scan', e);
         }
@@ -921,8 +930,16 @@ async function treeMoveProject(slug, localId) {
     _ensureTree();
     const dest = await pickFolderModal();
     if (dest === undefined) return;
-    _treeRemove(n => n.type === 'project' && ((slug && n.slug === slug) || (localId && n.localId === localId)));
+    // ★ 一致するノードを**全部**外す。_treeRemove は 1 件外して返すだけなので、
+    //   {localId} と {slug} の 2 ノードで載っているプロジェクト (renderNodes の
+    //   コメント参照) を移動すると、片方が移動元に幽霊として残っていた。
     const node = { type: 'project' };
+    let removed;
+    while ((removed = _treeRemove(n => n.type === 'project'
+            && ((slug && n.slug === slug) || (localId && n.localId === localId))))) {
+        if (removed.slug && !node.slug) node.slug = removed.slug;
+        if (removed.localId && !node.localId) node.localId = removed.localId;
+    }
     if (slug) node.slug = slug;
     if (localId) node.localId = localId;
     _treeChildrenOf(dest.id).push(node);
@@ -1368,8 +1385,13 @@ async function buildRows() {
                 // onto it (write back to IDB) so the manager shows a single
                 // "Local + Server" row instead of "Local" + "Server only".
                 // Ambiguous (0 or >1 same-name) matches are left as server-only.
+                // ★ 中身の無いローカル記録には slug を渡さない。渡すと空の抜け殻が
+                //   "Local + Server" を名乗り、主ボタンが「Open」(= ローカルの空を
+                //   開く) に変わって、サーバにある本体へ手が届かなくなる。
+                //   sectionCount が無い (古いサマリ行) ときは従来どおり通す。
                 const nm = String(sp.display_name || '').trim().toLowerCase();
-                const cands = nm ? localOnly.filter(lp => String(lp.displayName || '').trim().toLowerCase() === nm) : [];
+                const cands = nm ? localOnly.filter(lp => String(lp.displayName || '').trim().toLowerCase() === nm
+                                                       && lp.sectionCount !== 0) : [];
                 if (cands.length === 1) {
                     const lp = cands[0];
                     const prev = lp.shareInfo || {};
@@ -1423,18 +1445,24 @@ function rowHtml(r) {
     const badge = r.kind === 'server-only'
         ? '<span class="badge server">Server only</span>'
         : (r.kind === 'local+server' ? '<span class="badge both">Local + Server</span>' : '<span class="badge local">Local</span>');
+    // ローカル記録に切片が 1 つも無い = 開いても「レイヤーがありません」にしか
+    // ならない。作っただけのプロジェクトを「データが消えた」と誤解しないよう、
+    // 一覧の時点で分かるようにする。
+    const emptyBadge = (r.local && r.local.sectionCount === 0)
+        ? '<span class="badge empty" title="このローカル記録には切片がありません（作成しただけの状態）">空</span>'
+        : '';
     const localId = r.local ? r.local.id : '';
     return `
         <div class="card p-3 proj-row" data-local-id="${safe(localId)}" data-slug="${safe(slug)}" data-url="${safe(url)}">
           <div class="flex items-center justify-between gap-3 flex-wrap">
             <div class="flex items-center gap-2 min-w-0">
               <div class="font-semibold truncate">${safe(name)}</div>
-              ${badge}
+              ${badge}${emptyBadge}
             </div>
             <div class="flex gap-2">
               ${r.local
                   ? '<button type="button" class="btn primary" data-action="open-local">Open</button>'
-                  : '<button type="button" class="btn primary" data-action="open-server" title="サーバから取り込んで master mode で開きます (admin password 要)">Open (master)</button>'}
+                  : '<button type="button" class="btn primary" data-action="open-server" title="サーバから取り込んで master mode で開きます (master password 要)">Open (master)</button>'}
               ${(!r.local && slug) ? '<button type="button" class="btn" data-action="open-share" title="閲覧専用 share view で開きます">Share view</button>' : ''}
               ${url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : '')}
               ${r.local ? '<button type="button" class="btn danger" data-action="delete-local">Delete</button>' : ''}
@@ -1477,6 +1505,8 @@ async function renderList() {
         if (lid) byLocal.set(lid, r);
     }
     const placed = new Set();
+    // 同じ行に解決された最初のノード。2 つ目以降は重複なので畳む (renderNodes)。
+    const firstNodeByKey = new Map();
     const rowForNode = (n) => {
         if (n.slug && bySlug.has(n.slug)) return bySlug.get(n.slug);
         if (n.localId && byLocal.has(n.localId)) return byLocal.get(n.localId);
@@ -1548,7 +1578,29 @@ async function renderList() {
                     + '</div>';
             } else if (n.type === 'project') {
                 const r = rowForNode(n);
-                if (r) { placed.add(rkey(r)); html += rowHtml(r); }
+                if (!r) continue;
+                const k = rkey(r);
+                // ★ 1 つのプロジェクトがツリーに 2 ノード載っていることがある。
+                //   フォルダ内の「＋プロジェクト」は {localId} だけのノードを作り
+                //   (:1595)、publish 後にローカル記録を持たない別 PC から「移動」
+                //   すると slug でしか照合できないので {slug} ノードが足される。
+                //   ツリーはサーバ共有なので、**両方を解決できる PC でだけ**同じ
+                //   行が 2 回描かれ、「プロジェクトが複製された」ように見えていた
+                //   (実体は 1 つで、どちらを押しても同じものが開く)。
+                //   ここで 1 つに畳み、身元 (slug / localId) は残す方へ寄せる。
+                //   別フォルダに散っている場合はツリー順で先に出た方を残す。
+                //   保存はユーザーが次にフォルダ操作をしたとき (persistTreeAndRender)。
+                const first = firstNodeByKey.get(k);
+                if (first) {
+                    if (n.slug && !first.slug) first.slug = n.slug;
+                    if (n.localId && !first.localId) first.localId = n.localId;
+                    const i = nodes.indexOf(n);   // sortNodes は複製を返すので splice して安全
+                    if (i >= 0) nodes.splice(i, 1);
+                    continue;
+                }
+                firstNodeByKey.set(k, n);
+                placed.add(k);
+                html += rowHtml(r);
             }
         }
         return html;

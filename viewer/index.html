@@ -104,6 +104,7 @@ body.share-mode:not(.share-admin) #btn-share-admin-login { display:inline-flex; 
 .sync-status.sync-synced          { background:#dcfce7; color:#166534; }
 .sync-status.sync-conflict        { background:#fee2e2; color:#b91c1c; }
 .sync-status.sync-needs-master-pw { background:#ede9fe; color:#6d28d9; }
+.sync-status.sync-needs-share-pw  { background:#ede9fe; color:#6d28d9; }
 .sync-status.sync-error           { background:#fee2e2; color:#b91c1c; }
 body.share-mode .sync-status { display:none !important; }
 /* Preview/embed mode (opened with #...&preview=1, e.g. the MRM "実測棚卸し"
@@ -2380,6 +2381,8 @@ const ProjectStorage = (() => {
             createdAt: project.createdAt || '',
             memo: project.memo || null,
             shareInfo: (si.slug || si.url) ? { slug: si.slug || '', url: si.url || '' } : null,
+            // 切片が 0 のローカル記録を一覧で見分けるため (管理画面の「空」バッジ)。
+            sectionCount: (project.sections || []).length,
         };
     }
 
@@ -2431,7 +2434,11 @@ const ProjectStorage = (() => {
             const t = await tx(['projects', 'project_index'], 'readonly');
             const keys = await pr(t.objectStore('projects').getAllKeys());
             const idx = await pr(t.objectStore('project_index').getAll());
-            if ((idx || []).length === (keys || []).length) return sortRows(idx || []);
+            // 件数だけでなく「今の indexRowFor が持つ列が揃っているか」も見る。
+            // 列を足しても件数は合ったままなので、これが無いと古いインデックスが
+            // 永久に使われ続ける。
+            if ((idx || []).length === (keys || []).length
+                && (idx || []).every(r => r && typeof r.sectionCount === 'number')) return sortRows(idx || []);
         } catch (e) {
             console.warn('project_index read failed; falling back to a full scan', e);
         }
@@ -5815,8 +5822,15 @@ async function parquetSrcForEnt(ent) {
     if (ent && ent.sourceUrl) return parquetSrcFromUrl(ent.sourceUrl, ent.sourceBytes);
     if (!ent || !ent.blobId) return null;
     const rec = await ProjectStorage.getBlob(ent.blobId);
-    if (!rec || !rec.blob) return null;
-    return parquetSrcFromBlob(rec.blob);
+    if (rec && rec.blob) return parquetSrcFromBlob(rec.blob);
+    // ★ ローカルの blob が消えている。parquet だけは**ダウンロードして戻さない**
+    //   — 数百 MB を IndexedDB に置こうとして容量超過で消える、を繰り返すだけ
+    //   なので、共有側と同じように Storage の URL へ HTTP Range で読みに行く。
+    const path = storagePathForEnt(ent, (typeof App !== 'undefined') ? App.project : null);
+    const url = path ? SupabaseClient.publicUrl('atlases', path) : null;
+    if (!url) return null;
+    console.info('[repair] parquet を Storage から直接読みます:', path);
+    return parquetSrcFromUrl(url, ent.sourceBytes);
 }
 
 // _pqFiles / pq_index のキー。共有先は blobId を持たないので URL から作る。
@@ -6680,8 +6694,9 @@ class SectionPanel {
 
     async loadImageLayer(key, ent) {
         if (!ent || !ent.blobId) return;
-        const rec = await ProjectStorage.getBlob(ent.blobId);
-        if (!rec) return;
+        // blob が消えていても publish 済みなら Storage から取り直す (ensureLocalBlob)。
+        const rec = await ensureLocalBlob(ent, App.project);
+        if (!rec || !rec.blob) return;
         const dataUrl = await decodeImageBlobToDataUrl(rec.blob, rec.mime);
         this.imageDataUrls[key] = dataUrl;
         await this.attachImage(key, dataUrl);
@@ -6714,10 +6729,11 @@ class SectionPanel {
             }
             result = await buildParquetRaster(ent, src);
         } else {
-            const rec = await ProjectStorage.getBlob(ent.blobId);
+            const rec = await ensureLocalBlob(ent, App.project);
             if (!rec || !rec.blob) {
                 throw new Error('元データがこの端末に保存されていません (' + key + ')。'
-                    + '保存容量が足りずに書き込みが取り消された可能性があります');
+                    + 'サーバからも復元できませんでした (未 publish、または保存容量が'
+                    + '足りずに書き込みが取り消された可能性があります)');
             }
             if (parseWorkerAvailable()) {
                 try {
@@ -8284,11 +8300,22 @@ class SectionPanel {
     removeLayer(key, skipConfirm) {
         if (!skipConfirm && !confirm('レイヤー "' + formatDisplayName(key) + '" を削除しますか?')) return;
         const ent = (this.section.images || {})[key] || (this.section.msiSeries || {})[key];
-        // Avoid orphaning a shared blob: only drop the blob when no other layer references it.
+        // Avoid orphaning a shared blob: only drop the blob when no other layer
+        // references it.
+        // ★ 走査はプロジェクト全体。以前は**同じ切片の中しか見ていなかった**ので、
+        //   1 本のソースを複数の切片で共有していると (parquet のノンターゲットは
+        //   1 ファイルを全切片で共有し、.raw も切片ごとに同じ zip を指しうる)、
+        //   ある切片で最後のレイヤーを消した時点で他の切片のソースまで道連れに
+        //   なり、そちらは二度と表示できなくなっていた ("delete file" ボタンは
+        //   切片内の全レイヤーを消すので、まさにこれを踏む)。deleteSection には
+        //   最初から全切片を見るガードがあり、そこと非対称だった。
         const blobStillUsed = (id) => {
             if (!id) return false;
-            for (const e of Object.values(this.section.images || {})) if (e && e.blobId === id && e !== ent) return true;
-            for (const e of Object.values(this.section.msiSeries || {})) if (e && e.blobId === id && e !== ent) return true;
+            const sections = (App.project && App.project.sections) || [this.section];
+            for (const sec of sections) {
+                for (const e of Object.values(sec.images || {})) if (e && e.blobId === id && e !== ent) return true;
+                for (const e of Object.values(sec.msiSeries || {})) if (e && e.blobId === id && e !== ent) return true;
+            }
             return false;
         };
         if (ent && ent.blobId && !blobStillUsed(ent.blobId)) ProjectStorage.deleteBlob(ent.blobId).catch(() => {});
@@ -14940,6 +14967,72 @@ function sanitizeStorageKeySegment(s) {
     return String(s == null ? '' : s).replace(/[^A-Za-z0-9._-]/g, '_') || 'bin';
 }
 
+// publish が Storage に置くときのキー規則。**_publishCoreInner の enqueue と
+// ここは必ず同じ規則**でなければならない (片方だけ変えると、既に上がっている
+// オブジェクトを見つけられなくなる)。拡張子だけを付けるのは rename が
+// 同じ blobId のまま filename を書き換えるため (拡張子は継承される)。
+function storageExtOf(name) {
+    const m = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || ''));
+    return m ? ('.' + sanitizeStorageKeySegment(m[1]).toLowerCase()) : '';
+}
+
+// この ent のソースが Storage 上のどこに在るか。取り込んだプロジェクトは
+// storagePath を持っている。ローカルで登録したものは持っていないが、publish
+// 済みなら slug と blobId からパスを組み立てられる (パスは blobId で決まり、
+// blob の中身は登録後に変わらないので、後から食い違うことがない)。
+function storagePathForEnt(ent, project) {
+    if (!ent) return '';
+    if (ent.storagePath) return ent.storagePath;
+    const slug = project && project.shareInfo && project.shareInfo.slug;
+    if (!slug || !ent.blobId) return '';
+    return slug + '/blobs/' + ent.blobId + storageExtOf(ent.filename);
+}
+
+// ローカルの blob が消えていても、同じものが Storage に在れば取り直す。
+//
+// ★ master モードはこれまでローカルの IndexedDB だけを見ていた。共有画面は
+//   Storage から取り直すので、「share は見えるのに master だけ何も出ない」
+//   という、利用者からは直しようのない状態が起こりえた (ブラウザによる退避、
+//   容量超過での書き込み巻き戻し、取り込みの部分失敗など)。サーバに在るの
+//   だから黙って取り直せばよい。同じ blob を 1390 化合物が共有するので、
+//   取得は blobId ごとに 1 本にまとめる。
+const _blobRepairInFlight = new Map();   // blobId -> Promise<rec|null>
+async function ensureLocalBlob(ent, project) {
+    if (!ent || !ent.blobId) return null;
+    let rec = null;
+    try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
+    if (rec && rec.blob) return rec;
+    const running = _blobRepairInFlight.get(ent.blobId);
+    if (running) return running;
+    const path = storagePathForEnt(ent, project || (typeof App !== 'undefined' ? App.project : null));
+    const url = path ? SupabaseClient.publicUrl('atlases', path) : null;
+    if (!url) return null;
+    const job = (async () => {
+        try {
+            const resp = await fetch(url);
+            if (!resp.ok) throw new Error('HTTP ' + resp.status + ' for ' + path);
+            const blob = await resp.blob();
+            const mime = ent.mime || blob.type || 'application/octet-stream';
+            // 同じ blobId で書き戻す。これで同じソースを指す他のレイヤーも一緒に
+            // 直る (ent 側は書き換えない = 保存も publish も従来どおり)。
+            await ProjectStorage.putBlob({
+                id: ent.blobId, blob, mime,
+                filename: ent.filename || path.split('/').pop(),
+            });
+            const back = await ProjectStorage.getBlob(ent.blobId);
+            if (!back || !back.blob) throw new Error('IndexedDB へ保存できませんでした (容量不足の可能性)');
+            console.info('[repair] Storage からソースを復元しました:', path);
+            return back;
+        } catch (e) {
+            console.warn('[repair] Storage から復元できませんでした:', path, e);
+            return null;
+        }
+    })();
+    _blobRepairInFlight.set(ent.blobId, job);
+    job.then(() => { _blobRepairInFlight.delete(ent.blobId); });
+    return job;
+}
+
 // Content signature of a blob, used to deduplicate identical "full" HE/IF
 // images at export. Prefers SHA-256 (crypto.subtle; needs a secure context),
 // falling back to length + FNV-1a over the bytes when subtle crypto is absent.
@@ -15996,20 +16089,27 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     //   rename は拡張子を継承する仕様なので、拡張子なら安定する。
     //   拡張子は blobId ごとに最初に見たものを採用する (切片ごとに rename すると
     //   同じ blobId でも ent.filename が食い違いうるため)。
+    //   (規則そのものは storageExtOf / storagePathForEnt に置いてある。
+    //    blob 復旧 (ensureLocalBlob) が同じパスを組み立てられる必要があるため。)
     const extByBlob = new Map();
-    const storageExtOf = (name) => {
-        const m = /\.([A-Za-z0-9]{1,8})$/.exec(String(name || ''));
-        return m ? ('.' + sanitizeStorageKeySegment(m[1]).toLowerCase()) : '';
-    };
     const enqueue = (sec, storage, kindFolder, slot, k, ent) => {
-        if (!ent || !ent.blobId) return;
+        if (!ent) return;
         const filename = (ent.filename) || (k + '.bin');
-        if (!extByBlob.has(ent.blobId)) extByBlob.set(ent.blobId, storageExtOf(filename));
+        // ★ blobId を持たないレイヤー = Storage から直接読んでいるもの
+        //   (取り込んだ parquet)。既にサーバに在るのでアップロードは要らないが、
+        //   **参照は必ず書かなければならない**。ここで捨てていた頃は、取り込んだ
+        //   プロジェクトを再 publish した時点で parquet のレイヤーが公開内容から
+        //   丸ごと消えていた (storage_paths は切片ごと置き換えられるため)。
+        const noUpload = !ent.blobId;
+        if (noUpload && !ent.storagePath) return;
+        if (!noUpload && !extByBlob.has(ent.blobId)) extByBlob.set(ent.blobId, storageExtOf(filename));
         // Supabase は非 ASCII キーを InvalidKey で弾くので、パスに載せるのは
         // blobId (英数字と _ のみ) と正規化した拡張子だけにする。元のファイル名は
         // task.filename → ref.filename として表示・ダウンロード名に残る。
-        const path = `${meta.slug}/blobs/${ent.blobId}${extByBlob.get(ent.blobId)}`;
-        const task = { blobId: ent.blobId, kindFolder, slot, key: k, ent, sectionId: sec.id, storage, path, filename };
+        const path = noUpload
+            ? ent.storagePath
+            : `${meta.slug}/blobs/${ent.blobId}${extByBlob.get(ent.blobId)}`;
+        const task = { blobId: ent.blobId || null, noUpload, kindFolder, slot, key: k, ent, sectionId: sec.id, storage, path, filename };
         let bucket = pathTasks.get(path);
         if (!bucket) { bucket = []; pathTasks.set(path, bucket); }
         bucket.push(task);
@@ -16035,8 +16135,15 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     const writeRefToTasks = (path, ref) => {
         const tasks = pathTasks.get(path) || [];
         for (const t of tasks) {
-            if (t.slot === 'msiSeries') t.storage[t.slot][t.key] = Object.assign({}, t.ent, ref);
-            else t.storage[t.slot][t.key] = ref;
+            if (t.slot === 'msiSeries') {
+                const out = Object.assign({}, t.ent, ref);
+                // 受け手は自分の環境で URL を組み立て直すので、こちらの
+                // sourceUrl / storagePath は載せない (別オリジンの URL が
+                // 公開ドキュメントに残るだけで、誰も読まない)。
+                delete out.sourceUrl;
+                delete out.storagePath;
+                t.storage[t.slot][t.key] = out;
+            } else t.storage[t.slot][t.key] = ref;
         }
     };
 
@@ -16044,19 +16151,29 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     // 旧スキーム (slug/<切片ID>/...) のパスがいつまでも残って肥大するのを防ぐ。
     for (const p of [...uploadedPaths]) if (!pathTasks.has(p)) uploadedPaths.delete(p);
 
-    // ---- Stage B: HEAD-verify every cached path. The cache claims they're
-    // already on Storage, but real-world drift (manual deletes, bucket
+    // ---- Stage B: HEAD-verify what is already on Storage. The cache claims
+    // some paths are up there, but real-world drift (manual deletes, bucket
     // migrations) can leave the DB pointing at missing objects. Drop those
     // from the cache so they get re-uploaded in Stage C, instead of
     // silently writing dead paths into the DB payload.
+    //
+    // ★ 対象はキャッシュ掲載分だけでなく**全パス**にする。パスは blobId で
+    //   決まり中身は不変なので、既に在るものを上げ直す意味は無い。そして何より、
+    //   ローカルの blob が失われたレイヤーでも「サーバに在る」と確かめられれば
+    //   参照を書けるので、**公開内容からレイヤーが消えなくなる**。以前は
+    //   キャッシュに載っていないパスは無条件にアップロードへ回り、blob が
+    //   無ければ黙って storage_paths から落ちていた (共有先で「No data」)。
+    //   forceFullUpload (救済用の全再送) のときは検証を飛ばして必ず送り直す。
+    //   ただしアップロードできない参照専用 (noUpload) だけは常に検証する。
     const candidatePaths = [];
-    for (const path of pathTasks.keys()) {
-        if (uploadedPaths.has(path)) candidatePaths.push(path);
+    for (const [path, tasks] of pathTasks.entries()) {
+        if (!forceFull || tasks.every(t => t.noUpload)) candidatePaths.push(path);
     }
     if (candidatePaths.length) {
         await runWithConcurrency(candidatePaths, 8, async (path) => {
             const ok = await SupabaseClient.headObject('atlases', path);
             if (ok) {
+                uploadedPaths.add(path);
                 // Object exists — record the ref straight from cached metadata
                 // and skip the network upload for this path.
                 const tasks = pathTasks.get(path) || [];
@@ -16082,8 +16199,9 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
         uploadTasks.push(tasks[0]);
     }
 
-    // Compounds whose local blob is gone (so they can't be uploaded and would
-    // silently be absent from the published doc → "No data" for recipients).
+    // ソースがこの端末にも Storage にも無いレイヤー (Stage B で「サーバに在る」と
+    // 確かめられず、ローカルの blob も消えている)。参照を書けないので、このまま
+    // 公開すると storage_paths から落ちて共有先で「No data」になる。
     const skippedNoBlob = [];
 
     // ---- Stage C-0: サイズを先に測る。
@@ -16211,15 +16329,32 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     // ★ progress.close() はここでは呼ばない。この後の upsert_project_doc が
     //   5560 エントリぶんの JSON (数 MB) を送るので、モーダルを消すと
     //   「また固まった」ように見える。RPC の finally でまとめて閉じる。
-    if (progress) progress.setNote('アップロード完了。サーバへ反映しています…');
+    // ★ ソースを 1 つでも欠いたまま黙って公開しない。
+    //   upsert_project_doc は storage_paths を**切片ごと丸ごと置き換える**ので、
+    //   参照を書けなかったレイヤーはサーバの公開内容から消える。以前はトーストを
+    //   出すだけで公開を続けていたため、ローカルの blob を失った端末で 1 回
+    //   同期しただけで、共有先から見えていたレイヤーが消えていた。
     if (skippedNoBlob.length) {
         const uniq = [...new Set(skippedNoBlob)];
         const head = uniq.slice(0, 5).map(k => String(k).replace(/^MSI_/, '')).join(', ');
-        const msg = uniq.length + ' 件の画像をアップロードできませんでした (ローカルに blob がありません): '
-            + head + (uniq.length > 5 ? ' …' : '') + '。該当化合物を再登録のうえ再公開してください。';
-        console.warn('publish: blob missing, not uploaded →', uniq);
-        if (!silent && typeof showToast === 'function') showToast(msg, 9000);
+        console.warn('publish: source missing locally AND on Storage →', uniq);
+        const msg = uniq.length + ' 件のレイヤーは、この端末にもサーバにもソースがありません: '
+            + head + (uniq.length > 5 ? ' …' : '')
+            + '。このまま公開すると、これらは共有先から見えなくなります。';
+        if (silent) {
+            // 自動同期は勝手に公開内容を削らない。手動 publish の判断に委ねる。
+            const err = new Error('missing_sources');
+            err.userMessage = msg + ' 手動で「Publish to share」を実行して内容を確認してください。';
+            throw err;
+        }
+        if (progress) { try { progress.close(); } catch (e2) {} progress = null; }
+        if (!confirm(msg + '\n\nOK: このまま公開する\nキャンセル: 中止する (サーバの公開内容は変わりません)')) {
+            const err = new Error('publish_cancelled');
+            err.cancelled = true;
+            throw err;
+        }
     }
+    if (progress) progress.setNote('アップロード完了。サーバへ反映しています…');
 
     // Exclude the read-only collaborator overlay (`_collab`): those ROIs are
     // authored by viewers and live authoritatively on the server. Master
@@ -16333,6 +16468,25 @@ async function publishProjectToShare() {
     const meta = await openPublishMetaModal(project);
     if (!meta) return;
 
+    // ★ 初回 publish のときだけ、その slug がサーバで空いているか確かめる。
+    //   upsert_project_doc は slug が主キーなので、埋まっている slug へ送ると
+    //   **別のプロジェクトを丸ごと上書きする**。再 publish (既に slug を持って
+    //   いる) は自分自身に当たるだけなので聞かない。
+    //   getProjectPublicState は anon の列限定 SELECT で、失敗しても null を
+    //   返すだけ (通信不良で publish を止めはしない)。
+    if (!(project.shareInfo && project.shareInfo.slug)) {
+        let taken = null;
+        try { taken = await SupabaseClient.getProjectPublicState(meta.slug); }
+        catch (e) { console.warn('slug の重複確認に失敗 (続行します)', e); }
+        if (taken) {
+            const nm = taken.display_name || meta.slug;
+            if (!confirm('slug "' + meta.slug + '" は既にサーバで使われています'
+                + '（プロジェクト名: ' + nm + '）。\n'
+                + 'このまま続けると、そのプロジェクトを上書きします。\n\n'
+                + 'OK: 上書きする / キャンセル: 中止して slug を変える')) return;
+        }
+    }
+
     // master pw: reuse the cached value when available; otherwise prompt.
     let masterPw = _readCachedMasterPw();
     if (!masterPw) {
@@ -16407,9 +16561,31 @@ async function publishProjectToShare() {
     }
 }
 
+// 表示名から slug を作れなかったときの代替。
+//
+// ★ 日本語だけの名前は ASCII 化すると空になる。以前はそこで 'project' を既定に
+//   していたので、**日本語名のプロジェクトはすべて同じ slug** になり、2 件目を
+//   publish した時点で 1 件目をサーバ上で黙って上書きしていた (slug が
+//   upsert_project_doc の主キー)。実際に slug='project' のプロジェクトが
+//   1 件登録済みだった。日付 + 乱数で必ず一意になるようにする。
+function _fallbackSlugFor(project) {
+    const digits = String((project && project.memo && project.memo.experimentDate) || '').replace(/[^0-9]/g, '');
+    let ymd;
+    if (digits.length >= 8) {
+        ymd = digits.slice(2, 8);                     // YYYYMMDD → YYMMDD
+    } else {
+        const t = new Date();
+        ymd = String(t.getFullYear()).slice(2)
+            + String(t.getMonth() + 1).padStart(2, '0')
+            + String(t.getDate()).padStart(2, '0');
+    }
+    return 'p' + ymd + '_' + Math.random().toString(36).slice(2, 6);
+}
+
 async function openPublishMetaModal(project) {
     const safe = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    const guess = (project.displayName || 'project').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'project';
+    const fromName = (project.displayName || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+    const guess = fromName || _fallbackSlugFor(project);
     // Re-publish must REUSE the project's existing slug — it is the project's
     // identity. Deriving a fresh slug from displayName (e.g. after a rename)
     // would create a SECOND server record and fork the project. So when the
@@ -16423,6 +16599,7 @@ async function openPublishMetaModal(project) {
             <input type="text" name="slug" value="${safe(existingSlug || guess)}" pattern="[A-Za-z0-9_-]+" required${existingSlug ? ' readonly title="既存の共有 slug を維持し、同じプロジェクトを更新します（改名もここで反映）。変更すると別プロジェクトになります。"' : ''}>
           </label>
           ${existingSlug ? '<p style="font-size:11px;color:#475569;margin-top:2px;">※ 再 publish: 既存の slug を維持して同じプロジェクトを更新します（改名もここで反映）。</p>' : ''}
+          ${(!existingSlug && !fromName) ? '<p style="font-size:11px;color:#b45309;margin-top:2px;">※ プロジェクト名に英数字が無いため slug を自動生成しました。分かりやすい名前に変えられます（英数字 / _ / -）。</p>' : ''}
           <label style="display:flex;align-items:center;gap:6px;margin-top:6px;">
             <input type="checkbox" data-is-public name="is_public">
             公開リンク (パスワードなしで閲覧可)
@@ -19287,6 +19464,15 @@ function serverUnavailableReason() {
     return null;   // 使える
 }
 
+// 「その RPC がまだデータベースに適用されていない」だけかを見分ける。SQL は
+// Supabase の SQL Editor へ手で流す運用なので、新しい RPC を足したページが
+// 古いスキーマに対して動くことが普通にある。呼び出し側はこれが true のときだけ
+// 旧経路へ落とすこと (認証エラーまでフォールバックすると穴になる)。
+function _isMissingRpc(e) {
+    const msg = String((e && (e.message || e.details || e.hint)) || '');
+    return (e && e.code === 'PGRST202') || /Could not find the function/i.test(msg);
+}
+
 const SupabaseClient = (() => {
     let client = null;
     let lastError = null;
@@ -21020,31 +21206,79 @@ const App = {
         await this._hydrateSharedProject(session);
     },
 
-    // Pull a published project from Supabase into the local IndexedDB so a
-    // master on a different PC (or in incognito) can edit it with the full
-    // master toolbar instead of the read-only share recipient flow. Mirrors
-    // the share recipient hydrate path (_hydrateSharedProject) but lands on
-    // a real master project record (no `__share: true`, fresh local id, all
-    // blobs persisted) and returns the new project id for App.init to open.
-    // admin pw is required because the import grants editing rights — the
-    // session_token returned by unlock_project must carry role='admin'.
-    async _importProjectFromServer(slug) {
-        if (!SupabaseClient.configured()) {
-            alert(serverUnavailableReason() || 'Supabase が未設定です');
-            return null;
+    // 取り込み用の読み取りトークンを取る。返り値は _hydrateSharedProject と
+    // 同じ形の session ({ slug, token, role, expiresAt })。
+    //
+    // ★ 認証はマスターパスワード。取り込みが読むのは get_project_doc と
+    //   list_rois だけで、どちらも viewer トークンで通る。以前は**プロジェクト
+    //   個別の admin password** を要求していたが、publish モーダルの admin 欄は
+    //   任意入力で、upsert_project_doc は _admin_pw が null なら資格情報を書かない
+    //   (share_locks.sql)。つまり admin pw を入れずに公開したプロジェクトには
+    //   正解のパスワードが存在せず、**どの PC からも永久に取り込めなかった**
+    //   (何を入れても unlock_project が 28P01 を返し、一覧へ戻るだけ)。
+    async _openImportSession(slug) {
+        // まずマスターパスワードで読み取りトークンを取る。管理画面の入場と
+        // 同じ資格情報なので、たいていは入力すら要らない。
+        let masterPw = _readCachedMasterPw();
+        let typed = false;
+        let missingRpc = false;
+        for (let attempt = 0; attempt < 2 && !missingRpc; attempt++) {
+            if (!masterPw) {
+                masterPw = (prompt(
+                    '"' + slug + '" を master mode で取り込みます。\n' +
+                    'Master password を入力してください。',
+                    ''
+                ) || '').trim();
+                typed = true;
+                if (!masterPw) return null;
+            }
+            try {
+                const raw = await SupabaseClient.unlockProjectMaster(slug, masterPw);
+                const row = Array.isArray(raw) ? raw[0] : raw;
+                if (!row || !row.token) { alert('token を取得できませんでした'); return null; }
+                _saveCachedMasterPw(masterPw);
+                return { slug, token: row.token, role: row.role || 'viewer', expiresAt: row.expires_at };
+            } catch (e) {
+                // ★ 落とすのは「RPC がまだ無い」ときだけ。パスワード違いで旧経路へ
+                //   落ちると、マスターパスワードを admin パスワードとして
+                //   もう一度聞くことになり、利用者には同じ失敗が 2 回見える。
+                if (_isMissingRpc(e)) {
+                    console.warn('unlock_project_master が未適用。admin password 経路へ退避します', e);
+                    missingRpc = true;
+                    break;
+                }
+                const msg = String((e && (e.message || e.details)) || e);
+                if (/not_found|P0002/i.test(msg)) {
+                    alert('サーバにこのプロジェクトがありません (slug: ' + slug + ')');
+                    return null;
+                }
+                console.warn('import unlock_project_master failed', e);
+                // キャッシュが古いだけかもしれないので、捨てて 1 回だけ聞き直す。
+                try { sessionStorage.removeItem('desi:masterPw'); } catch (e2) {}
+                if (typed) { alert('マスターパスワードが違います'); return null; }
+                masterPw = '';
+            }
         }
+        if (!missingRpc) return null;
+
+        // ---- 退避経路: 旧来のプロジェクト個別 admin password ----
+        // unlock_project_master を含む supabase/share_locks.sql をまだ流していない
+        // データベース向け。admin pw が設定されていないプロジェクトはここでは
+        // 取り込めないので、その旨まで含めて知らせる。
         const adminPw = (prompt(
             '"' + slug + '" を master mode で取り込みます。\n' +
-            'このプロジェクトの admin password を入力してください。',
+            'このサーバは master 取り込みに未対応のため、このプロジェクトの\n' +
+            'admin password を入力してください。',
             ''
         ) || '').trim();
         if (!adminPw) return null;
-
         let raw;
         try { raw = await SupabaseClient.unlockProject(slug, adminPw); }
         catch (e) {
             console.warn('import unlock_project failed', e);
-            alert('admin password が違うか、プロジェクトが存在しません');
+            alert('admin password が違うか、このプロジェクトには admin password が\n'
+                + '設定されていません。管理画面の「🔑 パスワード」で admin を設定してから\n'
+                + 'もう一度お試しください。');
             return null;
         }
         const row = Array.isArray(raw) ? raw[0] : raw;
@@ -21053,7 +21287,22 @@ const App = {
             alert('viewer password では取り込めません。admin password を入力してください\n(admin pw 未設定の公開リンクは "Share view" ボタンで read-only 表示してください)');
             return null;
         }
-        const session = { slug, token: row.token, role: 'admin', expiresAt: row.expires_at };
+        return { slug, token: row.token, role: 'admin', expiresAt: row.expires_at };
+    },
+
+    // Pull a published project from Supabase into the local IndexedDB so a
+    // master on a different PC (or in incognito) can edit it with the full
+    // master toolbar instead of the read-only share recipient flow. Mirrors
+    // the share recipient hydrate path (_hydrateSharedProject) but lands on
+    // a real master project record (no `__share: true`, fresh local id, all
+    // blobs persisted) and returns the new project id for App.init to open.
+    async _importProjectFromServer(slug) {
+        if (!SupabaseClient.configured()) {
+            alert(serverUnavailableReason() || 'Supabase が未設定です');
+            return null;
+        }
+        const session = await this._openImportSession(slug);
+        if (!session) return null;
 
         let doc;
         try { doc = await SupabaseClient.fetchProjectDoc(session.token); }
@@ -21126,8 +21375,18 @@ const App = {
             id: uid('proj'),
             displayName: docMeta.display_name || doc.display_name || doc.displayName || slug,
             anatomyPalette: doc.anatomy_palette || doc.anatomyPalette || {},
+            // ★ 切片 ID はサーバの UUID ではなく client_id を使う。
+            //   get_project_doc は client_id を**単独の列としては返さない**
+            //   (meta の中に入っている) ので、これまでの `s.client_id || s.id` は
+            //   必ず UUID に落ちていた。その状態で取り込んだプロジェクトを再
+            //   publish すると、upsert_project_doc の client_id 照合が総外れして
+            //   既存の切片が全削除→再作成され、rois の ON DELETE CASCADE で
+            //   **共有先の閲覧者が描いた ROI が消える**。_refreshMasterCollabRois は
+            //   最初から meta.client_id を読んでおり、そことも噛み合っていなかった。
+            //   (共有モードの _hydrateSharedProject は UUID のままで正しい。
+            //    あちらは list_rois と同じキーで揃っている必要がある。)
             sections: (doc.sections || []).map(s => ({
-                id: s.client_id || s.id,
+                id: (s.meta && s.meta.client_id) || s.id,
                 ordinal: s.ordinal,
                 displayName: s.display_name || s.displayName || ('Section ' + s.ordinal),
                 meta: s.meta || {},
@@ -21212,7 +21471,9 @@ const App = {
             for (const [key, ref] of Object.entries(sp.images || {})) {
                 try {
                     const { id: blobId, mime } = await ensureImported(ref);
-                    sec.images[key] = { blobId, mime, filename: ref.filename };
+                    // storagePath を残す。これで blob が失われても Storage から
+                    // 取り直せる (ensureLocalBlob)。以前は path を捨てていた。
+                    sec.images[key] = { blobId, mime, filename: ref.filename, storagePath: ref.path };
                 } catch (e) {
                     console.warn('import image fetch failed', key, e);
                     failed.push({ kind: 'image', key, path: ref.path, error: e });
@@ -21220,10 +21481,34 @@ const App = {
             }
             for (const [key, ref] of Object.entries(sp.msiSeries || {})) {
                 try {
+                    // ★ parquet はダウンロードしない。1 本に全切片 × 全化合物が
+                    //   入っていて数百 MB あるが、列指向なので 1 化合物あたり実際に
+                    //   要るのは数百 KB で、Storage の URL に HTTP Range を投げれば
+                    //   足りる。丸ごと IndexedDB に置くと容量超過でトランザクション
+                    //   が取り消され、「blobId は在るのに中身が無い」状態になって
+                    //   MSI が 1 枚も出なくなる。共有側は既にこの形
+                    //   (_hydrateSharedProject) で、取り込み側だけ漏れていた。
+                    if (ref.kind === 'parquet') {
+                        const url = SupabaseClient.publicUrl('atlases', ref.path);
+                        if (!url) throw new Error('publicUrl returned null for ' + ref.path);
+                        sec.msiSeries[key] = Object.assign({}, ref, {
+                            blobId: null, sourceUrl: url, storagePath: ref.path,
+                        });
+                        if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
+                            sec.msiFiles[ref.sourceFileId] = {
+                                id: ref.sourceFileId, kind: ref.kind, filename: ref.filename,
+                                sourceUrl: url, storagePath: ref.path,
+                            };
+                        }
+                        continue;
+                    }
                     const { id: blobId } = await ensureImported(ref);
-                    sec.msiSeries[key] = Object.assign({}, ref, { blobId });
+                    sec.msiSeries[key] = Object.assign({}, ref, { blobId, storagePath: ref.path });
                     if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
-                        sec.msiFiles[ref.sourceFileId] = { id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, blobId };
+                        sec.msiFiles[ref.sourceFileId] = {
+                            id: ref.sourceFileId, kind: ref.kind, filename: ref.filename,
+                            blobId, storagePath: ref.path,
+                        };
                     }
                 } catch (e) {
                     console.warn('import msi fetch failed', key, e);
@@ -21244,9 +21529,27 @@ const App = {
         // Same per-section fan-out + colorKey grouping as the share-mode
         // hydration path; without it the imported project drops every ROI
         // that the master previously published.
+        // ★ list_rois はサーバの UUID で引くので、取得は doc.sections (UUID) で
+        //   行い、載せるときにローカルの切片キー (client_id) へ翻訳する。
+        //   翻訳しないと ROI が「どの切片にも属さない」状態になって描かれない。
         try {
-            const rows = await fetchAllShareRois(session.token, project.sections);
-            project.rois = groupRoiRowsByColor(rows, project.anatomyPalette);
+            const uuidToClient = {};
+            for (const s of (doc.sections || [])) {
+                if (s && s.id) uuidToClient[s.id] = (s.meta && s.meta.client_id) || s.id;
+            }
+            const rows = await fetchAllShareRois(session.token, doc.sections || []);
+            project.rois = groupRoiRowsByColor(rows, project.anatomyPalette).map(r => {
+                const polys = {}, sids = {};
+                for (const [uuid, poly] of Object.entries(r.polysBySection || {})) {
+                    const cid = uuidToClient[uuid];
+                    if (!cid) continue;
+                    polys[cid] = poly;
+                    if (r.serverIdsBySection && r.serverIdsBySection[uuid]) {
+                        sids[cid] = r.serverIdsBySection[uuid];
+                    }
+                }
+                return Object.assign({}, r, { polysBySection: polys, serverIdsBySection: sids });
+            });
         } catch (e) { console.warn('import ROI fetch failed', e); }
 
         return project;
@@ -21894,7 +22197,20 @@ const App = {
             }
         }
         const sources = [...groups.values()];
-        if (!sources.length) { showToast('差し替えられる parquet が登録されていません'); return; }
+        if (!sources.length) {
+            // 取り込んだプロジェクトの parquet は Storage 直読み (blobId を持たない)
+            // ので、この一覧には出ない。「登録されていません」だけでは誤解を招く。
+            const urlBacked = (this.project.sections || []).some(sec =>
+                Object.values((sec && sec.msiSeries) || {})
+                    .some(e => e && e.kind === 'parquet' && !e.blobId && e.sourceUrl));
+            if (urlBacked) {
+                showToast('サーバから取り込んだ parquet はこの端末に実体が無いため差し替えできません。'
+                    + '登録した PC で差し替えてから再 publish してください', 7000);
+            } else {
+                showToast('差し替えられる parquet が登録されていません');
+            }
+            return;
+        }
 
         // 現行ファイルの目録と幾何を先に読む (照合の基準)。
         for (const s of sources) {
@@ -21928,6 +22244,11 @@ const App = {
             //   解析し直す)。再パック後のフッタは 2 MB なので、素直に開き直す。
             for (const e of src.ents) {
                 e.blobId = blobId;
+                // 別のファイルを指すことになるので、取り込み時に付いていた
+                // Storage の在り処は必ず捨てる。残すと blob 復旧 (ensureLocalBlob)
+                // が**差し替え前のファイル**を拾ってしまう。
+                delete e.storagePath;
+                delete e.sourceUrl;
                 e.filename = file.name;
                 // ★ sourceBytes を埋める。共有先の parquet は長さが分からないと
                 //   worker ごとに HEAD が 1 往復発生する (:3477 のコメント参照)。
@@ -23141,6 +23462,17 @@ const App = {
         //   「master pw 期限切れ」には状態があるのに、こちらには無かった。
         if (!SupabaseClient.configured()) { this._setSyncStatus('no-server'); return; }
 
+        // ★ 取り込んだプロジェクトは共有パスワードを引き継がない
+        //   (_buildLocalProjectFromDoc が viewerPassword/adminPassword を null で
+        //   作る)。このまま送っても upsert_project_doc が
+        //   viewer_password_required を返すだけなので、通信する前に止めて
+        //   「1 回 Publish to share を押してほしい」を状態で伝える。
+        //   ここが無いと、編集のたびに "⚠ Sync 失敗" が出て原因が分からない。
+        if (!project.shareInfo.isPublic && !project.shareInfo.viewerPassword) {
+            this._setSyncStatus('needs-share-pw');
+            return;
+        }
+
         const masterPw = _readCachedMasterPw();
         if (!masterPw) {
             this._setSyncStatus('needs-master-pw');
@@ -23189,7 +23521,8 @@ const App = {
             this._setSyncStatus(this._publishDirty ? 'local-saved' : 'synced');
         } catch (e) {
             console.warn('auto-publish failed', e);
-            const msg = String((e && (e.message || e.details)) || e);
+            // userMessage は「利用者が読んで次の一手が分かる」文面 (missing_sources など)。
+            const msg = String((e && (e.userMessage || e.message || e.details)) || e);
             if (/unauthorized|28000/i.test(msg)) {
                 // master pw rejected — drop the cache so the next attempt
                 // will re-prompt rather than silently failing again.
@@ -23258,6 +23591,9 @@ const App = {
             }
             case 'conflict':        text = '⚠ サーバが新しい'; break;
             case 'needs-master-pw': text = '🔑 Master pw 期限切れ'; break;
+            // 取り込んだプロジェクト: viewer / admin パスワードが引き継がれて
+            // いないので、1 回だけ手動 publish で設定してもらう必要がある。
+            case 'needs-share-pw':  text = '🔑 共有パスワード未設定'; break;
             // ★ サーバに繋がらない。**「Local 保存中」のまま黙って止まらせない**。
             //   公開されていないことが一目で分かる必要がある。
             case 'no-server':       text = '⚠ サーバに接続できません'; break;
@@ -23268,6 +23604,9 @@ const App = {
         el.title = (state === 'error' && a) ? a
                  : (state === 'conflict') ? '別 PC が新しいバージョンを publish しました。クリックで対応'
                  : (state === 'needs-master-pw') ? 'クリックで Master pw 入力'
+                 : (state === 'needs-share-pw')
+                     ? '取り込んだプロジェクトには共有パスワードが引き継がれません。'
+                       + 'クリックして Publish to share で viewer / admin パスワードを設定してください'
                  : (state === 'no-server')
                      ? (serverUnavailableReason() || 'サーバに接続できないため公開できていません')
                        + '（この変更はこの端末にだけ保存されています。クリックで再試行）'
@@ -23294,6 +23633,12 @@ const App = {
             // Force an immediate auto-publish.
             if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
             this.autoPublishProject().catch(e => console.warn('manual sync failed', e));
+            return;
+        }
+        if (state === 'needs-share-pw') {
+            // パスワードは publish モーダルでしか設定できないので、そこへ送る。
+            // 設定して 1 回送れば shareInfo に載り、以降は自動同期に戻る。
+            publishProjectToShare().catch(e => console.warn('publish from sync indicator failed', e));
             return;
         }
         if (state === 'needs-master-pw') {

@@ -68,13 +68,20 @@ function extractFunction(source, name) {
   return source.slice(markerAt, closeAt + 1);
 }
 
-function compileInlineScripts() {
-  const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
+// 構文ゲート。アプリは 1 ファイル 1 ページの inline script なので、ここが
+// 落ちなければ「読み込んだ瞬間に真っ白」だけは避けられる。viewer だけでなく
+// 管理画面 (index.html) と MRM 管理 (mrm.html) も見る — どちらも同じ
+// IndexedDB / RPC を触るのに、これまで構文の網が掛かっていなかった。
+function compileInlineScripts(relPath, minScripts) {
+  const source = relPath === 'viewer/index.html'
+    ? html
+    : fs.readFileSync(path.join(root, relPath), 'utf8');
+  const scripts = [...source.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
     .map((match) => match[1])
-    .filter((source) => source.trim());
-  assert.ok(scripts.length >= 2, 'expected inline viewer scripts');
-  scripts.forEach((source, index) => new vm.Script(source, {
-    filename: `viewer/index.html#inline-${index + 1}`,
+    .filter((s) => s.trim());
+  assert.ok(scripts.length >= minScripts, `expected inline scripts in ${relPath}`);
+  scripts.forEach((src, index) => new vm.Script(src, {
+    filename: `${relPath}#inline-${index + 1}`,
   }));
 }
 
@@ -700,8 +707,71 @@ function testRenameKeepsInstrumentCeCv() {
   assert.deepEqual(after(null, 'X_45_14'), { ce: 45, cv: 14 });
 }
 
+// Storage のキー規則。blob 復旧 (ensureLocalBlob / parquetSrcForEnt) は
+// 「publish が置いたのと同じパス」を組み立て直せることが前提なので、
+// storagePathForEnt と publish 側の組み立てが食い違うと復旧が黙って効かなくなる。
+function testStoragePathRule() {
+  const ctx = vm.createContext({ console });
+  vm.runInContext(
+    `${extractFunction(html, 'sanitizeStorageKeySegment')}\n`
+    + `${extractFunction(html, 'storageExtOf')}\n`
+    + `${extractFunction(html, 'storagePathForEnt')}\n`
+    + 'this.out = { storageExtOf, storagePathForEnt };',
+    ctx);
+  const { storageExtOf, storagePathForEnt } = ctx.out;
+
+  assert.equal(storageExtOf('sample.RAW.zip'), '.zip');
+  assert.equal(storageExtOf('slide1.tif'), '.tif');
+  assert.equal(storageExtOf('noext'), '');
+
+  const project = { shareInfo: { slug: 'proj_x' } };
+  // ローカル登録: slug + blobId + 拡張子。日本語のファイル名でもキーは英数字だけ。
+  assert.equal(storagePathForEnt({ blobId: 'blob_1', filename: 'データ.xlsx' }, project),
+    'proj_x/blobs/blob_1.xlsx');
+  // 取り込んだレイヤーは doc が持ってきた storagePath をそのまま使う。
+  assert.equal(storagePathForEnt({ blobId: 'blob_1', filename: 'x.parquet', storagePath: 'other/blobs/b.parquet' }, project),
+    'other/blobs/b.parquet');
+  // 未 publish (slug が無い) なら復旧先も無い。
+  assert.equal(storagePathForEnt({ blobId: 'blob_1', filename: 'x.xlsx' }, {}), '');
+  assert.equal(storagePathForEnt(null, project), '');
+
+  // publish 側が同じ規則で組み立てていること。
+  assert.match(html, /\$\{meta\.slug\}\/blobs\/\$\{ent\.blobId\}\$\{extByBlob\.get\(ent\.blobId\)\}/);
+  assert.match(html, /extByBlob\.set\(ent\.blobId, storageExtOf\(filename\)\)/);
+}
+
+// オブジェクトのメソッド (async name(...) { ... }) を丸ごと取り出す。
+function extractMethod(source, name) {
+  const marker = `async ${name}(`;
+  const markerAt = source.indexOf(marker);
+  assert.notEqual(markerAt, -1, `missing method ${name}`);
+  const openAt = source.indexOf('{', markerAt + marker.length);
+  return source.slice(markerAt, scanBalanced(source, openAt) + 1);
+}
+
+// 切片 ID の付け方は取り込み (master) と共有 (share) で**わざと違う**。
+//   取り込み: meta.client_id — 再 publish したとき upsert_project_doc の
+//             client_id 照合が当たり、サーバの切片が作り直されない
+//             (作り直されると rois の ON DELETE CASCADE で閲覧者の ROI が消える)。
+//   共有:     サーバの UUID — list_rois と同じキーで揃える必要がある。
+// 片方に寄せるともう片方が壊れるので、両方を縛る。
+function testImportSectionIdKeying() {
+  const importFn = extractMethod(html, '_buildLocalProjectFromDoc');
+  const shareFn = extractMethod(html, '_hydrateSharedProject');
+
+  assert.match(importFn, /id:\s*\(s\.meta && s\.meta\.client_id\) \|\| s\.id/);
+  // ROI はサーバの UUID で引いてから client_id へ翻訳する。
+  assert.match(importFn, /fetchAllShareRois\(session\.token, doc\.sections/);
+  assert.match(importFn, /uuidToClient\[uuid\]/);
+
+  assert.match(shareFn, /id:\s*s\.client_id \|\| s\.id/);
+  assert.match(shareFn, /fetchAllShareRois\(session\.token, project\.sections\)/);
+}
+
 async function main() {
-  compileInlineScripts();
+  compileInlineScripts('viewer/index.html', 2);
+  compileInlineScripts('index.html', 1);
+  compileInlineScripts('mrm.html', 1);
   assert.match(html, /data-preview-range-reset/);
   assert.doesNotMatch(html, /data-organ-select/);
   assert.match(html, /parseXlsxSheet, rowsFromParsedXlsx, parseXlsxToRows/);
@@ -713,6 +783,8 @@ async function main() {
   testRenameKeepsInstrumentCeCv();
   testWorkerBakePath();
   await testWorkerRawDecodePath();
+  testStoragePathRule();
+  testImportSectionIdKeying();
   console.log('viewer preview regression tests: PASS');
 }
 
