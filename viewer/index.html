@@ -1072,6 +1072,25 @@ function splitCeCv(label) {
     return { base: s, ce: null, cv: null };
 }
 
+// Whether a rename may rewrite CE / CV.
+//
+// Before .raw the compound LABEL was the source of truth for these, so
+// re-deriving them from the new name was the correct thing to do. Values read
+// off the instrument must survive a rename instead: renaming a .raw layer to
+// "ACh_146_87" would otherwise turn CE=10 / CV=15 into 146 / 87 — the
+// transition's m/z, not voltages — silently, and then send that to the MRM
+// library. A blank value is still filled in from the name, so a .raw acquired
+// without _FUNCnnn.EE can still be annotated by hand.
+function ceCvAfterRename(meta, split) {
+    const fromRaw = !!(meta && meta.fromRaw);
+    const curCe = meta ? meta.ce : null;
+    const curCv = meta ? meta.cv : null;
+    return {
+        ce: (split.ce != null && !(fromRaw && curCe != null)) ? split.ce : curCe,
+        cv: (split.cv != null && !(fromRaw && curCv != null)) ? split.cv : curCv,
+    };
+}
+
 // MSI rasters are quantised to 0-255 luminance, but the user-facing Method (MRM)
 // table edits the original raw value range. These helpers convert between the
 // two given a per-layer rawRange = [rawMin, rawMax] saved at registration time.
@@ -11295,8 +11314,9 @@ function _bindMethodRowDelegation(tbody) {
     });
 
     // Master-only inline rename. Share-mode returns early; in master we prompt
-    // for the new base name (CE/CV will be re-derived from the trailing
-    // _<int>_<int> pattern by splitCeCv).
+    // for the new base name. A trailing _<int>_<int> still sets CE/CV for layers
+    // whose CE/CV came from the label in the first place, but never overwrites
+    // values read off the instrument (.raw) — see ceCvAfterRename.
     tbody.addEventListener('dblclick', (ev) => {
         const t = ev.target;
         const cell = (t && t.closest) ? t.closest('[data-compound-cell]') : null;
@@ -19730,10 +19750,11 @@ const App = {
             if (!s.msiSeries || !s.msiSeries[oldKey]) continue;
             const ent = s.msiSeries[oldKey];
             if (ent.compoundMeta) {
+                const next = ceCvAfterRename(ent.compoundMeta, split);
                 ent.compoundMeta.base = split.base;
                 ent.compoundMeta.name = cleanBase;
-                if (split.ce != null) ent.compoundMeta.ce = split.ce;
-                if (split.cv != null) ent.compoundMeta.cv = split.cv;
+                ent.compoundMeta.ce = next.ce;
+                ent.compoundMeta.cv = next.cv;
             }
             s.msiSeries[newKey] = ent;
             delete s.msiSeries[oldKey];

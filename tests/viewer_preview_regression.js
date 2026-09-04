@@ -614,6 +614,42 @@ async function testWorkerRawDecodePath() {
   assert.deepEqual(Array.from(viaBuffer, (r) => r.v), [100, 200, 300, 400, 500, 600]);
 }
 
+// Renaming a compound re-derives CE/CV from a trailing _<CE>_<CV> in the new
+// label. That was right while the label WAS the source of those numbers; for a
+// .raw layer the instrument is, and re-deriving destroys it — renaming
+// POS_Acetylcholine to "ACh_146_87" turned CE=10/CV=15 into 146/87 (the
+// transition m/z) and pushed that to the MRM library, silently.
+function testRenameKeepsInstrumentCeCv() {
+  const context = vm.createContext({});
+  vm.runInContext(
+    extractTopLevelFunction('splitCeCv') + '\n' + extractTopLevelFunction('ceCvAfterRename')
+    + '\nthis.api = { splitCeCv, ceCvAfterRename };',
+    context,
+  );
+  const { splitCeCv, ceCvAfterRename } = context.api;
+  // The vm has its own realm, so rebuild the result host-side before comparing.
+  const after = (meta, label) => {
+    const r = ceCvAfterRename(meta, splitCeCv(label));
+    return { ce: r.ce, cv: r.cv };
+  };
+
+  // .raw: the instrument's values survive a label that looks like _<CE>_<CV>.
+  const raw = { fromRaw: true, ce: 10, cv: 15 };
+  assert.deepEqual(after(raw, 'ACh_146_87'), { ce: 10, cv: 15 });
+  assert.deepEqual(after(raw, 'Acetylcholine'), { ce: 10, cv: 15 });
+
+  // .raw acquired without _FUNCnnn.EE has no CE/CV, so the label may still fill
+  // them in — that is annotation, not destruction.
+  assert.deepEqual(after({ fromRaw: true, ce: null, cv: null }, 'ACh_45_14'), { ce: 45, cv: 14 });
+  assert.deepEqual(after({ fromRaw: true, ce: 10, cv: null }, 'ACh_45_14'), { ce: 10, cv: 14 });
+
+  // Everything else keeps the old behaviour: the label is the source of truth.
+  assert.deepEqual(after({ ce: 1, cv: 2 }, 'Oxylipin_45_14'), { ce: 45, cv: 14 });
+  assert.deepEqual(after({ fromRaw: false, ce: 1, cv: 2 }, 'X_45_14'), { ce: 45, cv: 14 });
+  assert.deepEqual(after({ ce: 1, cv: 2 }, 'PlainName'), { ce: 1, cv: 2 });
+  assert.deepEqual(after(null, 'X_45_14'), { ce: 45, cv: 14 });
+}
+
 async function main() {
   compileInlineScripts();
   assert.match(html, /data-preview-range-reset/);
@@ -624,6 +660,7 @@ async function main() {
   testRangeResetAndSingleRepaint();
   await testWorkerXlsxDecodeCache();
   testAnalyteHeaderShapes();
+  testRenameKeepsInstrumentCeCv();
   testWorkerBakePath();
   await testWorkerRawDecodePath();
   console.log('viewer preview regression tests: PASS');
