@@ -71,6 +71,7 @@ body.share-mode #project-picker,
 body.share-mode #project-name-input,
 body.share-mode #tb-add-heif,
 body.share-mode #tb-add-msi,
+body.share-mode #tb-add-raw,
 body.share-mode #tb-align-heif,
 body.share-mode #tb-rot-share-default,
 body.share-mode #tb-msi-um-group,
@@ -669,7 +670,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
   #btn-share-admin-login, #btn-projects, #btn-new-project, #btn-import-zip,
   #btn-publish-share, #btn-share-info, #btn-add-section, #btn-add-parquet,
   #btn-replace-parquet, #btn-delete-project,
-  #tb-add-heif, #tb-add-msi, #tb-align-heif, #tb-del-section,
+  #tb-add-heif, #tb-add-msi, #tb-add-raw, #tb-align-heif, #tb-del-section,
   #tb-flip-group, #tb-msi-um-group, #tb-rot-share-default,
   /* 狭い画面でも絞り込みは残す (共有先の唯一の探索手段なので)。
      書き換え系のボタンだけ畳む。 */
@@ -836,6 +837,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                 <span class="tb-divider"></span>
                 <button class="tb-btn" id="tb-add-heif" title="Register HE or IF TIFF with transform JSON">+ HE/IF</button>
                 <button class="tb-btn" id="tb-add-msi" title="Register MSI xlsx or txt as a layer">+ MSI</button>
+                <button class="tb-btn" id="tb-add-raw" title="Waters .raw (DESI-TQ-MSI) をフォルダごと登録">+ .raw</button>
                 <button class="tb-btn" id="tb-align-heif" title="HE/IF を MSI と重ね合わせる (manual / landmark)">Align</button>
                 <button class="tb-btn danger" id="tb-del-section" title="Delete the active section">×</button>
                 <span class="tb-divider"></span>
@@ -4271,6 +4273,16 @@ function parseWatersParamTable(buf) {
 
 const RAW_MAX_CHANNELS = 32;
 
+// _FUNCTNS.INF stores m/z and dwell as float32, so a method entered as 146.1
+// reads back as 146.10000610351562. That is representation noise, not measured
+// precision, and it is not merely cosmetic: mrm_transitions dedups on
+// unique(compound_id, precursor, product, ce, cv), so an unrounded value would
+// never match the same transition typed in by hand or read from another .raw.
+// float32 carries ~7 significant digits, so rounding to the precision MassLynx
+// actually accepts recovers the entered value exactly.
+function rawRoundMz(v) { return v > 0 ? Math.round(v * 1e4) / 1e4 : v; }
+function rawRoundDwell(v) { return v > 0 ? Math.round(v * 1e6) / 1e6 : v; }
+
 // 416 bytes per function; the file length divides by it to give the count.
 function parseWatersFunctions(buf) {
     const dv = new DataView(buf);
@@ -4283,9 +4295,9 @@ function parseWatersFunctions(buf) {
             for (let i = 0; i < RAW_MAX_CHANNELS; i++) a.push(dv.getFloat32(b + off + i * 4, true));
             return a;
         };
-        const dwell = slots(32);
-        const precursor = slots(160);
-        const product = slots(288);
+        const dwell = slots(32).map(rawRoundDwell);
+        const precursor = slots(160).map(rawRoundMz);
+        const product = slots(288).map(rawRoundMz);
         let nChannels = 0;
         for (let i = 0; i < RAW_MAX_CHANNELS; i++) if (precursor[i] > 0) nChannels = i + 1;
         out.push({
@@ -4667,6 +4679,165 @@ window.__rawInspect = async function (input) {
     }
     return meta;
 };
+
+// ---- .raw registration helpers (UI side; deliberately OUTSIDE the sentinels
+//      above, since the worker and the connector never need any of this) ------
+
+// Drag-and-drop of a DIRECTORY. Two things here are load-bearing and both fail
+// silently rather than loudly when you get them wrong:
+//
+//   1. The DataTransfer is neutered as soon as the drop handler yields, so every
+//      entry must be taken out of it SYNCHRONOUSLY, before the first await.
+//      This function is the synchronous half and does nothing else.
+//   2. (in rawFilesFromEntries) readEntries() returns at most 100 children per
+//      call and an empty batch is the only end-of-directory signal.
+//
+// getAsFileSystemHandle() would be tidier but is Chromium-only; webkitGetAsEntry
+// works in Chrome/Edge/Firefox/Safari.
+function rawEntriesFromDataTransfer(dt) {
+    const out = [];
+    const items = (dt && dt.items) ? Array.from(dt.items) : [];
+    for (const it of items) {
+        if (it.kind !== 'file') continue;
+        const entry = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
+        if (entry) { out.push(entry); continue; }
+        const f = it.getAsFile ? it.getAsFile() : null;
+        if (f) out.push(f);
+    }
+    if (!out.length && dt && dt.files) out.push(...Array.from(dt.files));
+    return out;
+}
+
+// Async half: walk what rawEntriesFromDataTransfer captured into a flat File[]
+// carrying _rawPath, the same relative-path shape webkitRelativePath gives.
+async function rawFilesFromEntries(entries) {
+    const out = [];
+    const readAll = (reader) => new Promise((resolve, reject) => {
+        const acc = [];
+        const step = () => reader.readEntries((batch) => {
+            // ★ 100 件ずつしか返らない。空配列が返るまで同じ reader を呼び続ける。
+            //   1 回で済ませると大きいフォルダが黙って途中までしか読まれない。
+            if (!batch.length) { resolve(acc); return; }
+            acc.push(...batch);
+            step();
+        }, reject);
+        step();
+    });
+    const walk = async (entry, prefix) => {
+        if (typeof File !== 'undefined' && entry instanceof File) {
+            entry._rawPath = prefix + entry.name;
+            out.push(entry);
+            return;
+        }
+        if (entry.isFile) {
+            const f = await new Promise((res, rej) => entry.file(res, rej));
+            f._rawPath = prefix + entry.name;
+            out.push(f);
+            return;
+        }
+        if (entry.isDirectory) {
+            const kids = await readAll(entry.createReader());
+            for (const kid of kids) await walk(kid, prefix + entry.name + '/');
+        }
+    };
+    for (const e of entries) await walk(e, '');
+    return out;
+}
+
+const RAW_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+// Round-trip through Date.UTC so impossible dates (260230, 260013) are rejected
+// rather than silently rolling over into the next month.
+function rawIsoDate(y, m, d) {
+    if (!(m >= 1 && m <= 12) || !(d >= 1 && d <= 31)) return null;
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+    return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+
+// _HEADER.TXT "Acquired Date" — "04-Sep-2026". This is what the INSTRUMENT
+// recorded, so it is the primary source for the experiment date.
+function rawDateFromHeader(s) {
+    const m = /^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/.exec(String(s || '').trim());
+    if (!m) return null;
+    const mon = RAW_MONTHS[m[2].toLowerCase()];
+    return mon ? rawIsoDate(Number(m[3]), mon, Number(m[1])) : null;
+}
+
+// Fallback: the leading date in the sample name ("260904_Test_POS1" -> 2026-09-04).
+// Also accepts YYYYMMDD. Anything else yields null, which leaves the field blank
+// for the user rather than guessing.
+function rawDateFromName(s) {
+    const m = /^(\d{8}|\d{6})(?!\d)/.exec(String(s || ''));
+    if (!m) return null;
+    const t = m[1];
+    return t.length === 8
+        ? rawIsoDate(Number(t.slice(0, 4)), Number(t.slice(4, 6)), Number(t.slice(6, 8)))
+        : rawIsoDate(2000 + Number(t.slice(0, 2)), Number(t.slice(2, 4)), Number(t.slice(4, 6)));
+}
+
+// Pack the .raw back into one file for storage. Entries are rooted at
+// "<name>.raw/" so unzipping gives back something MassLynx can open.
+async function rawBuildArchiveZip(bundle, opts) {
+    const o = opts || {};
+    await loadScript(LAZY_LIBS.jszip);
+    const zip = new JSZip();
+    const root = (bundle.rootName || 'raw') + '.raw/';
+    for (const name of bundle.names()) {
+        if (o.includeImaging === false && /(^|\/)imaging\//i.test(name)) continue;
+        // Hand JSZip the File itself where we have one: it streams the blob
+        // instead of us materialising every member in memory first.
+        const f = bundle.file ? bundle.file(name) : null;
+        zip.file(root + name, f || await bundle.read(name));
+    }
+    const blob = await zip.generateAsync({
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: Number.isFinite(o.level) ? o.level : 6 },
+    }, o.onProgress);
+    // A File, not a bare Blob: addMsiLayer reads blob.name and blob.type, and a
+    // Blob would be filed as an .xlsx of unknown type.
+    return new File([blob], (bundle.rootName || 'raw') + '.raw.zip', { type: 'application/zip' });
+}
+
+// Total bytes of the members that would go into the archive.
+async function rawArchiveSize(bundle, includeImaging) {
+    let total = 0;
+    for (const name of bundle.names()) {
+        if (!includeImaging && /(^|\/)imaging\//i.test(name)) continue;
+        const f = bundle.file ? bundle.file(name) : null;
+        if (f && Number.isFinite(f.size)) total += f.size;
+        else total += (await bundle.read(name)).byteLength;
+    }
+    return total;
+}
+
+// A channel with no usable name in _FUNCnnn.CMP still needs a stable label.
+// The m/z are prefixed so splitCeCv() can never mistake "104_87" for a
+// _<CE>_<CV> suffix and invent collision/cone voltages out of the transition.
+function rawChannelLabel(fn, ch) {
+    if (ch.name) return ch.name;
+    const p = (v) => (v == null ? '?' : Number(v).toFixed(2));
+    return 'F' + fn.number + 'ch' + ch.ordinal + '_m' + p(ch.precursor) + '_p' + p(ch.product);
+}
+
+// Registering a second .raw into a section that already has layers must not
+// silently overwrite one. Returns the key to use plus what had to be renamed.
+function rawLayerKeyFor(section, label, polarity) {
+    const series = (section && section.msiSeries) || {};
+    const base = 'MSI_' + sanitizeCompoundName(label);
+    if (!series[base]) return { key: base, renamedFrom: null };
+    const tag = polarity === '+' ? 'POS' : polarity === '-' ? 'NEG' : null;
+    if (tag && !new RegExp('(^|[_-])' + tag + '([_-]|$)', 'i').test(label)) {
+        const withPol = base + '_' + tag;
+        if (!series[withPol]) return { key: withPol, renamedFrom: base };
+    }
+    for (let n = 2; n < 1000; n++) {
+        const k = base + '_' + n;
+        if (!series[k]) return { key: k, renamedFrom: base };
+    }
+    return { key: base, renamedFrom: null };
+}
 
 // =============================================================
 // Parse Web Worker — offload heavy xlsx / txt / TIFF parsing off the main
@@ -13927,6 +14098,407 @@ const Wizards = {
         }
     },
 
+    // Waters .raw (MassLynx / Xevo TQ Absolute) をそのまま登録する。
+    //
+    // xlsx/txt の経路と違い、測定条件は人が打ち込むのではなく .raw から読む:
+    // MRM のプリカーサー / プロダクト / CV / CE / dwell / 極性、ピクセルピッチ、
+    // 装置名と測定日。人が決めるのは「どのチャンネルを登録するか」だけ。
+    //
+    // 登録時は zip 化していない生ファイルをそのまま読む。中身が妥当か分かる
+    // 前に圧縮を待たせる理由が無いので、圧縮は OK を押してから 1 回だけ。
+    async openRawWizard(panel) {
+        const html = `
+            <h2>Waters .raw を登録</h2>
+            <form>
+              <p style="font-size:11px;color:#475569;margin-bottom:6px;">
+                DESI-TQ-MSI (Xevo TQ Absolute) の <code>.raw</code> フォルダをそのまま登録します。<br>
+                <span style="color:#64748b;">MRM / CV / CE / 極性 / ピッチ / 装置 / 測定日は .raw から読み取ります。生データは .raw ごと保存されます。</span>
+              </p>
+              <div data-drop style="border:2px dashed #cbd5e1;border-radius:6px;padding:14px;text-align:center;font-size:12px;color:#64748b;background:#f8fafc;cursor:default;">
+                ここに <b>.raw フォルダ</b>をドラッグ &amp; ドロップ
+              </div>
+              <div class="field-row" style="margin-top:6px;">
+                <label style="font-size:11px;">.raw フォルダを選択
+                  <input type="file" name="dir" webkitdirectory directory>
+                </label>
+                <label style="font-size:11px;">または .raw.zip
+                  <input type="file" name="zip" accept=".zip">
+                </label>
+              </div>
+              <div data-excl style="font-size:11px;color:#64748b;margin:2px 0;"></div>
+              <div data-rootpick style="display:none;margin:6px 0;">
+                <label style="font-size:11px;color:#b45309;">.raw が複数あります。どれを登録するか選んでください
+                  <select data-root style="width:100%;font-size:11px;"></select>
+                </label>
+              </div>
+              <div data-scan style="font-size:11px;color:#475569;min-height:16px;margin:6px 0;"></div>
+              <div data-meta style="display:none;border:1px solid #e5e7eb;border-radius:4px;padding:6px;margin:6px 0;">
+                <div class="field-row">
+                  <label style="font-size:11px;">装置
+                    <select data-machine style="font-size:11px;">
+                      <option value="DESI">DESI</option><option value="TIMS">TIMS</option>
+                      <option value="LTQ">LTQ</option><option value="Other">Other</option>
+                    </select>
+                  </label>
+                  <label style="font-size:11px;">測定日
+                    <input type="date" data-date style="font-size:11px;">
+                  </label>
+                </div>
+                <div data-metanote style="font-size:11px;color:#64748b;margin-top:4px;"></div>
+              </div>
+              <div data-funcs style="max-height:260px;overflow:auto;display:none;"></div>
+              <div data-warn style="font-size:11px;color:#b45309;margin:4px 0;"></div>
+              <label style="font-size:11px;display:flex;align-items:center;gap:6px;margin-top:4px;">
+                <input type="checkbox" data-imaging checked>
+                <span>保存する .raw に <code>imaging/</code> を含める</span>
+              </label>
+              <p data-err style="color:#b91c1c;font-size:11px;min-height:14px;"></p>
+              <div class="modal-actions">
+                <button type="button" class="btn" data-modal-cancel>Cancel</button>
+                <button type="submit" class="btn primary" data-modal-ok disabled>登録</button>
+              </div>
+            </form>`;
+        const p = openModal(html);
+        const card = openModal._card;
+        const dropEl = card.querySelector('[data-drop]');
+        const dirInp = card.querySelector('input[name=dir]');
+        const zipInp = card.querySelector('input[name=zip]');
+        const exclEl = card.querySelector('[data-excl]');
+        const rootBox = card.querySelector('[data-rootpick]');
+        const rootSel = card.querySelector('[data-root]');
+        const scanEl = card.querySelector('[data-scan]');
+        const metaBox = card.querySelector('[data-meta]');
+        const machineSel = card.querySelector('[data-machine]');
+        const dateInp = card.querySelector('[data-date]');
+        const metaNote = card.querySelector('[data-metanote]');
+        const funcsEl = card.querySelector('[data-funcs]');
+        const warnEl = card.querySelector('[data-warn]');
+        const imagingChk = card.querySelector('[data-imaging]');
+        const errEl = card.querySelector('[data-err]');
+
+        let candidates = [];
+        let state = null;
+
+        const reset = () => {
+            errEl.textContent = ''; warnEl.textContent = ''; scanEl.textContent = '';
+            funcsEl.style.display = 'none'; funcsEl.innerHTML = '';
+            metaBox.style.display = 'none'; metaNote.textContent = '';
+            rootBox.style.display = 'none'; state = null;
+            card.querySelector('[data-modal-ok]').disabled = true;
+        };
+
+        // 生ファイル / zip / ドロップ の 3 経路をここで 1 本の RawBundle にする。
+        const take = async (bundles, excluded) => {
+            reset();
+            exclEl.textContent = excluded && excluded.length
+                ? '除外: ' + excluded.join(' / ') : '';
+            candidates = bundles;
+            if (!candidates.length) {
+                errEl.textContent = '.raw フォルダが見つかりません（フォルダの中身ではなく .raw フォルダ自体を選んでください）。';
+                return;
+            }
+            // 複数あるとき黙って先頭を採らない (parquet ウィザードと同じ方針)。
+            if (candidates.length > 1) {
+                rootSel.innerHTML = '<option value="">— 選択してください —</option>'
+                    + candidates.map((b, i) => '<option value="' + i + '">'
+                        + String(b.rootName).replace(/</g, '&lt;') + '.raw</option>').join('');
+                rootBox.style.display = '';
+                rootSel.onchange = () => {
+                    const i = Number(rootSel.value);
+                    if (Number.isInteger(i) && i >= 0) scan(candidates[i]);
+                };
+                return;
+            }
+            scan(candidates[0]);
+        };
+
+        async function scan(bundle) {
+            errEl.textContent = ''; warnEl.textContent = '';
+            scanEl.textContent = '.raw を読み込み中…';
+            funcsEl.style.display = 'none'; funcsEl.innerHTML = '';
+            metaBox.style.display = 'none';
+            card.querySelector('[data-modal-ok]').disabled = true;
+            state = null;
+            try {
+                const meta = await parseRawArchiveMeta(bundle);
+                const usable = meta.functions.filter(f => f.isMrm !== false);
+                if (!usable.length) throw new Error('MRM ファンクションがありません');
+                const sec = panel.section;
+                const wc = (sec.meta && sec.meta.world_coords) || {};
+                const existingUm = wc.msi_um_per_px || null;
+
+                scanEl.innerHTML = '<b>' + String(meta.rootName).replace(/</g, '&lt;') + '</b>'
+                    + ' / ' + (meta.header['Instrument'] || '装置不明')
+                    + ' / 機能 ' + meta.functions.length + ' 件';
+
+                // 測定日: 装置の記録 (_HEADER.TXT) を第一、ファイル名を予備、
+                // どちらも読めなければ空欄。両方あって食い違えば必ず知らせる。
+                const fromHeader = rawDateFromHeader(meta.header['Acquired Date']);
+                const fromName = rawDateFromName(meta.rootName);
+                dateInp.value = fromHeader || fromName || '';
+                const notes = [];
+                notes.push(fromHeader ? '測定日: 装置の記録 (' + fromHeader + ') を採用'
+                    : (fromName ? '測定日: 装置の記録が無いのでファイル名 (' + fromName + ') を採用'
+                        : '測定日: .raw から読み取れませんでした。手で入力してください'));
+                if (fromHeader && fromName && fromHeader !== fromName) {
+                    notes.push('⚠ ファイル名は ' + fromName + ' で食い違っています');
+                }
+                if (meta.header['Instrument']) notes.push('装置: ' + meta.header['Instrument']);
+                const curMachine = (App.project && App.project.memo && App.project.memo.machine) || '';
+                machineSel.value = 'DESI';
+                if (curMachine && curMachine !== 'DESI') {
+                    notes.push('⚠ このプロジェクトの装置は現在 ' + curMachine + ' です');
+                }
+                metaNote.innerHTML = notes.map(t => String(t).replace(/</g, '&lt;')).join('<br>');
+                metaBox.style.display = '';
+
+                const warn = [];
+                if (meta.pitchWarning) warn.push('⚠ ピッチ: ' + meta.pitchWarning);
+
+                funcsEl.innerHTML = usable.map((f) => {
+                    const um = (v) => (v != null ? Math.round(v * 1000) : '?');
+                    if (f.countsDisagree) {
+                        warn.push('⚠ 機能 ' + f.number + ' のチャンネル数が食い違っています ('
+                            + JSON.stringify(f.counts) + ')。登録できません');
+                    }
+                    if (existingUm && f.pitchX != null
+                        && (Math.abs(um(f.pitchX) - existingUm.x) > existingUm.x * 0.1
+                            || Math.abs(um(f.pitchY) - existingUm.y) > existingUm.y * 0.1)) {
+                        warn.push('⚠ この切片は既に ' + existingUm.x + '×' + existingUm.y
+                            + ' µm で登録されています (この .raw は ' + um(f.pitchX) + '×' + um(f.pitchY)
+                            + ' µm)。登録は可能ですが、重ね合わせは Align で調整してください');
+                    }
+                    const rows = f.channels.map((c) => {
+                        const label = rawChannelLabel(f, c);
+                        const { key, renamedFrom } = rawLayerKeyFor(panel.section, label, f.polarity);
+                        if (renamedFrom) {
+                            warn.push('⚠ ' + renamedFrom + ' は既にあります。'
+                                + key + ' として登録します');
+                        }
+                        const num = (v, d) => (v == null ? '—' : Number(v).toFixed(d));
+                        return '<label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:2px 0;">'
+                            + '<input type="checkbox" data-ch value="' + c.index + '"'
+                            + (f.countsDisagree ? ' disabled' : ' checked') + '>'
+                            + '<span style="width:22px;color:#64748b;">' + c.ordinal + '</span>'
+                            + '<span style="flex:1;' + (c.name ? '' : 'color:#b45309;') + '"'
+                            + (c.name ? '' : ' title="_FUNCnnn.CMP に化合物名がありません"') + '>'
+                            + String(label).replace(/</g, '&lt;') + '</span>'
+                            + '<span style="color:#334155;width:110px;">' + num(c.precursor, 2)
+                            + ' &gt; ' + num(c.product, 2) + '</span>'
+                            + '<span style="color:#64748b;width:100px;">CV ' + (c.cv == null ? '—' : c.cv)
+                            + ' / CE ' + (c.ce == null ? '—' : c.ce) + '</span>'
+                            + '<span style="color:#94a3b8;width:64px;">'
+                            + (c.dwell == null ? '—' : (c.dwell * 1000).toFixed(1) + ' ms') + '</span>'
+                            + '</label>';
+                    }).join('');
+                    return '<details open data-func="' + f.number + '" style="border:1px solid #e5e7eb;border-radius:4px;padding:6px;margin-bottom:6px;">'
+                        + '<summary style="font-size:11px;cursor:pointer;">機能 ' + f.number
+                        + ' — MRM ' + f.nChannels + ' ch / ' + f.nScans.toLocaleString() + ' scans / '
+                        + f.width + '×' + f.height + ' px / ' + um(f.pitchX) + '×' + um(f.pitchY) + ' µm'
+                        + (f.polarity ? ' / ' + (f.polarity === '+' ? 'ES+' : 'ES-') : '')
+                        + '</summary>'
+                        + '<div style="margin-top:4px;">'
+                        + '<button type="button" class="btn" data-all="1" style="font-size:10px;padding:1px 6px;">全選択</button> '
+                        + '<button type="button" class="btn" data-all="0" style="font-size:10px;padding:1px 6px;">全解除</button>'
+                        + '</div>' + rows + '</details>';
+                }).join('');
+                funcsEl.style.display = '';
+                funcsEl.querySelectorAll('[data-all]').forEach(b => b.addEventListener('click', () => {
+                    b.closest('details').querySelectorAll('[data-ch]').forEach(c => {
+                        if (!c.disabled) c.checked = b.dataset.all === '1';
+                    });
+                }));
+                warnEl.innerHTML = warn.map(t => String(t).replace(/</g, '&lt;')).join('<br>');
+                state = { bundle, meta, functions: usable };
+                card.querySelector('[data-modal-ok]').disabled = false;
+            } catch (e) {
+                console.error('.raw の読み込みに失敗', e);
+                errEl.textContent = '.raw を読み込めませんでした: ' + ((e && e.message) || e);
+                scanEl.textContent = '';
+            }
+        }
+
+        dirInp.addEventListener('change', () => {
+            const picked = rawBundleFromFileList(Array.from(dirInp.files || []));
+            take(picked.bundles, picked.excluded);
+        });
+        zipInp.addEventListener('change', async () => {
+            const f = (zipInp.files || [])[0];
+            if (!f) return;
+            reset();
+            scanEl.textContent = 'zip を読み込み中…';
+            try { await take([rawBundleFromZip(await f.arrayBuffer())], []); }
+            catch (e) { reset(); errEl.textContent = 'zip を読めませんでした: ' + ((e && e.message) || e); }
+        });
+        ['dragenter', 'dragover'].forEach(ev => dropEl.addEventListener(ev, (e) => {
+            e.preventDefault(); e.stopPropagation();
+            dropEl.style.borderColor = '#2563eb'; dropEl.style.background = '#eff6ff';
+        }));
+        ['dragleave', 'drop'].forEach(ev => dropEl.addEventListener(ev, (e) => {
+            e.preventDefault(); e.stopPropagation();
+            dropEl.style.borderColor = '#cbd5e1'; dropEl.style.background = '#f8fafc';
+        }));
+        dropEl.addEventListener('drop', async (e) => {
+            // ★ DataTransfer は最初の await で無効化されるので、entry の取り出しだけ
+            //   同期でやりきってから非同期の walk に入る。
+            const entries = rawEntriesFromDataTransfer(e.dataTransfer);
+            reset();
+            scanEl.textContent = 'フォルダを読み込み中…';
+            try {
+                if (entries.length === 1 && typeof File !== 'undefined' && entries[0] instanceof File
+                    && /\.zip$/i.test(entries[0].name || '')) {
+                    await take([rawBundleFromZip(await entries[0].arrayBuffer())], []);
+                    return;
+                }
+                const files = await rawFilesFromEntries(entries);
+                const picked = rawBundleFromFileList(files);
+                await take(picked.bundles, picked.excluded);
+            } catch (err) {
+                reset();
+                errEl.textContent = '読み込めませんでした: ' + ((err && err.message) || err);
+            }
+        });
+
+        // openModal の既定 OK は同期の _collect 前提なので差し替える
+        // (openMsiWizard と同じ手口)。
+        const okBtn = card.querySelector('[data-modal-ok]');
+        okBtn.replaceWith(okBtn.cloneNode(true));
+        const ok = card.querySelector('[data-modal-ok]');
+        ok.addEventListener('click', async () => {
+            if (!state) { errEl.textContent = '.raw を選択してください。'; return; }
+            const picks = [];
+            for (const det of funcsEl.querySelectorAll('details[data-func]')) {
+                const fnNo = Number(det.dataset.func);
+                const fn = state.functions.find(f => f.number === fnNo);
+                if (!fn) continue;
+                det.querySelectorAll('[data-ch]').forEach((c) => {
+                    if (c.checked && !c.disabled) picks.push({ fn, channel: Number(c.value) });
+                });
+            }
+            if (!picks.length) { errEl.textContent = 'チェックされたチャンネルがありません。'; return; }
+            ok.disabled = true;
+            errEl.textContent = '';
+            try {
+                const includeImaging = imagingChk.checked;
+                scanEl.textContent = '.raw を圧縮中… (生データはこの形で保存されます)';
+                const file = await rawBuildArchiveZip(state.bundle, {
+                    includeImaging,
+                    onProgress: (m) => {
+                        scanEl.textContent = '.raw を圧縮中… ' + Math.round(m.percent) + '%';
+                    },
+                });
+                if (file.size > STORAGE_FILE_LIMIT_MB * 1048576) {
+                    warnEl.innerHTML += (warnEl.innerHTML ? '<br>' : '')
+                        + '⚠ 圧縮後 ' + fmtBytesMB(file.size) + ' で Storage の上限 ('
+                        + STORAGE_FILE_LIMIT_MB + ' MB) を超えています。Publish に失敗します';
+                }
+                scanEl.textContent = '登録中… (' + picks.length + ' チャンネル / ' + fmtBytesMB(file.size) + ')';
+
+                const sec = panel.section;
+                sec.meta = sec.meta || {};
+                sec.meta.world_coords = sec.meta.world_coords || {};
+                const sourceFileId = uid('msifile');
+                const first = picks[0].fn;
+                let sharedBlobId = null;
+                let lastKey = null;
+                const renamed = [];
+                for (const pick of picks) {
+                    const fn = pick.fn;
+                    const ch = fn.channels[pick.channel];
+                    const label = rawChannelLabel(fn, ch);
+                    const { key, renamedFrom } = rawLayerKeyFor(sec, label, fn.polarity);
+                    if (renamedFrom) renamed.push(renamedFrom + ' → ' + key);
+                    const compoundMeta = {
+                        name: label,
+                        base: label,
+                        precursor: ch.precursor,
+                        product: ch.product,
+                        ce: ch.ce,
+                        cv: ch.cv,
+                        // 極性は .raw の実値。読めなければ null のままにして、
+                        // 既存の _POS/_NEG 推定に委ねる (推測で + を入れない)。
+                        polarity: fn.polarity,
+                        sourceFile: file.name,
+                        dwell: ch.dwell,
+                        functionIndex: fn.number,
+                        channelIndex: ch.index,
+                        rtStart: fn.rtStart,
+                        rtEnd: fn.rtEnd,
+                        instrument: state.meta.header['Instrument'] || null,
+                        acquiredAt: (state.meta.header['Acquired Date'] || '')
+                            + (state.meta.header['Acquired Time'] ? ' ' + state.meta.header['Acquired Time'] : ''),
+                        msMethod: state.meta.header['MS Method'] || null,
+                        tuneMethod: state.meta.header['Tune Method'] || null,
+                        calibrationFile: state.meta.header['Calibration File'] || null,
+                        fromRaw: true,
+                    };
+                    await panel.addMsiLayer(key, file, {
+                        kind: 'raw',
+                        func: fn.number,
+                        channel: ch.index,
+                    }, { sourceFileId, compoundMeta, sharedBlobId, deferBulkRefresh: true });
+                    if (!sharedBlobId) sharedBlobId = sec.msiSeries[key].blobId;
+                    lastKey = key;
+                }
+                if (sec.msiFiles && sec.msiFiles[sourceFileId]) {
+                    sec.msiFiles[sourceFileId].rawSummary = {
+                        rootName: state.meta.rootName,
+                        nFunctions: state.meta.functions.length,
+                        funcNo: first.number,
+                        nScans: first.nScans,
+                        nChannels: first.nChannels,
+                        W: first.width, H: first.height,
+                        includeImaging,
+                    };
+                }
+
+                // ピッチは既存値を上書きしない。空のときだけ .raw から入れる。
+                if (!sec.meta.world_coords.msi_um_per_px && first.pitchX != null && first.pitchY != null) {
+                    sec.meta.world_coords.msi_um_per_px = {
+                        x: Math.round(first.pitchX * 1000),
+                        y: Math.round(first.pitchY * 1000),
+                    };
+                }
+                // 装置の測定条件は列が無いので、切片の付帯情報として丸ごと残す。
+                sec.meta.raw = {
+                    sampleName: state.meta.rootName,
+                    acquiredDate: state.meta.header['Acquired Date'] || null,
+                    acquiredTime: state.meta.header['Acquired Time'] || null,
+                    instrument: state.meta.header['Instrument'] || null,
+                    sampleDescription: state.meta.header['Sample Description'] || null,
+                    msMethod: state.meta.header['MS Method'] || null,
+                    tuneMethod: state.meta.header['Tune Method'] || null,
+                    calibrationFile: state.meta.header['Calibration File'] || null,
+                    desi: state.meta.extern.desi || {},
+                    source: first.source || null,
+                    polarity: first.polarity,
+                    functionType: first.type,
+                    rtStart: first.rtStart, rtEnd: first.rtEnd,
+                    pitchSource: state.meta.pitchSource,
+                    pitchWarning: state.meta.pitchWarning,
+                };
+
+                if (App.project) {
+                    App.project.memo = ensureMemoShape(App.project.memo);
+                    if (machineSel.value) App.project.memo.machine = machineSel.value;
+                    if (dateInp.value) App.project.memo.experimentDate = dateInp.value;
+                    try { renderMemoForm(); } catch (e) { /* memo panel not mounted */ }
+                }
+
+                await panel.finishBulkAdd(lastKey);
+                card._close(true);
+                showToast('登録: ' + picks.length + ' チャンネル (' + fmtBytesMB(file.size) + ')');
+                if (renamed.length) showToast('名前が重複したため改名: ' + renamed.join(', '), 6000);
+            } catch (e) {
+                console.error('.raw の登録に失敗', e);
+                errEl.textContent = '登録に失敗しました: ' + ((e && e.message) || e);
+                scanEl.textContent = '';
+                ok.disabled = false;
+            }
+        });
+        return await p;
+    },
+
     async openMsiWizard(panel) {
         const html = `
             <h2>Register MSI layer</h2>
@@ -15216,13 +15788,19 @@ function fmtBytesMB(b) {
 // Supabase Storage の 1 ファイル上限に当たったときのメッセージ。既定は全プランで
 // 50 MB なので、836 MB の parquet を上げようとすると必ずここに来る。生の
 // "upload failed: HTTP 413" では何をすればいいか分からないので置き換える。
+// Supabase の 1 ファイル上限として運用している値。ダッシュボード
+// (Storage → Settings → Upload file size limit) の設定と揃えること。
+// .raw 登録ウィザードが圧縮後サイズを事前警告するのにも使う。
+const STORAGE_FILE_LIMIT_MB = 500;
+
 function _publishSizeError(task, size) {
     return new Error(
         'ファイルが Supabase Storage の 1 ファイル上限を超えています (HTTP 413)。\n'
       + (task && task.filename ? task.filename + ' は ' : 'このファイルは ') + fmtBytesMB(size) + ' です。\n'
       + 'Supabase Dashboard → Storage → Settings の "Upload file size limit" を'
-      + '引き上げてから再実行してください (既定 50 MB。このアプリは通常の'
-      + 'アップロードを使うので上限は 5 GB までです)。'
+      + '引き上げてから再実行してください (このアプリの想定は '
+      + STORAGE_FILE_LIMIT_MB + ' MB。Supabase の既定は 50 MB で、通常の'
+      + 'アップロードなので上限は 5 GB までです)。'
     );
 }
 
@@ -18125,6 +18703,7 @@ const Toolbar = {
         this.rotTargetSel = document.getElementById('tb-rot-target');
         this.addHeIfBtn = document.getElementById('tb-add-heif');
         this.addMsiBtn = document.getElementById('tb-add-msi');
+        this.addRawBtn = document.getElementById('tb-add-raw');
         this.alignHeIfBtn = document.getElementById('tb-align-heif');
         this.delBtn = document.getElementById('tb-del-section');
         this.rotResetBtn = document.getElementById('tb-rot-reset');
@@ -18144,6 +18723,9 @@ const Toolbar = {
 
         this.addHeIfBtn.addEventListener('click', () => { const p = this.activePanel(); if (p) Wizards.openHeIfWizard(p); });
         this.addMsiBtn.addEventListener('click',  () => { const p = this.activePanel(); if (p) Wizards.openMsiWizard(p); });
+        if (this.addRawBtn) this.addRawBtn.addEventListener('click', () => {
+            const p = this.activePanel(); if (p) Wizards.openRawWizard(p);
+        });
         if (this.alignHeIfBtn) this.alignHeIfBtn.addEventListener('click', () => {
             const p = this.activePanel(); if (p) Wizards.openAlignmentModal(p);
         });
