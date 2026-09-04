@@ -134,7 +134,7 @@ Unpublished projects show a disabled `URL なし` (No URL) button. `Open` → pu
 
 | Location | What | Scope |
 | --- | --- | --- |
-| **Local IndexedDB** (`desi-projects`) | Project meta + section structure + ROIs + memo + raw files (TIFF/xlsx/txt) | This browser, this profile |
+| **Local IndexedDB** (`desi-projects`) | Project meta + section structure + ROIs + memo + raw files (TIFF/xlsx/txt/parquet/.raw.zip) | This browser, this profile |
 | **Supabase** (published projects only) | Section structure / ROIs / memo / binaries / bcrypt-hashed passwords | Whole server |
 | **localStorage** | Last opened project id, layout sizes | This browser, this profile |
 | **sessionStorage** | Admin pw cache, master unlock flag | This tab |

@@ -98,6 +98,8 @@ Click `+ HE/IF` on a section panel:
 - Analyte (`Analyte (converted from imzML)`) or generic TSV/CSV
 - Specify a layer name (e.g. `MSI_DA`) and the value column index
 
+> **Files with no compound-name row** (Waters' own `.raw/imaging/Analyte N.txt` among them) get a name synthesised from the transition, e.g. `mz146.1_87.1`. Those rows are flagged amber, and registering while they still carry the placeholder asks for confirmation first. That label becomes the compound name in the shared MRM library, **where the compound name is unique** — so two experiments registering placeholders would merge into one compound. Name them before registering (registering the `.raw` folder instead reads the real names).
+
 ### 4-3. Waters `.raw` (DESI-TQ-MSI / Xevo TQ Absolute)
 
 `+ .raw` registers the instrument's `.raw` **directory** as-is. Unlike xlsx / txt, **no acquisition parameters have to be typed in**.
@@ -385,7 +387,10 @@ Values auto-save to IndexedDB (~400 ms debounce). On Publish they're also writte
 
 ### 9-2. Rename a compound (master only)
 
-**Double-click** the **Compound cell** in the Method (MRM) table to rename only the compound's display name. Precursor / Fragment / CE / CV are untouched.
+**Double-click** the **Compound cell** in the Method (MRM) table to rename a compound's display name. Precursor / Fragment never change. CE / CV depend on where they came from:
+
+- **Registered from a `.raw`** — these are the instrument's own values, so they **survive the rename** even if the new label looks like `_45_14`. (Only when they are blank — a `.raw` acquired without `_FUNCnnn.EE` — does the label fill them in.)
+- **Registered from xlsx / txt** — unchanged behaviour: they are **re-derived** from a trailing `_<CE>_<CV>` in the new label. On that route the label *is* where CE/CV come from, so renaming is how you correct them.
 
 - The new name is broadcast to every section that holds the same compound key.
 - Persisted with verify-after-write; failures surface as a red error banner.
@@ -420,25 +425,34 @@ The **Export ZIP** button packages the entire project (images, MSI numerical dat
 
 ```
 <projectName>_<YYYY-MM-DDTHH-MM-SS>.zip
-├── <projectName>.json               ← project meta + all ROIs + memo (root JSON name = project name)
-└── sections/
-    └── <sectionId>/
-        ├── atlas.json               ← per-section meta + layer definitions (Align / Display / state)
-        └── data/
-            ├── img_HE_Stain__<original>.tif    ← HE/IF: one file per layer
-            ├── msi__Analyte_1.txt              ← MSI: one file per source file
-            └── msi__Analyte_2.xlsx             ← (with ROI columns appended)
+├── <projectName>.json                    ← project + every section's meta + ROIs + memo
+├── HE_IF/
+│   ├── full__<original>.tif              ← HE/IF originals (deduped when byte-identical)
+│   └── <sample>__<layerKey>__aligned.png ← the baked, aligned overlay
+├── Data/
+│   └── <sample>.csv                      ← MSI values, one file per section, compounds as columns
+│                                           (__bg_removed / __bg_flagged when exported with Otsu)
+└── Source/
+    └── <blobId>__<original>              ← sources that cannot be a CSV, or whose original is kept
+                                             (parquet and Waters .raw.zip; deduped by blobId)
 ```
+
+> Two kinds of file end up in `Source/`, for different reasons. **parquet** cannot
+> be written as a CSV (1390 columns × 100k rows), so without it the ZIP would carry
+> no MSI data at all. **`.raw`** does appear in the CSV, but that is a derivative —
+> the original is bundled so it can travel with the project (unzip it and MassLynx
+> opens it). On import the original wins when present; a ZIP without `Source/`
+> restores from the CSV instead.
 
 ### 9-2. Root JSON named after the project
 
 The root JSON is `<projectName>.json` (non-ASCII / unsafe chars replaced with `_`). On import the loader scans for any root-level `*.json` whose `format` field equals `desi_data_share_v1`, so renaming the file outside the viewer is fine.
 
-### 9-3. MSI data is consolidated per source file
+### 9-3. MSI data is consolidated per section
 
-Old format wrote one ZIP entry per compound, so 17 compounds registered from the same `Analyte 1.txt` produced 17 identical-content files. **The new format writes one file per source file**, regardless of how many compounds it produced.
+Old format wrote one ZIP entry per compound, so 17 compounds registered from the same `Analyte 1.txt` produced 17 identical-content files. **The new format writes one CSV per section**, with every compound of that section as a column.
 
-Example: 17 compounds from `Analyte 1.txt` → old format = 17 files, **new format = single `data/msi__Analyte_1.txt` containing all 17 compounds**.
+Example: 17 compounds from `Analyte 1.txt` → old format = 17 files, **new format = a single `Data/<sample>.csv` holding all 17 compounds as columns**.
 
 <div style="border:1px solid #cbd5e1;border-radius:6px;padding:8px;background:#f8fafc;margin:10px 0;font-size:12px;">
   <div style="font-weight:600;color:#0f172a;margin-bottom:6px;">Why "same section ⇒ same XY" holds</div>
@@ -457,19 +471,20 @@ xlsx sources keep their original column layout, with **0/1 flag columns appended
 | **Cortex (new)** | 1 if inside ROI Cortex, else 0 |
 | **Hippocampus (new)** | Same |
 
-### 9-5. atlas.json `path` semantics
+### 9-5. Shared paths inside the ZIP
 
-Each section's `atlas.json` carries a `path` for every MSI layer entry. **Multiple `msiSeries[layerKey]` entries pointing at the same `path` is the new normal.** On import the path becomes the dedup key — only one IndexedDB blob is created per unique path, even if many compounds reference it.
+Section definitions live inline in the root JSON's `sections[]` (the per-section `atlas.json` belongs to the old format and is no longer written). Each MSI compound points at the `Data/<sample>.csv` that holds its values, and **several compounds pointing at the same file is the normal case**. On import that path is the dedup key, so only one IndexedDB blob is created per file. Originals under `Source/` (parquet, `.raw.zip`) are deduped the same way, by blobId.
 
 ### 9-6. Import (= restore)
 
 Use the header's **Import ZIP**:
-- The loader finds the root-level `*.json` whose `format` is `desi_data_share_v1` and treats it as project metadata
-- Each `sections/<id>/atlas.json` rebuilds one section
-- Compounds sharing a `path` collapse to a single IDB blob
+- The loader finds the root-level `*.json` and switches on its `format` field (`desi_data_share_v2`, or the older `v1`)
+- Sections are rebuilt from the root JSON's `sections[]` (for `v1` ZIPs, from `sections/<id>/atlas.json`)
+- Compounds sharing a path collapse to a single IDB blob
+- When `Source/` holds the original (parquet, `.raw.zip`) that wins; otherwise the layer is restored from the `Data/` CSV
 - Fresh ids are minted so the imported project never collides with the source
 
-> **Old-format ZIPs** (fixed `project.json` + per-layer `msi_<layerKey>__` paths) are **not supported**. The importer raises a clear "old-format ZIP not supported" error. Re-export with the latest viewer.
+> **Still older ZIPs** (per-layer `msi_<layerKey>__` files) are **not supported**. The importer raises a clear "old-format ZIP not supported" error. Re-export with the latest viewer.
 
 ### 9-7. ZIP is independent of Publish
 
@@ -500,7 +515,7 @@ Pressing `Publish`:
 
 1. **Master password is verified** — the value from the management-page gate is reused if still cached; otherwise a prompt asks for it
 2. Server issues a 1-hour **publish session token**
-3. All blobs (TIFF / xlsx / txt) upload to Supabase Storage in parallel (concurrency 4) — the token is sent as a header and validated by RLS
+3. All blobs (TIFF / xlsx / txt / parquet / .raw.zip) upload to Supabase Storage in parallel (concurrency 4) — the token is sent as a header and validated by RLS
 4. A progress modal shows live `X / N files (Y MB / Z MB)`
 5. Each file retries up to 3 times with exponential backoff
 6. `upsert_project_doc` is called with the master password to update the DB
@@ -619,6 +634,8 @@ Tips for large (~1.5 GB) projects:
 | **Pro** | **100 GB** | **250 GB / month** | **$25** |
 
 Per-file size cap defaults to 50 MB on both plans, raisable to 5 GB from the dashboard settings.
+
+> **This app assumes a 500 MB per-file cap** (`STORAGE_FILE_LIMIT_MB`). Waters `.raw` archives are kept whole, and the 50 MB default will not hold a larger acquisition. Set Supabase Dashboard → Storage → Settings → Upload file size limit to 500 MB. Both the over-quota message and the `.raw` wizard's pre-publish warning read this value.
 
 > A 1.5 GB project pretty much requires Pro. The Free tier will hit both storage and bandwidth limits on the very first publish.
 

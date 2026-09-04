@@ -98,6 +98,8 @@
 - Analyte (`Analyte (converted from imzML)`) または一般 TSV/CSV
 - レイヤー名 (例 `MSI_DA`) と value column 番号を指定して登録
 
+> **化合物名の行が無いファイル**(`.raw` 同梱の `imaging/Analyte N.txt` など)では、名前を m/z から `mz146.1_87.1` のように仮に付けます。該当行は名前欄が琥珀色になり、仮の名前のまま登録しようとすると確認が出ます。この名前は **MRM ライブラリに登録するとそのまま化合物名になり、化合物名は全体で一意**なので、別の実験の仮名と同じ行に合流してしまいます。登録前に正しい名前を入れてください (`.raw` フォルダごと登録すれば化合物名も読み取れます)。
+
 ### 4-3. Waters `.raw` 形式 (DESI-TQ-MSI / Xevo TQ Absolute)
 
 `+ .raw` ボタンから、装置が出力した `.raw` **フォルダ**をそのまま登録します。xlsx / txt と違い、**測定条件を手で入力する必要がありません**。
@@ -385,7 +387,12 @@ Master が各 MSI の Range スライダー (Toolbar の Range 入力 or 歯車 
 
 ### 9-2. Compound 名 (master のみ)
 
-中央下の **Method (MRM) テーブルの Compound セル** をダブルクリックすると、化合物表示名のみ変更できます (同セル右側の precursor / product / CE / CV はそのまま)。
+中央下の **Method (MRM) テーブルの Compound セル** をダブルクリックすると、化合物表示名を変更できます。precursor / product は変わりません。
+
+CE / CV は出典によって扱いが分かれます。
+
+- **`.raw` から登録した化合物** … 装置の実測値なので**変わりません**。新しい名前が `_45_14` のような形でも上書きされません (`.raw` に `_FUNCnnn.EE` が無く CE/CV が空の場合だけ、名前から補われます)
+- **xlsx / txt から登録した化合物** … 従来どおり、新しい名前の末尾 `_<CE>_<CV>` から**再導出されます**。この経路では名前が CE/CV の出典そのものなので、名前を直すことが値を直す手段になっています
 
 - 変更名は project 全切片に broadcast (同じ compound key を持つ全 section に反映)
 - IDB 永続化 + verify 後に確定。失敗すれば赤エラーバナーで通知。
@@ -421,25 +428,33 @@ Master が各 MSI の Range スライダー (Toolbar の Range 入力 or 歯車 
 
 ```
 <プロジェクト名>_<YYYY-MM-DDTHH-MM-SS>.zip
-├── <プロジェクト名>.json            ← プロジェクトメタ + 全 ROI + Memo (ルート JSON 名 = プロジェクト名)
-└── sections/
-    └── <sectionId>/
-        ├── atlas.json               ← 切片メタ + 各レイヤー定義 (Align / Display / 表示状態)
-        └── data/
-            ├── img_HE_Stain__<元ファイル名>.tif    ← HE/IF はレイヤーごと
-            ├── msi__Analyte_1.txt                   ← MSI はソースファイル単位で 1 ファイル
-            └── msi__Analyte_2.xlsx                   ← 同上(ROI 列追記済み)
+├── <プロジェクト名>.json                  ← プロジェクト + 全切片メタ + ROI + Memo
+├── HE_IF/
+│   ├── full__<元ファイル名>.tif           ← HE/IF の原本 (内容が同じなら 1 部に重複排除)
+│   └── <切片名>__<レイヤー>__aligned.png  ← align 済みの焼き込み
+├── Data/
+│   └── <切片名>.csv                       ← MSI 数値。切片ごとに 1 ファイル、全化合物を横に並べる
+│                                             (背景除去して出すと __bg_removed / __bg_flagged が付く)
+└── Source/
+    └── <blobId>__<元ファイル名>            ← CSV にできない / 原本を残すソース本体
+                                              (parquet と Waters .raw.zip。blobId で重複排除)
 ```
+
+> `Source/` に入るのは 2 種類で、理由が別々です。**parquet** は CSV にできない
+> (1390 列 × 10 万行) ので、同梱しないと ZIP に MSI のデータが 1 つも入りません。
+> **`.raw`** は CSV にも出ますがそれは派生物で、原本を持ち出せるようにするために
+> 入れています (展開すれば MassLynx で開けます)。取り込み時は原本があればそちらを
+> 正として復元し、`Source/` の無い ZIP なら CSV から復元します。
 
 ### 9-2. ルート JSON 名がプロジェクト名
 
 `<プロジェクト名>.json` というファイル名で出力されます (ASCII 英数字 + `_` `-` 以外は `_` に置換)。Import 時はルート直下の任意の `*.json` を `format` フィールドで判別して読むので、リネームしても問題ありません。
 
-### 9-3. MSI データはソースファイル単位で 1 ファイルに統合
+### 9-3. MSI データは切片ごとに 1 ファイルへ統合
 
-旧形式では 1 化合物 = 1 ファイル(同じ xlsx でも複数 MSI レイヤーを登録すると同じバイナリが複製出力)。**新形式では同じソースファイルから登録された MSI 化合物は ZIP 内で 1 ファイルにまとめられます**。
+旧形式では 1 化合物 = 1 ファイル(同じ xlsx でも複数 MSI レイヤーを登録すると同じバイナリが複製出力)。**新形式では同じ切片の MSI 化合物が `Data/<切片名>.csv` の 1 ファイルにまとまります**(化合物が列として横に並ぶ)。
 
-例: `Analyte 1.txt` から 17 化合物登録 → 旧形式では 17 ファイル、新形式では `data/msi__Analyte_1.txt` の **1 ファイル**(中身に 17 化合物全件あり)。
+例: `Analyte 1.txt` から 17 化合物登録 → 旧形式では 17 ファイル、新形式では `Data/<切片名>.csv` の **1 ファイル**(中身に 17 化合物全件あり)。
 
 <div style="border:1px solid #cbd5e1;border-radius:6px;padding:8px;background:#f8fafc;margin:10px 0;font-size:12px;">
   <div style="font-weight:600;color:#0f172a;margin-bottom:6px;">同一切片の MSI ファイルが「同じ XY」を共有する根拠</div>
@@ -458,19 +473,20 @@ xlsx ソースは元の列構造を保持したまま、**末尾に各 ROI ご�
 | **Cortex (新規)** | ROI Cortex 内なら 1、外なら 0 |
 | **Hippocampus (新規)** | 同上 |
 
-### 9-5. atlas.json の `path` 解釈
+### 9-5. ZIP 内のパス共有
 
-各切片の `atlas.json` は MSI レイヤー定義に `path` フィールドを持ちます。**複数の `msiSeries[layerKey]` が同じ `path` を共有するのが新形式の正常状態**。Import 時はこの path をキーに blob を 1 度だけ復元 → IDB 容量も圧縮されます。
+切片の定義はルート JSON の `sections[]` に直接入っています(切片ごとの `atlas.json` は旧形式のもので、現行では作られません)。各 MSI 化合物は自分の値が入った `Data/<切片名>.csv` を指し、**複数の化合物が同じファイルを指すのが正常**です。Import 時はこのパスをキーに blob を 1 度だけ復元するので、IDB 上でも 1 部で済みます。`Source/` の parquet / `.raw.zip` も blobId で同じように重複排除されます。
 
 ### 9-6. Import (= 復元)
 
 ヘッダの **Import ZIP** で取り込み:
-- ZIP ルート直下の `*.json` を探索 → `format=desi_data_share_v1` を持つものをプロジェクトメタとして採用
-- `sections/<id>/atlas.json` から各切片を再構築
-- `path` が共有された MSI 化合物は **1 つの blob に集約** されて IDB に格納
+- ZIP ルート直下の `*.json` を探索し、`format` フィールドで形式を判別 (`desi_data_share_v2` / 旧 `v1`)
+- ルート JSON の `sections[]` から各切片を再構築 (旧 `v1` の ZIP は `sections/<id>/atlas.json` から)
+- 同じパスを指す MSI 化合物は **1 つの blob に集約** されて IDB に格納
+- `Source/` に原本 (parquet / `.raw.zip`) があればそちらを正として復元し、無ければ `Data/` の CSV から復元
 - 新しい id を採番(元プロジェクトと衝突しない)
 
-> **旧形式の ZIP**(`project.json` 固定名 + `msi_<layerKey>__` 個別ファイル)は **非対応**。Import すると「旧形式の ZIP は非対応です」エラーが出ます。最新版で再 Export してください。
+> **さらに古い形式の ZIP**(`msi_<layerKey>__` の個別ファイル)は **非対応**。Import すると「旧形式の ZIP は非対応です」エラーが出ます。最新版で再 Export してください。
 
 ### 9-7. ZIP は Publish とは独立
 
@@ -501,7 +517,7 @@ xlsx ソースは元の列構造を保持したまま、**末尾に各 ROI ご�
 
 1. **Master password の確認** — 管理画面のゲートで通したパスワードがそのまま使われます (キャッシュなしの場合のみ再入力プロンプト)
 2. サーバから 1 時間有効な **publish session token** を取得
-3. 全 blob (TIFF / xlsx / txt) を Supabase Storage に並列 (4 同時) アップロード — token をヘッダで送り、サーバ側 RLS で検証
+3. 全 blob (TIFF / xlsx / txt / parquet / .raw.zip) を Supabase Storage に並列 (4 同時) アップロード — token をヘッダで送り、サーバ側 RLS で検証
 4. 進捗モーダルで `X / N files (Y MB / Z MB)` をライブ表示
 5. 各ファイルは最大 3 回までリトライ (exponential backoff)
 6. `upsert_project_doc` を master pw 付きで呼んで DB を更新
@@ -620,6 +636,8 @@ xlsx ソースは元の列構造を保持したまま、**末尾に各 ROI ご�
 | **Pro** | **100 GB** | **250 GB / 月** | **$25** |
 
 ファイルサイズ上限は Free / Pro どちらも標準 50 MB → ダッシュボード設定で 5 GB まで引き上げ可能。
+
+> **このアプリは 1 ファイル 500 MB を前提にしています** (`STORAGE_FILE_LIMIT_MB`)。Waters `.raw` を原本ごと保存するため、既定の 50 MB では大きめの測定が入りません。Supabase ダッシュボード → Storage → Settings → Upload file size limit を 500 MB に設定してください。容量オーバー時のメッセージと、`.raw` 登録時の事前警告がこの値を見ています。
 
 > 1.5 GB プロジェクトを想定するなら Pro プラン必須。Free 枠で進めると 1 つ目で容量も帯域も即破綻します。
 
