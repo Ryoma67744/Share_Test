@@ -740,6 +740,34 @@ function testStoragePathRule() {
   assert.match(html, /extByBlob\.set\(ent\.blobId, storageExtOf\(filename\)\)/);
 }
 
+// オブジェクトのメソッド (async name(...) { ... }) を丸ごと取り出す。
+function extractMethod(source, name) {
+  const marker = `async ${name}(`;
+  const markerAt = source.indexOf(marker);
+  assert.notEqual(markerAt, -1, `missing method ${name}`);
+  const openAt = source.indexOf('{', markerAt + marker.length);
+  return source.slice(markerAt, scanBalanced(source, openAt) + 1);
+}
+
+// 切片 ID の付け方は取り込み (master) と共有 (share) で**わざと違う**。
+//   取り込み: meta.client_id — 再 publish したとき upsert_project_doc の
+//             client_id 照合が当たり、サーバの切片が作り直されない
+//             (作り直されると rois の ON DELETE CASCADE で閲覧者の ROI が消える)。
+//   共有:     サーバの UUID — list_rois と同じキーで揃える必要がある。
+// 片方に寄せるともう片方が壊れるので、両方を縛る。
+function testImportSectionIdKeying() {
+  const importFn = extractMethod(html, '_buildLocalProjectFromDoc');
+  const shareFn = extractMethod(html, '_hydrateSharedProject');
+
+  assert.match(importFn, /id:\s*\(s\.meta && s\.meta\.client_id\) \|\| s\.id/);
+  // ROI はサーバの UUID で引いてから client_id へ翻訳する。
+  assert.match(importFn, /fetchAllShareRois\(session\.token, doc\.sections/);
+  assert.match(importFn, /uuidToClient\[uuid\]/);
+
+  assert.match(shareFn, /id:\s*s\.client_id \|\| s\.id/);
+  assert.match(shareFn, /fetchAllShareRois\(session\.token, project\.sections\)/);
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -756,6 +784,7 @@ async function main() {
   testWorkerBakePath();
   await testWorkerRawDecodePath();
   testStoragePathRule();
+  testImportSectionIdKeying();
   console.log('viewer preview regression tests: PASS');
 }
 

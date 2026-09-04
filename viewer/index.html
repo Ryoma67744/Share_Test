@@ -21375,8 +21375,18 @@ const App = {
             id: uid('proj'),
             displayName: docMeta.display_name || doc.display_name || doc.displayName || slug,
             anatomyPalette: doc.anatomy_palette || doc.anatomyPalette || {},
+            // ★ 切片 ID はサーバの UUID ではなく client_id を使う。
+            //   get_project_doc は client_id を**単独の列としては返さない**
+            //   (meta の中に入っている) ので、これまでの `s.client_id || s.id` は
+            //   必ず UUID に落ちていた。その状態で取り込んだプロジェクトを再
+            //   publish すると、upsert_project_doc の client_id 照合が総外れして
+            //   既存の切片が全削除→再作成され、rois の ON DELETE CASCADE で
+            //   **共有先の閲覧者が描いた ROI が消える**。_refreshMasterCollabRois は
+            //   最初から meta.client_id を読んでおり、そことも噛み合っていなかった。
+            //   (共有モードの _hydrateSharedProject は UUID のままで正しい。
+            //    あちらは list_rois と同じキーで揃っている必要がある。)
             sections: (doc.sections || []).map(s => ({
-                id: s.client_id || s.id,
+                id: (s.meta && s.meta.client_id) || s.id,
                 ordinal: s.ordinal,
                 displayName: s.display_name || s.displayName || ('Section ' + s.ordinal),
                 meta: s.meta || {},
@@ -21519,9 +21529,27 @@ const App = {
         // Same per-section fan-out + colorKey grouping as the share-mode
         // hydration path; without it the imported project drops every ROI
         // that the master previously published.
+        // ★ list_rois はサーバの UUID で引くので、取得は doc.sections (UUID) で
+        //   行い、載せるときにローカルの切片キー (client_id) へ翻訳する。
+        //   翻訳しないと ROI が「どの切片にも属さない」状態になって描かれない。
         try {
-            const rows = await fetchAllShareRois(session.token, project.sections);
-            project.rois = groupRoiRowsByColor(rows, project.anatomyPalette);
+            const uuidToClient = {};
+            for (const s of (doc.sections || [])) {
+                if (s && s.id) uuidToClient[s.id] = (s.meta && s.meta.client_id) || s.id;
+            }
+            const rows = await fetchAllShareRois(session.token, doc.sections || []);
+            project.rois = groupRoiRowsByColor(rows, project.anatomyPalette).map(r => {
+                const polys = {}, sids = {};
+                for (const [uuid, poly] of Object.entries(r.polysBySection || {})) {
+                    const cid = uuidToClient[uuid];
+                    if (!cid) continue;
+                    polys[cid] = poly;
+                    if (r.serverIdsBySection && r.serverIdsBySection[uuid]) {
+                        sids[cid] = r.serverIdsBySection[uuid];
+                    }
+                }
+                return Object.assign({}, r, { polysBySection: polys, serverIdsBySection: sids });
+            });
         } catch (e) { console.warn('import ROI fetch failed', e); }
 
         return project;
