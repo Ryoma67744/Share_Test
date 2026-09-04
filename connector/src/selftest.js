@@ -702,6 +702,70 @@ console.log('Waters .raw — connector vs app');
   check('the archive is fetched whole exactly once', cache.fetchCount === 1, cache.fetchCount);
 }
 
+// =============================================================================
+// buildMsiGrid — connector vs app
+//
+// This one exists because it actually drifted. The app gained a "try the MEDIAN
+// gap before the minimum" pitch estimator; this module kept the min-only
+// version for about a month. On evenly spaced data the two agree, so nothing
+// looked broken — but they disagree exactly where the median was introduced to
+// help (float stage jitter), which is what a Waters .raw carries. A silent
+// disagreement here means the AI quotes ROI numbers computed on a different
+// pixel grid than the one the app drew.
+//
+// Extract the app's own buildMsiGrid and diff it, rather than eyeballing the
+// two copies.
+// =============================================================================
+console.log('buildMsiGrid — connector vs app');
+{
+  const viewerSrc = readFileSync(fileURLToPath(new URL('../../viewer/index.html', import.meta.url)), 'utf8');
+  const START = '\nfunction buildMsiGrid(rows) {';
+  const END = '// Pure numeric core (no DOM/canvas): build the MSI raster grid';
+  const s0 = viewerSrc.indexOf(START);
+  const e0 = viewerSrc.indexOf(END, s0);
+  check('locate the app buildMsiGrid in viewer/index.html', s0 >= 0 && e0 > s0, { s0, e0 });
+  if (s0 >= 0 && e0 > s0) {
+    const ctx = vm.createContext({});
+    new vm.Script(viewerSrc.slice(s0 + 1, e0) + '\nglobalThis.__appGrid = buildMsiGrid;').runInContext(ctx);
+    const appGrid = ctx.globalThis ? ctx.globalThis.__appGrid : ctx.__appGrid;
+
+    // Coordinates are the same on both axes so each case exercises x and y.
+    const CASES = {
+      'evenly spaced, complete': [0, 1, 2, 3, 4, 5],
+      'a skipped scan line': [0, 1, 2, 4, 5],
+      // ★ THE DISCRIMINATING CASE. One gap smaller than the true pitch, which is
+      //   what stage jitter looks like. min-only spreads this to W=10 and draws
+      //   phantom gaps; the median keeps W=6. The drift this test guards against
+      //   showed up here and nowhere else.
+      'float jitter (one short gap)': [0, 1, 2, 3, 4, 4.5],
+      'sparse ROI-only coordinates': [0, 10, 20, 21],
+      'two clustered coordinates': [0, 2, 4, 6, 6.1, 8],
+      'single coordinate': [3],
+    };
+    const asRows = (vals) => {
+      const out = [];
+      for (const y of vals) for (const x of vals) out.push({ x, y, v: 1 });
+      return out;
+    };
+    const dump = (g) => JSON.stringify({
+      W: g.W, H: g.H, fallback: g.gridFallback,
+      x: [...g.xIndex.entries()].sort((a, b) => a[0] - b[0]),
+      y: [...g.yIndex.entries()].sort((a, b) => a[0] - b[0]),
+    });
+    for (const [name, vals] of Object.entries(CASES)) {
+      const rows = asRows(vals);
+      const a = dump(appGrid(rows));
+      const b = dump(buildMsiGrid(rows));
+      check('★ ' + name, a === b, a === b ? null : { app: a, connector: b });
+    }
+    // Pin the behaviour the drift got wrong, so "both sides agree" cannot be
+    // satisfied by both regressing to min-only together.
+    const jitter = asRows(CASES['float jitter (one short gap)']);
+    check('★ the jitter case uses the median pitch (W=6, not the min-gap W=10)',
+      buildMsiGrid(jitter).W === 6, buildMsiGrid(jitter).W);
+  }
+}
+
 console.log('');
 if (failures) { console.log('SELFTEST FAILED:', failures, 'check(s)'); process.exit(1); }
 console.log('SELFTEST PASSED');
