@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { deflateRawSync } = require('node:zlib');
 
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'viewer', 'index.html'), 'utf8');
@@ -482,7 +483,12 @@ function crc32(bytes) {
   return (c ^ 0xFFFFFFFF) >>> 0;
 }
 
-// STORE-only writer, so the fixture needs no compressor and stays byte-stable.
+// Members whose name matches this are DEFLATEd rather than STOREd. The app's own
+// archives are deflated, so leaving the fixture STORE-only would never execute
+// the inflate path at all — the one place the app (DecompressionStream) and the
+// connector (zlib) legitimately differ.
+const ZIP_DEFLATE = /_FUNC001\.(STS|DAT)$/;
+
 function buildZip(members) {
   const parts = [];
   const central = [];
@@ -490,13 +496,16 @@ function buildZip(members) {
   for (const [name, bytes] of members) {
     const nameBytes = new TextEncoder().encode(name);
     const crc = crc32(bytes);
+    const deflate = ZIP_DEFLATE.test(name);
+    const stored = deflate ? new Uint8Array(deflateRawSync(bytes)) : bytes;
+    const method = deflate ? 8 : 0;
     const local = new Uint8Array(30 + nameBytes.length);
     const ldv = new DataView(local.buffer);
     ldv.setUint32(0, 0x04034b50, true);
     ldv.setUint16(4, 20, true);
-    ldv.setUint16(8, 0, true);            // method 0 = STORE
+    ldv.setUint16(8, method, true);
     ldv.setUint32(14, crc, true);
-    ldv.setUint32(18, bytes.length, true);
+    ldv.setUint32(18, stored.length, true);
     ldv.setUint32(22, bytes.length, true);
     ldv.setUint16(26, nameBytes.length, true);
     local.set(nameBytes, 30);
@@ -504,16 +513,16 @@ function buildZip(members) {
     const cdv = new DataView(cd.buffer);
     cdv.setUint32(0, 0x02014b50, true);
     cdv.setUint16(6, 20, true);
-    cdv.setUint16(10, 0, true);
+    cdv.setUint16(10, method, true);
     cdv.setUint32(16, crc, true);
-    cdv.setUint32(20, bytes.length, true);
+    cdv.setUint32(20, stored.length, true);
     cdv.setUint32(24, bytes.length, true);
     cdv.setUint16(28, nameBytes.length, true);
     cdv.setUint32(42, offset, true);
     cd.set(nameBytes, 46);
     central.push(cd);
-    parts.push(local, bytes);
-    offset += local.length + bytes.length;
+    parts.push(local, stored);
+    offset += local.length + stored.length;
   }
   const cdStart = offset;
   let cdSize = 0;
@@ -555,7 +564,7 @@ function extractTopLevelFunction(name) {
 // caller wants to CALL. Defining a function does not evaluate its body, so the
 // xlsx/TIFF entries can be defined without XLSX/UTIF present; only what a test
 // actually calls has to resolve.
-function assembleWorkerFns(wanted) {
+function assembleWorkerFns(wanted, extraNames) {
   const listMatch = /const fns = \[([\s\S]*?)\n {4}\];/.exec(html);
   assert.ok(listMatch, 'missing parse-worker fns list');
   const names = listMatch[1].split(/[,\s]+/).filter(Boolean);
@@ -570,7 +579,9 @@ function assembleWorkerFns(wanted) {
   vm.runInContext(
     'const MSI_ROBUST_PERCENTILE = ' + constOf('MSI_ROBUST_PERCENTILE') + ';\n'
     + 'const MSI_DEFAULT_DISPLAY_PERCENTILE = ' + constOf('MSI_DEFAULT_DISPLAY_PERCENTILE') + ';\n'
-    + names.map(extractTopLevelFunction).join('\n\n')
+    // `extraNames` are defined alongside but are NOT part of the worker list —
+    // main-thread-only entry points a test wants to call.
+    + names.concat(extraNames || []).map(extractTopLevelFunction).join('\n\n')
     + '\nout.api = { ' + wanted.join(', ') + ' };',
     context,
   );
@@ -584,9 +595,16 @@ function assembleWorkerFns(wanted) {
 // to the main thread — the picture still appeared, only the off-main-thread
 // benefit died. Running the chain here makes that fail loudly instead.
 function testWorkerBakePath() {
-  const { api } = assembleWorkerFns(['computeRasterPixels']);
+  const { api } = assembleWorkerFns(['computeRasterPixels', 'parseTxtToRows']);
   const rows = [];
   for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) rows.push({ x, y, v: y * 5 + x });
+
+  // The txt reader feeds the same chain, and is pure, so cover it here too.
+  const tsv = ['x\ty\tv'].concat(rows.map((r) => r.x + '\t' + r.y + '\t' + r.v)).join('\n');
+  const parsed = api.parseTxtToRows(new TextEncoder().encode(tsv).buffer, {});
+  assert.equal(parsed.length, rows.length);
+  assert.deepEqual(Array.from(parsed, (r) => r.v), Array.from(rows, (r) => r.v));
+
   const px = api.computeRasterPixels(rows, null, 'robust');
   assert.equal(px.width, 5);
   assert.equal(px.height, 4);
@@ -600,10 +618,13 @@ function testWorkerBakePath() {
 }
 
 async function testWorkerRawDecodePath() {
+  // parseRawToRows is the MAIN-THREAD fallback (loadMsiLayer uses it when the
+  // worker is unavailable); the worker itself calls rawDecodeFunction +
+  // rawRowsFromDecoded, so it is deliberately not in the fns list.
   const { names, api } = assembleWorkerFns([
     'rawBundleFromZip', 'rawDecodeFunction', 'rawRowsFromDecoded', 'parseRawToRows',
     'parseWatersParamTable', 'buildMsiGrid',
-  ]);
+  ], ['parseRawToRows']);
   assert.ok(names.includes('rawDecodeFunction') && names.includes('rawRowsFromDecoded'),
     '.raw decode helpers must be in the parse-worker fns list');
 
@@ -611,6 +632,9 @@ async function testWorkerRawDecodePath() {
   const bundle = api.rawBundleFromZip(zip);
   assert.equal(bundle.rootName, 'SYNTH', 'the *.raw/ prefix names the bundle');
 
+  // _FUNC001.STS and .DAT are DEFLATEd in the fixture (ZIP_DEFLATE), so every
+  // assertion below also proves the inflate path — which is the path the app's
+  // own archives take, and the one place the app and the connector differ.
   const decoded = await api.rawDecodeFunction(bundle, 1);
   assert.equal(decoded.nScans, 6);
   assert.equal(decoded.nCh, 2);

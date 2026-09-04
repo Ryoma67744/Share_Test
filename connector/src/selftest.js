@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import { deflateRawSync } from 'node:zlib';
 import * as XLSX from 'xlsx';
 import {
   a1ColToIndex, pointInPolygon, buildMsiGrid,
@@ -576,7 +577,10 @@ console.log('Waters .raw — connector vs app');
     ['260904_Test_POS1.raw/_FUNC001.CMP', cmp],
   ];
 
-  // STORE-only writer: no compressor needed on the write side.
+  // Members matching this are DEFLATEd. The app writes deflated archives, so a
+  // STORE-only fixture would never execute rawInflate — the single line where
+  // this module and the app legitimately differ (zlib vs DecompressionStream).
+  const ZIP_DEFLATE = /_FUNC001\.(STS|DAT|CMP)$/;
   const CRC_T = (() => { const t = new Uint32Array(256);
     for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[i] = c >>> 0; }
     return t; })();
@@ -585,15 +589,18 @@ console.log('Waters .raw — connector vs app');
     const parts = [], central = []; let offset = 0;
     for (const [name, bytes] of entries) {
       const nb = enc(name), crc = crc32(bytes);
+      const deflate = ZIP_DEFLATE.test(name);
+      const stored = deflate ? new Uint8Array(deflateRawSync(bytes)) : bytes;
+      const method = deflate ? 8 : 0;
       const L = new Uint8Array(30 + nb.length), ld = new DataView(L.buffer);
-      ld.setUint32(0, 0x04034b50, true); ld.setUint16(4, 20, true); ld.setUint16(8, 0, true);
-      ld.setUint32(14, crc, true); ld.setUint32(18, bytes.length, true); ld.setUint32(22, bytes.length, true);
+      ld.setUint32(0, 0x04034b50, true); ld.setUint16(4, 20, true); ld.setUint16(8, method, true);
+      ld.setUint32(14, crc, true); ld.setUint32(18, stored.length, true); ld.setUint32(22, bytes.length, true);
       ld.setUint16(26, nb.length, true); L.set(nb, 30);
       const C = new Uint8Array(46 + nb.length), cd = new DataView(C.buffer);
-      cd.setUint32(0, 0x02014b50, true); cd.setUint16(6, 20, true); cd.setUint16(10, 0, true);
-      cd.setUint32(16, crc, true); cd.setUint32(20, bytes.length, true); cd.setUint32(24, bytes.length, true);
+      cd.setUint32(0, 0x02014b50, true); cd.setUint16(6, 20, true); cd.setUint16(10, method, true);
+      cd.setUint32(16, crc, true); cd.setUint32(20, stored.length, true); cd.setUint32(24, bytes.length, true);
       cd.setUint16(28, nb.length, true); cd.setUint32(42, offset, true); C.set(nb, 46);
-      central.push(C); parts.push(L, bytes); offset += L.length + bytes.length;
+      central.push(C); parts.push(L, stored); offset += L.length + stored.length;
     }
     const cdStart = offset; let cdSize = 0;
     for (const c of central) { parts.push(c); cdSize += c.length; }
@@ -612,6 +619,10 @@ console.log('Waters .raw — connector vs app');
   const f = meta.functions[0];
 
   check('root name comes from the *.raw/ prefix', meta.rootName === '260904_Test_POS1', meta.rootName);
+  // .STS / .DAT / .CMP are DEFLATEd above, so everything below also exercises
+  // rawInflate — zlib here, DecompressionStream in the app.
+  check('DEFLATEd members inflate (zlib side of the only divergence)',
+    f.channels[0].name === 'POS-NTs-GABA' && f.nScans === N, [f.channels[0].name, f.nScans]);
   check('instrument + acquired date read from _HEADER.TXT',
     meta.header['Instrument'] === 'XEVO-TQAbs#WDA0428' && meta.header['Acquired Date'] === '04-Sep-2026', meta.header);
   check('function type 9 = MRM', f.type === 9 && f.isMrm === true, f.type);
