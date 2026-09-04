@@ -104,6 +104,7 @@ body.share-mode:not(.share-admin) #btn-share-admin-login { display:inline-flex; 
 .sync-status.sync-synced          { background:#dcfce7; color:#166534; }
 .sync-status.sync-conflict        { background:#fee2e2; color:#b91c1c; }
 .sync-status.sync-needs-master-pw { background:#ede9fe; color:#6d28d9; }
+.sync-status.sync-needs-share-pw  { background:#ede9fe; color:#6d28d9; }
 .sync-status.sync-error           { background:#fee2e2; color:#b91c1c; }
 body.share-mode .sync-status { display:none !important; }
 /* Preview/embed mode (opened with #...&preview=1, e.g. the MRM "実測棚卸し"
@@ -19287,6 +19288,15 @@ function serverUnavailableReason() {
     return null;   // 使える
 }
 
+// 「その RPC がまだデータベースに適用されていない」だけかを見分ける。SQL は
+// Supabase の SQL Editor へ手で流す運用なので、新しい RPC を足したページが
+// 古いスキーマに対して動くことが普通にある。呼び出し側はこれが true のときだけ
+// 旧経路へ落とすこと (認証エラーまでフォールバックすると穴になる)。
+function _isMissingRpc(e) {
+    const msg = String((e && (e.message || e.details || e.hint)) || '');
+    return (e && e.code === 'PGRST202') || /Could not find the function/i.test(msg);
+}
+
 const SupabaseClient = (() => {
     let client = null;
     let lastError = null;
@@ -21020,31 +21030,79 @@ const App = {
         await this._hydrateSharedProject(session);
     },
 
-    // Pull a published project from Supabase into the local IndexedDB so a
-    // master on a different PC (or in incognito) can edit it with the full
-    // master toolbar instead of the read-only share recipient flow. Mirrors
-    // the share recipient hydrate path (_hydrateSharedProject) but lands on
-    // a real master project record (no `__share: true`, fresh local id, all
-    // blobs persisted) and returns the new project id for App.init to open.
-    // admin pw is required because the import grants editing rights — the
-    // session_token returned by unlock_project must carry role='admin'.
-    async _importProjectFromServer(slug) {
-        if (!SupabaseClient.configured()) {
-            alert(serverUnavailableReason() || 'Supabase が未設定です');
-            return null;
+    // 取り込み用の読み取りトークンを取る。返り値は _hydrateSharedProject と
+    // 同じ形の session ({ slug, token, role, expiresAt })。
+    //
+    // ★ 認証はマスターパスワード。取り込みが読むのは get_project_doc と
+    //   list_rois だけで、どちらも viewer トークンで通る。以前は**プロジェクト
+    //   個別の admin password** を要求していたが、publish モーダルの admin 欄は
+    //   任意入力で、upsert_project_doc は _admin_pw が null なら資格情報を書かない
+    //   (share_locks.sql)。つまり admin pw を入れずに公開したプロジェクトには
+    //   正解のパスワードが存在せず、**どの PC からも永久に取り込めなかった**
+    //   (何を入れても unlock_project が 28P01 を返し、一覧へ戻るだけ)。
+    async _openImportSession(slug) {
+        // まずマスターパスワードで読み取りトークンを取る。管理画面の入場と
+        // 同じ資格情報なので、たいていは入力すら要らない。
+        let masterPw = _readCachedMasterPw();
+        let typed = false;
+        let missingRpc = false;
+        for (let attempt = 0; attempt < 2 && !missingRpc; attempt++) {
+            if (!masterPw) {
+                masterPw = (prompt(
+                    '"' + slug + '" を master mode で取り込みます。\n' +
+                    'Master password を入力してください。',
+                    ''
+                ) || '').trim();
+                typed = true;
+                if (!masterPw) return null;
+            }
+            try {
+                const raw = await SupabaseClient.unlockProjectMaster(slug, masterPw);
+                const row = Array.isArray(raw) ? raw[0] : raw;
+                if (!row || !row.token) { alert('token を取得できませんでした'); return null; }
+                _saveCachedMasterPw(masterPw);
+                return { slug, token: row.token, role: row.role || 'viewer', expiresAt: row.expires_at };
+            } catch (e) {
+                // ★ 落とすのは「RPC がまだ無い」ときだけ。パスワード違いで旧経路へ
+                //   落ちると、マスターパスワードを admin パスワードとして
+                //   もう一度聞くことになり、利用者には同じ失敗が 2 回見える。
+                if (_isMissingRpc(e)) {
+                    console.warn('unlock_project_master が未適用。admin password 経路へ退避します', e);
+                    missingRpc = true;
+                    break;
+                }
+                const msg = String((e && (e.message || e.details)) || e);
+                if (/not_found|P0002/i.test(msg)) {
+                    alert('サーバにこのプロジェクトがありません (slug: ' + slug + ')');
+                    return null;
+                }
+                console.warn('import unlock_project_master failed', e);
+                // キャッシュが古いだけかもしれないので、捨てて 1 回だけ聞き直す。
+                try { sessionStorage.removeItem('desi:masterPw'); } catch (e2) {}
+                if (typed) { alert('マスターパスワードが違います'); return null; }
+                masterPw = '';
+            }
         }
+        if (!missingRpc) return null;
+
+        // ---- 退避経路: 旧来のプロジェクト個別 admin password ----
+        // unlock_project_master を含む supabase/share_locks.sql をまだ流していない
+        // データベース向け。admin pw が設定されていないプロジェクトはここでは
+        // 取り込めないので、その旨まで含めて知らせる。
         const adminPw = (prompt(
             '"' + slug + '" を master mode で取り込みます。\n' +
-            'このプロジェクトの admin password を入力してください。',
+            'このサーバは master 取り込みに未対応のため、このプロジェクトの\n' +
+            'admin password を入力してください。',
             ''
         ) || '').trim();
         if (!adminPw) return null;
-
         let raw;
         try { raw = await SupabaseClient.unlockProject(slug, adminPw); }
         catch (e) {
             console.warn('import unlock_project failed', e);
-            alert('admin password が違うか、プロジェクトが存在しません');
+            alert('admin password が違うか、このプロジェクトには admin password が\n'
+                + '設定されていません。管理画面の「🔑 パスワード」で admin を設定してから\n'
+                + 'もう一度お試しください。');
             return null;
         }
         const row = Array.isArray(raw) ? raw[0] : raw;
@@ -21053,7 +21111,22 @@ const App = {
             alert('viewer password では取り込めません。admin password を入力してください\n(admin pw 未設定の公開リンクは "Share view" ボタンで read-only 表示してください)');
             return null;
         }
-        const session = { slug, token: row.token, role: 'admin', expiresAt: row.expires_at };
+        return { slug, token: row.token, role: 'admin', expiresAt: row.expires_at };
+    },
+
+    // Pull a published project from Supabase into the local IndexedDB so a
+    // master on a different PC (or in incognito) can edit it with the full
+    // master toolbar instead of the read-only share recipient flow. Mirrors
+    // the share recipient hydrate path (_hydrateSharedProject) but lands on
+    // a real master project record (no `__share: true`, fresh local id, all
+    // blobs persisted) and returns the new project id for App.init to open.
+    async _importProjectFromServer(slug) {
+        if (!SupabaseClient.configured()) {
+            alert(serverUnavailableReason() || 'Supabase が未設定です');
+            return null;
+        }
+        const session = await this._openImportSession(slug);
+        if (!session) return null;
 
         let doc;
         try { doc = await SupabaseClient.fetchProjectDoc(session.token); }
@@ -23141,6 +23214,17 @@ const App = {
         //   「master pw 期限切れ」には状態があるのに、こちらには無かった。
         if (!SupabaseClient.configured()) { this._setSyncStatus('no-server'); return; }
 
+        // ★ 取り込んだプロジェクトは共有パスワードを引き継がない
+        //   (_buildLocalProjectFromDoc が viewerPassword/adminPassword を null で
+        //   作る)。このまま送っても upsert_project_doc が
+        //   viewer_password_required を返すだけなので、通信する前に止めて
+        //   「1 回 Publish to share を押してほしい」を状態で伝える。
+        //   ここが無いと、編集のたびに "⚠ Sync 失敗" が出て原因が分からない。
+        if (!project.shareInfo.isPublic && !project.shareInfo.viewerPassword) {
+            this._setSyncStatus('needs-share-pw');
+            return;
+        }
+
         const masterPw = _readCachedMasterPw();
         if (!masterPw) {
             this._setSyncStatus('needs-master-pw');
@@ -23258,6 +23342,9 @@ const App = {
             }
             case 'conflict':        text = '⚠ サーバが新しい'; break;
             case 'needs-master-pw': text = '🔑 Master pw 期限切れ'; break;
+            // 取り込んだプロジェクト: viewer / admin パスワードが引き継がれて
+            // いないので、1 回だけ手動 publish で設定してもらう必要がある。
+            case 'needs-share-pw':  text = '🔑 共有パスワード未設定'; break;
             // ★ サーバに繋がらない。**「Local 保存中」のまま黙って止まらせない**。
             //   公開されていないことが一目で分かる必要がある。
             case 'no-server':       text = '⚠ サーバに接続できません'; break;
@@ -23268,6 +23355,9 @@ const App = {
         el.title = (state === 'error' && a) ? a
                  : (state === 'conflict') ? '別 PC が新しいバージョンを publish しました。クリックで対応'
                  : (state === 'needs-master-pw') ? 'クリックで Master pw 入力'
+                 : (state === 'needs-share-pw')
+                     ? '取り込んだプロジェクトには共有パスワードが引き継がれません。'
+                       + 'クリックして Publish to share で viewer / admin パスワードを設定してください'
                  : (state === 'no-server')
                      ? (serverUnavailableReason() || 'サーバに接続できないため公開できていません')
                        + '（この変更はこの端末にだけ保存されています。クリックで再試行）'
@@ -23294,6 +23384,12 @@ const App = {
             // Force an immediate auto-publish.
             if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
             this.autoPublishProject().catch(e => console.warn('manual sync failed', e));
+            return;
+        }
+        if (state === 'needs-share-pw') {
+            // パスワードは publish モーダルでしか設定できないので、そこへ送る。
+            // 設定して 1 回送れば shareInfo に載り、以降は自動同期に戻る。
+            publishProjectToShare().catch(e => console.warn('publish from sync indicator failed', e));
             return;
         }
         if (state === 'needs-master-pw') {

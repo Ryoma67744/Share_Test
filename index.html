@@ -1434,7 +1434,7 @@ function rowHtml(r) {
             <div class="flex gap-2">
               ${r.local
                   ? '<button type="button" class="btn primary" data-action="open-local">Open</button>'
-                  : '<button type="button" class="btn primary" data-action="open-server" title="サーバから取り込んで master mode で開きます (admin password 要)">Open (master)</button>'}
+                  : '<button type="button" class="btn primary" data-action="open-server" title="サーバから取り込んで master mode で開きます (master password 要)">Open (master)</button>'}
               ${(!r.local && slug) ? '<button type="button" class="btn" data-action="open-share" title="閲覧専用 share view で開きます">Share view</button>' : ''}
               ${url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : '')}
               ${r.local ? '<button type="button" class="btn danger" data-action="delete-local">Delete</button>' : ''}
