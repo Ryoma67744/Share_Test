@@ -36,6 +36,16 @@
 
 `schema.sql` を実行すると `atlases` という非公開バケットが自動作成されます。
 
+### 2-0. 1 ファイルの上限を 500 MB に上げる (必須)
+
+**Storage → Settings → Upload file size limit** を **500 MB** に設定してください。既定は 50 MB です。
+
+- アプリはこの値を前提にしています (`viewer/index.html` の `STORAGE_FILE_LIMIT_MB`)。容量オーバー時のメッセージと、`.raw` 登録ウィザードの事前警告が同じ値を見ます
+- 上げないと、Waters `.raw` を原本ごと保存する運用で **publish が HTTP 413 で失敗**します (`.raw` は圧縮しても数 MB〜数十 MB になります)
+- 引き上げ可能な上限はプランに依存します。設定画面で 500 MB を入力できるか確認してください
+
+### 2-1. seed 用ファイルのアップロード
+
 1. Supabase の **Storage → atlases** に移動
 2. 新規フォルダ `cor_slide_1_10/sections/0/` を作成
 3. 以下 3 ファイルを `datasets/cor_slide_1_10/data/` から **そのままアップロード**:
