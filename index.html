@@ -921,8 +921,16 @@ async function treeMoveProject(slug, localId) {
     _ensureTree();
     const dest = await pickFolderModal();
     if (dest === undefined) return;
-    _treeRemove(n => n.type === 'project' && ((slug && n.slug === slug) || (localId && n.localId === localId)));
+    // ★ 一致するノードを**全部**外す。_treeRemove は 1 件外して返すだけなので、
+    //   {localId} と {slug} の 2 ノードで載っているプロジェクト (renderNodes の
+    //   コメント参照) を移動すると、片方が移動元に幽霊として残っていた。
     const node = { type: 'project' };
+    let removed;
+    while ((removed = _treeRemove(n => n.type === 'project'
+            && ((slug && n.slug === slug) || (localId && n.localId === localId))))) {
+        if (removed.slug && !node.slug) node.slug = removed.slug;
+        if (removed.localId && !node.localId) node.localId = removed.localId;
+    }
     if (slug) node.slug = slug;
     if (localId) node.localId = localId;
     _treeChildrenOf(dest.id).push(node);
@@ -1477,6 +1485,8 @@ async function renderList() {
         if (lid) byLocal.set(lid, r);
     }
     const placed = new Set();
+    // 同じ行に解決された最初のノード。2 つ目以降は重複なので畳む (renderNodes)。
+    const firstNodeByKey = new Map();
     const rowForNode = (n) => {
         if (n.slug && bySlug.has(n.slug)) return bySlug.get(n.slug);
         if (n.localId && byLocal.has(n.localId)) return byLocal.get(n.localId);
@@ -1548,7 +1558,29 @@ async function renderList() {
                     + '</div>';
             } else if (n.type === 'project') {
                 const r = rowForNode(n);
-                if (r) { placed.add(rkey(r)); html += rowHtml(r); }
+                if (!r) continue;
+                const k = rkey(r);
+                // ★ 1 つのプロジェクトがツリーに 2 ノード載っていることがある。
+                //   フォルダ内の「＋プロジェクト」は {localId} だけのノードを作り
+                //   (:1595)、publish 後にローカル記録を持たない別 PC から「移動」
+                //   すると slug でしか照合できないので {slug} ノードが足される。
+                //   ツリーはサーバ共有なので、**両方を解決できる PC でだけ**同じ
+                //   行が 2 回描かれ、「プロジェクトが複製された」ように見えていた
+                //   (実体は 1 つで、どちらを押しても同じものが開く)。
+                //   ここで 1 つに畳み、身元 (slug / localId) は残す方へ寄せる。
+                //   別フォルダに散っている場合はツリー順で先に出た方を残す。
+                //   保存はユーザーが次にフォルダ操作をしたとき (persistTreeAndRender)。
+                const first = firstNodeByKey.get(k);
+                if (first) {
+                    if (n.slug && !first.slug) first.slug = n.slug;
+                    if (n.localId && !first.localId) first.localId = n.localId;
+                    const i = nodes.indexOf(n);   // sortNodes は複製を返すので splice して安全
+                    if (i >= 0) nodes.splice(i, 1);
+                    continue;
+                }
+                firstNodeByKey.set(k, n);
+                placed.add(k);
+                html += rowHtml(r);
             }
         }
         return html;

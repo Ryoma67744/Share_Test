@@ -68,13 +68,20 @@ function extractFunction(source, name) {
   return source.slice(markerAt, closeAt + 1);
 }
 
-function compileInlineScripts() {
-  const scripts = [...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
+// 構文ゲート。アプリは 1 ファイル 1 ページの inline script なので、ここが
+// 落ちなければ「読み込んだ瞬間に真っ白」だけは避けられる。viewer だけでなく
+// 管理画面 (index.html) と MRM 管理 (mrm.html) も見る — どちらも同じ
+// IndexedDB / RPC を触るのに、これまで構文の網が掛かっていなかった。
+function compileInlineScripts(relPath, minScripts) {
+  const source = relPath === 'viewer/index.html'
+    ? html
+    : fs.readFileSync(path.join(root, relPath), 'utf8');
+  const scripts = [...source.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)]
     .map((match) => match[1])
-    .filter((source) => source.trim());
-  assert.ok(scripts.length >= 2, 'expected inline viewer scripts');
-  scripts.forEach((source, index) => new vm.Script(source, {
-    filename: `viewer/index.html#inline-${index + 1}`,
+    .filter((s) => s.trim());
+  assert.ok(scripts.length >= minScripts, `expected inline scripts in ${relPath}`);
+  scripts.forEach((src, index) => new vm.Script(src, {
+    filename: `${relPath}#inline-${index + 1}`,
   }));
 }
 
@@ -701,7 +708,9 @@ function testRenameKeepsInstrumentCeCv() {
 }
 
 async function main() {
-  compileInlineScripts();
+  compileInlineScripts('viewer/index.html', 2);
+  compileInlineScripts('index.html', 1);
+  compileInlineScripts('mrm.html', 1);
   assert.match(html, /data-preview-range-reset/);
   assert.doesNotMatch(html, /data-organ-select/);
   assert.match(html, /parseXlsxSheet, rowsFromParsedXlsx, parseXlsxToRows/);
