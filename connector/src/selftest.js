@@ -458,6 +458,250 @@ console.log('parquet (TIMS non-target) — connector vs app');
   }
 }
 
+// =============================================================================
+// Waters .raw — connector vs app
+//
+// A .raw is built here byte by byte, which doubles as executable documentation
+// of the binary layout. Its channel table carries the SAME values as a real
+// Xevo TQ Absolute acquisition, so an endianness or field-offset regression
+// fails on the first run instead of producing plausible-but-wrong ion images.
+//
+// It then extracts the app's parser live from viewer/index.html (between the
+// "waters-raw parser" sentinels) and diffs this module's output against it.
+// The only permitted divergence is rawInflate (DecompressionStream vs zlib).
+// =============================================================================
+console.log('Waters .raw — connector vs app');
+{
+  // The real acquisition's 8 MRM channels, verbatim.
+  const FX = {
+    names: ['POS-NTs-GABA', 'POS-NTs-Dopamine', 'POS_Acetylcholine', 'POS_AA_Glutamine',
+            'POS-NTs-NE', 'POS-NTs-5-HT', 'POS_Adenosine', '798'],
+    precursor: [104, 137.1, 146.1, 147.0691, 152, 177, 268.24, 798.55],
+    product: [87, 91.1, 87.1, 84, 107, 160, 136, 163],
+    cv: [10, 50, 15, 22, 30, 14, 32, 20],
+    ce: [10, 18, 10, 18, 14, 8, 18, 35],
+    dwell: 0.0098889,
+    W: 5, H: 3, pitch: 0.07, x0: 9.40746, y0: -5.78301,
+  };
+  const N = FX.W * FX.H, NCH = FX.names.length;
+  const xs = [], ys = [];
+  for (let r = 0; r < FX.H; r++) for (let c = 0; c < FX.W; c++) {
+    xs.push(FX.x0 + c * FX.pitch); ys.push(FX.y0 + r * FX.pitch);
+  }
+  // Distinct per (scan, channel) so a column mix-up cannot pass unnoticed.
+  const valueAt = (i, ch) => (ch + 1) * 1000 + i;
+
+  // intensity = (w & 0x3FFFFF) * 2 ** ((w >>> 22) - 21); exponent 21 keeps an
+  // integer mantissa verbatim.
+  const word = (v) => ((((21 << 22) >>> 0) | v) >>> 0);
+
+  const paramTable = ({ stride, params, records, write }) => {
+    const dataOffset = 32 + params.length * 48;
+    const buf = new ArrayBuffer(dataOffset + records * stride);
+    const dv = new DataView(buf), u8 = new Uint8Array(buf);
+    dv.setUint16(0, dataOffset, true); dv.setUint16(2, 1, true);
+    dv.setUint16(4, stride, true); dv.setUint16(6, params.length, true);
+    params.forEach((p, i) => {
+      const b = 32 + i * 48;
+      dv.setUint16(b, p.id, true); dv.setUint16(b + 2, p.flag, true); dv.setUint16(b + 4, p.offset, true);
+      for (let k = 0; k < p.name.length && k < 26; k++) u8[b + 6 + k] = p.name.charCodeAt(k);
+      dv.setUint16(b + 32, p.size, true);
+    });
+    for (let r = 0; r < records; r++) write(dv, dataOffset + r * stride, r);
+    return new Uint8Array(buf);
+  };
+
+  const dat = new ArrayBuffer(N * NCH * 4);
+  const datDv = new DataView(dat);
+  for (let i = 0; i < N; i++) for (let c = 0; c < NCH; c++) {
+    datDv.setUint32((i * NCH + c) * 4, word(valueAt(i, c)), true);
+  }
+  const idx = new ArrayBuffer(N * 22);
+  const idxDv = new DataView(idx);
+  for (let i = 0; i < N; i++) {
+    let tic = 0; for (let c = 0; c < NCH; c++) tic += valueAt(i, c);
+    idxDv.setUint32(i * 22, i * NCH * 4, true);
+    idxDv.setUint32(i * 22 + 4, (0x08000000 | NCH) >>> 0, true);
+    idxDv.setFloat32(i * 22 + 8, tic, true);
+    idxDv.setFloat32(i * 22 + 12, (i + 1) * 0.00185, true);
+  }
+  // Odd stride (153, as the real instrument writes) so the fixture exercises the
+  // unaligned reads that make DataView mandatory over typed-array views.
+  const sts = paramTable({
+    stride: 153,
+    params: [
+      { id: 9, flag: 3, offset: 16, size: 4, name: 'Aim X Position' },
+      { id: 10, flag: 3, offset: 20, size: 4, name: 'Aim Y Position' },
+    ],
+    records: N,
+    write: (dv, at, r) => { dv.setFloat32(at + 16, xs[r], true); dv.setFloat32(at + 20, ys[r], true); },
+  });
+  const ee = paramTable({
+    stride: 4,
+    params: [
+      { id: 110, flag: 1, offset: 0, size: 2, name: 'Cone Voltage' },
+      { id: 111, flag: 1, offset: 2, size: 2, name: 'Collision Energy' },
+    ],
+    records: NCH,
+    write: (dv, at, c) => { dv.setUint16(at, FX.cv[c], true); dv.setUint16(at + 2, FX.ce[c], true); },
+  });
+  const REC = 1024;
+  const cmp = new Uint8Array(12 + NCH * REC);
+  const cmpDv = new DataView(cmp.buffer);
+  cmpDv.setUint32(0, 1, true); cmpDv.setUint32(4, NCH, true);
+  FX.names.forEach((nm, c) => { for (let k = 0; k < nm.length; k++) cmp[12 + c * REC + k] = nm.charCodeAt(k); });
+  const fnsBuf = new Uint8Array(416);
+  const fnsDv = new DataView(fnsBuf.buffer);
+  fnsDv.setUint8(0, 9);                       // function type 9 = MRM
+  fnsDv.setFloat32(10, 0, true); fnsDv.setFloat32(14, 3000, true);
+  for (let c = 0; c < NCH; c++) {
+    fnsDv.setFloat32(32 + c * 4, FX.dwell, true);
+    fnsDv.setFloat32(160 + c * 4, FX.precursor[c], true);
+    fnsDv.setFloat32(288 + c * 4, FX.product[c], true);
+  }
+  const enc = (t) => new TextEncoder().encode(t);
+  const members = [
+    ['260904_Test_POS1.raw/_HEADER.TXT', enc('$$ Instrument: XEVO-TQAbs#WDA0428\r\n$$ Acquired Date: 04-Sep-2026\r\n')],
+    // 0xB0 is the windows-1252 degree sign; decoding as UTF-8 corrupts the key.
+    ['260904_Test_POS1.raw/_extern.inf', Uint8Array.from([
+      ...enc('[DESI Experiment Parameters]\r\nDesiXStep\t0.0087\r\nDesiYStep\t0.0700\r\n\r\n'),
+      ...enc('Instrument Parameters - Function 1:\r\nPolarity\tES+\r\nSource Temperature ('), 0xB0,
+      ...enc('C)\t150\t150\r\n'),
+    ])],
+    ['260904_Test_POS1.raw/_FUNCTNS.INF', fnsBuf],
+    ['260904_Test_POS1.raw/_FUNC001.IDX', new Uint8Array(idx)],
+    ['260904_Test_POS1.raw/_FUNC001.DAT', new Uint8Array(dat)],
+    ['260904_Test_POS1.raw/_FUNC001.STS', sts],
+    ['260904_Test_POS1.raw/_FUNC001.EE', ee],
+    ['260904_Test_POS1.raw/_FUNC001.CMP', cmp],
+  ];
+
+  // STORE-only writer: no compressor needed on the write side.
+  const CRC_T = (() => { const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) { let c = i; for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1); t[i] = c >>> 0; }
+    return t; })();
+  const crc32 = (b) => { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC_T[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  const zipOf = (entries) => {
+    const parts = [], central = []; let offset = 0;
+    for (const [name, bytes] of entries) {
+      const nb = enc(name), crc = crc32(bytes);
+      const L = new Uint8Array(30 + nb.length), ld = new DataView(L.buffer);
+      ld.setUint32(0, 0x04034b50, true); ld.setUint16(4, 20, true); ld.setUint16(8, 0, true);
+      ld.setUint32(14, crc, true); ld.setUint32(18, bytes.length, true); ld.setUint32(22, bytes.length, true);
+      ld.setUint16(26, nb.length, true); L.set(nb, 30);
+      const C = new Uint8Array(46 + nb.length), cd = new DataView(C.buffer);
+      cd.setUint32(0, 0x02014b50, true); cd.setUint16(6, 20, true); cd.setUint16(10, 0, true);
+      cd.setUint32(16, crc, true); cd.setUint32(20, bytes.length, true); cd.setUint32(24, bytes.length, true);
+      cd.setUint16(28, nb.length, true); cd.setUint32(42, offset, true); C.set(nb, 46);
+      central.push(C); parts.push(L, bytes); offset += L.length + bytes.length;
+    }
+    const cdStart = offset; let cdSize = 0;
+    for (const c of central) { parts.push(c); cdSize += c.length; }
+    const E = new Uint8Array(22), ed = new DataView(E.buffer);
+    ed.setUint32(0, 0x06054b50, true); ed.setUint16(8, central.length, true); ed.setUint16(10, central.length, true);
+    ed.setUint32(12, cdSize, true); ed.setUint32(16, cdStart, true); parts.push(E);
+    const total = parts.reduce((a, b) => a + b.length, 0);
+    const out = new Uint8Array(total); let at = 0;
+    for (const p of parts) { out.set(p, at); at += p.length; }
+    return out.buffer;
+  };
+  const zip = zipOf(members);
+
+  const { rawBundleFromZip, parseRawArchiveMeta, parseRawToRows } = await import('./raw.js');
+  const meta = await parseRawArchiveMeta(rawBundleFromZip(zip));
+  const f = meta.functions[0];
+
+  check('root name comes from the *.raw/ prefix', meta.rootName === '260904_Test_POS1', meta.rootName);
+  check('instrument + acquired date read from _HEADER.TXT',
+    meta.header['Instrument'] === 'XEVO-TQAbs#WDA0428' && meta.header['Acquired Date'] === '04-Sep-2026', meta.header);
+  check('function type 9 = MRM', f.type === 9 && f.isMrm === true, f.type);
+  check('polarity from _extern.inf (never guessed)', f.polarity === '+', f.polarity);
+  check('windows-1252 key survives (Source Temperature)',
+    f.source && f.source.sourceTempC === '150', f.source);
+  check('scan + channel counts', f.nScans === N && f.nChannels === NCH, [f.nScans, f.nChannels]);
+  check('all four channel counts agree', f.countsDisagree === false, f.counts);
+  check('compound names from _FUNCnnn.CMP',
+    JSON.stringify(f.channels.map(c => c.name)) === JSON.stringify(FX.names), f.channels.map(c => c.name));
+  check('precursor m/z from _FUNCTNS.INF @160',
+    JSON.stringify(f.channels.map(c => c.precursor)) === JSON.stringify(FX.precursor), f.channels.map(c => c.precursor));
+  check('product m/z from _FUNCTNS.INF @288',
+    JSON.stringify(f.channels.map(c => c.product)) === JSON.stringify(FX.product), f.channels.map(c => c.product));
+  check('★ cone voltage from _FUNCnnn.EE',
+    JSON.stringify(f.channels.map(c => c.cv)) === JSON.stringify(FX.cv), f.channels.map(c => c.cv));
+  check('★ collision energy from _FUNCnnn.EE',
+    JSON.stringify(f.channels.map(c => c.ce)) === JSON.stringify(FX.ce), f.channels.map(c => c.ce));
+  check('dwell rounded off float32 noise', f.channels.every(c => c.dwell === 0.009889), f.channels[0].dwell);
+  // DesiXStep is the distance travelled during ONE channel, so the X pitch is
+  // DesiXStep * nChannels. Reading it as the pitch is wrong by the channel count;
+  // the stage coordinates in .STS are the authority.
+  check('★ grid and pitch come from the stage coordinates, not DesiXStep',
+    f.width === FX.W && f.height === FX.H
+    && Math.abs(f.pitchX - FX.pitch) < 1e-6 && Math.abs(f.pitchY - FX.pitch) < 1e-6,
+    [f.width, f.height, f.pitchX, f.pitchY]);
+  check('DesiXStep x nChannels agrees, so no pitch warning', meta.pitchWarning === null, meta.pitchWarning);
+
+  const rows = await parseRawToRows(zip, { func: 1, channel: 2 });
+  check('rows returned', rows.length === N, rows.length);
+  check('★ the requested channel is the one returned',
+    rows.every((r, i) => r.v === valueAt(i, 2)), rows.slice(0, 3));
+  const grid = buildMsiGrid(rows);
+  check('snapped coordinates land on the true raster (no ordinal fallback)',
+    grid.W === FX.W && grid.H === FX.H && !grid.gridFallback, [grid.W, grid.H, grid.gridFallback]);
+
+  // ---- live diff against the app's own copy -------------------------------
+  const viewerSrc = readFileSync(fileURLToPath(new URL('../../viewer/index.html', import.meta.url)), 'utf8');
+  const S = viewerSrc.indexOf('// ==== BEGIN waters-raw parser');
+  const E = viewerSrc.indexOf('// ==== END waters-raw parser');
+  check('locate the app .raw parser in viewer/index.html', S >= 0 && E > S, { S, E });
+  if (S >= 0 && E > S) {
+    // The app's rawInflate uses DecompressionStream, which Node has natively,
+    // so the block runs here unmodified — no shim, nothing to keep in sync.
+    const ctx = vm.createContext({
+      TextDecoder, TextEncoder, Blob, Response, DecompressionStream, console,
+    });
+    new vm.Script(viewerSrc.slice(S, E)
+      + '\nglobalThis.__app = { rawBundleFromZip, parseRawArchiveMeta, parseRawToRows };').runInContext(ctx);
+    const app = ctx.globalThis ? ctx.globalThis.__app : ctx.__app;
+    const appMeta = await app.parseRawArchiveMeta(app.rawBundleFromZip(zip));
+    const appF = appMeta.functions[0];
+    check('★ app and connector agree on the channel table',
+      JSON.stringify(appF.channels) === JSON.stringify(f.channels));
+    check('★ app and connector agree on the grid',
+      appF.width === f.width && appF.height === f.height
+      && appF.pitchX === f.pitchX && appF.pitchY === f.pitchY);
+    let same = true;
+    for (let ch = 0; ch < NCH; ch++) {
+      const a = await app.parseRawToRows(zip, { func: 1, channel: ch });
+      const b = await parseRawToRows(zip, { func: 1, channel: ch });
+      if (a.length !== b.length) { same = false; break; }
+      for (let i = 0; i < a.length; i++) {
+        if (a[i].x !== b[i].x || a[i].y !== b[i].y || a[i].v !== b[i].v) { same = false; break; }
+      }
+      if (!same) break;
+    }
+    check('★ every {x,y,v} of every channel matches the app bit for bit', same);
+    const poly = [[-0.5, -0.5], [1.5, -0.5], [1.5, 1.5], [-0.5, 1.5]];
+    const appRows = await app.parseRawToRows(zip, { func: 1, channel: 5 });
+    const sa = stats(extractRoiValues(appRows, poly));
+    const sb = stats(extractRoiValues(rows.length ? await parseRawToRows(zip, { func: 1, channel: 5 }) : [], poly));
+    check('★ ROI statistics match the app', JSON.stringify(sa) === JSON.stringify(sb), [sa, sb]);
+  }
+
+  // ---- it must survive the pieces a .raw may not carry --------------------
+  const minimal = zipOf(members.filter(([n]) => /(IDX|DAT|STS)$/.test(n)));
+  const mm = await parseRawArchiveMeta(rawBundleFromZip(minimal));
+  check('IDX + DAT + STS alone still parse', mm.functions[0].nChannels === NCH
+    && mm.functions[0].width === FX.W, mm.functions[0]);
+  check('missing EE/CMP degrades to null rather than throwing',
+    mm.functions[0].channels[0].name === null && mm.functions[0].channels[0].cv === null);
+
+  // ---- rows.js dispatch ---------------------------------------------------
+  const cache = newRowCache({ fetchBytes: async () => zip });
+  const viaCache = await loadRowsForDef({ kind: 'raw', path: 'x/blobs/b.zip', func: 1, channel: 2 }, cache);
+  check('loadRowsForDef dispatches kind:raw', viaCache.length === N && viaCache[0].v === valueAt(0, 2));
+  check('the archive is fetched whole exactly once', cache.fetchCount === 1, cache.fetchCount);
+}
+
 console.log('');
 if (failures) { console.log('SELFTEST FAILED:', failures, 'check(s)'); process.exit(1); }
 console.log('SELFTEST PASSED');

@@ -46,26 +46,46 @@ export function buildMsiGrid(rows) {
   const axis = (vals) => {
     const n = vals.length;
     if (n <= 1) return { index: ordinal(vals), size: Math.max(1, n), fallback: null };
-    let step = Infinity;
+    const gaps = [];
+    let minGap = Infinity;
     for (let i = 1; i < n; i++) {
       const d = vals[i] - vals[i - 1];
-      if (d > 0 && d < step) step = d;
+      if (d > 0) { gaps.push(d); if (d < minGap) minGap = d; }
     }
-    if (!(step > 0) || !Number.isFinite(step)) return { index: ordinal(vals), size: n, fallback: 'pitch' };
-    const size = Math.round((vals[n - 1] - vals[0]) / step) + 1;
-    const INFLATION_LIMIT = 4, ABS_CAP = 8192;
-    if (!(size >= n) || size > ABS_CAP || size > n * INFLATION_LIMIT + 1) {
-      return { index: ordinal(vals), size: n, fallback: 'inflation' };
+    if (!(minGap > 0) || !Number.isFinite(minGap)) return { index: ordinal(vals), size: n, fallback: 'pitch' };
+    const build = (step) => {
+      const size = Math.round((vals[n - 1] - vals[0]) / step) + 1;
+      const INFLATION_LIMIT = 4, ABS_CAP = 8192;
+      if (!(size >= n) || size > ABS_CAP || size > n * INFLATION_LIMIT + 1) {
+        return { fallback: 'inflation' };
+      }
+      const index = new Map();
+      const used = new Set();
+      for (const v of vals) {
+        const k = Math.round((v - vals[0]) / step);
+        if (used.has(k)) return { fallback: 'collision' };
+        used.add(k);
+        index.set(v, k);
+      }
+      return { index, size, fallback: null };
+    };
+    // ★ Try the MEDIAN gap before the minimum. The minimum is the fragile
+    //   estimator: one pair closer than the true pitch (stage jitter / float
+    //   error) makes step too small, which spreads the coordinates out and
+    //   inserts gaps where no scan line was actually skipped. On an evenly
+    //   spaced raster median === min, so nothing changes.
+    //   Kept in sync with the app (viewer/index.html buildMsiGrid) — this used
+    //   to be min-only here, which agreed with the app on evenly spaced data
+    //   but not on the float-mm stage coordinates a Waters .raw carries.
+    const sorted = gaps.slice().sort((a, b) => a - b);
+    const median = sorted[(sorted.length - 1) >> 1];
+    if (median > 0 && median !== minGap) {
+      const byMedian = build(median);
+      if (!byMedian.fallback) return byMedian;
     }
-    const index = new Map();
-    const used = new Set();
-    for (const v of vals) {
-      const k = Math.round((v - vals[0]) / step);
-      if (used.has(k)) return { index: ordinal(vals), size: n, fallback: 'collision' };
-      used.add(k);
-      index.set(v, k);
-    }
-    return { index, size, fallback: null };
+    const byMin = build(minGap);
+    if (byMin.fallback) return { index: ordinal(vals), size: n, fallback: byMin.fallback };
+    return byMin;
   };
   const ax = axis([...xSet].sort((a, b) => a - b));
   const ay = axis([...ySet].sort((a, b) => a - b));
@@ -147,6 +167,9 @@ export function parseTxtToRows(buf, def) {
   return rows;
 }
 
+// Synchronous formats only. kind:'raw' is async (ZIP inflation) and is
+// dispatched in rows.js/loadRowsForDef alongside parquet, so this stays sync
+// and callers never have to guess whether the result is a promise.
 export function parseMsiRows(buf, def) {
   return (def && def.kind === 'txt') ? parseTxtToRows(buf, def) : parseXlsxToRows(buf, def);
 }

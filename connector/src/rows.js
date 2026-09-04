@@ -124,6 +124,13 @@ export async function loadRowsForDef(def, cache) {
       const { parquetRowsForDef } = await import('./parquet.js');
       return parquetRowsForDef(def, cache);
     }
+    // Waters .raw is stored as one ZIP holding the whole acquisition. Unlike
+    // parquet it IS fetched whole — an MRM .raw is megabytes, not 836 MB — but
+    // it is async (inflation), so it cannot go through the sync parseMsiRows.
+    if (def.kind === 'raw') {
+      const { parseRawToRows } = await import('./raw.js');
+      return parseRawToRows(await bytesFor(path, cache), def);
+    }
     return parseMsiRows(await bytesFor(path, cache), def);
   })();
   lruSet(cache.rows, key, p, MAX_CACHED_ROWSETS);
