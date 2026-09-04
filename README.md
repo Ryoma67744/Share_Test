@@ -36,6 +36,21 @@ python3 -m http.server 8000
 
 ブラウザで `http://localhost:8000/` を開くと管理画面が起動します。Supabase 側のデータベース / Storage は GitHub Pages の状態に関係なく稼働しているため、ローカルからでも `Publish to share` 含む全機能が動作します。
 
+### テスト
+
+PR と `main` への push では [`tests.yml`](.github/workflows/tests.yml) が自動で走ります。手元で回すときは:
+
+```bash
+# ビューアの回帰テスト (インラインスクリプトの構文ゲート、parse worker の
+# 関数リスト漏れ、Analyte ヘッダ、改名時の CE/CV 保持 など)
+node tests/viewer_preview_regression.js
+
+# アプリ ⇄ connector の一致 (.exp / parquet / Waters .raw / buildMsiGrid)。
+# アプリのコードを viewer/index.html から切り出して数値を突き合わせるので、
+# 移植がずれるとここで落ちる
+cd connector && npm ci && npm run selftest
+```
+
 ### Master 認証
 
 管理画面 (`/`) およびビューア master モードはパスワードゲートで保護されています。既定値は **`MSIadomine`** (`supabase/README.md` 参照)。
@@ -57,6 +72,9 @@ python3 -m http.server 8000
 - `USER_GUIDE.md`, `USER_GUIDE.en.md` — 共有受け手向けガイド (**共有モードのアプリ内 Help はこれのみ表示**)
 - `USER_GUIDE.manage.md`, `USER_GUIDE.manage.en.md` — プロジェクト管理ガイド (master/admin 用)
 - `USER_GUIDE.master.md`, `USER_GUIDE.master.en.md` — 管理者 (admin) 向けガイド (master/admin 用)
+- `connector/` — 読み取り専用の AI コネクタ (MCP / HTTP)。Node
+- `tests/` — ビューアの回帰テスト
+- `.github/workflows/` — Pages のデプロイ (`pages.yml`) とテスト (`tests.yml`)
 - `supabase/` — SQL スキーマと運用 README
 
 ---
