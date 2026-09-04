@@ -53,9 +53,15 @@ function extractObject(source, marker) {
 }
 
 function extractFunction(source, name) {
-  const marker = `async function ${name}`;
-  const markerAt = source.indexOf(marker);
-  assert.notEqual(markerAt, -1, `missing ${marker}`);
+  // Accept both `async function <name>` and plain `function <name>` so sync
+  // parsers can be lifted out of the HTML the same way the worker handler is.
+  let marker = `async function ${name}`;
+  let markerAt = source.indexOf(marker);
+  if (markerAt === -1) {
+    marker = `function ${name}`;
+    markerAt = source.indexOf(marker);
+  }
+  assert.notEqual(markerAt, -1, `missing function ${name}`);
   const openAt = source.indexOf('{', markerAt + marker.length);
   const closeAt = scanBalanced(source, openAt);
   return source.slice(markerAt, closeAt + 1);
@@ -265,6 +271,54 @@ async function testWorkerXlsxDecodeCache() {
   assert.ok(posts.every((entry) => entry.ok));
 }
 
+// Waters writes .raw/imaging/Analyte N.txt with an all-zero padding row above the
+// real m/z rows. Zeros are finite, so the "first pair of consecutive numeric-only
+// rows" heuristic used to latch onto the padding, reject every column for
+// precursor <= 0, and throw "no compounds detected". Both header shapes must work.
+function testAnalyteHeaderShapes() {
+  const context = vm.createContext({ TextDecoder, Number, String, Error });
+  vm.runInContext(
+    `${extractFunction(html, 'splitCeCv')};${extractFunction(html, 'parseAnalyteHeader')};`
+    + 'this.parse = (text) => parseAnalyteHeader(text);',
+    context,
+  );
+  // Arrays built inside the vm live in another realm, so compare host-side copies.
+  const parse = context.parse;
+
+  // (a) the Waters .raw/imaging shape: blank line, all-zero padding row,
+  //     strict channel-index row, precursor row, product row, then data.
+  const rawImaging = [
+    '',
+    '5\t\t\t0\t0\t0\t0\t',
+    '\t\t\t1\t2\t3\t4\t',
+    '\t\t\t104.0000\t137.1000\t146.1000\t798.5500\t',
+    '\t\t\t87.0000\t91.1000\t87.1000\t163.0000\t',
+    '1\t9.40746\t-5.78301\t10820.0000\t1186.0000\t6854.0000\t111256.0000\t1\t1',
+  ].join('\r\n');
+  const rawHeader = parse(rawImaging);
+  assert.equal(rawHeader.precIdx, 3, 'padding row must not be taken as precursor');
+  assert.equal(rawHeader.prodIdx, 4);
+  assert.equal(rawHeader.dataStartLine, 5);
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.precursor), [104, 137.1, 146.1, 798.55]);
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.product), [87, 91.1, 87.1, 163]);
+
+  // (b) the HDI-converted shape with a compound-name row still parses unchanged,
+  //     including the _<CE>_<CV> suffix split.
+  const converted = [
+    'Analyte (converted from imzML)',
+    '\t\t\tGABA_10_10\tDopamine_18_50\tACh_10_15',
+    '\t\t\t104.0000\t137.1000\t146.1000',
+    '\t\t\t87.0000\t91.1000\t87.1000',
+    '1\t0\t0\t1\t2\t3',
+  ].join('\n');
+  const convHeader = parse(converted);
+  assert.equal(convHeader.nameIdx, 1);
+  assert.equal(convHeader.dataStartLine, 4);
+  assert.deepEqual(Array.from(convHeader.compounds, (c) => c.base), ['GABA', 'Dopamine', 'ACh']);
+  assert.deepEqual(Array.from(convHeader.compounds, (c) => c.ce), [10, 18, 10]);
+  assert.deepEqual(Array.from(convHeader.compounds, (c) => c.cv), [10, 50, 15]);
+}
+
 async function main() {
   compileInlineScripts();
   assert.match(html, /data-preview-range-reset/);
@@ -274,6 +328,7 @@ async function main() {
   await testFailedLoadStaysExplicit();
   testRangeResetAndSingleRepaint();
   await testWorkerXlsxDecodeCache();
+  testAnalyteHeaderShapes();
   console.log('viewer preview regression tests: PASS');
 }
 

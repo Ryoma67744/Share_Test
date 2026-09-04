@@ -3823,8 +3823,10 @@ async function inspectXlsxColumns(buf, sheetName, headerRow1based) {
 //   1. For each line, count tokens at col >= 3 that are finite numbers vs.
 //      non-empty non-numeric strings.
 //   2. The first pair of CONSECUTIVE numeric-only rows (>= 3 numbers each)
-//      that is NOT a strict 1,2,3,...,N channel-index row becomes
-//      <precursor row, product row>.
+//      that is NOT a strict 1,2,3,...,N channel-index row AND that carries at
+//      least one positive value in each row becomes <precursor row, product row>.
+//      (The positivity test rejects the all-zero padding row Waters writes in
+//      .raw/imaging/Analyte N.txt, which is otherwise numeric-only.)
 //   3. The closest line above the precursor row with non-numeric tokens
 //      becomes the compound-name row.
 //   4. Data rows start immediately after the product row.
@@ -3840,14 +3842,15 @@ function parseAnalyteHeader(buf) {
 
     const lineStats = linesAll.map((line) => {
         const toks = splitTab(line).slice(3);
-        let nNumeric = 0, nString = 0;
+        let nNumeric = 0, nString = 0, nPositive = 0;
         for (const t of toks) {
             const tt = t.trim();
             if (!tt) continue;
-            if (Number.isFinite(Number(tt))) nNumeric++;
+            const v = Number(tt);
+            if (Number.isFinite(v)) { nNumeric++; if (v > 0) nPositive++; }
             else nString++;
         }
-        return { nNumeric, nString };
+        return { nNumeric, nString, nPositive };
     });
 
     // A row is a "strict channel-index row" if its col>=3 tokens are
@@ -3871,6 +3874,13 @@ function parseAnalyteHeader(buf) {
         const a = lineStats[i], b = lineStats[i + 1];
         if (a.nNumeric >= 3 && b.nNumeric >= 3 && a.nString === 0 && b.nString === 0) {
             if (isStrictChannelIndex(i)) continue;
+            // A precursor / product row is m/z data, so at least one value must be
+            // POSITIVE. Waters' .raw/imaging export carries an all-zero padding row
+            // ("5\t\t\t0\t0\t0...") above the real m/z rows; zeros are finite, so the
+            // test above accepted the padding as the precursor row, the compound loop
+            // below then rejected every candidate for pre <= 0, and the file died on
+            // "no compounds detected".
+            if (a.nPositive === 0 || b.nPositive === 0) continue;
             precIdx = i; prodIdx = i + 1;
             break;
         }
