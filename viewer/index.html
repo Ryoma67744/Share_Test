@@ -16334,6 +16334,25 @@ async function publishProjectToShare() {
     const meta = await openPublishMetaModal(project);
     if (!meta) return;
 
+    // ★ 初回 publish のときだけ、その slug がサーバで空いているか確かめる。
+    //   upsert_project_doc は slug が主キーなので、埋まっている slug へ送ると
+    //   **別のプロジェクトを丸ごと上書きする**。再 publish (既に slug を持って
+    //   いる) は自分自身に当たるだけなので聞かない。
+    //   getProjectPublicState は anon の列限定 SELECT で、失敗しても null を
+    //   返すだけ (通信不良で publish を止めはしない)。
+    if (!(project.shareInfo && project.shareInfo.slug)) {
+        let taken = null;
+        try { taken = await SupabaseClient.getProjectPublicState(meta.slug); }
+        catch (e) { console.warn('slug の重複確認に失敗 (続行します)', e); }
+        if (taken) {
+            const nm = taken.display_name || meta.slug;
+            if (!confirm('slug "' + meta.slug + '" は既にサーバで使われています'
+                + '（プロジェクト名: ' + nm + '）。\n'
+                + 'このまま続けると、そのプロジェクトを上書きします。\n\n'
+                + 'OK: 上書きする / キャンセル: 中止して slug を変える')) return;
+        }
+    }
+
     // master pw: reuse the cached value when available; otherwise prompt.
     let masterPw = _readCachedMasterPw();
     if (!masterPw) {
@@ -16408,9 +16427,31 @@ async function publishProjectToShare() {
     }
 }
 
+// 表示名から slug を作れなかったときの代替。
+//
+// ★ 日本語だけの名前は ASCII 化すると空になる。以前はそこで 'project' を既定に
+//   していたので、**日本語名のプロジェクトはすべて同じ slug** になり、2 件目を
+//   publish した時点で 1 件目をサーバ上で黙って上書きしていた (slug が
+//   upsert_project_doc の主キー)。実際に slug='project' のプロジェクトが
+//   1 件登録済みだった。日付 + 乱数で必ず一意になるようにする。
+function _fallbackSlugFor(project) {
+    const digits = String((project && project.memo && project.memo.experimentDate) || '').replace(/[^0-9]/g, '');
+    let ymd;
+    if (digits.length >= 8) {
+        ymd = digits.slice(2, 8);                     // YYYYMMDD → YYMMDD
+    } else {
+        const t = new Date();
+        ymd = String(t.getFullYear()).slice(2)
+            + String(t.getMonth() + 1).padStart(2, '0')
+            + String(t.getDate()).padStart(2, '0');
+    }
+    return 'p' + ymd + '_' + Math.random().toString(36).slice(2, 6);
+}
+
 async function openPublishMetaModal(project) {
     const safe = (s) => String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
-    const guess = (project.displayName || 'project').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'project';
+    const fromName = (project.displayName || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+    const guess = fromName || _fallbackSlugFor(project);
     // Re-publish must REUSE the project's existing slug — it is the project's
     // identity. Deriving a fresh slug from displayName (e.g. after a rename)
     // would create a SECOND server record and fork the project. So when the
@@ -16424,6 +16465,7 @@ async function openPublishMetaModal(project) {
             <input type="text" name="slug" value="${safe(existingSlug || guess)}" pattern="[A-Za-z0-9_-]+" required${existingSlug ? ' readonly title="既存の共有 slug を維持し、同じプロジェクトを更新します（改名もここで反映）。変更すると別プロジェクトになります。"' : ''}>
           </label>
           ${existingSlug ? '<p style="font-size:11px;color:#475569;margin-top:2px;">※ 再 publish: 既存の slug を維持して同じプロジェクトを更新します（改名もここで反映）。</p>' : ''}
+          ${(!existingSlug && !fromName) ? '<p style="font-size:11px;color:#b45309;margin-top:2px;">※ プロジェクト名に英数字が無いため slug を自動生成しました。分かりやすい名前に変えられます（英数字 / _ / -）。</p>' : ''}
           <label style="display:flex;align-items:center;gap:6px;margin-top:6px;">
             <input type="checkbox" data-is-public name="is_public">
             公開リンク (パスワードなしで閲覧可)
