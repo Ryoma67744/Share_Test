@@ -509,15 +509,21 @@ xlsx ソースは元の列構造を保持したまま、**末尾に各 ROI ご�
 
 | 項目 | 内容 |
 | --- | --- |
-| **Project slug** | URL の識別子 (英数字 / `_` / `-`) |
-| **Viewer password** | 受け手が入力するパスワード (4 文字以上) |
-| **Admin password** | 既定で `MSIadomine` が pre-fill (4 文字以上) |
+| **Project slug** | URL の識別子 (英数字 / `_` / `-`)。初回のみ編集でき、2 回目以降は固定されます |
+| **Viewer password** | 受け手が入力するパスワード (4 文字以上、必須) |
+| **Admin password** | 管理者ビュー (Method の CE / CV まで見える) 用。**任意**で、空なら設定されません |
+
+> **slug の注意**: 初期値はプロジェクト名を英数字化したものです。**プロジェクト名が日本語だけだと英数字が残らない**ため、`p<YYMMDD>_<4文字>` の形で自動生成します (以前はこの場合すべて `project` になり、2 件目を publish すると 1 件目を上書きしていました)。分かりやすい名前に付け替えて構いません。初回 publish のときは、その slug が既にサーバで使われていないかを確認し、使われていたら相手のプロジェクト名を添えて確認します。
+
+> **Admin password は空でも publish できます**が、その場合は**別 PC からの `Open (master)` に admin password は使えません** (正解が存在しないため)。現行版は master password で取り込むので問題ありませんが、古いビルドと混在する環境では管理画面の `🔑 パスワード` で admin を設定しておくと確実です。
 
 `Publish` を押すと:
 
 1. **Master password の確認** — 管理画面のゲートで通したパスワードがそのまま使われます (キャッシュなしの場合のみ再入力プロンプト)
 2. サーバから 1 時間有効な **publish session token** を取得
 3. 全 blob (TIFF / xlsx / txt / parquet / .raw.zip) を Supabase Storage に並列 (4 同時) アップロード — token をヘッダで送り、サーバ側 RLS で検証
+   - 既に同じパスに在るオブジェクトは HEAD で確認して送り直しません。**ローカルの blob を失っていても、サーバに在れば参照だけ書けるので公開内容は欠けません。**
+   - 端末にもサーバにもソースが無いレイヤーがあるときは、**そのまま公開せずに確認を出します** (自動同期の場合は中断して同期インジケータに理由を出します)。公開ドキュメントの `storage_paths` は切片ごと丸ごと置き換わるため、黙って続けると共有先からそのレイヤーが消えるからです。
 4. 進捗モーダルで `X / N files (Y MB / Z MB)` をライブ表示
 5. 各ファイルは最大 3 回までリトライ (exponential backoff)
 6. `upsert_project_doc` を master pw 付きで呼んで DB を更新
@@ -545,6 +551,7 @@ xlsx ソースは元の列構造を保持したまま、**末尾に各 ROI ご�
 | `local-saved` (灰) | Local saved | IDB のみ更新済み。次回保存時に publish 再試行。 |
 | `conflict` (赤) | Conflict | サーバ側で別端末が同時 publish した形跡 (`updated_at` 不一致)。バッジクリックで manual `Publish to share` を案内。 |
 | `needs-master-pw` (紫) | Master pw 必要 | sessionStorage に master pw が無い。クリックで再入力モーダル。 |
+| `needs-share-pw` (紫) | 共有パスワード未設定 | 取り込んだプロジェクトは viewer / admin パスワードを引き継がない。クリックで `Publish to share` を開き、1 回だけ設定する。 |
 | `error` (赤) | Error | publish に失敗。クリックで詳細トースト。 |
 
 - 未保存変更がある状態でタブを閉じようとすると **beforeunload 警告** が出ます (sync 完了 / error の両方で)。
@@ -590,9 +597,14 @@ xlsx ソースは元の列構造を保持したまま、**末尾に各 ROI ご�
 | --- | --- |
 | 1 | 管理画面で `Open (master)` をクリック |
 | 2 | viewer に `?import=<slug>` で遷移 |
-| 3 | 「Master password を入力」モーダル — 正しければ Storage から全 blob をダウンロード |
-| 4 | IDB に書き戻し → 通常の master 画面が表示される |
-| 5 | 以降は同 PC 内で auto-publish が回るので別 PC との同期も自動 |
+| 3 | 「Master password を入力」モーダル — 管理画面に入るときと同じもの。既に入力済みならこの手順は飛びます |
+| 4 | Storage からソースをダウンロードして IDB に書き戻す。**parquet だけはダウンロードせず Storage から直接読みます** (数百 MB を IndexedDB に置くと容量超過で壊れるため) |
+| 5 | 通常の master 画面が表示される |
+| 6 | 取り込んだ直後は共有パスワードが未設定なので、最初の編集で同期インジケータが **🔑 共有パスワード未設定** になります。クリック → `Publish to share` で viewer / admin パスワードを入れ直すと、以降は auto-publish が回ります |
+
+> 取り込んだプロジェクトから再 publish しても、サーバ側の切片は作り直されません (切片の対応は `client_id` で取ります)。閲覧者が描いた ROI もそのまま残ります。
+>
+> ローカルの blob が失われた場合 (ブラウザによる退避、容量超過での巻き戻しなど) でも、publish 済みなら**表示のたびに Storage から自動で取り直します**。「共有画面は見えるのに master だけ真っ白」という状態にはなりません。
 
 > 1 人が複数 PC を順番に使う運用では、Phase 1 で publish した内容を Phase 2 の PC で `?import=` 経由で取り込み、続きの編集 → auto-publish → 次の PC で取り込み… を繰り返すのが標準フロー。
 

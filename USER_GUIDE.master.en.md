@@ -507,15 +507,21 @@ The header's `Publish to share` button:
 
 | Field | Meaning |
 | --- | --- |
-| **Project slug** | URL identifier (alphanumerics, `_`, `-`) |
-| **Viewer password** | What recipients type (≥ 4 chars) |
-| **Admin password** | Pre-filled with `MSIadomine` (≥ 4 chars) |
+| **Project slug** | URL identifier (alphanumerics, `_`, `-`). Editable on the first publish only; fixed afterwards |
+| **Viewer password** | What recipients type (≥ 4 chars, required) |
+| **Admin password** | For the admin view (Method CE / CV visible). **Optional** — left empty means no admin credential is stored |
+
+> **About the slug**: the default is the project name reduced to ASCII. **A name written only in Japanese leaves nothing**, so a `p<YYMMDD>_<4 chars>` slug is generated instead (previously every such project fell back to `project`, and publishing a second one silently overwrote the first). Rename it to anything readable. On a first publish the slug is checked against the server, and a collision asks for confirmation naming the project that would be overwritten.
+
+> **Publishing without an admin password is allowed**, but then the project's admin password cannot be used for `Open (master)` from another PC — there is no correct value. The current build imports with the master password instead, so this only matters against older builds; set one from `🔑 パスワード` on the manager page if in doubt.
 
 Pressing `Publish`:
 
 1. **Master password is verified** — the value from the management-page gate is reused if still cached; otherwise a prompt asks for it
 2. Server issues a 1-hour **publish session token**
 3. All blobs (TIFF / xlsx / txt / parquet / .raw.zip) upload to Supabase Storage in parallel (concurrency 4) — the token is sent as a header and validated by RLS
+   - Objects already present at the same path are HEAD-verified and not re-uploaded. **Even when the local blob is gone, a copy on Storage is enough to write the reference, so the published document never loses a layer.**
+   - If a layer's source is missing both locally and on Storage, the publish **asks before continuing** (an auto-publish aborts and explains itself on the sync indicator). `storage_paths` is replaced per section, so continuing silently would drop that layer for recipients.
 4. A progress modal shows live `X / N files (Y MB / Z MB)`
 5. Each file retries up to 3 times with exponential backoff
 6. `upsert_project_doc` is called with the master password to update the DB
@@ -543,6 +549,7 @@ A small **sync badge** sits in the header. Its color and label show the current 
 | `local-saved` (gray) | Local saved | IDB updated but server not yet. Next save retries publish. |
 | `conflict` (red) | Conflict | Another device published in the meantime (`updated_at` mismatch). Click to resolve via manual Publish. |
 | `needs-master-pw` (purple) | Master pw needed | sessionStorage has no master pw — click to re-enter. |
+| `needs-share-pw` (purple) | Share password unset | An imported project does not inherit the viewer / admin passwords. Click to open `Publish to share` and set them once. |
 | `error` (red) | Error | Publish failed. Click for a detailed toast. |
 
 - Closing the tab while sync isn't `synced` triggers the **beforeunload warning**.
@@ -588,9 +595,14 @@ When you `Open (master)` a server-only project from another PC / browser profile
 | --- | --- |
 | 1 | Click `Open (master)` on the manager page |
 | 2 | Viewer loads at `?import=<slug>` |
-| 3 | Master password modal — correct value triggers a Storage download of every blob |
-| 4 | Blobs land in IndexedDB; the master view boots normally |
-| 5 | Subsequent saves auto-publish, so the second PC stays in sync with the first |
+| 3 | Master password modal — the same password that unlocks the manager. Skipped when it is already cached |
+| 4 | Sources download from Storage into IndexedDB. **parquet is the exception: it is read straight from Storage** (hundreds of MB in IndexedDB blows the quota) |
+| 5 | The master view boots normally |
+| 6 | An imported project has no share passwords yet, so the first edit turns the sync indicator into **🔑 共有パスワード未設定**. Click it, set viewer / admin in `Publish to share`, and auto-publish resumes |
+
+> Re-publishing an imported project does not recreate the sections server-side (they are matched by `client_id`), so ROIs drawn by recipients survive.
+>
+> If local blobs are lost (browser eviction, a quota rollback), a published project **re-fetches them from Storage on demand**. "The share view works but master is blank" can no longer happen.
 
 > The recommended workflow for one operator across multiple PCs: publish from PC A, `?import=` on PC B and continue editing, auto-publish, `?import=` on PC C, and so on.
 

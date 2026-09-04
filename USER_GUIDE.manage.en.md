@@ -61,6 +61,7 @@ The management page is gated by an admin password.
 | **Local** | Only in this browser's IndexedDB (not yet published, or made on another PC, etc.) |
 | **Local + Server** | Exists both locally and on the server (you published it from this PC) |
 | **Server only** | Only on the server (published from another PC, or local copy was deleted) |
+| **空** (empty) | The local record has no sections at all (created but never populated). Opening it only ever shows "no layers" |
 
 ---
 
@@ -91,7 +92,10 @@ The buttons differ by row badge.
 
 ### 5-1. Server-only row buttons
 
-- **Open (master)**: navigates to viewer at `?import=<slug>`, prompts for the master password, downloads every blob from Storage into IDB, then boots the master view. Subsequent saves auto-publish, keeping every PC in sync.
+- **Open (master)**: navigates to viewer at `?import=<slug>`, authenticates with the **master password** (the same one that unlocks this manager), downloads the blobs from Storage, then boots the master view.
+  - If you already entered it in the manager, you are not asked again for the rest of the session.
+  - parquet (TIMS non-target) sources are **not downloaded**; they are read straight from Storage (putting hundreds of MB into IndexedDB blows the quota).
+  - An imported project does not inherit the share passwords (viewer / admin). The first edit turns the sync indicator into **🔑 共有パスワード未設定**; click it once and set the passwords in `Publish to share`. After that, saves auto-publish as usual.
 - **Share view**: ordinary `#share=<slug>` viewer link (recipients flow — needs viewer pw).
 - **Delete (server)**: requires master pw + a confirm dialog. Removes the `projects` row + cascading children (sections / rois / project_credentials / session_tokens / roi_locks) + every Storage object under `<slug>/...`. **No undo**; double-check the slug.
 
@@ -163,4 +167,7 @@ A small **`v:YYYY-MM-DD-rN`** badge is permanently visible in the bottom-right c
 | Password keeps being rejected | Clear cache + reload. If still failing, the admin password may have been changed |
 | Projects from another PC not showing | Press `サーバから一覧取得` and re-enter the admin password |
 | `Delete (server)` reports "失敗: N 件" | The Storage publish-token DELETE policy has not been applied. Re-run §4 of `supabase/share_locks.sql` |
-| `Open (master)` keeps asking for the master password | Expected on the first `?import=<slug>` open — same value as the admin password used at publish time |
+| `Open (master)` keeps asking for the master password | Expected on the first `?import=<slug>` open — it is the same password that unlocks the manager |
+| `Open (master)` bounces back to the list after entering a password | Older builds asked for the project's own **admin password**. Projects published without one have no correct answer, so every attempt bounced. Reload to get the current build, or set an admin password from `🔑 パスワード` |
+| The viewer says "no layers" right after opening | Check for the **空** (empty) badge in the list — that record was created but never populated. Open the one that holds the data |
+| The same project appears twice in the list | Duplicate folder-tree entries written by an older build. The current build collapses them to one row, and one folder operation pushes the cleanup to the server |

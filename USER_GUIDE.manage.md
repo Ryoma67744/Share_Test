@@ -61,6 +61,7 @@
 | **Local** | このブラウザの IndexedDB にだけある (未 publish、または別 PC で作成等) |
 | **Local + Server** | ローカルにもサーバにもある (この PC で publish したもの) |
 | **Server only** | サーバのみ (別 PC で publish した、ローカルから削除済み等) |
+| **空** | このローカル記録に切片が 1 つもない (作成しただけの状態)。開いても「レイヤーがありません」にしかなりません |
 
 ---
 
@@ -91,7 +92,10 @@
 
 ### 5-1. Server only 行のボタン詳細
 
-- **Open (master)**: viewer に `?import=<slug>` 付きで遷移し、master pw を入力すると Storage から全 blob をダウンロードして IDB に書き戻し、master 画面が起動。以降は通常の auto-publish フローに乗ります。
+- **Open (master)**: viewer に `?import=<slug>` 付きで遷移し、**master password** (この管理画面に入るときと同じもの) で認証して Storage から blob をダウンロードし、master 画面が起動します。
+  - 管理画面で一度入力していればセッション中は聞かれません。
+  - parquet (TIMS ノンターゲット) は**ダウンロードせず Storage から直接読みます** (数百 MB を IndexedDB に置くと容量超過で壊れるため)。
+  - 取り込んだ直後は共有パスワード (viewer / admin) が引き継がれません。編集すると同期インジケータが **🔑 共有パスワード未設定** になるので、1 回だけクリック → `Publish to share` でパスワードを設定してください。以降は通常の auto-publish フローに乗ります。
 - **Share view**: 普通の `#share=<slug>` リンクで viewer に遷移 (viewer pw 入力 → 受け手と同じ画面)。
 - **Delete (server)**: master pw を要求 → 確認ダイアログ → サーバの `projects` 行 + 関連子テーブル (sections / rois / project_credentials / session_tokens / roi_locks) + Storage 配下 `<slug>/...` のオブジェクトをすべて削除。**復旧手段なし** なので注意。
 
@@ -163,4 +167,7 @@ Publish 済みのプロジェクトには `Copy URL` ボタンが出ます。
 | パスワードを入力しても先に進めない | キャッシュをクリア + 再ロード。それでもダメなら admin pw を変更した可能性 |
 | 別 PC からプロジェクトが見えない | `サーバから一覧取得` で admin pw を入力し直してください |
 | `Delete (server)` で「失敗: N 件」 | Storage の publish-token DELETE policy が未適用。`supabase/share_locks.sql` の §4 を再実行してください |
-| `Open (master)` で master pw を聞かれる | `?import=<slug>` 経由の初回オープンは必ず master pw が必要 (publish 時の admin pw 入力と同じ値) |
+| `Open (master)` で master pw を聞かれる | `?import=<slug>` 経由の初回オープンには master password が必要です (管理画面に入るときと同じもの) |
+| `Open (master)` でパスワードを入れると一覧に戻ってしまう | 古いビルドはプロジェクト個別の **admin password** を要求していました。admin password を設定せずに publish したプロジェクトには正解が存在しないため、何を入れても戻ります。ページを更新して最新版で開き直すか、`🔑 パスワード` で admin を設定してください |
+| 開いたら「レイヤーがありません」と出る | 一覧で **空** バッジが付いていないか確認してください (作成しただけのプロジェクト)。データのある方を開いてください |
+| 同じプロジェクトが 2 行に出る | 古いビルドが作ったフォルダ情報の重複です。最新版で開くと 1 行に畳まれ、フォルダ操作を 1 回行うとサーバ側にも反映されます |
