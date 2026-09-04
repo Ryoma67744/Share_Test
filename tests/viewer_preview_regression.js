@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { deflateRawSync } = require('node:zlib');
 
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'viewer', 'index.html'), 'utf8');
@@ -53,9 +54,15 @@ function extractObject(source, marker) {
 }
 
 function extractFunction(source, name) {
-  const marker = `async function ${name}`;
-  const markerAt = source.indexOf(marker);
-  assert.notEqual(markerAt, -1, `missing ${marker}`);
+  // Accept both `async function <name>` and plain `function <name>` so sync
+  // parsers can be lifted out of the HTML the same way the worker handler is.
+  let marker = `async function ${name}`;
+  let markerAt = source.indexOf(marker);
+  if (markerAt === -1) {
+    marker = `function ${name}`;
+    markerAt = source.indexOf(marker);
+  }
+  assert.notEqual(markerAt, -1, `missing function ${name}`);
   const openAt = source.indexOf('{', markerAt + marker.length);
   const closeAt = scanBalanced(source, openAt);
   return source.slice(markerAt, closeAt + 1);
@@ -265,6 +272,434 @@ async function testWorkerXlsxDecodeCache() {
   assert.ok(posts.every((entry) => entry.ok));
 }
 
+// Waters writes .raw/imaging/Analyte N.txt with an all-zero padding row above the
+// real m/z rows. Zeros are finite, so the "first pair of consecutive numeric-only
+// rows" heuristic used to latch onto the padding, reject every column for
+// precursor <= 0, and throw "no compounds detected". Both header shapes must work.
+function testAnalyteHeaderShapes() {
+  const context = vm.createContext({ TextDecoder, Number, String, Error });
+  vm.runInContext(
+    `${extractFunction(html, 'splitCeCv')};${extractFunction(html, 'parseAnalyteHeader')};`
+    + 'this.parse = (text) => parseAnalyteHeader(text);',
+    context,
+  );
+  // Arrays built inside the vm live in another realm, so compare host-side copies.
+  const parse = context.parse;
+
+  // (a) the Waters .raw/imaging shape: blank line, all-zero padding row,
+  //     strict channel-index row, precursor row, product row, then data.
+  const rawImaging = [
+    '',
+    '5\t\t\t0\t0\t0\t0\t',
+    '\t\t\t1\t2\t3\t4\t',
+    '\t\t\t104.0000\t137.1000\t146.1000\t798.5500\t',
+    '\t\t\t87.0000\t91.1000\t87.1000\t163.0000\t',
+    '1\t9.40746\t-5.78301\t10820.0000\t1186.0000\t6854.0000\t111256.0000\t1\t1',
+  ].join('\r\n');
+  const rawHeader = parse(rawImaging);
+  assert.equal(rawHeader.precIdx, 3, 'padding row must not be taken as precursor');
+  assert.equal(rawHeader.prodIdx, 4);
+  assert.equal(rawHeader.dataStartLine, 5);
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.precursor), [104, 137.1, 146.1, 798.55]);
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.product), [87, 91.1, 87.1, 163]);
+  // This shape has no name row at all, so every channel is named from its
+  // transition and flagged. "Compound3" would say nothing, and the label becomes
+  // the compound name in the shared MRM library where the name is UNIQUE.
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.name),
+    ['mz104_87', 'mz137.1_91.1', 'mz146.1_87.1', 'mz798.55_163']);
+  assert.ok(Array.from(rawHeader.compounds).every((c) => c.synthesizedName === true));
+  // Exactly one underscore, so splitCeCv can never read the transition back as
+  // a _<CE>_<CV> suffix (that is how renaming used to invent voltages).
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.ce), [null, null, null, null]);
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.cv), [null, null, null, null]);
+  assert.deepEqual(Array.from(rawHeader.compounds, (c) => c.base),
+    ['mz104_87', 'mz137.1_91.1', 'mz146.1_87.1', 'mz798.55_163']);
+
+  // (b) the HDI-converted shape with a compound-name row still parses unchanged,
+  //     including the _<CE>_<CV> suffix split.
+  const converted = [
+    'Analyte (converted from imzML)',
+    '\t\t\tGABA_10_10\tDopamine_18_50\tACh_10_15',
+    '\t\t\t104.0000\t137.1000\t146.1000',
+    '\t\t\t87.0000\t91.1000\t87.1000',
+    '1\t0\t0\t1\t2\t3',
+  ].join('\n');
+  const convHeader = parse(converted);
+  assert.equal(convHeader.nameIdx, 1);
+  assert.equal(convHeader.dataStartLine, 4);
+  assert.deepEqual(Array.from(convHeader.compounds, (c) => c.base), ['GABA', 'Dopamine', 'ACh']);
+  assert.deepEqual(Array.from(convHeader.compounds, (c) => c.ce), [10, 18, 10]);
+  assert.deepEqual(Array.from(convHeader.compounds, (c) => c.cv), [10, 50, 15]);
+  assert.ok(Array.from(convHeader.compounds).every((c) => c.synthesizedName === false),
+    'a real name row must not be reported as synthesised');
+
+  // (c) a name row with a hole: only the blank entry is synthesised.
+  const partial = [
+    'Analyte (converted from imzML)',
+    '\t\t\tGABA\t\tACh',
+    '\t\t\t104.0000\t137.1000\t146.1000',
+    '\t\t\t87.0000\t91.1000\t87.1000',
+    '1\t0\t0\t1\t2\t3',
+  ].join('\n');
+  const partialHeader = parse(partial);
+  assert.deepEqual(Array.from(partialHeader.compounds, (c) => c.name), ['GABA', 'mz137.1_91.1', 'ACh']);
+  assert.deepEqual(Array.from(partialHeader.compounds, (c) => c.synthesizedName), [false, true, false]);
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic Waters .raw, written byte by byte so this doubles as executable
+// documentation of the layout the viewer reads. 3x2 pixels, 2 MRM channels.
+// ---------------------------------------------------------------------------
+const RAW_FX = {
+  xs: [1.0, 1.1, 1.2, 1.0, 1.1, 1.2],
+  ys: [5.0, 5.0, 5.0, 5.2, 5.2, 5.2],
+  chan: [[100, 200, 300, 400, 500, 600], [7, 8, 9, 10, 11, 12]],
+  names: ['Alpha', 'Beta'],
+  precursor: [104, 146.1],
+  product: [87, 87.1],
+  cv: [10, 15],
+  ce: [22, 35],
+  dwell: 0.0098889,
+  // .STS deliberately gets an ODD stride so the fixture exercises the
+  // unaligned reads that make DataView (not typed-array views) mandatory.
+  stsStride: 9,
+};
+
+// intensity = (w & 0x3FFFFF) * 2 ** ((w >>> 22) - 21); exponent 21 stores an
+// integer mantissa verbatim.
+function rawWord(v) { return (((21 << 22) >>> 0) | v) >>> 0; }
+
+function putParamTable({ stride, params, records, write }) {
+  const dataOffset = 32 + params.length * 48;
+  const buf = new ArrayBuffer(dataOffset + records * stride);
+  const dv = new DataView(buf);
+  const u8 = new Uint8Array(buf);
+  dv.setUint16(0, dataOffset, true);
+  dv.setUint16(2, 1, true);
+  dv.setUint16(4, stride, true);
+  dv.setUint16(6, params.length, true);
+  params.forEach((p, i) => {
+    const b = 32 + i * 48;
+    dv.setUint16(b, p.id, true);
+    dv.setUint16(b + 2, p.flag, true);
+    dv.setUint16(b + 4, p.offset, true);
+    for (let k = 0; k < p.name.length && k < 26; k++) u8[b + 6 + k] = p.name.charCodeAt(k);
+    dv.setUint16(b + 32, p.size, true);
+  });
+  for (let r = 0; r < records; r++) write(dv, dataOffset + r * stride, r);
+  return buf;
+}
+
+function buildSyntheticRawMembers() {
+  const n = RAW_FX.xs.length;
+  const nCh = RAW_FX.chan.length;
+
+  const dat = new ArrayBuffer(n * nCh * 4);
+  const datDv = new DataView(dat);
+  for (let i = 0; i < n; i++) {
+    for (let c = 0; c < nCh; c++) datDv.setUint32((i * nCh + c) * 4, rawWord(RAW_FX.chan[c][i]), true);
+  }
+
+  const idx = new ArrayBuffer(n * 22);
+  const idxDv = new DataView(idx);
+  for (let i = 0; i < n; i++) {
+    idxDv.setUint32(i * 22, i * nCh * 4, true);          // offset into .DAT
+    idxDv.setUint32(i * 22 + 4, (0x08000000 | nCh) >>> 0, true); // nPeaks + calibrated bit
+    idxDv.setFloat32(i * 22 + 8, RAW_FX.chan.reduce((a, c) => a + c[i], 0), true); // TIC
+    idxDv.setFloat32(i * 22 + 12, (i + 1) * 0.00185, true);      // retention time, minutes
+  }
+
+  const sts = putParamTable({
+    stride: RAW_FX.stsStride,
+    params: [
+      { id: 9, flag: 3, offset: 1, size: 4, name: 'Aim X Position' },
+      { id: 10, flag: 3, offset: 5, size: 4, name: 'Aim Y Position' },
+    ],
+    records: n,
+    write: (dv, at, r) => { dv.setFloat32(at + 1, RAW_FX.xs[r], true); dv.setFloat32(at + 5, RAW_FX.ys[r], true); },
+  });
+
+  const ee = putParamTable({
+    stride: 4,
+    params: [
+      { id: 110, flag: 1, offset: 0, size: 2, name: 'Cone Voltage' },
+      { id: 111, flag: 1, offset: 2, size: 2, name: 'Collision Energy' },
+    ],
+    records: nCh,
+    write: (dv, at, c) => { dv.setUint16(at, RAW_FX.cv[c], true); dv.setUint16(at + 2, RAW_FX.ce[c], true); },
+  });
+
+  const REC = 16;
+  const cmp = new ArrayBuffer(12 + nCh * REC);
+  const cmpDv = new DataView(cmp);
+  const cmpU8 = new Uint8Array(cmp);
+  cmpDv.setUint32(0, 1, true);
+  cmpDv.setUint32(4, nCh, true);
+  RAW_FX.names.forEach((nm, c) => {
+    for (let k = 0; k < nm.length; k++) cmpU8[12 + c * REC + k] = nm.charCodeAt(k);
+  });
+
+  const fns = new ArrayBuffer(416);
+  const fnsDv = new DataView(fns);
+  fnsDv.setUint8(0, 9);              // function type 9 = MRM
+  fnsDv.setFloat32(10, 0, true);     // rt start
+  fnsDv.setFloat32(14, 3000, true);  // rt end
+  for (let c = 0; c < nCh; c++) {
+    fnsDv.setFloat32(32 + c * 4, RAW_FX.dwell, true);
+    fnsDv.setFloat32(160 + c * 4, RAW_FX.precursor[c], true);
+    fnsDv.setFloat32(288 + c * 4, RAW_FX.product[c], true);
+  }
+
+  const enc = (t) => new TextEncoder().encode(t);
+  return [
+    ['SYNTH.raw/_HEADER.TXT', enc('$$ Instrument: SYNTH-TQ\r\n$$ Acquired Date: 04-Sep-2026\r\n')],
+    // windows-1252 degree sign (0xB0) - decoding this as UTF-8 corrupts the key.
+    ['SYNTH.raw/_extern.inf', Uint8Array.from([
+      ...enc('[DESI Experiment Parameters]\r\nDesiXStep\t0.05\r\nDesiYStep\t0.2\r\n\r\n'),
+      ...enc('Instrument Parameters - Function 1:\r\nPolarity\tES+\r\nSource Temperature ('), 0xB0,
+      ...enc('C)\t150\t150\r\n'),
+    ])],
+    ['SYNTH.raw/_FUNCTNS.INF', new Uint8Array(fns)],
+    ['SYNTH.raw/_FUNC001.IDX', new Uint8Array(idx)],
+    ['SYNTH.raw/_FUNC001.DAT', new Uint8Array(dat)],
+    ['SYNTH.raw/_FUNC001.STS', new Uint8Array(sts)],
+    ['SYNTH.raw/_FUNC001.EE', new Uint8Array(ee)],
+    ['SYNTH.raw/_FUNC001.CMP', new Uint8Array(cmp)],
+  ];
+}
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+function crc32(bytes) {
+  let c = 0xFFFFFFFF;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+
+// Members whose name matches this are DEFLATEd rather than STOREd. The app's own
+// archives are deflated, so leaving the fixture STORE-only would never execute
+// the inflate path at all — the one place the app (DecompressionStream) and the
+// connector (zlib) legitimately differ.
+const ZIP_DEFLATE = /_FUNC001\.(STS|DAT)$/;
+
+function buildZip(members) {
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const [name, bytes] of members) {
+    const nameBytes = new TextEncoder().encode(name);
+    const crc = crc32(bytes);
+    const deflate = ZIP_DEFLATE.test(name);
+    const stored = deflate ? new Uint8Array(deflateRawSync(bytes)) : bytes;
+    const method = deflate ? 8 : 0;
+    const local = new Uint8Array(30 + nameBytes.length);
+    const ldv = new DataView(local.buffer);
+    ldv.setUint32(0, 0x04034b50, true);
+    ldv.setUint16(4, 20, true);
+    ldv.setUint16(8, method, true);
+    ldv.setUint32(14, crc, true);
+    ldv.setUint32(18, stored.length, true);
+    ldv.setUint32(22, bytes.length, true);
+    ldv.setUint16(26, nameBytes.length, true);
+    local.set(nameBytes, 30);
+    const cd = new Uint8Array(46 + nameBytes.length);
+    const cdv = new DataView(cd.buffer);
+    cdv.setUint32(0, 0x02014b50, true);
+    cdv.setUint16(6, 20, true);
+    cdv.setUint16(10, method, true);
+    cdv.setUint32(16, crc, true);
+    cdv.setUint32(20, stored.length, true);
+    cdv.setUint32(24, bytes.length, true);
+    cdv.setUint16(28, nameBytes.length, true);
+    cdv.setUint32(42, offset, true);
+    cd.set(nameBytes, 46);
+    central.push(cd);
+    parts.push(local, stored);
+    offset += local.length + stored.length;
+  }
+  const cdStart = offset;
+  let cdSize = 0;
+  for (const cd of central) { parts.push(cd); cdSize += cd.length; }
+  const eocd = new Uint8Array(22);
+  const edv = new DataView(eocd.buffer);
+  edv.setUint32(0, 0x06054b50, true);
+  edv.setUint16(8, central.length, true);
+  edv.setUint16(10, central.length, true);
+  edv.setUint32(12, cdSize, true);
+  edv.setUint32(16, cdStart, true);
+  parts.push(eocd);
+  const total = parts.reduce((a, b) => a + b.length, 0);
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const part of parts) { out.set(part, at); at += part.length; }
+  return out.buffer;
+}
+
+// Anchored so a mention of the name in a comment can never be mistaken for the
+// declaration.
+function extractTopLevelFunction(name) {
+  const re = new RegExp(`(^|\\n)(async )?function ${name}\\s*\\(`);
+  const m = re.exec(html);
+  assert.ok(m, `missing top-level function ${name}`);
+  const startAt = m.index + (m[1] ? m[1].length : 0);
+  const openAt = html.indexOf('{', m.index + m[0].length - 1);
+  return html.slice(startAt, scanBalanced(html, openAt) + 1);
+}
+
+// The parse worker is assembled by stringifying the functions named in the
+// `fns` array. A name missing from that array does NOT fail node --check: the
+// worker throws ReferenceError at run time and every caller silently falls back
+// to the main thread, so the picture still appears and only the off-main-thread
+// benefit dies. This test assembles the SAME list and actually runs the .raw
+// path through it, so an omitted helper fails loudly here instead.
+// Assemble the worker exactly as _buildParseWorkerSource does — the same `fns`
+// list, the same injected constants — and hand back whichever of them the
+// caller wants to CALL. Defining a function does not evaluate its body, so the
+// xlsx/TIFF entries can be defined without XLSX/UTIF present; only what a test
+// actually calls has to resolve.
+function assembleWorkerFns(wanted, extraNames) {
+  const listMatch = /const fns = \[([\s\S]*?)\n {4}\];/.exec(html);
+  assert.ok(listMatch, 'missing parse-worker fns list');
+  const names = listMatch[1].split(/[,\s]+/).filter(Boolean);
+  const constOf = (name) => {
+    const m = new RegExp('const ' + name + ' = ([0-9.]+);').exec(html);
+    assert.ok(m, 'missing constant ' + name);
+    return m[1];
+  };
+  const context = vm.createContext({
+    console, TextDecoder, TextEncoder, Blob, Response, DecompressionStream, out: {},
+  });
+  vm.runInContext(
+    'const MSI_ROBUST_PERCENTILE = ' + constOf('MSI_ROBUST_PERCENTILE') + ';\n'
+    + 'const MSI_DEFAULT_DISPLAY_PERCENTILE = ' + constOf('MSI_DEFAULT_DISPLAY_PERCENTILE') + ';\n'
+    // `extraNames` are defined alongside but are NOT part of the worker list —
+    // main-thread-only entry points a test wants to call.
+    + names.concat(extraNames || []).map(extractTopLevelFunction).join('\n\n')
+    + '\nout.api = { ' + wanted.join(', ') + ' };',
+    context,
+  );
+  return { names, api: context.out.api };
+}
+
+// The bake chain the worker runs for EVERY MSI layer, whatever the format.
+// This is the omission that actually happened once: deriveBakeStats and
+// percentileOfSorted were dropped from the list when "sort only once" split them
+// out, so the worker threw ReferenceError on every bake and silently fell back
+// to the main thread — the picture still appeared, only the off-main-thread
+// benefit died. Running the chain here makes that fail loudly instead.
+function testWorkerBakePath() {
+  const { api } = assembleWorkerFns(['computeRasterPixels', 'parseTxtToRows']);
+  const rows = [];
+  for (let y = 0; y < 4; y++) for (let x = 0; x < 5; x++) rows.push({ x, y, v: y * 5 + x });
+
+  // The txt reader feeds the same chain, and is pure, so cover it here too.
+  const tsv = ['x\ty\tv'].concat(rows.map((r) => r.x + '\t' + r.y + '\t' + r.v)).join('\n');
+  const parsed = api.parseTxtToRows(new TextEncoder().encode(tsv).buffer, {});
+  assert.equal(parsed.length, rows.length);
+  assert.deepEqual(Array.from(parsed, (r) => r.v), Array.from(rows, (r) => r.v));
+
+  const px = api.computeRasterPixels(rows, null, 'robust');
+  assert.equal(px.width, 5);
+  assert.equal(px.height, 4);
+  assert.equal(px.values.length, 20);
+  assert.equal(px.pixels.length, 20 * 4);
+  assert.equal(px.rawTrueMax, 19);
+  assert.ok(Array.isArray(px.rawRange) && px.rawRange.length === 2, px.rawRange);
+  assert.equal(px.diag.gridFallback, null);
+  // 'full' must bake to the true maximum rather than the robust percentile.
+  assert.equal(api.computeRasterPixels(rows, null, 'full').rawRange[1], 19);
+}
+
+async function testWorkerRawDecodePath() {
+  // parseRawToRows is the MAIN-THREAD fallback (loadMsiLayer uses it when the
+  // worker is unavailable); the worker itself calls rawDecodeFunction +
+  // rawRowsFromDecoded, so it is deliberately not in the fns list.
+  const { names, api } = assembleWorkerFns([
+    'rawBundleFromZip', 'rawDecodeFunction', 'rawRowsFromDecoded', 'parseRawToRows',
+    'parseWatersParamTable', 'buildMsiGrid',
+  ], ['parseRawToRows']);
+  assert.ok(names.includes('rawDecodeFunction') && names.includes('rawRowsFromDecoded'),
+    '.raw decode helpers must be in the parse-worker fns list');
+
+  const zip = buildZip(buildSyntheticRawMembers());
+  const bundle = api.rawBundleFromZip(zip);
+  assert.equal(bundle.rootName, 'SYNTH', 'the *.raw/ prefix names the bundle');
+
+  // _FUNC001.STS and .DAT are DEFLATEd in the fixture (ZIP_DEFLATE), so every
+  // assertion below also proves the inflate path — which is the path the app's
+  // own archives take, and the one place the app and the connector differ.
+  const decoded = await api.rawDecodeFunction(bundle, 1);
+  assert.equal(decoded.nScans, 6);
+  assert.equal(decoded.nCh, 2);
+  // Odd .STS stride (9) means every record after the first is unaligned; this
+  // is the read that a typed-array view would throw RangeError on.
+  assert.deepEqual(Array.from(decoded.xs, (v) => +v.toFixed(4)), [1, 1.1, 1.2, 1, 1.1, 1.2]);
+  assert.deepEqual(Array.from(decoded.ys, (v) => +v.toFixed(4)), [5, 5, 5, 5.2, 5.2, 5.2]);
+  assert.deepEqual(Array.from(decoded.chans[0]), [100, 200, 300, 400, 500, 600]);
+  assert.deepEqual(Array.from(decoded.chans[1]), [7, 8, 9, 10, 11, 12]);
+  assert.equal(decoded.gridX.count, 3);
+  assert.equal(decoded.gridY.count, 2);
+  assert.ok(Math.abs(decoded.gridX.pitch - 0.1) < 1e-9, 'X pitch from the stage coordinates');
+  assert.ok(Math.abs(decoded.gridY.pitch - 0.2) < 1e-9, 'Y pitch from the stage coordinates');
+
+  const rows = api.rawRowsFromDecoded(decoded, { channel: 1 });
+  assert.equal(rows.length, 6);
+  assert.deepEqual(Array.from(rows, (r) => r.v), [7, 8, 9, 10, 11, 12]);
+  // Snapped coordinates must land buildMsiGrid on the true 3x2 raster rather
+  // than tripping its inflation guard and collapsing the geometry.
+  const grid = api.buildMsiGrid(rows);
+  assert.equal(grid.W, 3);
+  assert.equal(grid.H, 2);
+  assert.equal(grid.gridFallback && (grid.gridFallback.x || grid.gridFallback.y), null);
+
+  // parseRawToRows must accept a raw ArrayBuffer as well as a bundle.
+  const viaBuffer = await api.parseRawToRows(zip, { func: 1, channel: 0 });
+  assert.deepEqual(Array.from(viaBuffer, (r) => r.v), [100, 200, 300, 400, 500, 600]);
+}
+
+// Renaming a compound re-derives CE/CV from a trailing _<CE>_<CV> in the new
+// label. That was right while the label WAS the source of those numbers; for a
+// .raw layer the instrument is, and re-deriving destroys it — renaming
+// POS_Acetylcholine to "ACh_146_87" turned CE=10/CV=15 into 146/87 (the
+// transition m/z) and pushed that to the MRM library, silently.
+function testRenameKeepsInstrumentCeCv() {
+  const context = vm.createContext({});
+  vm.runInContext(
+    extractTopLevelFunction('splitCeCv') + '\n' + extractTopLevelFunction('ceCvAfterRename')
+    + '\nthis.api = { splitCeCv, ceCvAfterRename };',
+    context,
+  );
+  const { splitCeCv, ceCvAfterRename } = context.api;
+  // The vm has its own realm, so rebuild the result host-side before comparing.
+  const after = (meta, label) => {
+    const r = ceCvAfterRename(meta, splitCeCv(label));
+    return { ce: r.ce, cv: r.cv };
+  };
+
+  // .raw: the instrument's values survive a label that looks like _<CE>_<CV>.
+  const raw = { fromRaw: true, ce: 10, cv: 15 };
+  assert.deepEqual(after(raw, 'ACh_146_87'), { ce: 10, cv: 15 });
+  assert.deepEqual(after(raw, 'Acetylcholine'), { ce: 10, cv: 15 });
+
+  // .raw acquired without _FUNCnnn.EE has no CE/CV, so the label may still fill
+  // them in — that is annotation, not destruction.
+  assert.deepEqual(after({ fromRaw: true, ce: null, cv: null }, 'ACh_45_14'), { ce: 45, cv: 14 });
+  assert.deepEqual(after({ fromRaw: true, ce: 10, cv: null }, 'ACh_45_14'), { ce: 10, cv: 14 });
+
+  // Everything else keeps the old behaviour: the label is the source of truth.
+  assert.deepEqual(after({ ce: 1, cv: 2 }, 'Oxylipin_45_14'), { ce: 45, cv: 14 });
+  assert.deepEqual(after({ fromRaw: false, ce: 1, cv: 2 }, 'X_45_14'), { ce: 45, cv: 14 });
+  assert.deepEqual(after({ ce: 1, cv: 2 }, 'PlainName'), { ce: 1, cv: 2 });
+  assert.deepEqual(after(null, 'X_45_14'), { ce: 45, cv: 14 });
+}
+
 async function main() {
   compileInlineScripts();
   assert.match(html, /data-preview-range-reset/);
@@ -274,6 +709,10 @@ async function main() {
   await testFailedLoadStaysExplicit();
   testRangeResetAndSingleRepaint();
   await testWorkerXlsxDecodeCache();
+  testAnalyteHeaderShapes();
+  testRenameKeepsInstrumentCeCv();
+  testWorkerBakePath();
+  await testWorkerRawDecodePath();
   console.log('viewer preview regression tests: PASS');
 }
 

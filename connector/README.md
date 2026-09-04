@@ -83,7 +83,7 @@ npm run selftest
 ## しくみ（内部）
 - サーバの**読み取り専用RPC**（`unlock_public_project` / `unlock_project` / `get_project_doc` / `list_rois`）と、**公開ストレージ**からの取得のみを使います。
 - MSI の数値化は、Webアプリ本体と**同一のパースロジック**を移植しているので、数値が一致します。
-- 対応形式は **xlsx / txt（Analyte）/ parquet（TIMS ノンターゲット）**。parquet は列指向なので、**HTTP Range で必要な列だけ**読みます（836 MB のファイルでも実際に読むのは 1 化合物あたり数百 KB。全体をダウンロードしません）。読み出しはビューア本体のワーカーと**ビット一致**することを `npm run selftest` で確認しています。
+- 対応形式は **xlsx / txt（Analyte）/ parquet（TIMS ノンターゲット）/ Waters `.raw`（DESI-TQ-MSI。`.raw.zip` として保存されたもの）**。parquet は列指向なので、**HTTP Range で必要な列だけ**読みます（836 MB のファイルでも実際に読むのは 1 化合物あたり数百 KB。全体をダウンロードしません）。読み出しはビューア本体のワーカーと**ビット一致**することを `npm run selftest` で確認しています。
 - ROI内の値は、生の行を `buildMsiGrid` でピクセル格子に対応づけ、`pointInPolygon` で内側だけ集めた**生強度**です（表示用の0–255輝度ではありません）。
 
 ## ChatGPT で使う（カスタムGPT Action・ホスト版）
@@ -128,7 +128,7 @@ curl -H "Authorization: Bearer あなたのAPIキー" https://あなたのURL/pr
 ## 内部のしくみ
 - サーバの**読み取り専用RPC**（`unlock_public_project` / `unlock_project` / `get_project_doc` / `list_rois`）と、**公開ストレージ**からの取得のみを使います。
 - MSI の数値化は、Webアプリ本体と**同一のパースロジック**を移植しているので、数値が一致します。
-- 対応形式は **xlsx / txt（Analyte）/ parquet（TIMS ノンターゲット）**。parquet は列指向なので、**HTTP Range で必要な列だけ**読みます（836 MB のファイルでも実際に読むのは 1 化合物あたり数百 KB。全体をダウンロードしません）。読み出しはビューア本体のワーカーと**ビット一致**することを `npm run selftest` で確認しています。
+- 対応形式は **xlsx / txt（Analyte）/ parquet（TIMS ノンターゲット）/ Waters `.raw`（DESI-TQ-MSI。`.raw.zip` として保存されたもの）**。parquet は列指向なので、**HTTP Range で必要な列だけ**読みます（836 MB のファイルでも実際に読むのは 1 化合物あたり数百 KB。全体をダウンロードしません）。読み出しはビューア本体のワーカーと**ビット一致**することを `npm run selftest` で確認しています。
 - ROI内の値は、生の行を `buildMsiGrid` でピクセル格子に対応づけ、`pointInPolygon` で内側だけ集めた**生強度**です（表示用の0–255輝度ではありません）。
 - 構成: `src/server.js`(Claude用MCP) と `src/http.js`(ChatGPT用HTTP) は**同じコア** `src/tools.js` を共有します。
 

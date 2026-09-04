@@ -134,7 +134,7 @@ Publish 済みのプロジェクトには `Copy URL` ボタンが出ます。
 
 | 場所 | 何が入る | 範囲 |
 | --- | --- | --- |
-| **ローカル IndexedDB** (`desi-projects` DB) | プロジェクトメタ + 切片構造 + ROI + Memo + 登録ファイル本体 (TIFF/xlsx/txt) | このブラウザのこのプロファイル限定 |
+| **ローカル IndexedDB** (`desi-projects` DB) | プロジェクトメタ + 切片構造 + ROI + Memo + 登録ファイル本体 (TIFF/xlsx/txt/parquet/.raw.zip) | このブラウザのこのプロファイル限定 |
 | **Supabase** (publish 済のみ) | 切片構造 / ROI / Memo / 圧縮バイナリ / bcrypt パスワード | サーバ全体 |
 | **localStorage** | 最後に開いたプロジェクト ID、レイアウト寸法 | このブラウザのこのプロファイル |
 | **sessionStorage** | admin pw キャッシュ、master 解錠フラグ | このタブのみ |

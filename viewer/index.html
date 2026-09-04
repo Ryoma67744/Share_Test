@@ -71,6 +71,7 @@ body.share-mode #project-picker,
 body.share-mode #project-name-input,
 body.share-mode #tb-add-heif,
 body.share-mode #tb-add-msi,
+body.share-mode #tb-add-raw,
 body.share-mode #tb-align-heif,
 body.share-mode #tb-rot-share-default,
 body.share-mode #tb-msi-um-group,
@@ -669,7 +670,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
   #btn-share-admin-login, #btn-projects, #btn-new-project, #btn-import-zip,
   #btn-publish-share, #btn-share-info, #btn-add-section, #btn-add-parquet,
   #btn-replace-parquet, #btn-delete-project,
-  #tb-add-heif, #tb-add-msi, #tb-align-heif, #tb-del-section,
+  #tb-add-heif, #tb-add-msi, #tb-add-raw, #tb-align-heif, #tb-del-section,
   #tb-flip-group, #tb-msi-um-group, #tb-rot-share-default,
   /* 狭い画面でも絞り込みは残す (共有先の唯一の探索手段なので)。
      書き換え系のボタンだけ畳む。 */
@@ -836,6 +837,7 @@ body.share-mode #btn-share-preview { display:inline-flex; }
                 <span class="tb-divider"></span>
                 <button class="tb-btn" id="tb-add-heif" title="Register HE or IF TIFF with transform JSON">+ HE/IF</button>
                 <button class="tb-btn" id="tb-add-msi" title="Register MSI xlsx or txt as a layer">+ MSI</button>
+                <button class="tb-btn" id="tb-add-raw" title="Waters .raw (DESI-TQ-MSI) をフォルダごと登録">+ .raw</button>
                 <button class="tb-btn" id="tb-align-heif" title="HE/IF を MSI と重ね合わせる (manual / landmark)">Align</button>
                 <button class="tb-btn danger" id="tb-del-section" title="Delete the active section">×</button>
                 <span class="tb-divider"></span>
@@ -1068,6 +1070,25 @@ function splitCeCv(label) {
     const m = s.match(/^(.+?)_(\d+)_(\d+)$/);
     if (m) return { base: m[1], ce: Number(m[2]), cv: Number(m[3]) };
     return { base: s, ce: null, cv: null };
+}
+
+// Whether a rename may rewrite CE / CV.
+//
+// Before .raw the compound LABEL was the source of truth for these, so
+// re-deriving them from the new name was the correct thing to do. Values read
+// off the instrument must survive a rename instead: renaming a .raw layer to
+// "ACh_146_87" would otherwise turn CE=10 / CV=15 into 146 / 87 — the
+// transition's m/z, not voltages — silently, and then send that to the MRM
+// library. A blank value is still filled in from the name, so a .raw acquired
+// without _FUNCnnn.EE can still be annotated by hand.
+function ceCvAfterRename(meta, split) {
+    const fromRaw = !!(meta && meta.fromRaw);
+    const curCe = meta ? meta.ce : null;
+    const curCv = meta ? meta.cv : null;
+    return {
+        ce: (split.ce != null && !(fromRaw && curCe != null)) ? split.ce : curCe,
+        cv: (split.cv != null && !(fromRaw && curCv != null)) ? split.cv : curCv,
+    };
 }
 
 // MSI rasters are quantised to 0-255 luminance, but the user-facing Method (MRM)
@@ -2990,13 +3011,8 @@ const MSI_ROBUST_PERCENTILE = 0.995;
 // ため rawDispMax は bakeHi(=p99.5)が上限。値を下げるほど初期表示は明るく(上位
 // クリップ増)。ユーザーが Range を手入力した上書きには影響しない(getMsiWindow 参照)。
 const MSI_DEFAULT_DISPLAY_PERCENTILE = 0.99;
-function percentileSorted(vals, p) {
-    if (!vals || !vals.length) return NaN;
-    return percentileOfSorted(Float64Array.from(vals).sort(), p);
-}
 // 既にソート済みの配列から分位点を取る。呼び出し側が 1 回だけソートして
-// 複数の分位点を取れるように、添字の計算だけを切り出したもの。
-// percentileSorted と同じ式なので、どちらを通しても値は一致する。
+// 複数の分位点を取れるようにするため、添字の計算だけを切り出してある。
 function percentileOfSorted(a, p) {
     if (!a || !a.length) return NaN;
     const idx = Math.min(a.length - 1, Math.max(0, Math.round(p * (a.length - 1))));
@@ -3139,10 +3155,11 @@ function computeRasterPixels(rows, range, bakeMode) {
 // 8bit 画素は作らない — 合成 TIC のように「範囲と統計しか要らない」経路が
 // 10 万画素 × 4 バイトの確保と書き込みを丸ごと省けるようにするため。
 //
-// ★ ソートは 1 回だけ。以前は percentileSorted を 2 回呼んでおり、その中で
-//   毎回 Float64Array.from(vals).sort() していた。1390 化合物 × 4 切片で
-//   約 1 万 1 千回ソートしていたことになる。同じ配列から 2 つの添字を取るだけなので
-//   結果は完全に一致する。**これは DESI の通常のレイヤー読み込みにも効く。**
+// ★ ソートは 1 回だけ。以前は分位点を取るたびに
+//   Float64Array.from(vals).sort() する関数 (percentileSorted, 現在は削除) を
+//   2 回呼んでいた。1390 化合物 × 4 切片で約 1 万 1 千回ソートしていたことに
+//   なる。同じ配列から 2 つの添字を取るだけなので結果は完全に一致する。
+//   **これは DESI の通常のレイヤー読み込みにも効く。**
 function deriveBakeStats(values, range, bakeMode) {
     let vmin = Infinity, vmax = -Infinity, sum = 0, n = 0;
     for (let i = 0; i < values.length; i++) {
@@ -3189,7 +3206,7 @@ function deriveBakeStats(values, range, bakeMode) {
     } else {
         bakeLo = vmin;
         // 有限値だけを 1 本の Float64Array に詰めて 1 回だけソートし、
-        // 2 つの分位点を同じ配列から取る (percentileSorted の 2 回呼びを廃止)。
+        // 2 つの分位点を同じ配列から取る (分位点ごとにソートし直すのを廃止)。
         const sorted = new Float64Array(n);
         for (let i = 0, k = 0; i < values.length; i++) {
             const v = values[i];
@@ -3447,6 +3464,10 @@ async function _ensureRoiRawGrid(section, layerKey) {
             const e = series[k];
             if (!e || e.blobId !== ent.blobId) continue;
             if ((e.sourceFileId || e.blobId) !== srcKey) continue;
+            // One .raw can hold several functions with different scan lists, and
+            // extractSourceMatrixForExport returns parallel arrays. Only bundle
+            // siblings that share the function.
+            if (ent.kind === 'raw' && ((e.func || 1) !== (ent.func || 1))) continue;
             if (entries.length >= ROI_RAW_GRID_CACHE_MAX) break;
             entries.push({ layerKey: k, ent: e });
         }
@@ -3478,7 +3499,7 @@ async function _ensureRoiRawGrid(section, layerKey) {
     if (!rec || !rec.blob) return null;
 
     let m = null;
-    try { m = extractSourceMatrixForExport(await rec.blob.arrayBuffer(), ent, entries); }
+    try { m = await extractSourceMatrixForExport(await rec.blob.arrayBuffer(), ent, entries); }
     catch (e) { console.warn('[roi] source parse failed', layerKey, e); m = null; }
     if (!m || !m.positions || !m.positions.length || !m.cols) return null;
 
@@ -3553,7 +3574,7 @@ async function computeSectionOtsuMasks(sec, project, opts) {
         let m = null, sig = null;
         try {
             const buf = await rec.blob.arrayBuffer();
-            m = extractSourceMatrixForExport(buf, grp.repr, grp.entries);
+            m = await extractSourceMatrixForExport(buf, grp.repr, grp.entries);
         } catch (e) { console.warn('[otsu] source parse failed', srcKey, e); m = null; }
         try { sig = await blobContentSig(rec.blob); } catch (e) { sig = null; }
         if (!m || !m.positions || !m.positions.length) {
@@ -3823,14 +3844,21 @@ async function inspectXlsxColumns(buf, sheetName, headerRow1based) {
 //   1. For each line, count tokens at col >= 3 that are finite numbers vs.
 //      non-empty non-numeric strings.
 //   2. The first pair of CONSECUTIVE numeric-only rows (>= 3 numbers each)
-//      that is NOT a strict 1,2,3,...,N channel-index row becomes
-//      <precursor row, product row>.
+//      that is NOT a strict 1,2,3,...,N channel-index row AND that carries at
+//      least one positive value in each row becomes <precursor row, product row>.
+//      (The positivity test rejects the all-zero padding row Waters writes in
+//      .raw/imaging/Analyte N.txt, which is otherwise numeric-only.)
 //   3. The closest line above the precursor row with non-numeric tokens
 //      becomes the compound-name row.
 //   4. Data rows start immediately after the product row.
 //
-// Returns { compounds: [{ index, name, precursor, product }], dataStartLine,
-//           precIdx, prodIdx, nameIdx }.
+// A file may have no name row at all — Waters' own .raw/imaging export is one:
+// its header is padding / channel index / precursor / product and nothing else.
+// Those channels get a name synthesised from the transition and are flagged
+// `synthesizedName` so the caller can insist the user names them properly.
+//
+// Returns { compounds: [{ index, name, precursor, product, synthesizedName }],
+//           dataStartLine, precIdx, prodIdx, nameIdx }.
 function parseAnalyteHeader(buf) {
     const raw = (typeof buf === 'string') ? buf : new TextDecoder('utf-8').decode(buf);
     const linesAll = raw.split(/\r?\n/);
@@ -3840,14 +3868,15 @@ function parseAnalyteHeader(buf) {
 
     const lineStats = linesAll.map((line) => {
         const toks = splitTab(line).slice(3);
-        let nNumeric = 0, nString = 0;
+        let nNumeric = 0, nString = 0, nPositive = 0;
         for (const t of toks) {
             const tt = t.trim();
             if (!tt) continue;
-            if (Number.isFinite(Number(tt))) nNumeric++;
+            const v = Number(tt);
+            if (Number.isFinite(v)) { nNumeric++; if (v > 0) nPositive++; }
             else nString++;
         }
-        return { nNumeric, nString };
+        return { nNumeric, nString, nPositive };
     });
 
     // A row is a "strict channel-index row" if its col>=3 tokens are
@@ -3871,6 +3900,13 @@ function parseAnalyteHeader(buf) {
         const a = lineStats[i], b = lineStats[i + 1];
         if (a.nNumeric >= 3 && b.nNumeric >= 3 && a.nString === 0 && b.nString === 0) {
             if (isStrictChannelIndex(i)) continue;
+            // A precursor / product row is m/z data, so at least one value must be
+            // POSITIVE. Waters' .raw/imaging export carries an all-zero padding row
+            // ("5\t\t\t0\t0\t0...") above the real m/z rows; zeros are finite, so the
+            // test above accepted the padding as the precursor row, the compound loop
+            // below then rejected every candidate for pre <= 0, and the file died on
+            // "no compounds detected".
+            if (a.nPositive === 0 || b.nPositive === 0) continue;
             precIdx = i; prodIdx = i + 1;
             break;
         }
@@ -3887,6 +3923,16 @@ function parseAnalyteHeader(buf) {
     const prodRow = splitTab(linesAll[prodIdx]).slice(3);
     const nameRow = nameIdx >= 0 ? splitTab(linesAll[nameIdx]).slice(3) : [];
 
+    // "Compound3" says nothing; "mz146.1_87.1" identifies the channel, which
+    // matters because this label becomes the compound name in the shared MRM
+    // library, and mrm_compounds.name is UNIQUE — two experiments both
+    // registering a "Compound1" would silently merge into one compound.
+    //
+    // Exactly one underscore, so splitCeCv (which needs _<int>_<int>) can never
+    // read the transition back as a collision / cone voltage.
+    const nameFromTransition = (pre, pro) =>
+        'mz' + String(pre) + (Number.isFinite(pro) && pro > 0 ? '_' + String(pro) : '');
+
     const compounds = [];
     let ordinal = 0;
     for (let i = 0; i < precRow.length; i++) {
@@ -3899,7 +3945,8 @@ function parseAnalyteHeader(buf) {
         const pro = Number((prodRow[i] || '').trim());
         let name = (nameRow[i] || '').trim();
         ordinal++;
-        if (!name) name = 'Compound' + ordinal;
+        const synthesizedName = !name;
+        if (synthesizedName) name = nameFromTransition(pre, pro);
         const split = splitCeCv(name);
         compounds.push({
             // Column offset within the slice(3) view; data rows have value at tok[3 + index].
@@ -3912,6 +3959,7 @@ function parseAnalyteHeader(buf) {
             cv: split.cv,
             precursor: pre,
             product: (Number.isFinite(pro) && pro > 0) ? pro : null,
+            synthesizedName,
         });
     }
     if (!compounds.length) throw new Error('no compounds detected');
@@ -3972,6 +4020,871 @@ function parseTxtToRows(buf, def) {
 // directly). Behaviour/return shape unchanged.
 async function buildPngFromTxtArrayBuffer(buf, def) {
     return rasterRowsToPngDataUrl(parseTxtToRows(buf, def), def.range, def.bakeMode);
+}
+
+// Main-thread fallback for kind:'raw' (worker unavailable or it threw).
+async function buildPngFromRawArrayBuffer(buf, def) {
+    return rasterRowsToPngDataUrl(await parseRawToRows(buf, def), def.range, def.bakeMode);
+}
+
+// ==== BEGIN waters-raw parser (ported VERBATIM to connector/src/raw.js) ====
+// Waters MassLynx .raw reader (Xevo TQ Absolute / DESI-MSI, MRM functions).
+//
+// A .raw is a DIRECTORY, so the app stores it as one ZIP and every re-parse
+// reads members out of that ZIP. All of these are pure (no DOM, no canvas) so
+// the parse Web Worker can run the exact same code as the main thread.
+//
+// Layout, reverse-engineered and verified byte-for-byte against a real
+// acquisition (73x54 px, 8 MRM channels, 3942 scans). Everything is
+// LITTLE-ENDIAN, and every multi-byte read goes through DataView on purpose:
+// _FUNC001.STS has an ODD record stride (153), so `new Float32Array(buf, off, 1)`
+// throws RangeError on most records.
+//
+//   _FUNCnnn.IDX   22 bytes per scan; nScans = size / 22
+//                    u32 @0  byte offset into .DAT
+//                    u32 @4  packed; nPeaks = v & 0x3FFFFF, bit27 = calibrated
+//                    f32 @8  TIC (equals the sum of that scan's channels)
+//                    f32 @12 retention time, MINUTES
+//   _FUNCnnn.DAT   nScans * nPeaks u32 words:
+//                    intensity = (w & 0x3FFFFF) * 2 ** ((w >>> 22) - 21)
+//   _FUNCnnn.EE    "parameter table" (see parseWatersParamTable) whose records
+//                  are CHANNELS: "Cone Voltage" (CV) and "Collision Energy" (CE)
+//   _FUNCnnn.STS   the same parameter-table layout whose records are SCANS;
+//                  "Aim X Position" / "Aim Y Position" are the DESI stage
+//                  coordinates in mm — the authoritative source of the raster
+//   _FUNCnnn.CMP   u32 version, u32 count, u32 unknown, then `count` fixed-width
+//                  NUL-terminated compound names
+//   _FUNCTNS.INF   416 bytes PER FUNCTION; u8 @0 type (9 = MRM),
+//                  f32[32] @32 dwell(s), @160 precursor m/z, @288 product m/z
+//                  -> at most 32 MRM channels in one function
+//   _HEADER.TXT    "$$ Key: Value" lines
+//   _extern.inf    method / source / [DESI Experiment Parameters] blocks
+//   imaging/*.txt  optional text export; NEVER read here (it is derivable, and
+//                  its values are rounded where the binary is exact)
+//
+// Only IDX + DAT + STS are required. Missing EE loses CV/CE, missing CMP loses
+// names, missing _FUNCTNS.INF loses m/z — none of which is fatal.
+
+// Waters writes 8-bit text (e.g. the degree sign in "Source Temperature (°C)"),
+// which is windows-1252, not UTF-8. Decoding as UTF-8 corrupts those keys.
+function rawDecodeText(buf) {
+    const bytes = (buf instanceof Uint8Array) ? buf : new Uint8Array(buf);
+    return new TextDecoder('windows-1252').decode(bytes);
+}
+
+// The one place the app and the Node connector legitimately differ: the
+// connector swaps this for zlib.inflateRawSync. Keep it a single function.
+async function rawInflate(bytes) {
+    if (typeof DecompressionStream !== 'function') {
+        throw new Error('raw: DecompressionStream unavailable');
+    }
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+// Index a ZIP from its CENTRAL DIRECTORY, never from local headers: a local
+// header may carry a data descriptor with zeroed sizes, which some zip writers
+// (including several GUI tools) emit. Returns Map<lowercased name, entry>.
+function rawZipIndex(buf) {
+    const dv = new DataView(buf);
+    const n = buf.byteLength;
+    // End of central directory: scan back over the max comment length (65535).
+    let eocd = -1;
+    for (let i = n - 22; i >= Math.max(0, n - 22 - 65535); i--) {
+        if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    }
+    if (eocd < 0) throw new Error('raw: not a ZIP (no end-of-central-directory)');
+    let count = dv.getUint16(eocd + 10, true);
+    let cdOffset = dv.getUint32(eocd + 16, true);
+    // Zip64: the 32-bit fields saturate and the real values live in the Zip64
+    // end-of-central-directory record found via the locator just before EOCD.
+    if (cdOffset === 0xFFFFFFFF || count === 0xFFFF) {
+        const loc = eocd - 20;
+        if (loc < 0 || dv.getUint32(loc, true) !== 0x07064b50) {
+            throw new Error('raw: ZIP64 locator missing');
+        }
+        const z64 = Number(dv.getBigUint64(loc + 8, true));
+        if (dv.getUint32(z64, true) !== 0x06064b50) throw new Error('raw: ZIP64 EOCD missing');
+        count = Number(dv.getBigUint64(z64 + 32, true));
+        cdOffset = Number(dv.getBigUint64(z64 + 48, true));
+    }
+    const entries = new Map();
+    let p = cdOffset;
+    for (let i = 0; i < count; i++) {
+        if (dv.getUint32(p, true) !== 0x02014b50) throw new Error('raw: bad ZIP central directory');
+        const flag = dv.getUint16(p + 8, true);
+        const method = dv.getUint16(p + 10, true);
+        let compSize = dv.getUint32(p + 20, true);
+        let size = dv.getUint32(p + 24, true);
+        const nameLen = dv.getUint16(p + 28, true);
+        const extraLen = dv.getUint16(p + 30, true);
+        const commentLen = dv.getUint16(p + 32, true);
+        let localOffset = dv.getUint32(p + 42, true);
+        const nameBytes = new Uint8Array(buf, p + 46, nameLen);
+        // Bit 11 promises UTF-8; otherwise it is CP437, but every name a Waters
+        // .raw or our own writer produces is ASCII, where the two agree.
+        const name = (flag & 0x800)
+            ? new TextDecoder('utf-8').decode(nameBytes)
+            : rawDecodeText(nameBytes);
+        // Zip64 extra field: only the fields that saturated are present, in this order.
+        let ex = p + 46 + nameLen;
+        const exEnd = ex + extraLen;
+        while (ex + 4 <= exEnd) {
+            const id = dv.getUint16(ex, true);
+            const len = dv.getUint16(ex + 2, true);
+            if (id === 0x0001) {
+                let q = ex + 4;
+                if (size === 0xFFFFFFFF) { size = Number(dv.getBigUint64(q, true)); q += 8; }
+                if (compSize === 0xFFFFFFFF) { compSize = Number(dv.getBigUint64(q, true)); q += 8; }
+                if (localOffset === 0xFFFFFFFF) { localOffset = Number(dv.getBigUint64(q, true)); q += 8; }
+                break;
+            }
+            ex += 4 + len;
+        }
+        if (!name.endsWith('/')) entries.set(name.toLowerCase(), { name, method, compSize, size, localOffset });
+        p += 46 + nameLen + extraLen + commentLen;
+    }
+    return entries;
+}
+
+// Read one member. The local header is consulted ONLY for its variable-length
+// field sizes, so the (possibly zeroed) sizes it carries are never trusted.
+async function rawZipRead(buf, entry) {
+    const dv = new DataView(buf);
+    if (dv.getUint32(entry.localOffset, true) !== 0x04034b50) {
+        throw new Error('raw: bad ZIP local header for ' + entry.name);
+    }
+    const nameLen = dv.getUint16(entry.localOffset + 26, true);
+    const extraLen = dv.getUint16(entry.localOffset + 28, true);
+    const start = entry.localOffset + 30 + nameLen + extraLen;
+    if (entry.method === 0) return new Uint8Array(buf, start, entry.size);
+    if (entry.method !== 8) throw new Error('raw: unsupported ZIP compression ' + entry.method);
+    const out = await rawInflate(new Uint8Array(buf, start, entry.compSize));
+    if (entry.size && out.length !== entry.size) {
+        throw new Error('raw: ZIP size mismatch for ' + entry.name);
+    }
+    return out;
+}
+
+// A RawBundle is { rootName, names(): string[], read(name): Promise<ArrayBuffer> }
+// where names are relative to the *.raw directory. Registration builds one over
+// the loose files the user dropped; every later re-parse builds one over the
+// stored ZIP. Everything downstream only sees this contract.
+function rawBundleFromZip(buf) {
+    const entries = rawZipIndex(buf);
+    // Strip the "<something>.raw/" prefix so member lookup is nesting-agnostic.
+    let root = '';
+    let rootName = '';
+    for (const e of entries.values()) {
+        const m = /^(.*?([^/]+)\.raw)\//i.exec(e.name);
+        if (m) { root = m[1] + '/'; rootName = m[2]; break; }
+    }
+    const rel = (name) => (root && name.toLowerCase().startsWith(root.toLowerCase()))
+        ? name.slice(root.length) : name;
+    const byRel = new Map();
+    for (const e of entries.values()) byRel.set(rel(e.name).toLowerCase(), e);
+    return {
+        rootName: rootName || 'raw',
+        names: () => Array.from(byRel.values(), (e) => rel(e.name)),
+        async read(name) {
+            const e = byRel.get(String(name).toLowerCase());
+            if (!e) throw new Error('raw: missing member ' + name);
+            const bytes = await rawZipRead(buf, e);
+            return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        },
+    };
+}
+
+// Member lookup by SUFFIX so an extra directory level never breaks it.
+function rawFindMember(names, re) {
+    for (const n of names) if (re.test(n.toLowerCase())) return n;
+    return null;
+}
+
+// "$$ Key: Value" lines.
+function parseWatersHeaderTxt(text) {
+    const out = {};
+    for (const line of String(text).split(/\r?\n/)) {
+        const m = /^\$\$\s*([^:]+):\s?(.*)$/.exec(line);
+        if (m) out[m[1].trim()] = m[2].trim();
+    }
+    return out;
+}
+
+// _extern.inf is a sectioned text file. We keep the three blocks that carry
+// acquisition conditions and index the per-function block by function number.
+function parseWatersExternInf(text) {
+    const out = { desi: {}, functions: {}, source: {} };
+    let mode = null;
+    let fn = 0;
+    for (const raw of String(text).split(/\r?\n/)) {
+        const line = raw.replace(/\s+$/, '');
+        if (/^\[DESI Experiment Parameters\]/i.test(line)) { mode = 'desi'; continue; }
+        const mf = /^Instrument Parameters\s*-\s*Function\s+(\d+)\s*:/i.exec(line);
+        if (mf) { mode = 'fn'; fn = Number(mf[1]); out.functions[fn] = {}; continue; }
+        if (/^Source Information\s*:/i.test(line)) { mode = 'src'; continue; }
+        // Any other block heading ends the current section.
+        if (/^(Engineers Settings|Inter-scan delays|Method Events|Data Processing|Prescan Statistics)\b/i.test(line)) {
+            mode = null; continue;
+        }
+        if (!line.trim()) continue;
+        if (mode === 'desi') {
+            const m = /^(Desi\w+)\s+(.+)$/i.exec(line);
+            if (m) out.desi[m[1]] = m[2].trim();
+        } else if (mode === 'fn') {
+            // "Cone (V)\t20.00\t77.80" — tab separated, may carry set + readback.
+            const parts = line.split('\t').filter((s) => s !== '');
+            if (parts.length >= 2) out.functions[fn][parts[0].trim()] = parts.slice(1).map((s) => s.trim());
+        } else if (mode === 'src') {
+            const m = /^([\w ]+?)\s+-\s+(.+)$/.exec(line);
+            if (m) out.source[m[1].trim()] = m[2].trim();
+        }
+    }
+    return out;
+}
+
+// Keys carry a windows-1252 degree sign ("Source Temperature (°C)"), so match
+// on the ASCII-only skeleton rather than the exact bytes.
+function rawExternValue(block, key) {
+    if (!block) return null;
+    const want = String(key).toLowerCase().replace(/[^a-z0-9]+/g, '');
+    for (const k of Object.keys(block)) {
+        if (k.toLowerCase().replace(/[^a-z0-9]+/g, '') === want) {
+            const v = block[k];
+            return Array.isArray(v) ? (v[0] != null ? v[0] : null) : v;
+        }
+    }
+    return null;
+}
+
+// _FUNCnnn.EE and _FUNCnnn.STS share ONE layout. Records are channels in the
+// former and scans in the latter; only the descriptor table tells them apart.
+//   u16 dataOffset, u16 version, u16 stride, u16 nParams
+//   descriptors from byte 32, 48 bytes each:
+//     u16 paramId, u16 flag, u16 offsetInStride, NUL-padded ASCII name at +6
+//     (26 bytes), u16 size at +32 (1/2/4/8 -> u8 / u16 / f32|u32 / f64;
+//     flag 3 means float)
+function parseWatersParamTable(buf) {
+    const dv = new DataView(buf);
+    const dataOffset = dv.getUint16(0, true);
+    const version = dv.getUint16(2, true);
+    const stride = dv.getUint16(4, true);
+    const nParams = dv.getUint16(6, true);
+    const params = [];
+    for (let i = 0; i < nParams; i++) {
+        const b = 32 + i * 48;
+        if (b + 48 > buf.byteLength) break;
+        // The name field is 26 bytes (b+6 .. b+31); b+32 is the size that
+        // follows it. Real tables bear this out — Waters truncates names to fit
+        // ("Reflectron Detector Volta"), and reading 32 here would let a long
+        // name swallow the size field.
+        const nameBytes = new Uint8Array(buf, b + 6, 26);
+        let end = nameBytes.indexOf(0);
+        if (end < 0) end = 26;
+        params.push({
+            id: dv.getUint16(b, true),
+            flag: dv.getUint16(b + 2, true),
+            offset: dv.getUint16(b + 4, true),
+            size: dv.getUint16(b + 32, true),
+            name: rawDecodeText(nameBytes.subarray(0, end)).trim(),
+        });
+    }
+    const nRecords = stride > 0 ? Math.floor((buf.byteLength - dataOffset) / stride) : 0;
+    const get = (record, p) => {
+        if (!p) return null;
+        const at = dataOffset + record * stride + p.offset;
+        if (at + p.size > buf.byteLength) return null;
+        if (p.size === 1) return dv.getUint8(at);
+        if (p.size === 2) return dv.getUint16(at, true);
+        if (p.size === 4) return p.flag === 3 ? dv.getFloat32(at, true) : dv.getUint32(at, true);
+        if (p.size === 8) return dv.getFloat64(at, true);
+        return null;
+    };
+    const byName = (name) => {
+        const want = String(name).toLowerCase().replace(/[^a-z0-9]+/g, '');
+        return params.find((p) => p.name.toLowerCase().replace(/[^a-z0-9]+/g, '') === want) || null;
+    };
+    return { dataOffset, version, stride, nParams, params, nRecords, get, byName };
+}
+
+const RAW_MAX_CHANNELS = 32;
+
+// _FUNCTNS.INF stores m/z and dwell as float32, so a method entered as 146.1
+// reads back as 146.10000610351562. That is representation noise, not measured
+// precision, and it is not merely cosmetic: mrm_transitions dedups on
+// unique(compound_id, precursor, product, ce, cv), so an unrounded value would
+// never match the same transition typed in by hand or read from another .raw.
+// float32 carries ~7 significant digits, so rounding to the precision MassLynx
+// actually accepts recovers the entered value exactly.
+function rawRoundMz(v) { return v > 0 ? Math.round(v * 1e4) / 1e4 : v; }
+function rawRoundDwell(v) { return v > 0 ? Math.round(v * 1e6) / 1e6 : v; }
+
+// 416 bytes per function; the file length divides by it to give the count.
+function parseWatersFunctions(buf) {
+    const dv = new DataView(buf);
+    const REC = 416;
+    const out = [];
+    for (let f = 0; (f + 1) * REC <= buf.byteLength; f++) {
+        const b = f * REC;
+        const slots = (off) => {
+            const a = [];
+            for (let i = 0; i < RAW_MAX_CHANNELS; i++) a.push(dv.getFloat32(b + off + i * 4, true));
+            return a;
+        };
+        const dwell = slots(32).map(rawRoundDwell);
+        const precursor = slots(160).map(rawRoundMz);
+        const product = slots(288).map(rawRoundMz);
+        let nChannels = 0;
+        for (let i = 0; i < RAW_MAX_CHANNELS; i++) if (precursor[i] > 0) nChannels = i + 1;
+        out.push({
+            index: f + 1,
+            type: dv.getUint8(b),
+            isMrm: dv.getUint8(b) === 9,
+            ionModeByte: dv.getUint8(b + 1),
+            massStart: dv.getFloat32(b + 2, true),
+            massEnd: dv.getFloat32(b + 6, true),
+            rtStart: dv.getFloat32(b + 10, true),
+            rtEnd: dv.getFloat32(b + 14, true),
+            nChannels,
+            dwell,
+            precursor,
+            product,
+        });
+    }
+    return out;
+}
+
+// u32 version, u32 count, u32 unknown, then `count` fixed-width records.
+// A vendor variant with a different record size would mis-slice silently, so
+// the divisibility is checked and a bad table degrades to "no names".
+function parseWatersCmp(buf) {
+    if (buf.byteLength < 12) return [];
+    const dv = new DataView(buf);
+    const count = dv.getUint32(4, true);
+    if (!count || count > 4096) return [];
+    const body = buf.byteLength - 12;
+    if (body % count !== 0) return [];
+    const rec = body / count;
+    const names = [];
+    for (let i = 0; i < count; i++) {
+        const bytes = new Uint8Array(buf, 12 + i * rec, rec);
+        let end = bytes.indexOf(0);
+        if (end < 0) end = rec;
+        names.push(rawDecodeText(bytes.subarray(0, end)).replace(/[\r\n\0]+$/g, '').trim());
+    }
+    return names;
+}
+
+function parseWatersIdx(buf) {
+    const dv = new DataView(buf);
+    const n = Math.floor(buf.byteLength / 22);
+    const offset = new Uint32Array(n);
+    const nPeaks = new Uint32Array(n);
+    const tic = new Float32Array(n);
+    const rt = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+        const b = i * 22;
+        offset[i] = dv.getUint32(b, true);
+        nPeaks[i] = dv.getUint32(b + 4, true) & 0x3FFFFF;
+        tic[i] = dv.getFloat32(b + 8, true);
+        rt[i] = dv.getFloat32(b + 12, true);
+    }
+    return { n, offset, nPeaks, tic, rt };
+}
+
+// 22-bit mantissa + 10-bit base-2 exponent biased by 21. Verified exact against
+// the vendor text export for every value of a real acquisition (the export is
+// the lossy one: it rounds to integers).
+function decodeWatersIntensity(word) {
+    return (word & 0x3FFFFF) * Math.pow(2, (word >>> 22) - 21);
+}
+
+// Pixel pitch from the distinct stage coordinates, using the MEDIAN positive
+// difference. The minimum is the fragile estimator: one pair closer than the
+// true pitch (float32 jitter) under-estimates it, which inflates the grid and
+// draws phantom gaps. Same reasoning as buildMsiGrid.
+function rawPitchOf(values) {
+    const uniq = Array.from(new Set(values.map((v) => Math.round(v * 1e4) / 1e4))).sort((a, b) => a - b);
+    if (uniq.length < 2) return { pitch: null, count: uniq.length, min: uniq[0], max: uniq[0] };
+    const gaps = [];
+    for (let i = 1; i < uniq.length; i++) {
+        const d = uniq[i] - uniq[i - 1];
+        if (d > 0) gaps.push(d);
+    }
+    gaps.sort((a, b) => a - b);
+    return {
+        pitch: gaps.length ? gaps[gaps.length >> 1] : null,
+        count: uniq.length,
+        min: uniq[0],
+        max: uniq[uniq.length - 1],
+    };
+}
+
+// A declaration, not a const arrow: _buildParseWorkerSource stringifies these
+// with Function.prototype.toString, which drops the binding name for arrows.
+function rawFuncTag(n) { return '_func' + String(n).padStart(3, '0'); }
+
+// Decode one function to raster-ready columns. This is the unit the worker
+// caches (keyed by blobId + function, NOT by channel) so registering N channels
+// from one file costs one decode.
+async function rawDecodeFunction(bundle, funcNo) {
+    const names = bundle.names();
+    const tag = rawFuncTag(funcNo);
+    const pick = (ext) => rawFindMember(names, new RegExp(tag + '\\.' + ext + '$'));
+    const idxName = pick('idx');
+    const datName = pick('dat');
+    const stsName = pick('sts');
+    if (!idxName || !datName || !stsName) {
+        throw new Error('raw: function ' + funcNo + ' needs .IDX + .DAT + .STS');
+    }
+    const [idxBuf, datBuf, stsBuf] = await Promise.all([
+        bundle.read(idxName), bundle.read(datName), bundle.read(stsName),
+    ]);
+    const idx = parseWatersIdx(idxBuf);
+    const sts = parseWatersParamTable(stsBuf);
+    const px = sts.byName('Aim X Position');
+    const py = sts.byName('Aim Y Position');
+    if (!px || !py) throw new Error('raw: .STS has no Aim X/Y Position (not a DESI imaging run?)');
+    if (sts.nRecords < idx.n) throw new Error('raw: .STS has fewer records than .IDX has scans');
+
+    let nCh = 0;
+    for (let i = 0; i < idx.n; i++) if (idx.nPeaks[i] > nCh) nCh = idx.nPeaks[i];
+    if (!nCh) throw new Error('raw: no channels in .IDX');
+
+    const dat = new DataView(datBuf);
+    const xs = new Float64Array(idx.n);
+    const ys = new Float64Array(idx.n);
+    const chans = [];
+    for (let c = 0; c < nCh; c++) chans.push(new Float64Array(idx.n));
+    for (let i = 0; i < idx.n; i++) {
+        xs[i] = sts.get(i, px);
+        ys[i] = sts.get(i, py);
+        const base = idx.offset[i];
+        const k = idx.nPeaks[i];
+        for (let c = 0; c < k && c < nCh; c++) {
+            chans[c][i] = decodeWatersIntensity(dat.getUint32(base + c * 4, true));
+        }
+    }
+    const gx = rawPitchOf(Array.from(xs));
+    const gy = rawPitchOf(Array.from(ys));
+    return { nScans: idx.n, nCh, xs, ys, chans, tic: idx.tic, rt: idx.rt, gridX: gx, gridY: gy };
+}
+
+// Everything the registration wizard needs, WITHOUT opening .DAT.
+async function parseRawArchiveMeta(bundle) {
+    const names = bundle.names();
+    const read = async (re) => {
+        const n = rawFindMember(names, re);
+        return n ? bundle.read(n) : null;
+    };
+    const headerBuf = await read(/_header\.txt$/);
+    const externBuf = await read(/_extern\.inf$/);
+    const fnsBuf = await read(/_functns\.inf$/);
+    const header = headerBuf ? parseWatersHeaderTxt(rawDecodeText(headerBuf)) : {};
+    const extern = externBuf ? parseWatersExternInf(rawDecodeText(externBuf)) : { desi: {}, functions: {}, source: {} };
+    const funcs = fnsBuf ? parseWatersFunctions(fnsBuf) : [];
+
+    // Which _FUNCnnn sets actually exist on disk — _FUNCTNS.INF can describe
+    // more functions than were written.
+    const present = [];
+    for (const n of names) {
+        const m = /_func(\d{3})\.idx$/i.exec(n.toLowerCase());
+        if (m) present.push(Number(m[1]));
+    }
+    present.sort((a, b) => a - b);
+
+    const functions = [];
+    for (const no of present) {
+        const spec = funcs[no - 1] || null;
+        const tag = rawFuncTag(no);
+        const eeBuf = await read(new RegExp(tag + '\\.ee$'));
+        const cmpBuf = await read(new RegExp(tag + '\\.cmp$'));
+        const ee = eeBuf ? parseWatersParamTable(eeBuf) : null;
+        const pCv = ee && ee.byName('Cone Voltage');
+        const pCe = ee && ee.byName('Collision Energy');
+        const cmpNames = cmpBuf ? parseWatersCmp(cmpBuf) : [];
+
+        const decoded = await rawDecodeFunction(bundle, no);
+        // Three independent channel counts. Disagreement means the layout was
+        // misread, and a wrong count yields plausible-but-wrong ion images, so
+        // it is surfaced rather than silently resolved.
+        const counts = {
+            idx: decoded.nCh,
+            functns: spec ? spec.nChannels : null,
+            cmp: cmpNames.length || null,
+            ee: ee ? ee.nRecords : null,
+        };
+        const disagree = [counts.functns, counts.cmp, counts.ee]
+            .filter((v) => v != null && v !== counts.idx).length > 0;
+
+        const channels = [];
+        for (let c = 0; c < decoded.nCh; c++) {
+            const precursor = spec && spec.precursor[c] > 0 ? spec.precursor[c] : null;
+            const product = spec && spec.product[c] > 0 ? spec.product[c] : null;
+            const name = (cmpNames[c] || '').trim();
+            channels.push({
+                index: c,
+                ordinal: c + 1,
+                name: name || null,
+                precursor,
+                product,
+                cv: ee && pCv && c < ee.nRecords ? ee.get(c, pCv) : null,
+                ce: ee && pCe && c < ee.nRecords ? ee.get(c, pCe) : null,
+                dwell: spec && spec.dwell[c] > 0 ? spec.dwell[c] : null,
+            });
+        }
+        const fnBlock = extern.functions[no] || null;
+        const polarityRaw = rawExternValue(fnBlock, 'Polarity');
+        functions.push({
+            number: no,
+            type: spec ? spec.type : null,
+            isMrm: spec ? spec.isMrm : null,
+            rtStart: spec ? spec.rtStart : null,
+            rtEnd: spec ? spec.rtEnd : null,
+            nScans: decoded.nScans,
+            nChannels: decoded.nCh,
+            channels,
+            counts,
+            countsDisagree: disagree,
+            // Never guess a polarity: an absent block stays null so the caller
+            // can fall back to the existing _POS/_NEG name heuristic.
+            polarity: /ES\+|^\+$/i.test(String(polarityRaw || '')) ? '+'
+                : (/ES-|^-$/i.test(String(polarityRaw || '')) ? '-' : null),
+            width: decoded.gridX.count,
+            height: decoded.gridY.count,
+            pitchX: decoded.gridX.pitch,
+            pitchY: decoded.gridY.pitch,
+            originX: decoded.gridX.min,
+            originY: decoded.gridY.min,
+            source: fnBlock ? {
+                capillaryKv: rawExternValue(fnBlock, 'Capillary (kV)'),
+                coneV: rawExternValue(fnBlock, 'Cone (V)'),
+                sourceOffsetV: rawExternValue(fnBlock, 'Source Offset (V)'),
+                sourceTempC: rawExternValue(fnBlock, 'Source Temperature (C)'),
+                htlTempC: rawExternValue(fnBlock, 'HTL Temperature (C)'),
+                nebuliser: rawExternValue(fnBlock, 'Nebuliser Gas Flow (L/Hr)'),
+                msCe: rawExternValue(fnBlock, 'MS Mode Collision Energy'),
+                msmsCe: rawExternValue(fnBlock, 'MSMS Mode Collision Energy'),
+            } : null,
+        });
+    }
+
+    // DesiXStep is NOT the pixel pitch — it is how far the stage travels during
+    // ONE MRM channel, so the X pitch is DesiXStep * nChannels. Reading it as a
+    // pitch is wrong by exactly the channel count. The stage coordinates in .STS
+    // always win; this only cross-checks them.
+    const first = functions[0] || null;
+    const declaredX = Number(extern.desi.DesiXStep);
+    const declaredY = Number(extern.desi.DesiYStep);
+    let pitchWarning = null;
+    if (first && first.pitchX != null) {
+        const expectX = declaredX * first.nChannels;
+        const off = (a, b) => (Number.isFinite(a) && a > 0 && Number.isFinite(b) && b > 0)
+            ? Math.abs(a - b) / b : null;
+        const dx = off(expectX, first.pitchX);
+        const dy = off(declaredY, first.pitchY);
+        if ((dx != null && dx > 0.1) || (dy != null && dy > 0.1)) {
+            pitchWarning = 'DesiXStep x ' + first.nChannels + ' = ' + expectX.toFixed(4)
+                + ' mm / DesiYStep = ' + declaredY
+                + ' mm but the stage coordinates give '
+                + first.pitchX.toFixed(4) + ' x ' + first.pitchY.toFixed(4) + ' mm';
+        }
+    }
+
+    return {
+        rootName: bundle.rootName,
+        header,
+        extern,
+        functions,
+        members: names,
+        hasImaging: names.some((n) => /(^|\/)imaging\//i.test(n)),
+        pitchSource: 'sts',
+        pitchWarning,
+    };
+}
+
+// Rows for one channel of an ALREADY-decoded function, shaped exactly like
+// parseTxtToRows output so buildMsiGrid and computeRasterPixels need no changes.
+// Split out from parseRawToRows so the parse worker can cache the decode per
+// (blob, function) and pay for it once however many channels were registered.
+//
+// Coordinates are snapped to the derived lattice: buildMsiGrid keys a Map on
+// the exact float, and float32 stage jitter would inflate the distinct-value
+// count past its guard, which falls back to ordinal indexing and SILENTLY
+// changes the image geometry by collapsing gaps.
+// The snapped coordinates, shared by the raster path and the export / ROI path
+// so both land on exactly the same lattice. Returns parallel arrays.
+function rawSnapCoords(decoded, def) {
+    const off = (def && def.snap === false);
+    const dx = off ? 0 : decoded.gridX.pitch;
+    const dy = off ? 0 : decoded.gridY.pitch;
+    const x0 = decoded.gridX.min;
+    const y0 = decoded.gridY.min;
+    const q = (v, base, step) => (step > 0)
+        ? Math.round((base + Math.round((v - base) / step) * step) * 1e4) / 1e4
+        : v;
+    const xs = new Float64Array(decoded.nScans);
+    const ys = new Float64Array(decoded.nScans);
+    for (let i = 0; i < decoded.nScans; i++) {
+        xs[i] = q(decoded.xs[i], x0, dx);
+        ys[i] = q(decoded.ys[i], y0, dy);
+    }
+    return { xs, ys };
+}
+
+function rawRowsFromDecoded(decoded, def) {
+    const channel = (def && def.channel) || 0;
+    if (channel >= decoded.nCh) throw new Error('raw: channel ' + channel + ' out of range');
+    const col = decoded.chans[channel];
+    const { xs, ys } = rawSnapCoords(decoded, def);
+    const rows = [];
+    for (let i = 0; i < decoded.nScans; i++) {
+        const x = xs[i], y = ys[i], v = col[i];
+        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(v)) continue;
+        rows.push({ x, y, v });
+    }
+    if (!rows.length) throw new Error('raw: no rows decoded');
+    return rows;
+}
+
+// Same signature and return shape as parseTxtToRows, except async (ZIP
+// inflation is). `buf` may also be a RawBundle, which is how the wizard reads
+// the loose files before anything has been zipped.
+async function parseRawToRows(buf, def) {
+    const bundle = (buf && typeof buf.names === 'function') ? buf : rawBundleFromZip(buf);
+    return rawRowsFromDecoded(await rawDecodeFunction(bundle, (def && def.func) || 1), def);
+}
+
+// Bundle over the loose files the user picked/dropped. Registration parses from
+// THIS (no zip round-trip), and only zips once the user commits — so an invalid
+// folder costs nothing and the wizard opens instantly.
+//
+// `files` is any iterable of File; the relative path comes from
+// webkitRelativePath (directory input) or a _rawPath we set when walking a drop.
+function rawBundleFromFileList(files) {
+    const list = Array.from(files || []);
+    const pathOf = (f) => String(f._rawPath || f.webkitRelativePath || f.name || '');
+    const roots = new Map();
+    const excluded = [];
+    for (const f of list) {
+        const p = pathOf(f);
+        // macOS resource forks and OS junk would otherwise be archived verbatim.
+        if (/(^|\/)(__MACOSX\/|\.DS_Store$|Thumbs\.db$|\._)/i.test(p)) { excluded.push(p); continue; }
+        const m = /^(.*?([^/]+)\.raw)\//i.exec(p);
+        const rootPath = m ? m[1] + '/' : '';
+        const rootName = m ? m[2] : '';
+        const key = rootPath.toLowerCase();
+        if (!roots.has(key)) roots.set(key, { rootPath, rootName, files: new Map() });
+        roots.get(key).files.set(p.slice(rootPath.length).toLowerCase(), f);
+    }
+    const mk = (r) => ({
+        rootName: r.rootName || 'raw',
+        rootPath: r.rootPath,
+        names: () => Array.from(r.files.keys()),
+        file: (name) => r.files.get(String(name).toLowerCase()) || null,
+        files: () => Array.from(r.files.entries()),
+        async read(name) {
+            const f = r.files.get(String(name).toLowerCase());
+            if (!f) throw new Error('raw: missing member ' + name);
+            return f.arrayBuffer();
+        },
+    });
+    return { bundles: Array.from(roots.values()).map(mk), excluded };
+}
+// ==== END waters-raw parser ====
+
+// Dev-only probe for the .raw reader: no UI, no storage, no data-model change.
+// Usage from the console:
+//   const i = document.createElement('input'); i.type = 'file'; i.webkitdirectory = true;
+//   i.onchange = () => window.__rawInspect(i.files); i.click();
+// or pass a single .raw.zip File.
+window.__rawInspect = async function (input) {
+    let bundle;
+    const list = (input && input.length != null) ? Array.from(input) : [input];
+    if (list.length === 1 && /\.zip$/i.test(list[0].name || '')) {
+        bundle = rawBundleFromZip(await list[0].arrayBuffer());
+    } else {
+        const picked = rawBundleFromFileList(list);
+        if (picked.excluded.length) console.warn('excluded:', picked.excluded);
+        if (picked.bundles.length !== 1) console.warn('found ' + picked.bundles.length + ' .raw roots');
+        if (!picked.bundles.length) throw new Error('no *.raw directory in the selection');
+        bundle = picked.bundles[0];
+    }
+    const meta = await parseRawArchiveMeta(bundle);
+    console.log('%c' + meta.rootName, 'font-weight:bold',
+        meta.header['Instrument'] || '', meta.header['Acquired Date'] || '');
+    if (meta.pitchWarning) console.warn('pitch:', meta.pitchWarning);
+    for (const f of meta.functions) {
+        console.log('function ' + f.number + ': type=' + f.type + (f.isMrm ? ' (MRM)' : '')
+            + ' pol=' + f.polarity + ' ' + f.nScans + ' scans '
+            + f.width + 'x' + f.height + ' px  pitch '
+            + Math.round(f.pitchX * 1000) + 'x' + Math.round(f.pitchY * 1000) + ' um');
+        if (f.countsDisagree) console.warn('channel counts disagree:', f.counts);
+        console.table(f.channels.map((c) => ({
+            ch: c.ordinal, compound: c.name, precursor: c.precursor, product: c.product,
+            CV: c.cv, CE: c.ce, 'dwell(ms)': c.dwell != null ? +(c.dwell * 1000).toFixed(3) : null,
+        })));
+    }
+    return meta;
+};
+
+// ---- .raw registration helpers (UI side; deliberately OUTSIDE the sentinels
+//      above, since the worker and the connector never need any of this) ------
+
+// Drag-and-drop of a DIRECTORY. Two things here are load-bearing and both fail
+// silently rather than loudly when you get them wrong:
+//
+//   1. The DataTransfer is neutered as soon as the drop handler yields, so every
+//      entry must be taken out of it SYNCHRONOUSLY, before the first await.
+//      This function is the synchronous half and does nothing else.
+//   2. (in rawFilesFromEntries) readEntries() returns at most 100 children per
+//      call and an empty batch is the only end-of-directory signal.
+//
+// getAsFileSystemHandle() would be tidier but is Chromium-only; webkitGetAsEntry
+// works in Chrome/Edge/Firefox/Safari.
+function rawEntriesFromDataTransfer(dt) {
+    const out = [];
+    const items = (dt && dt.items) ? Array.from(dt.items) : [];
+    for (const it of items) {
+        if (it.kind !== 'file') continue;
+        const entry = it.webkitGetAsEntry ? it.webkitGetAsEntry() : null;
+        if (entry) { out.push(entry); continue; }
+        const f = it.getAsFile ? it.getAsFile() : null;
+        if (f) out.push(f);
+    }
+    if (!out.length && dt && dt.files) out.push(...Array.from(dt.files));
+    return out;
+}
+
+// Async half: walk what rawEntriesFromDataTransfer captured into a flat File[]
+// carrying _rawPath, the same relative-path shape webkitRelativePath gives.
+async function rawFilesFromEntries(entries) {
+    const out = [];
+    const readAll = (reader) => new Promise((resolve, reject) => {
+        const acc = [];
+        const step = () => reader.readEntries((batch) => {
+            // ★ 100 件ずつしか返らない。空配列が返るまで同じ reader を呼び続ける。
+            //   1 回で済ませると大きいフォルダが黙って途中までしか読まれない。
+            if (!batch.length) { resolve(acc); return; }
+            acc.push(...batch);
+            step();
+        }, reject);
+        step();
+    });
+    const walk = async (entry, prefix) => {
+        if (typeof File !== 'undefined' && entry instanceof File) {
+            entry._rawPath = prefix + entry.name;
+            out.push(entry);
+            return;
+        }
+        if (entry.isFile) {
+            const f = await new Promise((res, rej) => entry.file(res, rej));
+            f._rawPath = prefix + entry.name;
+            out.push(f);
+            return;
+        }
+        if (entry.isDirectory) {
+            const kids = await readAll(entry.createReader());
+            for (const kid of kids) await walk(kid, prefix + entry.name + '/');
+        }
+    };
+    for (const e of entries) await walk(e, '');
+    return out;
+}
+
+const RAW_MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+
+// Round-trip through Date.UTC so impossible dates (260230, 260013) are rejected
+// rather than silently rolling over into the next month.
+function rawIsoDate(y, m, d) {
+    if (!(m >= 1 && m <= 12) || !(d >= 1 && d <= 31)) return null;
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    if (dt.getUTCFullYear() !== y || dt.getUTCMonth() !== m - 1 || dt.getUTCDate() !== d) return null;
+    return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+}
+
+// _HEADER.TXT "Acquired Date" — "04-Sep-2026". This is what the INSTRUMENT
+// recorded, so it is the primary source for the experiment date.
+function rawDateFromHeader(s) {
+    const m = /^(\d{1,2})-([A-Za-z]{3})-(\d{4})$/.exec(String(s || '').trim());
+    if (!m) return null;
+    const mon = RAW_MONTHS[m[2].toLowerCase()];
+    return mon ? rawIsoDate(Number(m[3]), mon, Number(m[1])) : null;
+}
+
+// Fallback: the leading date in the sample name ("260904_Test_POS1" -> 2026-09-04).
+// Also accepts YYYYMMDD. Anything else yields null, which leaves the field blank
+// for the user rather than guessing.
+function rawDateFromName(s) {
+    const m = /^(\d{8}|\d{6})(?!\d)/.exec(String(s || ''));
+    if (!m) return null;
+    const t = m[1];
+    return t.length === 8
+        ? rawIsoDate(Number(t.slice(0, 4)), Number(t.slice(4, 6)), Number(t.slice(6, 8)))
+        : rawIsoDate(2000 + Number(t.slice(0, 2)), Number(t.slice(2, 4)), Number(t.slice(4, 6)));
+}
+
+// Pack the .raw back into one file for storage. Entries are rooted at
+// "<name>.raw/" so unzipping gives back something MassLynx can open.
+async function rawBuildArchiveZip(bundle, opts) {
+    const o = opts || {};
+    await loadScript(LAZY_LIBS.jszip);
+    const zip = new JSZip();
+    const root = (bundle.rootName || 'raw') + '.raw/';
+    for (const name of bundle.names()) {
+        if (o.includeImaging === false && /(^|\/)imaging\//i.test(name)) continue;
+        // Hand JSZip the File itself where we have one: it streams the blob
+        // instead of us materialising every member in memory first.
+        const f = bundle.file ? bundle.file(name) : null;
+        zip.file(root + name, f || await bundle.read(name));
+    }
+    const blob = await zip.generateAsync({
+        type: 'blob',
+        compression: 'DEFLATE',
+        compressionOptions: { level: Number.isFinite(o.level) ? o.level : 6 },
+    }, o.onProgress);
+    // A File, not a bare Blob: addMsiLayer reads blob.name and blob.type, and a
+    // Blob would be filed as an .xlsx of unknown type.
+    return new File([blob], (bundle.rootName || 'raw') + '.raw.zip', { type: 'application/zip' });
+}
+
+// Total bytes of the members that would go into the archive.
+async function rawArchiveSize(bundle, includeImaging) {
+    let total = 0;
+    for (const name of bundle.names()) {
+        if (!includeImaging && /(^|\/)imaging\//i.test(name)) continue;
+        const f = bundle.file ? bundle.file(name) : null;
+        if (f && Number.isFinite(f.size)) total += f.size;
+        else total += (await bundle.read(name)).byteLength;
+    }
+    return total;
+}
+
+// A channel with no usable name in _FUNCnnn.CMP still needs a stable label.
+// The m/z are prefixed so splitCeCv() can never mistake "104_87" for a
+// _<CE>_<CV> suffix and invent collision/cone voltages out of the transition.
+function rawChannelLabel(fn, ch) {
+    if (ch.name) return ch.name;
+    const p = (v) => (v == null ? '?' : Number(v).toFixed(2));
+    return 'F' + fn.number + 'ch' + ch.ordinal + '_m' + p(ch.precursor) + '_p' + p(ch.product);
+}
+
+// Registering a second .raw into a section that already has layers must not
+// silently overwrite one. Returns the key to use plus what had to be renamed.
+function rawLayerKeyFor(section, label, polarity) {
+    const series = (section && section.msiSeries) || {};
+    const base = 'MSI_' + sanitizeCompoundName(label);
+    if (!series[base]) return { key: base, renamedFrom: null };
+    const tag = polarity === '+' ? 'POS' : polarity === '-' ? 'NEG' : null;
+    if (tag && !new RegExp('(^|[_-])' + tag + '([_-]|$)', 'i').test(label)) {
+        const withPol = base + '_' + tag;
+        if (!series[withPol]) return { key: withPol, renamedFrom: base };
+    }
+    for (let n = 2; n < 1000; n++) {
+        const k = base + '_' + n;
+        if (!series[k]) return { key: k, renamedFrom: base };
+    }
+    return { key: base, renamedFrom: null };
 }
 
 // =============================================================
@@ -4052,7 +4965,7 @@ async function _parseWorkerOnMessage(e) {
         const p = msg.payload || {};
         let buf = null;
         let result;
-        if (msg.op === 'xlsx-raster' || msg.op === 'txt-raster') {
+        if (msg.op === 'xlsx-raster' || msg.op === 'txt-raster' || msg.op === 'raw-raster') {
             let rows;
             if (msg.op === 'xlsx-raster') {
                 // Keep decoded sheets inside the long-lived worker. Blob
@@ -4075,6 +4988,29 @@ async function _parseWorkerOnMessage(e) {
                     cache.set(cacheKey, parsed);
                 }
                 rows = rowsFromParsedXlsx(parsed, p.def);
+            } else if (msg.op === 'raw-raster') {
+                // One .raw carries every MRM channel, so what is cached is the
+                // decoded FUNCTION (coordinates + all channel columns) keyed on
+                // blobId + function number only — `channel` is excluded for the
+                // same reason `col_v` is excluded above, so registering 8
+                // channels from one file costs one unzip+decode, not eight.
+                // These payloads are megabytes rather than a parsed sheet, so
+                // the LRU is much smaller than the xlsx one.
+                const cache = self.__rawDecodeCache || (self.__rawDecodeCache = new Map());
+                const cacheKey = p.cacheKey || '';
+                let decoded = cacheKey ? cache.get(cacheKey) : null;
+                if (!decoded) {
+                    buf = p.blob ? await p.blob.arrayBuffer() : null;
+                    decoded = await rawDecodeFunction(rawBundleFromZip(buf), (p.def && p.def.func) || 1);
+                    if (cacheKey) {
+                        cache.set(cacheKey, decoded);
+                        while (cache.size > 2) cache.delete(cache.keys().next().value);
+                    }
+                } else {
+                    cache.delete(cacheKey);
+                    cache.set(cacheKey, decoded);
+                }
+                rows = rawRowsFromDecoded(decoded, p.def);
             } else {
                 buf = p.blob ? await p.blob.arrayBuffer() : null;
                 rows = parseTxtToRows(buf, p.def);
@@ -4115,14 +5051,30 @@ function _buildParseWorkerSource() {
     //   増えた関数を足し忘れた)、ワーカーは MSI をベイクするたび ReferenceError
     //   を投げ、そのつどメインスレッドへ黙って退避していた — 絵は出るので
     //   気づけない。ワーカー化の効果だけが死ぬ。
-    //   syntax_check.js に「組み立てたソースに未束縛の識別子が無い」検査を
-    //   足してあるので、足し忘れたらそこで落ちる。
+    //
+    //   守っているのは tests/viewer_preview_regression.js。このリストを読み出して
+    //   同じ関数を vm に組み立て、**実際に走らせる**:
+    //     testWorkerBakePath      — parseTxtToRows → computeRasterPixels
+    //                               (形式によらず全 MSI レイヤーが通るベイク経路)
+    //     testWorkerRawDecodePath — .raw のデコード経路 (合成した .raw ZIP)
+    //   足し忘れるとその場で ReferenceError になる。リストに名前はあるが関数側を
+    //   リネームした場合も同テストが落ちる。
+    //
+    //   ★ 捕まらないのは XLSX / UTIF / canvas を要する 10 個
+    //     (a1ColToIndex, indexToA1Col, labToSrgb, get2dContext, _mkCanvas,
+    //      _canvasToDataUrl, _encodePixelsToDataUrl, inspectXlsxColumns,
+    //      decodeJpegInTiffToDataUrl, decodeTiffArrayBufferToDataUrl)。
+    //     vm では走らせられないので実行では守れない。ここに新しい経路を足すなら、
+    //     テスト側にも「実際に呼ぶ」検査を足すこと。
     const fns = [
-        a1ColToIndex, indexToA1Col, percentileSorted, percentileOfSorted, buildMsiGrid,
+        a1ColToIndex, indexToA1Col, percentileOfSorted, buildMsiGrid,
         labToSrgb, get2dContext, _mkCanvas, _canvasToDataUrl, _encodePixelsToDataUrl,
         deriveBakeStats, blankStats, bakeRasterFromValues, computeRasterPixels,
         parseXlsxSheet, rowsFromParsedXlsx, parseXlsxToRows, parseTxtToRows,
         decodeJpegInTiffToDataUrl, decodeTiffArrayBufferToDataUrl, inspectXlsxColumns,
+        rawDecodeText, rawInflate, rawZipIndex, rawZipRead, rawBundleFromZip,
+        rawFindMember, rawFuncTag, parseWatersParamTable, parseWatersIdx,
+        decodeWatersIntensity, rawPitchOf, rawDecodeFunction, rawSnapCoords, rawRowsFromDecoded,
         _parseWorkerOnMessage,
     ];
     return [
@@ -4171,7 +5123,7 @@ function _getParseWorker() {
     }
 }
 
-// op: 'xlsx-raster' | 'txt-raster' | 'tiff-decode' | 'xlsx-columns'.
+// op: 'xlsx-raster' | 'txt-raster' | 'raw-raster' | 'tiff-decode' | 'xlsx-columns'.
 // payload carries a Blob (posted by reference; the worker reads its bytes) plus
 // op-specific params. Rejects on worker-unavailable / error / timeout so the
 // caller can fall back to the main-thread parser.
@@ -5769,19 +6721,26 @@ class SectionPanel {
             }
             if (parseWorkerAvailable()) {
                 try {
-                    const op = (ent.kind === 'txt') ? 'txt-raster' : 'xlsx-raster';
+                    const op = (ent.kind === 'txt') ? 'txt-raster'
+                        : (ent.kind === 'raw') ? 'raw-raster' : 'xlsx-raster';
                     // blobId + sheet identifies the expensive workbook decode.
                     // col_v is intentionally excluded: every MRM column in the
                     // same sheet should reuse the decoded cell matrix.
+                    // .raw is the same idea one level up: blobId + function
+                    // identifies the unzip+decode, and `channel` is excluded so
+                    // every MRM channel of that function reuses it.
                     const cacheKey = (op === 'xlsx-raster')
                         ? String(ent.blobId || '') + '|' + String(ent.sheet || '')
-                        : '';
+                        : (op === 'raw-raster')
+                            ? String(ent.blobId || '') + '|F' + String(ent.func || 1)
+                            : '';
                     result = await callParseWorker(op, { blob: rec.blob, def: ent, cacheKey }, 120000);
                 } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
             }
             if (!result) {
                 const buf = await rec.blob.arrayBuffer();
                 if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
+                else if (ent.kind === 'raw') result = await buildPngFromRawArrayBuffer(buf, ent);
                 else result = await buildPngFromXlsxArrayBuffer(buf, ent);
             }
         }
@@ -8136,7 +9095,8 @@ class SectionPanel {
         opts = opts || {};
         const origName = blob.name || '';
         const dot = origName.lastIndexOf('.');
-        const ext = dot >= 0 ? origName.slice(dot) : (def.kind === 'txt' ? '.txt' : '.xlsx');
+        const ext = dot >= 0 ? origName.slice(dot)
+            : (def.kind === 'txt' ? '.txt' : def.kind === 'raw' ? '.raw.zip' : '.xlsx');
         const safeBase = String(opts.displayBaseName || '').trim().replace(/[\\/:*?"<>|\x00-\x1f]/g, '_');
         const finalName = safeBase ? (safeBase + ext) : (origName || (key + ext));
         let blobId = opts.sharedBlobId || null;
@@ -10379,8 +11339,9 @@ function _bindMethodRowDelegation(tbody) {
     });
 
     // Master-only inline rename. Share-mode returns early; in master we prompt
-    // for the new base name (CE/CV will be re-derived from the trailing
-    // _<int>_<int> pattern by splitCeCv).
+    // for the new base name. A trailing _<int>_<int> still sets CE/CV for layers
+    // whose CE/CV came from the label in the first place, but never overwrites
+    // values read off the instrument (.raw) — see ceCvAfterRename.
     tbody.addEventListener('dblclick', (ev) => {
         const t = ev.target;
         const cell = (t && t.closest) ? t.closest('[data-compound-cell]') : null;
@@ -13198,6 +14159,407 @@ const Wizards = {
         }
     },
 
+    // Waters .raw (MassLynx / Xevo TQ Absolute) をそのまま登録する。
+    //
+    // xlsx/txt の経路と違い、測定条件は人が打ち込むのではなく .raw から読む:
+    // MRM のプリカーサー / プロダクト / CV / CE / dwell / 極性、ピクセルピッチ、
+    // 装置名と測定日。人が決めるのは「どのチャンネルを登録するか」だけ。
+    //
+    // 登録時は zip 化していない生ファイルをそのまま読む。中身が妥当か分かる
+    // 前に圧縮を待たせる理由が無いので、圧縮は OK を押してから 1 回だけ。
+    async openRawWizard(panel) {
+        const html = `
+            <h2>Waters .raw を登録</h2>
+            <form>
+              <p style="font-size:11px;color:#475569;margin-bottom:6px;">
+                DESI-TQ-MSI (Xevo TQ Absolute) の <code>.raw</code> フォルダをそのまま登録します。<br>
+                <span style="color:#64748b;">MRM / CV / CE / 極性 / ピッチ / 装置 / 測定日は .raw から読み取ります。生データは .raw ごと保存されます。</span>
+              </p>
+              <div data-drop style="border:2px dashed #cbd5e1;border-radius:6px;padding:14px;text-align:center;font-size:12px;color:#64748b;background:#f8fafc;cursor:default;">
+                ここに <b>.raw フォルダ</b>をドラッグ &amp; ドロップ
+              </div>
+              <div class="field-row" style="margin-top:6px;">
+                <label style="font-size:11px;">.raw フォルダを選択
+                  <input type="file" name="dir" webkitdirectory directory>
+                </label>
+                <label style="font-size:11px;">または .raw.zip
+                  <input type="file" name="zip" accept=".zip">
+                </label>
+              </div>
+              <div data-excl style="font-size:11px;color:#64748b;margin:2px 0;"></div>
+              <div data-rootpick style="display:none;margin:6px 0;">
+                <label style="font-size:11px;color:#b45309;">.raw が複数あります。どれを登録するか選んでください
+                  <select data-root style="width:100%;font-size:11px;"></select>
+                </label>
+              </div>
+              <div data-scan style="font-size:11px;color:#475569;min-height:16px;margin:6px 0;"></div>
+              <div data-meta style="display:none;border:1px solid #e5e7eb;border-radius:4px;padding:6px;margin:6px 0;">
+                <div class="field-row">
+                  <label style="font-size:11px;">装置
+                    <select data-machine style="font-size:11px;">
+                      <option value="DESI">DESI</option><option value="TIMS">TIMS</option>
+                      <option value="LTQ">LTQ</option><option value="Other">Other</option>
+                    </select>
+                  </label>
+                  <label style="font-size:11px;">測定日
+                    <input type="date" data-date style="font-size:11px;">
+                  </label>
+                </div>
+                <div data-metanote style="font-size:11px;color:#64748b;margin-top:4px;"></div>
+              </div>
+              <div data-funcs style="max-height:260px;overflow:auto;display:none;"></div>
+              <div data-warn style="font-size:11px;color:#b45309;margin:4px 0;"></div>
+              <label style="font-size:11px;display:flex;align-items:center;gap:6px;margin-top:4px;">
+                <input type="checkbox" data-imaging checked>
+                <span>保存する .raw に <code>imaging/</code> を含める</span>
+              </label>
+              <p data-err style="color:#b91c1c;font-size:11px;min-height:14px;"></p>
+              <div class="modal-actions">
+                <button type="button" class="btn" data-modal-cancel>Cancel</button>
+                <button type="submit" class="btn primary" data-modal-ok disabled>登録</button>
+              </div>
+            </form>`;
+        const p = openModal(html);
+        const card = openModal._card;
+        const dropEl = card.querySelector('[data-drop]');
+        const dirInp = card.querySelector('input[name=dir]');
+        const zipInp = card.querySelector('input[name=zip]');
+        const exclEl = card.querySelector('[data-excl]');
+        const rootBox = card.querySelector('[data-rootpick]');
+        const rootSel = card.querySelector('[data-root]');
+        const scanEl = card.querySelector('[data-scan]');
+        const metaBox = card.querySelector('[data-meta]');
+        const machineSel = card.querySelector('[data-machine]');
+        const dateInp = card.querySelector('[data-date]');
+        const metaNote = card.querySelector('[data-metanote]');
+        const funcsEl = card.querySelector('[data-funcs]');
+        const warnEl = card.querySelector('[data-warn]');
+        const imagingChk = card.querySelector('[data-imaging]');
+        const errEl = card.querySelector('[data-err]');
+
+        let candidates = [];
+        let state = null;
+
+        const reset = () => {
+            errEl.textContent = ''; warnEl.textContent = ''; scanEl.textContent = '';
+            funcsEl.style.display = 'none'; funcsEl.innerHTML = '';
+            metaBox.style.display = 'none'; metaNote.textContent = '';
+            rootBox.style.display = 'none'; state = null;
+            card.querySelector('[data-modal-ok]').disabled = true;
+        };
+
+        // 生ファイル / zip / ドロップ の 3 経路をここで 1 本の RawBundle にする。
+        const take = async (bundles, excluded) => {
+            reset();
+            exclEl.textContent = excluded && excluded.length
+                ? '除外: ' + excluded.join(' / ') : '';
+            candidates = bundles;
+            if (!candidates.length) {
+                errEl.textContent = '.raw フォルダが見つかりません（フォルダの中身ではなく .raw フォルダ自体を選んでください）。';
+                return;
+            }
+            // 複数あるとき黙って先頭を採らない (parquet ウィザードと同じ方針)。
+            if (candidates.length > 1) {
+                rootSel.innerHTML = '<option value="">— 選択してください —</option>'
+                    + candidates.map((b, i) => '<option value="' + i + '">'
+                        + String(b.rootName).replace(/</g, '&lt;') + '.raw</option>').join('');
+                rootBox.style.display = '';
+                rootSel.onchange = () => {
+                    const i = Number(rootSel.value);
+                    if (Number.isInteger(i) && i >= 0) scan(candidates[i]);
+                };
+                return;
+            }
+            scan(candidates[0]);
+        };
+
+        async function scan(bundle) {
+            errEl.textContent = ''; warnEl.textContent = '';
+            scanEl.textContent = '.raw を読み込み中…';
+            funcsEl.style.display = 'none'; funcsEl.innerHTML = '';
+            metaBox.style.display = 'none';
+            card.querySelector('[data-modal-ok]').disabled = true;
+            state = null;
+            try {
+                const meta = await parseRawArchiveMeta(bundle);
+                const usable = meta.functions.filter(f => f.isMrm !== false);
+                if (!usable.length) throw new Error('MRM ファンクションがありません');
+                const sec = panel.section;
+                const wc = (sec.meta && sec.meta.world_coords) || {};
+                const existingUm = wc.msi_um_per_px || null;
+
+                scanEl.innerHTML = '<b>' + String(meta.rootName).replace(/</g, '&lt;') + '</b>'
+                    + ' / ' + (meta.header['Instrument'] || '装置不明')
+                    + ' / 機能 ' + meta.functions.length + ' 件';
+
+                // 測定日: 装置の記録 (_HEADER.TXT) を第一、ファイル名を予備、
+                // どちらも読めなければ空欄。両方あって食い違えば必ず知らせる。
+                const fromHeader = rawDateFromHeader(meta.header['Acquired Date']);
+                const fromName = rawDateFromName(meta.rootName);
+                dateInp.value = fromHeader || fromName || '';
+                const notes = [];
+                notes.push(fromHeader ? '測定日: 装置の記録 (' + fromHeader + ') を採用'
+                    : (fromName ? '測定日: 装置の記録が無いのでファイル名 (' + fromName + ') を採用'
+                        : '測定日: .raw から読み取れませんでした。手で入力してください'));
+                if (fromHeader && fromName && fromHeader !== fromName) {
+                    notes.push('⚠ ファイル名は ' + fromName + ' で食い違っています');
+                }
+                if (meta.header['Instrument']) notes.push('装置: ' + meta.header['Instrument']);
+                const curMachine = (App.project && App.project.memo && App.project.memo.machine) || '';
+                machineSel.value = 'DESI';
+                if (curMachine && curMachine !== 'DESI') {
+                    notes.push('⚠ このプロジェクトの装置は現在 ' + curMachine + ' です');
+                }
+                metaNote.innerHTML = notes.map(t => String(t).replace(/</g, '&lt;')).join('<br>');
+                metaBox.style.display = '';
+
+                const warn = [];
+                if (meta.pitchWarning) warn.push('⚠ ピッチ: ' + meta.pitchWarning);
+
+                funcsEl.innerHTML = usable.map((f) => {
+                    const um = (v) => (v != null ? Math.round(v * 1000) : '?');
+                    if (f.countsDisagree) {
+                        warn.push('⚠ 機能 ' + f.number + ' のチャンネル数が食い違っています ('
+                            + JSON.stringify(f.counts) + ')。登録できません');
+                    }
+                    if (existingUm && f.pitchX != null
+                        && (Math.abs(um(f.pitchX) - existingUm.x) > existingUm.x * 0.1
+                            || Math.abs(um(f.pitchY) - existingUm.y) > existingUm.y * 0.1)) {
+                        warn.push('⚠ この切片は既に ' + existingUm.x + '×' + existingUm.y
+                            + ' µm で登録されています (この .raw は ' + um(f.pitchX) + '×' + um(f.pitchY)
+                            + ' µm)。登録は可能ですが、重ね合わせは Align で調整してください');
+                    }
+                    const rows = f.channels.map((c) => {
+                        const label = rawChannelLabel(f, c);
+                        const { key, renamedFrom } = rawLayerKeyFor(panel.section, label, f.polarity);
+                        if (renamedFrom) {
+                            warn.push('⚠ ' + renamedFrom + ' は既にあります。'
+                                + key + ' として登録します');
+                        }
+                        const num = (v, d) => (v == null ? '—' : Number(v).toFixed(d));
+                        return '<label style="display:flex;align-items:center;gap:6px;font-size:11px;padding:2px 0;">'
+                            + '<input type="checkbox" data-ch value="' + c.index + '"'
+                            + (f.countsDisagree ? ' disabled' : ' checked') + '>'
+                            + '<span style="width:22px;color:#64748b;">' + c.ordinal + '</span>'
+                            + '<span style="flex:1;' + (c.name ? '' : 'color:#b45309;') + '"'
+                            + (c.name ? '' : ' title="_FUNCnnn.CMP に化合物名がありません"') + '>'
+                            + String(label).replace(/</g, '&lt;') + '</span>'
+                            + '<span style="color:#334155;width:110px;">' + num(c.precursor, 2)
+                            + ' &gt; ' + num(c.product, 2) + '</span>'
+                            + '<span style="color:#64748b;width:100px;">CV ' + (c.cv == null ? '—' : c.cv)
+                            + ' / CE ' + (c.ce == null ? '—' : c.ce) + '</span>'
+                            + '<span style="color:#94a3b8;width:64px;">'
+                            + (c.dwell == null ? '—' : (c.dwell * 1000).toFixed(1) + ' ms') + '</span>'
+                            + '</label>';
+                    }).join('');
+                    return '<details open data-func="' + f.number + '" style="border:1px solid #e5e7eb;border-radius:4px;padding:6px;margin-bottom:6px;">'
+                        + '<summary style="font-size:11px;cursor:pointer;">機能 ' + f.number
+                        + ' — MRM ' + f.nChannels + ' ch / ' + f.nScans.toLocaleString() + ' scans / '
+                        + f.width + '×' + f.height + ' px / ' + um(f.pitchX) + '×' + um(f.pitchY) + ' µm'
+                        + (f.polarity ? ' / ' + (f.polarity === '+' ? 'ES+' : 'ES-') : '')
+                        + '</summary>'
+                        + '<div style="margin-top:4px;">'
+                        + '<button type="button" class="btn" data-all="1" style="font-size:10px;padding:1px 6px;">全選択</button> '
+                        + '<button type="button" class="btn" data-all="0" style="font-size:10px;padding:1px 6px;">全解除</button>'
+                        + '</div>' + rows + '</details>';
+                }).join('');
+                funcsEl.style.display = '';
+                funcsEl.querySelectorAll('[data-all]').forEach(b => b.addEventListener('click', () => {
+                    b.closest('details').querySelectorAll('[data-ch]').forEach(c => {
+                        if (!c.disabled) c.checked = b.dataset.all === '1';
+                    });
+                }));
+                warnEl.innerHTML = warn.map(t => String(t).replace(/</g, '&lt;')).join('<br>');
+                state = { bundle, meta, functions: usable };
+                card.querySelector('[data-modal-ok]').disabled = false;
+            } catch (e) {
+                console.error('.raw の読み込みに失敗', e);
+                errEl.textContent = '.raw を読み込めませんでした: ' + ((e && e.message) || e);
+                scanEl.textContent = '';
+            }
+        }
+
+        dirInp.addEventListener('change', () => {
+            const picked = rawBundleFromFileList(Array.from(dirInp.files || []));
+            take(picked.bundles, picked.excluded);
+        });
+        zipInp.addEventListener('change', async () => {
+            const f = (zipInp.files || [])[0];
+            if (!f) return;
+            reset();
+            scanEl.textContent = 'zip を読み込み中…';
+            try { await take([rawBundleFromZip(await f.arrayBuffer())], []); }
+            catch (e) { reset(); errEl.textContent = 'zip を読めませんでした: ' + ((e && e.message) || e); }
+        });
+        ['dragenter', 'dragover'].forEach(ev => dropEl.addEventListener(ev, (e) => {
+            e.preventDefault(); e.stopPropagation();
+            dropEl.style.borderColor = '#2563eb'; dropEl.style.background = '#eff6ff';
+        }));
+        ['dragleave', 'drop'].forEach(ev => dropEl.addEventListener(ev, (e) => {
+            e.preventDefault(); e.stopPropagation();
+            dropEl.style.borderColor = '#cbd5e1'; dropEl.style.background = '#f8fafc';
+        }));
+        dropEl.addEventListener('drop', async (e) => {
+            // ★ DataTransfer は最初の await で無効化されるので、entry の取り出しだけ
+            //   同期でやりきってから非同期の walk に入る。
+            const entries = rawEntriesFromDataTransfer(e.dataTransfer);
+            reset();
+            scanEl.textContent = 'フォルダを読み込み中…';
+            try {
+                if (entries.length === 1 && typeof File !== 'undefined' && entries[0] instanceof File
+                    && /\.zip$/i.test(entries[0].name || '')) {
+                    await take([rawBundleFromZip(await entries[0].arrayBuffer())], []);
+                    return;
+                }
+                const files = await rawFilesFromEntries(entries);
+                const picked = rawBundleFromFileList(files);
+                await take(picked.bundles, picked.excluded);
+            } catch (err) {
+                reset();
+                errEl.textContent = '読み込めませんでした: ' + ((err && err.message) || err);
+            }
+        });
+
+        // openModal の既定 OK は同期の _collect 前提なので差し替える
+        // (openMsiWizard と同じ手口)。
+        const okBtn = card.querySelector('[data-modal-ok]');
+        okBtn.replaceWith(okBtn.cloneNode(true));
+        const ok = card.querySelector('[data-modal-ok]');
+        ok.addEventListener('click', async () => {
+            if (!state) { errEl.textContent = '.raw を選択してください。'; return; }
+            const picks = [];
+            for (const det of funcsEl.querySelectorAll('details[data-func]')) {
+                const fnNo = Number(det.dataset.func);
+                const fn = state.functions.find(f => f.number === fnNo);
+                if (!fn) continue;
+                det.querySelectorAll('[data-ch]').forEach((c) => {
+                    if (c.checked && !c.disabled) picks.push({ fn, channel: Number(c.value) });
+                });
+            }
+            if (!picks.length) { errEl.textContent = 'チェックされたチャンネルがありません。'; return; }
+            ok.disabled = true;
+            errEl.textContent = '';
+            try {
+                const includeImaging = imagingChk.checked;
+                scanEl.textContent = '.raw を圧縮中… (生データはこの形で保存されます)';
+                const file = await rawBuildArchiveZip(state.bundle, {
+                    includeImaging,
+                    onProgress: (m) => {
+                        scanEl.textContent = '.raw を圧縮中… ' + Math.round(m.percent) + '%';
+                    },
+                });
+                if (file.size > STORAGE_FILE_LIMIT_MB * 1048576) {
+                    warnEl.innerHTML += (warnEl.innerHTML ? '<br>' : '')
+                        + '⚠ 圧縮後 ' + fmtBytesMB(file.size) + ' で Storage の上限 ('
+                        + STORAGE_FILE_LIMIT_MB + ' MB) を超えています。Publish に失敗します';
+                }
+                scanEl.textContent = '登録中… (' + picks.length + ' チャンネル / ' + fmtBytesMB(file.size) + ')';
+
+                const sec = panel.section;
+                sec.meta = sec.meta || {};
+                sec.meta.world_coords = sec.meta.world_coords || {};
+                const sourceFileId = uid('msifile');
+                const first = picks[0].fn;
+                let sharedBlobId = null;
+                let lastKey = null;
+                const renamed = [];
+                for (const pick of picks) {
+                    const fn = pick.fn;
+                    const ch = fn.channels[pick.channel];
+                    const label = rawChannelLabel(fn, ch);
+                    const { key, renamedFrom } = rawLayerKeyFor(sec, label, fn.polarity);
+                    if (renamedFrom) renamed.push(renamedFrom + ' → ' + key);
+                    const compoundMeta = {
+                        name: label,
+                        base: label,
+                        precursor: ch.precursor,
+                        product: ch.product,
+                        ce: ch.ce,
+                        cv: ch.cv,
+                        // 極性は .raw の実値。読めなければ null のままにして、
+                        // 既存の _POS/_NEG 推定に委ねる (推測で + を入れない)。
+                        polarity: fn.polarity,
+                        sourceFile: file.name,
+                        dwell: ch.dwell,
+                        functionIndex: fn.number,
+                        channelIndex: ch.index,
+                        rtStart: fn.rtStart,
+                        rtEnd: fn.rtEnd,
+                        instrument: state.meta.header['Instrument'] || null,
+                        acquiredAt: (state.meta.header['Acquired Date'] || '')
+                            + (state.meta.header['Acquired Time'] ? ' ' + state.meta.header['Acquired Time'] : ''),
+                        msMethod: state.meta.header['MS Method'] || null,
+                        tuneMethod: state.meta.header['Tune Method'] || null,
+                        calibrationFile: state.meta.header['Calibration File'] || null,
+                        fromRaw: true,
+                    };
+                    await panel.addMsiLayer(key, file, {
+                        kind: 'raw',
+                        func: fn.number,
+                        channel: ch.index,
+                    }, { sourceFileId, compoundMeta, sharedBlobId, deferBulkRefresh: true });
+                    if (!sharedBlobId) sharedBlobId = sec.msiSeries[key].blobId;
+                    lastKey = key;
+                }
+                if (sec.msiFiles && sec.msiFiles[sourceFileId]) {
+                    sec.msiFiles[sourceFileId].rawSummary = {
+                        rootName: state.meta.rootName,
+                        nFunctions: state.meta.functions.length,
+                        funcNo: first.number,
+                        nScans: first.nScans,
+                        nChannels: first.nChannels,
+                        W: first.width, H: first.height,
+                        includeImaging,
+                    };
+                }
+
+                // ピッチは既存値を上書きしない。空のときだけ .raw から入れる。
+                if (!sec.meta.world_coords.msi_um_per_px && first.pitchX != null && first.pitchY != null) {
+                    sec.meta.world_coords.msi_um_per_px = {
+                        x: Math.round(first.pitchX * 1000),
+                        y: Math.round(first.pitchY * 1000),
+                    };
+                }
+                // 装置の測定条件は列が無いので、切片の付帯情報として丸ごと残す。
+                sec.meta.raw = {
+                    sampleName: state.meta.rootName,
+                    acquiredDate: state.meta.header['Acquired Date'] || null,
+                    acquiredTime: state.meta.header['Acquired Time'] || null,
+                    instrument: state.meta.header['Instrument'] || null,
+                    sampleDescription: state.meta.header['Sample Description'] || null,
+                    msMethod: state.meta.header['MS Method'] || null,
+                    tuneMethod: state.meta.header['Tune Method'] || null,
+                    calibrationFile: state.meta.header['Calibration File'] || null,
+                    desi: state.meta.extern.desi || {},
+                    source: first.source || null,
+                    polarity: first.polarity,
+                    functionType: first.type,
+                    rtStart: first.rtStart, rtEnd: first.rtEnd,
+                    pitchSource: state.meta.pitchSource,
+                    pitchWarning: state.meta.pitchWarning,
+                };
+
+                if (App.project) {
+                    App.project.memo = ensureMemoShape(App.project.memo);
+                    if (machineSel.value) App.project.memo.machine = machineSel.value;
+                    if (dateInp.value) App.project.memo.experimentDate = dateInp.value;
+                    try { renderMemoForm(); } catch (e) { /* memo panel not mounted */ }
+                }
+
+                await panel.finishBulkAdd(lastKey);
+                card._close(true);
+                showToast('登録: ' + picks.length + ' チャンネル (' + fmtBytesMB(file.size) + ')');
+                if (renamed.length) showToast('名前が重複したため改名: ' + renamed.join(', '), 6000);
+            } catch (e) {
+                console.error('.raw の登録に失敗', e);
+                errEl.textContent = '登録に失敗しました: ' + ((e && e.message) || e);
+                scanEl.textContent = '';
+                ok.disabled = false;
+            }
+        });
+        return await p;
+    },
+
     async openMsiWizard(panel) {
         const html = `
             <h2>Register MSI layer</h2>
@@ -13297,11 +14659,27 @@ const Wizards = {
                 name.value = 'MSI_' + sanitizeCompoundName(c.name);
                 name.className = 'analyte-name';
                 name.style.cssText = 'flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;';
+                if (c.synthesizedName) {
+                    // The file carries no name for this channel; the value above is
+                    // only the transition. Make that visible rather than letting it
+                    // pass for a compound name.
+                    name.dataset.synthesized = '1';
+                    name.style.borderColor = '#f59e0b';
+                    name.style.background = '#fffbeb';
+                    name.title = 'このファイルには化合物名がありません。m/z から仮の名前を付けています';
+                }
                 row.appendChild(name);
                 txtList.appendChild(row);
             }
             txtTools.style.display = '';
-            txtSummary.textContent = '検出: ' + analyteCache.compounds.length + ' 化合物';
+            const noName = analyteCache.compounds.filter(c => c.synthesizedName).length;
+            txtSummary.innerHTML = '検出: ' + analyteCache.compounds.length + ' 化合物'
+                + (noName
+                    ? '<br><span style="color:#b45309;">⚠ このファイルには化合物名が入っていません ('
+                      + noName + ' 件)。m/z から仮の名前を付けているので、'
+                      + '登録前に正しい名前に直してください'
+                      + '<br>（.raw フォルダごと登録すれば化合物名も読み取れます）</span>'
+                    : '');
         };
 
         const loadColumns = async () => {
@@ -13413,15 +14791,27 @@ const Wizards = {
             if (analyteCache && analyteCache.compounds.length) {
                 const rows = txtList.querySelectorAll('[data-idx]');
                 const picks = [];
+                let unnamed = 0;
                 rows.forEach(row => {
                     const chk = row.querySelector('.analyte-chk');
                     if (!chk || !chk.checked) return;
                     const idx = parseInt(row.dataset.idx, 10);
                     const nameInput = row.querySelector('.analyte-name');
-                    const layer = (nameInput.value || '').trim() || ('MSI_Compound' + (idx + 1));
+                    const c = analyteCache.compounds.find(cc => cc.index === idx);
+                    const fallback = 'MSI_' + sanitizeCompoundName((c && c.name) || ('Compound' + (idx + 1)));
+                    const layer = (nameInput.value || '').trim() || fallback;
+                    // Still the name we made up from the transition = nobody named it.
+                    if (nameInput.dataset.synthesized === '1' && layer === fallback) unnamed++;
                     picks.push({ index: idx, layer });
                 });
                 if (!picks.length) { err.textContent = 'チェックされた化合物がありません'; return false; }
+                // The label becomes the compound name in the shared MRM library,
+                // where mrm_compounds.name is UNIQUE — registering placeholders
+                // there merges unrelated transitions under one compound.
+                if (unnamed && !confirm(
+                    unnamed + ' 件が m/z のままの仮の名前です。\n\n'
+                    + 'この名前は MRM ライブラリに登録するとそのまま化合物名になります。\n'
+                    + 'このまま登録しますか?')) return false;
                 return { kind: 'txt-analyte', file: f, displayName, picks, dataStartLine: analyteCache.dataStartLine };
             }
             // generic TSV/CSV fallback (header from line 0)
@@ -13625,7 +15015,37 @@ async function bakeAlignedHeToMsiPng(panel, sec, layerKey) {
 // index-aligned (one entry per data row with finite x & y; missing v = NaN).
 // Handles xlsx (col_x/col_y/col_v), Analyte txt (value col = 3+compound_index)
 // and generic TSV/CSV (header lookup), mirroring buildPngFrom*ArrayBuffer.
-function extractSourceMatrixForExport(buf, repr, compoundEntries) {
+// One .raw decode serves every layer registered from the same archive and
+// function, so this mirrors the xlsx sheet path rather than the parquet path.
+// Values are pushed in lockstep with `positions` (NaN where a channel has no
+// value) because the caller treats them as parallel arrays.
+async function extractRawSourceMatrix(buf, repr, compoundEntries) {
+    const decoded = await rawDecodeFunction(rawBundleFromZip(buf), (repr && repr.func) || 1);
+    const { xs, ys } = rawSnapCoords(decoded, repr);
+    const positions = [];
+    for (let i = 0; i < decoded.nScans; i++) positions.push({ x: xs[i], y: ys[i] });
+    const reprFunc = (repr && repr.func) || 1;
+    const cols = [];
+    for (const c of compoundEntries) {
+        // A layer from another function has a different scan list, so its values
+        // would not line up with `positions`. Drop it rather than misalign it.
+        if (((c.ent && c.ent.func) || 1) !== reprFunc) {
+            console.warn('[raw] skipping', c.layerKey, '— different function than the group representative');
+            continue;
+        }
+        const ch = (c.ent && c.ent.channel) || 0;
+        const src = decoded.chans[ch];
+        const values = new Array(decoded.nScans);
+        for (let i = 0; i < decoded.nScans; i++) values[i] = src ? src[i] : NaN;
+        cols.push({ layerKey: c.layerKey, values });
+    }
+    return { positions, cols };
+}
+
+// async only because of the .raw branch; the xlsx/txt bodies below are unchanged
+// and every caller already awaited a blob read anyway.
+async function extractSourceMatrixForExport(buf, repr, compoundEntries) {
+    if (repr.kind === 'raw') return extractRawSourceMatrix(buf, repr, compoundEntries);
     if (repr.kind === 'txt') {
         const raw = new TextDecoder('utf-8').decode(buf);
         const linesAll = raw.split(/\r?\n/);
@@ -13838,7 +15258,7 @@ async function buildSampleCsvGroups(sec, project, otsuMode) {
         const rec = await ProjectStorage.getBlob(grp.blobId);
         if (!rec) continue;
         let m = null;
-        try { m = extractSourceMatrixForExport(await rec.blob.arrayBuffer(), grp.repr, grp.entries); }
+        try { m = await extractSourceMatrixForExport(await rec.blob.arrayBuffer(), grp.repr, grp.entries); }
         catch (e) { console.warn('[buildSampleCsvGroups] source parse failed:', e); }
         if (m && m.positions.length) parsed.push({ matrix: m, entries: grp.entries });
         await _yieldUi();
@@ -13940,7 +15360,7 @@ async function exportProjectAsZip() {
         const usedFullPaths = new Set();
         // parquet ソースは blobId で重複排除する (content hash は取らない —
         // 836 MB の SHA-256 に意味のある時間をかけないため)。
-        const parquetSrcPaths = new Map();   // blobId -> 'Source/...'
+        const bundledSrcPaths = new Map();   // blobId -> 'Source/...'
 
         for (const sec of (project.sections || [])) {
             const S = sampleNameById.get(sec.id);
@@ -13994,20 +15414,25 @@ async function exportProjectAsZip() {
                 secEntry.msiFilesMeta[fid] = { kind: frec.kind, filename: frec.filename, registeredAt: frec.registeredAt };
             }
 
-            // ★ parquet ソースは CSV にできない (1390 列 × 10 万行) ので、本体を
-            //   そのまま同梱する。blobId で重複排除するので、同じ parquet を
-            //   共有する切片が何枚あってもファイルは 1 部。
-            //   これが無いと ZIP に MSI のデータが 1 つも入らない。
+            // ★ ソース本体を同梱する 2 つの形式。理由は別々:
+            //   parquet — CSV にできない (1390 列 × 10 万行)。同梱しないと ZIP に
+            //             MSI のデータが 1 つも入らない。
+            //   raw     — CSV には出るが、それは派生物。「生データを .raw ごと
+            //             保存する」のが目的なので、書き出しでも原本を持ち出せる
+            //             ようにする (展開すれば MassLynx で開ける)。
+            //   どちらも blobId で重複排除するので、同じソースを共有する切片が
+            //   何枚あってもファイルは 1 部。
             for (const [fid, frec] of Object.entries(sec.msiFiles || {})) {
-                if (!frec || frec.kind !== 'parquet' || !frec.blobId) continue;
-                let sp = parquetSrcPaths.get(frec.blobId);
+                if (!frec || (frec.kind !== 'parquet' && frec.kind !== 'raw') || !frec.blobId) continue;
+                let sp = bundledSrcPaths.get(frec.blobId);
                 if (!sp) {
                     const prec = await ProjectStorage.getBlob(frec.blobId);
                     if (!prec || !prec.blob) continue;
-                    const base = sanitizeStorageKeySegment(frec.filename || 'source.parquet');
+                    const fallback = frec.kind === 'raw' ? 'source.raw.zip' : 'source.parquet';
+                    const base = sanitizeStorageKeySegment(frec.filename || fallback);
                     sp = 'Source/' + frec.blobId + '__' + base;
                     zip.file(sp, prec.blob);
-                    parquetSrcPaths.set(frec.blobId, sp);
+                    bundledSrcPaths.set(frec.blobId, sp);
                 }
                 secEntry.msiFilesMeta[fid].sourcePath = sp;
                 secEntry.msiFilesMeta[fid].blobId = frec.blobId;
@@ -14021,6 +15446,22 @@ async function exportProjectAsZip() {
                     annotation: ent.annotation, filename: ent.filename,
                     compoundMeta: ent.compoundMeta || null,
                     statMax: ent.statMax, rasterW: ent.rasterW, rasterH: ent.rasterH,
+                    rawRange: ent.rawRange, rawMean: ent.rawMean,
+                    rawTrueMax: ent.rawTrueMax, rawDispMax: ent.rawDispMax,
+                    bakeMode: (ent.bakeMode === 'full') ? 'full' : undefined,
+                };
+            }
+            // .raw レイヤーは CSV にも出るが、CSV から戻すと kind:'txt' になって
+            // 原本との結び付きが切れる。同梱した .raw.zip から戻せるよう、def を
+            // manifest に残す (取り込み側は CSV 経路の後に流して上書きする)。
+            for (const [k, ent] of Object.entries(sec.msiSeries || {})) {
+                if (!ent || ent.kind !== 'raw') continue;
+                secEntry.rawSeries = secEntry.rawSeries || {};
+                secEntry.rawSeries[k] = {
+                    sourceFileId: ent.sourceFileId || null,
+                    func: ent.func, channel: ent.channel, filename: ent.filename,
+                    compoundMeta: ent.compoundMeta || null,
+                    rasterW: ent.rasterW, rasterH: ent.rasterH,
                     rawRange: ent.rawRange, rawMean: ent.rawMean,
                     rawTrueMax: ent.rawTrueMax, rawDispMax: ent.rawDispMax,
                     bakeMode: (ent.bakeMode === 'full') ? 'full' : undefined,
@@ -14346,6 +15787,7 @@ function guessMimeFromPath(path) {
         case 'png':  return 'image/png';
         case 'jpg':
         case 'jpeg': return 'image/jpeg';
+        case 'zip':  return 'application/zip';
         default:     return 'application/octet-stream';
     }
 }
@@ -14486,13 +15928,19 @@ function fmtBytesMB(b) {
 // Supabase Storage の 1 ファイル上限に当たったときのメッセージ。既定は全プランで
 // 50 MB なので、836 MB の parquet を上げようとすると必ずここに来る。生の
 // "upload failed: HTTP 413" では何をすればいいか分からないので置き換える。
+// Supabase の 1 ファイル上限として運用している値。ダッシュボード
+// (Storage → Settings → Upload file size limit) の設定と揃えること。
+// .raw 登録ウィザードが圧縮後サイズを事前警告するのにも使う。
+const STORAGE_FILE_LIMIT_MB = 500;
+
 function _publishSizeError(task, size) {
     return new Error(
         'ファイルが Supabase Storage の 1 ファイル上限を超えています (HTTP 413)。\n'
       + (task && task.filename ? task.filename + ' は ' : 'このファイルは ') + fmtBytesMB(size) + ' です。\n'
       + 'Supabase Dashboard → Storage → Settings の "Upload file size limit" を'
-      + '引き上げてから再実行してください (既定 50 MB。このアプリは通常の'
-      + 'アップロードを使うので上限は 5 GB までです)。'
+      + '引き上げてから再実行してください (このアプリの想定は '
+      + STORAGE_FILE_LIMIT_MB + ' MB。Supabase の既定は 50 MB で、通常の'
+      + 'アップロードなので上限は 5 GB までです)。'
     );
 }
 
@@ -17231,9 +18679,11 @@ async function importZipFile(file) {
             //   共有する切片が何枚あっても IDB の blob は 1 部で済む。
             const pqBlobByFid = new Map();
             for (const [fid, frec] of Object.entries(sEnt.msiFilesMeta || {})) {
-                if (!frec || frec.kind !== 'parquet' || !frec.sourcePath) continue;
-                const bid = await ensureBlobRoot(frec.sourcePath, 'application/octet-stream',
-                    frec.filename || 'data.parquet');
+                if (!frec || !frec.sourcePath) continue;
+                if (frec.kind !== 'parquet' && frec.kind !== 'raw') continue;
+                const bid = await ensureBlobRoot(frec.sourcePath,
+                    frec.kind === 'raw' ? 'application/zip' : 'application/octet-stream',
+                    frec.filename || (frec.kind === 'raw' ? 'data.raw.zip' : 'data.parquet'));
                 if (bid) pqBlobByFid.set(fid, bid);
             }
             for (const [layerKey, p] of Object.entries(sEnt.parquetSeries || {})) {
@@ -17248,6 +18698,22 @@ async function importZipFile(file) {
                     rawRange: p.rawRange, rawMean: p.rawMean,
                     rawTrueMax: p.rawTrueMax, rawDispMax: p.rawDispMax,
                     bakeMode: (p.bakeMode === 'full') ? 'full' : undefined,
+                };
+            }
+            // .raw は CSV 経路でも kind:'txt' として復元されている。原本があるなら
+            // そちらが正なので、CSV 経路のあとに流して上書きする。
+            for (const [layerKey, r] of Object.entries(sEnt.rawSeries || {})) {
+                const bid = pqBlobByFid.get(r.sourceFileId);
+                if (!bid) continue;   // Source/ が無ければ CSV 由来のレイヤーを残す
+                newSec.msiSeries[layerKey] = {
+                    kind: 'raw', blobId: bid,
+                    func: r.func, channel: r.channel,
+                    filename: r.filename, sourceFileId: r.sourceFileId || null,
+                    compoundMeta: r.compoundMeta || null,
+                    rasterW: r.rasterW, rasterH: r.rasterH,
+                    rawRange: r.rawRange, rawMean: r.rawMean,
+                    rawTrueMax: r.rawTrueMax, rawDispMax: r.rawDispMax,
+                    bakeMode: (r.bakeMode === 'full') ? 'full' : undefined,
                 };
             }
             // msiFiles metadata, attaching the CSV blob that carries each fid
@@ -17395,6 +18861,7 @@ const Toolbar = {
         this.rotTargetSel = document.getElementById('tb-rot-target');
         this.addHeIfBtn = document.getElementById('tb-add-heif');
         this.addMsiBtn = document.getElementById('tb-add-msi');
+        this.addRawBtn = document.getElementById('tb-add-raw');
         this.alignHeIfBtn = document.getElementById('tb-align-heif');
         this.delBtn = document.getElementById('tb-del-section');
         this.rotResetBtn = document.getElementById('tb-rot-reset');
@@ -17414,6 +18881,9 @@ const Toolbar = {
 
         this.addHeIfBtn.addEventListener('click', () => { const p = this.activePanel(); if (p) Wizards.openHeIfWizard(p); });
         this.addMsiBtn.addEventListener('click',  () => { const p = this.activePanel(); if (p) Wizards.openMsiWizard(p); });
+        if (this.addRawBtn) this.addRawBtn.addEventListener('click', () => {
+            const p = this.activePanel(); if (p) Wizards.openRawWizard(p);
+        });
         if (this.alignHeIfBtn) this.alignHeIfBtn.addEventListener('click', () => {
             const p = this.activePanel(); if (p) Wizards.openAlignmentModal(p);
         });
@@ -18333,10 +19803,11 @@ const App = {
             if (!s.msiSeries || !s.msiSeries[oldKey]) continue;
             const ent = s.msiSeries[oldKey];
             if (ent.compoundMeta) {
+                const next = ceCvAfterRename(ent.compoundMeta, split);
                 ent.compoundMeta.base = split.base;
                 ent.compoundMeta.name = cleanBase;
-                if (split.ce != null) ent.compoundMeta.ce = split.ce;
-                if (split.cv != null) ent.compoundMeta.cv = split.cv;
+                ent.compoundMeta.ce = next.ce;
+                ent.compoundMeta.cv = next.cv;
             }
             s.msiSeries[newKey] = ent;
             delete s.msiSeries[oldKey];
