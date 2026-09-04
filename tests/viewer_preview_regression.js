@@ -707,6 +707,39 @@ function testRenameKeepsInstrumentCeCv() {
   assert.deepEqual(after(null, 'X_45_14'), { ce: 45, cv: 14 });
 }
 
+// Storage のキー規則。blob 復旧 (ensureLocalBlob / parquetSrcForEnt) は
+// 「publish が置いたのと同じパス」を組み立て直せることが前提なので、
+// storagePathForEnt と publish 側の組み立てが食い違うと復旧が黙って効かなくなる。
+function testStoragePathRule() {
+  const ctx = vm.createContext({ console });
+  vm.runInContext(
+    `${extractFunction(html, 'sanitizeStorageKeySegment')}\n`
+    + `${extractFunction(html, 'storageExtOf')}\n`
+    + `${extractFunction(html, 'storagePathForEnt')}\n`
+    + 'this.out = { storageExtOf, storagePathForEnt };',
+    ctx);
+  const { storageExtOf, storagePathForEnt } = ctx.out;
+
+  assert.equal(storageExtOf('sample.RAW.zip'), '.zip');
+  assert.equal(storageExtOf('slide1.tif'), '.tif');
+  assert.equal(storageExtOf('noext'), '');
+
+  const project = { shareInfo: { slug: 'proj_x' } };
+  // ローカル登録: slug + blobId + 拡張子。日本語のファイル名でもキーは英数字だけ。
+  assert.equal(storagePathForEnt({ blobId: 'blob_1', filename: 'データ.xlsx' }, project),
+    'proj_x/blobs/blob_1.xlsx');
+  // 取り込んだレイヤーは doc が持ってきた storagePath をそのまま使う。
+  assert.equal(storagePathForEnt({ blobId: 'blob_1', filename: 'x.parquet', storagePath: 'other/blobs/b.parquet' }, project),
+    'other/blobs/b.parquet');
+  // 未 publish (slug が無い) なら復旧先も無い。
+  assert.equal(storagePathForEnt({ blobId: 'blob_1', filename: 'x.xlsx' }, {}), '');
+  assert.equal(storagePathForEnt(null, project), '');
+
+  // publish 側が同じ規則で組み立てていること。
+  assert.match(html, /\$\{meta\.slug\}\/blobs\/\$\{ent\.blobId\}\$\{extByBlob\.get\(ent\.blobId\)\}/);
+  assert.match(html, /extByBlob\.set\(ent\.blobId, storageExtOf\(filename\)\)/);
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -722,6 +755,7 @@ async function main() {
   testRenameKeepsInstrumentCeCv();
   testWorkerBakePath();
   await testWorkerRawDecodePath();
+  testStoragePathRule();
   console.log('viewer preview regression tests: PASS');
 }
 
