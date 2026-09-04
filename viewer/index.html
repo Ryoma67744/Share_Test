@@ -3449,6 +3449,10 @@ async function _ensureRoiRawGrid(section, layerKey) {
             const e = series[k];
             if (!e || e.blobId !== ent.blobId) continue;
             if ((e.sourceFileId || e.blobId) !== srcKey) continue;
+            // One .raw can hold several functions with different scan lists, and
+            // extractSourceMatrixForExport returns parallel arrays. Only bundle
+            // siblings that share the function.
+            if (ent.kind === 'raw' && ((e.func || 1) !== (ent.func || 1))) continue;
             if (entries.length >= ROI_RAW_GRID_CACHE_MAX) break;
             entries.push({ layerKey: k, ent: e });
         }
@@ -3480,7 +3484,7 @@ async function _ensureRoiRawGrid(section, layerKey) {
     if (!rec || !rec.blob) return null;
 
     let m = null;
-    try { m = extractSourceMatrixForExport(await rec.blob.arrayBuffer(), ent, entries); }
+    try { m = await extractSourceMatrixForExport(await rec.blob.arrayBuffer(), ent, entries); }
     catch (e) { console.warn('[roi] source parse failed', layerKey, e); m = null; }
     if (!m || !m.positions || !m.positions.length || !m.cols) return null;
 
@@ -3555,7 +3559,7 @@ async function computeSectionOtsuMasks(sec, project, opts) {
         let m = null, sig = null;
         try {
             const buf = await rec.blob.arrayBuffer();
-            m = extractSourceMatrixForExport(buf, grp.repr, grp.entries);
+            m = await extractSourceMatrixForExport(buf, grp.repr, grp.entries);
         } catch (e) { console.warn('[otsu] source parse failed', srcKey, e); m = null; }
         try { sig = await blobContentSig(rec.blob); } catch (e) { sig = null; }
         if (!m || !m.positions || !m.positions.length) {
@@ -4576,22 +4580,34 @@ async function parseRawArchiveMeta(bundle) {
 // the exact float, and float32 stage jitter would inflate the distinct-value
 // count past its guard, which falls back to ordinal indexing and SILENTLY
 // changes the image geometry by collapsing gaps.
+// The snapped coordinates, shared by the raster path and the export / ROI path
+// so both land on exactly the same lattice. Returns parallel arrays.
+function rawSnapCoords(decoded, def) {
+    const off = (def && def.snap === false);
+    const dx = off ? 0 : decoded.gridX.pitch;
+    const dy = off ? 0 : decoded.gridY.pitch;
+    const x0 = decoded.gridX.min;
+    const y0 = decoded.gridY.min;
+    const q = (v, base, step) => (step > 0)
+        ? Math.round((base + Math.round((v - base) / step) * step) * 1e4) / 1e4
+        : v;
+    const xs = new Float64Array(decoded.nScans);
+    const ys = new Float64Array(decoded.nScans);
+    for (let i = 0; i < decoded.nScans; i++) {
+        xs[i] = q(decoded.xs[i], x0, dx);
+        ys[i] = q(decoded.ys[i], y0, dy);
+    }
+    return { xs, ys };
+}
+
 function rawRowsFromDecoded(decoded, def) {
     const channel = (def && def.channel) || 0;
     if (channel >= decoded.nCh) throw new Error('raw: channel ' + channel + ' out of range');
     const col = decoded.chans[channel];
-    const snap = (def && def.snap === false) ? null : {
-        x0: decoded.gridX.min, dx: decoded.gridX.pitch,
-        y0: decoded.gridY.min, dy: decoded.gridY.pitch,
-    };
-    const q = (v, base, step) => (step > 0)
-        ? Math.round((base + Math.round((v - base) / step) * step) * 1e4) / 1e4
-        : v;
+    const { xs, ys } = rawSnapCoords(decoded, def);
     const rows = [];
     for (let i = 0; i < decoded.nScans; i++) {
-        const x = snap && snap.dx ? q(decoded.xs[i], snap.x0, snap.dx) : decoded.xs[i];
-        const y = snap && snap.dy ? q(decoded.ys[i], snap.y0, snap.dy) : decoded.ys[i];
-        const v = col[i];
+        const x = xs[i], y = ys[i], v = col[i];
         if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(v)) continue;
         rows.push({ x, y, v });
     }
@@ -5013,7 +5029,7 @@ function _buildParseWorkerSource() {
         decodeJpegInTiffToDataUrl, decodeTiffArrayBufferToDataUrl, inspectXlsxColumns,
         rawDecodeText, rawInflate, rawZipIndex, rawZipRead, rawBundleFromZip,
         rawFindMember, rawFuncTag, parseWatersParamTable, parseWatersIdx,
-        decodeWatersIntensity, rawPitchOf, rawDecodeFunction, rawRowsFromDecoded,
+        decodeWatersIntensity, rawPitchOf, rawDecodeFunction, rawSnapCoords, rawRowsFromDecoded,
         parseRawToRows,
         _parseWorkerOnMessage,
     ];
@@ -14926,7 +14942,37 @@ async function bakeAlignedHeToMsiPng(panel, sec, layerKey) {
 // index-aligned (one entry per data row with finite x & y; missing v = NaN).
 // Handles xlsx (col_x/col_y/col_v), Analyte txt (value col = 3+compound_index)
 // and generic TSV/CSV (header lookup), mirroring buildPngFrom*ArrayBuffer.
-function extractSourceMatrixForExport(buf, repr, compoundEntries) {
+// One .raw decode serves every layer registered from the same archive and
+// function, so this mirrors the xlsx sheet path rather than the parquet path.
+// Values are pushed in lockstep with `positions` (NaN where a channel has no
+// value) because the caller treats them as parallel arrays.
+async function extractRawSourceMatrix(buf, repr, compoundEntries) {
+    const decoded = await rawDecodeFunction(rawBundleFromZip(buf), (repr && repr.func) || 1);
+    const { xs, ys } = rawSnapCoords(decoded, repr);
+    const positions = [];
+    for (let i = 0; i < decoded.nScans; i++) positions.push({ x: xs[i], y: ys[i] });
+    const reprFunc = (repr && repr.func) || 1;
+    const cols = [];
+    for (const c of compoundEntries) {
+        // A layer from another function has a different scan list, so its values
+        // would not line up with `positions`. Drop it rather than misalign it.
+        if (((c.ent && c.ent.func) || 1) !== reprFunc) {
+            console.warn('[raw] skipping', c.layerKey, '— different function than the group representative');
+            continue;
+        }
+        const ch = (c.ent && c.ent.channel) || 0;
+        const src = decoded.chans[ch];
+        const values = new Array(decoded.nScans);
+        for (let i = 0; i < decoded.nScans; i++) values[i] = src ? src[i] : NaN;
+        cols.push({ layerKey: c.layerKey, values });
+    }
+    return { positions, cols };
+}
+
+// async only because of the .raw branch; the xlsx/txt bodies below are unchanged
+// and every caller already awaited a blob read anyway.
+async function extractSourceMatrixForExport(buf, repr, compoundEntries) {
+    if (repr.kind === 'raw') return extractRawSourceMatrix(buf, repr, compoundEntries);
     if (repr.kind === 'txt') {
         const raw = new TextDecoder('utf-8').decode(buf);
         const linesAll = raw.split(/\r?\n/);
@@ -15139,7 +15185,7 @@ async function buildSampleCsvGroups(sec, project, otsuMode) {
         const rec = await ProjectStorage.getBlob(grp.blobId);
         if (!rec) continue;
         let m = null;
-        try { m = extractSourceMatrixForExport(await rec.blob.arrayBuffer(), grp.repr, grp.entries); }
+        try { m = await extractSourceMatrixForExport(await rec.blob.arrayBuffer(), grp.repr, grp.entries); }
         catch (e) { console.warn('[buildSampleCsvGroups] source parse failed:', e); }
         if (m && m.positions.length) parsed.push({ matrix: m, entries: grp.entries });
         await _yieldUi();
@@ -15241,7 +15287,7 @@ async function exportProjectAsZip() {
         const usedFullPaths = new Set();
         // parquet ソースは blobId で重複排除する (content hash は取らない —
         // 836 MB の SHA-256 に意味のある時間をかけないため)。
-        const parquetSrcPaths = new Map();   // blobId -> 'Source/...'
+        const bundledSrcPaths = new Map();   // blobId -> 'Source/...'
 
         for (const sec of (project.sections || [])) {
             const S = sampleNameById.get(sec.id);
@@ -15295,20 +15341,25 @@ async function exportProjectAsZip() {
                 secEntry.msiFilesMeta[fid] = { kind: frec.kind, filename: frec.filename, registeredAt: frec.registeredAt };
             }
 
-            // ★ parquet ソースは CSV にできない (1390 列 × 10 万行) ので、本体を
-            //   そのまま同梱する。blobId で重複排除するので、同じ parquet を
-            //   共有する切片が何枚あってもファイルは 1 部。
-            //   これが無いと ZIP に MSI のデータが 1 つも入らない。
+            // ★ ソース本体を同梱する 2 つの形式。理由は別々:
+            //   parquet — CSV にできない (1390 列 × 10 万行)。同梱しないと ZIP に
+            //             MSI のデータが 1 つも入らない。
+            //   raw     — CSV には出るが、それは派生物。「生データを .raw ごと
+            //             保存する」のが目的なので、書き出しでも原本を持ち出せる
+            //             ようにする (展開すれば MassLynx で開ける)。
+            //   どちらも blobId で重複排除するので、同じソースを共有する切片が
+            //   何枚あってもファイルは 1 部。
             for (const [fid, frec] of Object.entries(sec.msiFiles || {})) {
-                if (!frec || frec.kind !== 'parquet' || !frec.blobId) continue;
-                let sp = parquetSrcPaths.get(frec.blobId);
+                if (!frec || (frec.kind !== 'parquet' && frec.kind !== 'raw') || !frec.blobId) continue;
+                let sp = bundledSrcPaths.get(frec.blobId);
                 if (!sp) {
                     const prec = await ProjectStorage.getBlob(frec.blobId);
                     if (!prec || !prec.blob) continue;
-                    const base = sanitizeStorageKeySegment(frec.filename || 'source.parquet');
+                    const fallback = frec.kind === 'raw' ? 'source.raw.zip' : 'source.parquet';
+                    const base = sanitizeStorageKeySegment(frec.filename || fallback);
                     sp = 'Source/' + frec.blobId + '__' + base;
                     zip.file(sp, prec.blob);
-                    parquetSrcPaths.set(frec.blobId, sp);
+                    bundledSrcPaths.set(frec.blobId, sp);
                 }
                 secEntry.msiFilesMeta[fid].sourcePath = sp;
                 secEntry.msiFilesMeta[fid].blobId = frec.blobId;
@@ -15322,6 +15373,22 @@ async function exportProjectAsZip() {
                     annotation: ent.annotation, filename: ent.filename,
                     compoundMeta: ent.compoundMeta || null,
                     statMax: ent.statMax, rasterW: ent.rasterW, rasterH: ent.rasterH,
+                    rawRange: ent.rawRange, rawMean: ent.rawMean,
+                    rawTrueMax: ent.rawTrueMax, rawDispMax: ent.rawDispMax,
+                    bakeMode: (ent.bakeMode === 'full') ? 'full' : undefined,
+                };
+            }
+            // .raw レイヤーは CSV にも出るが、CSV から戻すと kind:'txt' になって
+            // 原本との結び付きが切れる。同梱した .raw.zip から戻せるよう、def を
+            // manifest に残す (取り込み側は CSV 経路の後に流して上書きする)。
+            for (const [k, ent] of Object.entries(sec.msiSeries || {})) {
+                if (!ent || ent.kind !== 'raw') continue;
+                secEntry.rawSeries = secEntry.rawSeries || {};
+                secEntry.rawSeries[k] = {
+                    sourceFileId: ent.sourceFileId || null,
+                    func: ent.func, channel: ent.channel, filename: ent.filename,
+                    compoundMeta: ent.compoundMeta || null,
+                    rasterW: ent.rasterW, rasterH: ent.rasterH,
                     rawRange: ent.rawRange, rawMean: ent.rawMean,
                     rawTrueMax: ent.rawTrueMax, rawDispMax: ent.rawDispMax,
                     bakeMode: (ent.bakeMode === 'full') ? 'full' : undefined,
@@ -18539,9 +18606,11 @@ async function importZipFile(file) {
             //   共有する切片が何枚あっても IDB の blob は 1 部で済む。
             const pqBlobByFid = new Map();
             for (const [fid, frec] of Object.entries(sEnt.msiFilesMeta || {})) {
-                if (!frec || frec.kind !== 'parquet' || !frec.sourcePath) continue;
-                const bid = await ensureBlobRoot(frec.sourcePath, 'application/octet-stream',
-                    frec.filename || 'data.parquet');
+                if (!frec || !frec.sourcePath) continue;
+                if (frec.kind !== 'parquet' && frec.kind !== 'raw') continue;
+                const bid = await ensureBlobRoot(frec.sourcePath,
+                    frec.kind === 'raw' ? 'application/zip' : 'application/octet-stream',
+                    frec.filename || (frec.kind === 'raw' ? 'data.raw.zip' : 'data.parquet'));
                 if (bid) pqBlobByFid.set(fid, bid);
             }
             for (const [layerKey, p] of Object.entries(sEnt.parquetSeries || {})) {
@@ -18556,6 +18625,22 @@ async function importZipFile(file) {
                     rawRange: p.rawRange, rawMean: p.rawMean,
                     rawTrueMax: p.rawTrueMax, rawDispMax: p.rawDispMax,
                     bakeMode: (p.bakeMode === 'full') ? 'full' : undefined,
+                };
+            }
+            // .raw は CSV 経路でも kind:'txt' として復元されている。原本があるなら
+            // そちらが正なので、CSV 経路のあとに流して上書きする。
+            for (const [layerKey, r] of Object.entries(sEnt.rawSeries || {})) {
+                const bid = pqBlobByFid.get(r.sourceFileId);
+                if (!bid) continue;   // Source/ が無ければ CSV 由来のレイヤーを残す
+                newSec.msiSeries[layerKey] = {
+                    kind: 'raw', blobId: bid,
+                    func: r.func, channel: r.channel,
+                    filename: r.filename, sourceFileId: r.sourceFileId || null,
+                    compoundMeta: r.compoundMeta || null,
+                    rasterW: r.rasterW, rasterH: r.rasterH,
+                    rawRange: r.rawRange, rawMean: r.rawMean,
+                    rawTrueMax: r.rawTrueMax, rawDispMax: r.rawDispMax,
+                    bakeMode: (r.bakeMode === 'full') ? 'full' : undefined,
                 };
             }
             // msiFiles metadata, attaching the CSV blob that carries each fid
