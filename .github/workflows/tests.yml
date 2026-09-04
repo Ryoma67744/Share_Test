@@ -1,0 +1,46 @@
+# これらのテストは「絵は出るので人には気づけない」壊れ方を捕まえるために
+# 置いてある。手元で走らせないと働かないままなので、PR で必ず走らせる。
+#   - viewer_preview_regression.js … 22,000 行の単一ファイルの構文ゲート、
+#     parse worker の関数リスト漏れ、Analyte ヘッダ、改名時の CE/CV 保持
+#   - connector selftest … アプリのコードを viewer/index.html から切り出して
+#     connector の移植と数値を突き合わせる (.exp / parquet / .raw /
+#     buildMsiGrid)。ここが落ちたら AI がアプリと違う数値を答える状態。
+name: Tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 公式ビルドは full ICU 付き。TextDecoder('windows-1252') が要る
+      # (_extern.inf の "Source Temperature (°C)" など Waters の 8bit テキスト)。
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: connector/package-lock.json
+
+      - name: viewer regression tests
+        run: node tests/viewer_preview_regression.js
+
+      - name: connector dependencies
+        working-directory: connector
+        run: npm ci --no-audit --no-fund
+
+      # devDependency の hyparquet-writer が入るので parquet のパリティも走る
+      # (入っていないと SKIP されて素通りする)。
+      - name: connector selftest (app <-> connector parity)
+        working-directory: connector
+        run: npm run selftest
