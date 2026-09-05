@@ -519,7 +519,8 @@ Opened from master it runs with admin rights, so the Method table also shows **C
 | **Image grid (centre)** | Every section × the selected compound, each cell with a scalebar and Section name + pixel pitch. Drag to pan, wheel to zoom |
 | **Range (top)** | vmin / vmax shared by all sections. `Reset` returns to the automatic range |
 | **背景除去(Otsu) (top)** | The **same setting** as the main toolbar, reachable without closing the preview (see below) |
-| **`＋重ね合わせ` (top)** | Register / edit a multi-molecule colour overlay (master only, see §10-ter) |
+| **`＋重ね合わせ` (top)** | Register a **new** multi-molecule colour overlay (master only, see §10-ter) |
+| **Overlay list (bottom of the Method panel)** | Every registered set, with its colour swatches. Click to display; **`✎` edits that set** (master only) |
 | **Stats / colourbar (right)** | Statistics for the selected compound. In overlay mode this becomes a molecule-to-colour legend |
 
 > **About background removal**: the preview checkbox drives the same single setting as the main toolbar's `背景除去(Otsu)`, and **it survives closing the preview** — unlike the Colormap, which is restored on close. The split is deliberate: colormap is a display preference, background removal is an analysis setting. **Adjusting the strength** needs the draggable histogram line, so close the preview and use the ANALYSIS panel.
@@ -531,6 +532,8 @@ Opened from master it runs with admin rights, so the Method table also shows **C
 ## 10-ter. Overlays (multi-molecule colour composites)
 
 **`＋重ね合わせ`** in the Method (MRM) panel — or the same button at the top of the preview — registers an image with **two or more molecules drawn in different colours on one picture**. Share recipients can **view** master-registered overlays but cannot create or edit them.
+
+**Register as many sets as you like.** Keep one set per question — "Lactate + Citrate", "Glucose + HVA" — and click through the list to compare them. `＋重ね合わせ` always creates a **new** set. To change a set you already registered, use the **`✎` on its row** in the preview, or the `✎` on its chip in the main Method panel; `×` on the chip deletes it.
 
 The composite is an **additive (light-sum) blend**, so:
 

@@ -631,6 +631,13 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
 }
 /* 重ね合わせの登録は master だけ (主画面の #btn-add-overlay と同じ権限設計。
    共有相手は master が登録した重ね合わせを見るだけ)。 */
+/* 行の ✎ (この重ね合わせを編集)。登録は master だけなので編集も master だけ。 */
+#share-preview-overlay .ov-row-edit { display:none; }
+body:not(.share-mode) #share-preview-overlay .ov-row-edit {
+    display:inline-block; margin-left:6px; cursor:pointer; color:#94a3b8;
+    font-size:11px; padding:0 3px; border-radius:2px;
+}
+body:not(.share-mode) #share-preview-overlay .ov-row-edit:hover { color:#1d4ed8; background:#e0e7ff; }
 #share-preview-overlay [data-add-overlay] { display:none; }
 body:not(.share-mode) #share-preview-overlay [data-add-overlay] {
     display:inline-flex; align-items:center; padding:2px 8px; font-size:11px;
@@ -17079,6 +17086,7 @@ const SharePreview = {
     _savedColormap: null,       // colormap name to restore on close
     _overlaySnapshot: undefined, // App.activeOverlay to restore on close (undefined = not open)
     _savedViewMode: null,       // App.viewMode to restore on close ('free' / 'compound')
+    _methodListOvSig: null,     // 重ね合わせ一覧の署名。変わったら Method 表を組み直す
     _opacityRaf: 0,             // rAF handle coalescing slider events
     _pendingOpacity: 1,         // last slider value queued for next rAF
     _cellTransforms: [],        // per-cell {tx, ty, scale}
@@ -17723,12 +17731,16 @@ const SharePreview = {
         // ＋重ね合わせ。既存の登録モーダルをそのまま呼ぶ (.modal-backdrop は
         // z-index:10000、プレビューは 9000 なのでプレビューの上に出る)。
         // 保存後の追随は App.setActiveOverlay が面倒を見る。
+        //
+        // ★ 必ず「新規登録」で開く (主画面の #btn-add-overlay と同じ)。表示中の
+        //   重ね合わせを existing として渡していたため、1 セット目を登録したあと
+        //   もう一度押すと編集モーダルが開き、**2 セット目を作ったつもりが 1 セット目を
+        //   上書きしていた**。プレビューからは 1 セットしか持てない状態だった。
+        //   既存セットの編集は各行の ✎ から (下の _renderMethodList)。
         const addOvBtn = overlay.querySelector('[data-add-overlay]');
         if (addOvBtn) {
             addOvBtn.addEventListener('click', () => {
-                // 編集として開くのは project.overlays に載っている定義だけ
-                // (理由は overlayForEditing のコメント)。
-                try { openOverlayModal(overlayForEditing(App.activeOverlay, App.project)); }
+                try { openOverlayModal(null); }
                 catch (e) { console.warn('openOverlayModal from preview failed', e); }
             });
         }
@@ -17850,6 +17862,13 @@ const SharePreview = {
         if (titleEl) titleEl.textContent = App.activeOverlay
             ? ('重ね合わせ: ' + (App.activeOverlay.name || ''))
             : buildCompoundTitle(focusKey, project, this.role);
+        // Method 表は open() でしか組んでいなかったので、プレビューの中で
+        // 重ね合わせを登録しても、その行が一覧に出てくるのは開き直したあとだった
+        // (2 セット目以降を作っても画面上は増えない)。一覧が変わったときだけ
+        // 組み直す — 化合物の行まで毎回作り直すのは重いので、署名で見分ける。
+        if (this._overlayListSignature(project) !== this._methodListOvSig) {
+            this._renderMethodList(project);
+        }
         this._renderMethodHighlight(focusKey);
         this._renderImageGrid(project, focusKey);
         this._renderStatsTable(project, focusKey);
@@ -18280,9 +18299,12 @@ const SharePreview = {
         const ncol = colDefs.length;
         const overlayRows = ((project.overlays) || []).map(ov => {
             const dots = (ov.layers || []).map(l => `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${esc2(l.color || '#fff')};margin-right:2px;border:1px solid rgba(0,0,0,0.3);vertical-align:middle;"></span>`).join('');
-            return `<tr data-overlay-id="${esc2(ov.id)}" class="overlay-row"><td class="compound-cell" colspan="${ncol}">${dots}${esc2(ov.name || 'overlay')} <span style="color:#94a3b8;">(重ね合わせ)</span></td></tr>`;
+            // ✎ は「この行の重ね合わせを編集」。主画面のチップの ✎ と同じ役割で、
+            // master だけに出す (CSS)。行そのもののクリックは従来どおり表示切替。
+            return `<tr data-overlay-id="${esc2(ov.id)}" class="overlay-row"><td class="compound-cell" colspan="${ncol}">${dots}${esc2(ov.name || 'overlay')} <span style="color:#94a3b8;">(重ね合わせ)</span><span class="ov-row-edit" data-ov-edit-row="${esc2(ov.id)}" title="この重ね合わせを編集">✎</span></td></tr>`;
         }).join('');
         body.innerHTML = rows.join('') + overlayRows;
+        this._methodListOvSig = this._overlayListSignature(project);
 
         body.querySelectorAll('tr[data-key]').forEach(tr => {
             tr.addEventListener('click', () => {
@@ -18299,9 +18321,19 @@ const SharePreview = {
             });
         });
         body.querySelectorAll('tr[data-overlay-id]').forEach(tr => {
-            tr.addEventListener('click', () => {
+            tr.addEventListener('click', (ev) => {
                 const ov = ((project.overlays) || []).find(o => o.id === tr.getAttribute('data-overlay-id'));
                 if (!ov) return;
+                // ✎ は編集。行の表示切替と両方走らないよう、ここで打ち切る。
+                if (ev && ev.target && ev.target.closest && ev.target.closest('[data-ov-edit-row]')) {
+                    ev.stopPropagation();
+                    const editable = overlayForEditing(ov, App.project);
+                    if (editable) {
+                        try { openOverlayModal(editable); }
+                        catch (e) { console.warn('openOverlayModal from preview row failed', e); }
+                    }
+                    return;
+                }
                 this._focusLoadSeq++;
                 this._loadingFocusKey = null;
                 this._focusLoadStatus = null;
@@ -18310,6 +18342,15 @@ const SharePreview = {
                 this.refresh(App.project);
             });
         });
+    },
+
+    // 登録済み重ね合わせの一覧が変わったかを見る署名。件数だけでなく名前・色・
+    // 構成分子も含めるので、改名や色替えでも行の表示が追随する。
+    _overlayListSignature(project) {
+        return ((project && project.overlays) || [])
+            .map(o => o.id + '\u0000' + (o.name || '') + '\u0000'
+                + (o.layers || []).map(l => l.key + ':' + l.color).join(','))
+            .join('\u0001');
     },
 
     _renderMethodHighlight(focusKey) {
