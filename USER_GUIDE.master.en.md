@@ -128,6 +128,8 @@ The `Method (MRM)` table then shows the measured Precursor / Fragment / CE / CV,
 
 > **About pitch**: `DesiXStep` in `_extern.inf` is **not** the pixel pitch — it is how far the stage travels during ONE MRM channel (X pitch = `DesiXStep` × channel count). The app measures the pitch from the stage coordinates and uses `DesiXStep` only as a cross-check, warning when they disagree.
 
+> **About the function type**: a `.raw` records "this acquisition is MRM" as a one-byte type code. The same MRM acquisition can carry extra flag bits in that byte depending on the acquisition mode, so it reads `41` rather than `9` (both seen on real instruments). The app compares only the type-code part, so either registers. If the type is still unexpected, a function whose **Precursor and Product are both present is treated as MRM-shaped and registered with a warning** rather than silently dropped.
+
 > **More than 32 channels**: one `.raw` function holds at most 32 channels. Acquire larger methods as several `.raw` files and **register them into the same section**. Grid mismatches and layer-name collisions are warned about but never block registration; a colliding layer is renamed automatically, so nothing already registered is overwritten.
 
 ---

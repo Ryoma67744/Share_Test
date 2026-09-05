@@ -614,7 +614,7 @@ console.log('Waters .raw — connector vs app');
   };
   const zip = zipOf(members);
 
-  const { rawBundleFromZip, parseRawArchiveMeta, parseRawToRows } = await import('./raw.js');
+  const { rawBundleFromZip, parseRawArchiveMeta, parseRawToRows, parseWatersFunctions } = await import('./raw.js');
   const meta = await parseRawArchiveMeta(rawBundleFromZip(zip));
   const f = meta.functions[0];
 
@@ -626,6 +626,35 @@ console.log('Waters .raw — connector vs app');
   check('instrument + acquired date read from _HEADER.TXT',
     meta.header['Instrument'] === 'XEVO-TQAbs#WDA0428' && meta.header['Acquired Date'] === '04-Sep-2026', meta.header);
   check('function type 9 = MRM', f.type === 9 && f.isMrm === true, f.type);
+
+  // The type byte is 5 bits of MassLynx function type + acquisition flags in the
+  // upper bits. Comparing the raw byte to 9 rejected a real 17-channel MRM
+  // imaging run whose byte was 0x29, and the wizard then said "no MRM function"
+  // about a file that decoded perfectly. Same fixture is run through the app's
+  // copy below, so the two can never drift apart on this.
+  const typeFixture = (() => {
+    const REC = 416;
+    const buf = new ArrayBuffer(REC * 3);
+    const dv = new DataView(buf);
+    [0x09, 0x29, 0x01].forEach((typeByte, fi) => {
+      const b = fi * REC;
+      dv.setUint8(b, typeByte);
+      dv.setUint8(b + 1, 0x2d);
+      if (typeByte === 0x01) return;         // SIR carries no transition
+      for (let c = 0; c < 2; c++) {
+        dv.setFloat32(b + 160 + c * 4, 104 + c, true);
+        dv.setFloat32(b + 288 + c * 4, 87 + c, true);
+      }
+    });
+    return buf;
+  })();
+  const typeFns = parseWatersFunctions(typeFixture);
+  check('★ acquisition flags masked off the type byte (0x29 is still MRM)',
+    typeFns.length === 3
+    && typeFns[0].type === 9 && typeFns[0].typeByte === 0x09 && typeFns[0].isMrm === true
+    && typeFns[1].type === 9 && typeFns[1].typeByte === 0x29 && typeFns[1].isMrm === true
+    && typeFns[2].type === 1 && typeFns[2].isMrm === false,
+    typeFns.map(x => [x.typeByte, x.type, x.isMrm]));
   check('polarity from _extern.inf (never guessed)', f.polarity === '+', f.polarity);
   check('windows-1252 key survives (Source Temperature)',
     f.source && f.source.sourceTempC === '150', f.source);
@@ -671,7 +700,7 @@ console.log('Waters .raw — connector vs app');
       TextDecoder, TextEncoder, Blob, Response, DecompressionStream, console,
     });
     new vm.Script(viewerSrc.slice(S, E)
-      + '\nglobalThis.__app = { rawBundleFromZip, parseRawArchiveMeta, parseRawToRows };').runInContext(ctx);
+      + '\nglobalThis.__app = { rawBundleFromZip, parseRawArchiveMeta, parseRawToRows, parseWatersFunctions };').runInContext(ctx);
     const app = ctx.globalThis ? ctx.globalThis.__app : ctx.__app;
     const appMeta = await app.parseRawArchiveMeta(app.rawBundleFromZip(zip));
     const appF = appMeta.functions[0];
@@ -696,6 +725,11 @@ console.log('Waters .raw — connector vs app');
     const sa = stats(extractRoiValues(appRows, poly));
     const sb = stats(extractRoiValues(rows.length ? await parseRawToRows(zip, { func: 1, channel: 5 }) : [], poly));
     check('★ ROI statistics match the app', JSON.stringify(sa) === JSON.stringify(sb), [sa, sb]);
+    const appTypeFns = app.parseWatersFunctions(typeFixture);
+    check('★ app and connector mask the type byte identically',
+      JSON.stringify(appTypeFns.map(x => [x.typeByte, x.type, x.isMrm]))
+      === JSON.stringify(typeFns.map(x => [x.typeByte, x.type, x.isMrm])),
+      appTypeFns.map(x => [x.typeByte, x.type, x.isMrm]));
   }
 
   // ---- it must survive the pieces a .raw may not carry --------------------

@@ -671,6 +671,78 @@ async function testWorkerRawDecodePath() {
   assert.deepEqual(Array.from(viaBuffer, (r) => r.v), [100, 200, 300, 400, 500, 600]);
 }
 
+// _FUNCTNS.INF の種別バイトは「下位 5 ビット = MassLynx のファンクション種別、
+// 上位 3 ビット = 取得モードのフラグ」。生バイトを 9 と比べると、同じ MRM でも
+// フラグが立った取得 (0x29 = 41) を非 MRM と誤判定する。実際にそれが起き、
+// 17 ch / 117,449 px の完全な MRM イメージング .raw が
+// 「MRM ファンクションがありません」で登録できなくなった — 中身は装置の
+// テキスト書き出しと 1,996,633 値すべて一致していたのに、である。
+// 直前まで合成データは種別バイトに 9 しか書いておらず、この穴を踏めなかった。
+function testFunctionTypeFlagsAreMasked() {
+  const maxCh = /const RAW_MAX_CHANNELS = (\d+);/.exec(html);
+  assert.ok(maxCh, 'missing RAW_MAX_CHANNELS');
+
+  const context = vm.createContext({ DataView, Math, console });
+  vm.runInContext(
+    'const RAW_MAX_CHANNELS = ' + maxCh[1] + ';\n'
+    + extractTopLevelFunction('rawRoundMz') + '\n'
+    + extractTopLevelFunction('rawRoundDwell') + '\n'
+    + extractTopLevelFunction('parseWatersFunctions') + '\n'
+    + extractTopLevelFunction('rawFunctionIsRegisterable') + '\n'
+    + 'this.api = { parseWatersFunctions, rawFunctionIsRegisterable };',
+    context,
+  );
+  const { parseWatersFunctions, rawFunctionIsRegisterable } = context.api;
+
+  // 3 ファンクション: 素の MRM / フラグつき MRM / SIR (MRM ではない)。
+  const REC = 416;
+  const buf = new ArrayBuffer(REC * 3);
+  const dv = new DataView(buf);
+  [0x09, 0x29, 0x01].forEach((typeByte, f) => {
+    const b = f * REC;
+    dv.setUint8(b, typeByte);
+    dv.setUint8(b + 1, 0x2d);
+    if (typeByte === 0x01) return;          // SIR は precursor/product を持たない
+    for (let c = 0; c < 2; c++) {
+      dv.setFloat32(b + 32 + c * 4, 0.009889, true);
+      dv.setFloat32(b + 160 + c * 4, 104 + c, true);
+      dv.setFloat32(b + 288 + c * 4, 87 + c, true);
+    }
+  });
+
+  const fns = parseWatersFunctions(buf);
+  assert.equal(fns.length, 3, '416 バイト刻みでファンクション数が出る');
+
+  assert.equal(fns[0].typeByte, 0x09);
+  assert.equal(fns[0].type, 9);
+  assert.equal(fns[0].isMrm, true, '素の 0x09 は従来どおり MRM');
+
+  // ★ これが実際に起きた回帰。マスクを外すと type === 41 / isMrm === false に戻る。
+  assert.equal(fns[1].typeByte, 0x29, '生バイトは調査用に残す');
+  assert.equal(fns[1].type, 9, '下位 5 ビットが種別コード');
+  assert.equal(fns[1].isMrm, true, 'フラグが立っていても MRM は MRM');
+  assert.notEqual(fns[1].typeByte, fns[1].type, 'マスクが効いていること自体の確認');
+
+  // マスクは「何でも MRM にする」ものではない: 別の種別は別の種別のまま。
+  assert.equal(fns[2].type, 1, 'SIR は 1 (0x21 でも 1)');
+  assert.equal(fns[2].isMrm, false);
+
+  // byte 1 はイオンモードではない (ES+ と ES- の実サンプルがどちらも 0x2d)。
+  assert.equal(fns[0].byte1, 0x2d);
+
+  // ウィザードの採否。種別が未知でも構造が MRM なら通し、通す先が無いときだけ止める。
+  assert.equal(rawFunctionIsRegisterable(fns[0]), true);
+  assert.equal(rawFunctionIsRegisterable(fns[1]), true);
+  assert.equal(rawFunctionIsRegisterable(fns[2]), false, 'SIR は登録対象にしない');
+  const chans = (p, q) => ({ channels: [{ precursor: p, product: q }] });
+  assert.equal(rawFunctionIsRegisterable(Object.assign({ isMrm: false }, chans(104, 87))), true,
+    '未知の種別でも precursor/product が揃っていれば登録できる');
+  assert.equal(rawFunctionIsRegisterable(Object.assign({ isMrm: false }, chans(null, null))), false);
+  assert.equal(rawFunctionIsRegisterable(Object.assign({ isMrm: null }, chans(null, null))), true,
+    '_FUNCTNS.INF ごと欠けている .raw は従来どおり通る');
+  assert.equal(rawFunctionIsRegisterable(null), false);
+}
+
 // Renaming a compound re-derives CE/CV from a trailing _<CE>_<CV> in the new
 // label. That was right while the label WAS the source of those numbers; for a
 // .raw layer the instrument is, and re-deriving destroys it — renaming
@@ -783,6 +855,7 @@ async function main() {
   testRenameKeepsInstrumentCeCv();
   testWorkerBakePath();
   await testWorkerRawDecodePath();
+  testFunctionTypeFlagsAreMasked();
   testStoragePathRule();
   testImportSectionIdKeying();
   console.log('viewer preview regression tests: PASS');
