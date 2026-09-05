@@ -449,6 +449,81 @@ function testOverlayForEditingIgnoresUnregistered() {
   assert.equal(overlayForEditing({ id: 'ov_1', layers: [] }, project), null);
 }
 
+// プレビューの ＋重ね合わせ は必ず「新規登録」で開くこと。表示中の重ね合わせを
+// existing として渡していたため、1 セット目を登録したあともう一度押すと編集
+// モーダルが開き、2 セット目を作ったつもりで 1 セット目を上書きしていた
+// (プレビューからは 1 セットしか持てなかった)。主画面の #btn-add-overlay と同じ。
+function testPreviewAddOverlayAlwaysAdds() {
+  const at = html.indexOf("querySelector('[data-add-overlay]')");
+  assert.notEqual(at, -1, 'missing the preview ＋重ね合わせ wiring');
+  const end = html.indexOf('openOverlayModal from preview failed', at);
+  assert.notEqual(end, -1, 'missing the add-overlay click handler');
+  const handler = html.slice(at, end);
+  assert.match(handler, /openOverlayModal\(null\)/,
+    '＋重ね合わせ は新規登録で開くこと');
+  assert.doesNotMatch(handler, /openOverlayModal\(\s*overlayForEditing/,
+    '表示中の重ね合わせを編集対象として渡さないこと (2 セット目が作れなくなる)');
+  assert.doesNotMatch(handler, /openOverlayModal\(\s*App\.activeOverlay/,
+    '表示中の重ね合わせを編集対象として渡さないこと (2 セット目が作れなくなる)');
+  // 編集の導線は各行の ✎ に移した
+  assert.match(html, /data-ov-edit-row/, '行ごとの編集ボタンがあること');
+}
+
+// 登録済み一覧の署名。件数・名前・色・構成分子のどれが変わっても違う値になること。
+function testOverlayListSignature() {
+  const { preview } = makePreviewContext({});
+  const sig = (overlays) => preview._overlayListSignature({ overlays });
+  const a = { id: 'ov_1', name: 'A', layers: [{ key: 'MSI_x', color: '#ff00ff' }] };
+
+  assert.equal(sig([]), sig([]), '空同士は同じ');
+  assert.notEqual(sig([a]), sig([]), '追加で変わる');
+  assert.notEqual(sig([a]), sig([Object.assign({}, a, { name: 'B' })]), '改名で変わる');
+  assert.notEqual(sig([a]), sig([Object.assign({}, a, { layers: [{ key: 'MSI_x', color: '#00ff00' }] })]),
+    '色替えで変わる');
+  assert.notEqual(sig([a]), sig([Object.assign({}, a, { layers: [{ key: 'MSI_y', color: '#ff00ff' }] })]),
+    '構成分子の入れ替えで変わる');
+  assert.equal(sig([a]), sig([Object.assign({}, a)]), '同じ内容なら同じ');
+}
+
+// Method 表は open() でしか組んでいなかったので、プレビューの中で重ね合わせを
+// 登録しても行が一覧に出てくるのは開き直したあとだった。一覧が変わったときだけ
+// 組み直す (化合物の行まで毎回作り直すのは重い)。
+function testRefreshRebuildsMethodListOnOverlayChange() {
+  const project = { overlays: [] };
+  const App = { focusCompoundKey: 'MSI_A', activeOverlay: null, project };
+  const { preview } = makePreviewContext({ App, buildCompoundTitle: () => 'title' });
+  let listRenders = 0;
+  preview.isOpen = () => true;
+  preview.overlay = { querySelector: () => null };
+  preview._renderMethodList = () => {
+    listRenders++;
+    preview._methodListOvSig = preview._overlayListSignature(project);
+  };
+  for (const m of ['_renderMethodHighlight', '_renderImageGrid', '_renderStatsTable',
+                   '_renderHeaderScalebar', '_refreshRangeInputs', '_drawColorbar']) {
+    preview[m] = () => {};
+  }
+  preview._methodListOvSig = preview._overlayListSignature(project);
+
+  preview.refresh(project);
+  assert.equal(listRenders, 0, '一覧が変わっていなければ組み直さない');
+
+  project.overlays.push({ id: 'ov_1', name: 'A', layers: [{ key: 'MSI_x', color: '#ff00ff' }] });
+  preview.refresh(project);
+  assert.equal(listRenders, 1, '1 セット目の登録で組み直すこと');
+
+  project.overlays.push({ id: 'ov_2', name: 'B', layers: [{ key: 'MSI_y', color: '#00ff00' }] });
+  preview.refresh(project);
+  assert.equal(listRenders, 2, '2 セット目の登録でも組み直すこと');
+
+  preview.refresh(project);
+  assert.equal(listRenders, 2, '変化が無ければ組み直さない');
+
+  project.overlays[0].name = 'A2';
+  preview.refresh(project);
+  assert.equal(listRenders, 3, '改名でも行の表示を追随させること');
+}
+
 // master でも Preview を開けること。CSS の share 限定表示と JS の早期 return が
 // 両方外れていないと「ボタンが出ない / 押しても何も起きない」に戻る。
 function testMasterCanOpenPreview() {
@@ -1092,6 +1167,9 @@ async function main() {
   testCloseRestoresOverlay();
   testForcedHeBackdropDoesNotPersist();
   testOverlayForEditingIgnoresUnregistered();
+  testPreviewAddOverlayAlwaysAdds();
+  testOverlayListSignature();
+  testRefreshRebuildsMethodListOnOverlayChange();
   testMasterCanOpenPreview();
   testStoragePathRule();
   testImportSectionIdKeying();
