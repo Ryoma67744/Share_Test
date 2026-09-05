@@ -520,7 +520,7 @@ Opened from master it runs with admin rights, so the Method table also shows **C
 | **Range (top)** | vmin / vmax shared by all sections. `Reset` returns to the automatic range |
 | **背景除去(Otsu) (top)** | The **same setting** as the main toolbar, reachable without closing the preview (see below) |
 | **`＋重ね合わせ` (top)** | Register a **new** multi-molecule colour overlay (master only, see §10-ter) |
-| **Overlay list (bottom of the Method panel)** | Every registered set, with its colour swatches. Click to display; **`✎` edits that set** (master only) |
+| **Overlay list (right edge)** | Every registered set, with its colour swatches, **grouped at the right edge**. Click to display; **`✎` edits, `×` deletes** (both master only). While an overlay is shown, a 「単一表示へ戻る」 button appears below it |
 | **Stats / colourbar (right)** | Statistics for the selected compound. In overlay mode this becomes a molecule-to-colour legend |
 
 > **About background removal**: the preview checkbox drives the same single setting as the main toolbar's `背景除去(Otsu)`, and **it survives closing the preview** — unlike the Colormap, which is restored on close. The split is deliberate: colormap is a display preference, background removal is an analysis setting. **Adjusting the strength** needs the draggable histogram line, so close the preview and use the ANALYSIS panel.
@@ -533,7 +533,11 @@ Opened from master it runs with admin rights, so the Method table also shows **C
 
 **`＋重ね合わせ`** in the Method (MRM) panel — or the same button at the top of the preview — registers an image with **two or more molecules drawn in different colours on one picture**. Share recipients can **view** master-registered overlays but cannot create or edit them.
 
-**Register as many sets as you like.** Keep one set per question — "Lactate + Citrate", "Glucose + HVA" — and click through the list to compare them. `＋重ね合わせ` always creates a **new** set. To change a set you already registered, use the **`✎` on its row** in the preview, or the `✎` on its chip in the main Method panel; `×` on the chip deletes it.
+**Register as many sets as you like.** Keep one set per question — "Lactate + Citrate", "Glucose + HVA" — and click through the list to compare them. `＋重ね合わせ` always creates a **new** set.
+
+Registered sets are gathered in the **list at the right edge of the preview**. Click a row to display that set; **`✎` edits it and `×` deletes it** (the chips in the main Method panel carry the same `✎` / `×`). To leave overlay mode and go back to a single compound, press **`単一表示へ戻る`** under the list.
+
+> Saving without a name auto-names the set after **the molecules you picked** (`NEG_Lactate + NEG_Citrate`), so several sets stay tellable apart in the list.
 
 The composite is an **additive (light-sum) blend**, so:
 

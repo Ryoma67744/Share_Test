@@ -608,10 +608,45 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
    右端の列は .preview-body の grid で 80px 固定 (カラーバー 18px 前提) なので、
    凡例のときは分子名が読める幅まで広げる。grid のトラック幅は親でしか変えられず、
    クラスはオーバーレイ本体に付ける (_drawColorbar が付け外しする)。 */
-#share-preview-overlay.ov-mode .preview-body {
-    grid-template-columns: var(--preview-method-w, 260px) 6px 1fr 180px;
+/* 一覧や凡例を出すときは右端の列を広げる (既定は 80px = カラーバー 18px 用)。
+   grid のトラック幅は親でしか変えられないので、クラスはオーバーレイ本体に付ける。 */
+#share-preview-overlay.ov-wide .preview-body {
+    grid-template-columns: var(--preview-method-w, 260px) 6px 1fr 210px;
 }
-#share-preview-overlay.ov-mode .preview-colorbar { justify-content:flex-start; }
+#share-preview-overlay.ov-wide .preview-colorbar { justify-content:flex-start; align-items:stretch; }
+/* 重ね合わせの一覧。登録済みのセットをここにまとめる (Method 表の下に混ぜると
+   化合物の行に埋もれ、セットが増えるほど探しづらくなる)。 */
+#share-preview-overlay .cb-ov { align-self:stretch; margin-bottom:12px; min-height:0; display:flex; flex-direction:column; }
+#share-preview-overlay .cb-ov-head {
+    font-size:11px; font-weight:600; color:#cbd5e1; margin-bottom:6px;
+    border-bottom:1px solid #1f2937; padding-bottom:4px;
+}
+#share-preview-overlay .cb-ov-list { display:flex; flex-direction:column; gap:2px; overflow-y:auto; min-height:0; }
+#share-preview-overlay .cb-ov-item {
+    display:flex; align-items:center; gap:4px; font-size:11px; color:#e2e8f0;
+    padding:3px 4px; border-radius:3px; cursor:pointer;
+}
+#share-preview-overlay .cb-ov-item:hover { background:#1e293b; }
+#share-preview-overlay .cb-ov-item.on { background:#1d4ed8; color:#fff; }
+#share-preview-overlay .cb-ov-dots { flex:0 0 auto; }
+#share-preview-overlay .cb-ov-dots i {
+    display:inline-block; width:8px; height:8px; border-radius:50%;
+    margin-right:1px; border:1px solid rgba(255,255,255,0.35);
+}
+#share-preview-overlay .cb-ov-name { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#share-preview-overlay .cb-ov-edit, #share-preview-overlay .cb-ov-del {
+    flex:0 0 auto; display:none; cursor:pointer; padding:0 3px; border-radius:2px; color:#94a3b8;
+}
+/* 登録が master だけなので、編集も削除も master だけ (主画面と同じ権限設計)。 */
+body:not(.share-mode) #share-preview-overlay .cb-ov-edit,
+body:not(.share-mode) #share-preview-overlay .cb-ov-del { display:inline-block; }
+#share-preview-overlay .cb-ov-edit:hover { color:#fff; background:#334155; }
+#share-preview-overlay .cb-ov-del:hover { color:#fff; background:#b91c1c; }
+#share-preview-overlay .cb-ov-single {
+    margin-top:6px; font-size:10px; padding:3px 6px; cursor:pointer;
+    background:#1e293b; color:#cbd5e1; border:1px solid #334155; border-radius:3px;
+}
+#share-preview-overlay .cb-ov-single:hover { background:#334155; color:#fff; }
 #share-preview-overlay .preview-colorbar .cb-legend {
     display:flex; flex-direction:column; gap:6px; align-self:stretch;
     overflow-y:auto; min-height:0;
@@ -631,13 +666,6 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
 }
 /* 重ね合わせの登録は master だけ (主画面の #btn-add-overlay と同じ権限設計。
    共有相手は master が登録した重ね合わせを見るだけ)。 */
-/* 行の ✎ (この重ね合わせを編集)。登録は master だけなので編集も master だけ。 */
-#share-preview-overlay .ov-row-edit { display:none; }
-body:not(.share-mode) #share-preview-overlay .ov-row-edit {
-    display:inline-block; margin-left:6px; cursor:pointer; color:#94a3b8;
-    font-size:11px; padding:0 3px; border-radius:2px;
-}
-body:not(.share-mode) #share-preview-overlay .ov-row-edit:hover { color:#1d4ed8; background:#e0e7ff; }
 #share-preview-overlay [data-add-overlay] { display:none; }
 body:not(.share-mode) #share-preview-overlay [data-add-overlay] {
     display:inline-flex; align-items:center; padding:2px 8px; font-size:11px;
@@ -11956,7 +11984,15 @@ function openOverlayModal(existing) {
             color: r.querySelector('.ov-row-color').value,
         })).filter(l => l.key);
         if (rows.length < 2) { card.querySelector('[data-err]').textContent = '2つ以上の分子を選んでください'; return null; }
-        return { name: name || (rows.length + '色重ね合わせ'), layers: rows, bg: card.querySelector('[name="ovbg"]').value || 'black' };
+        // 既定名は分子名をつなぐ。旧既定は「2色重ね合わせ」で、セットを何組か
+        // 作ると全部同じ名前になり、一覧でどれがどれだか分からなくなっていた。
+        const nameOf = (k) => { const hit = compounds.find(c => c[0] === k); return hit ? hit[1] : String(k).replace(/^MSI_/, ''); };
+        const auto = rows.map(l => nameOf(l.key)).join(' + ');
+        return {
+            name: name || (auto.length > 60 ? (rows.length + '色重ね合わせ') : auto),
+            layers: rows,
+            bg: card.querySelector('[name="ovbg"]').value || 'black',
+        };
     };
     p.then((res) => {
         if (!res) return;
@@ -11976,6 +12012,33 @@ function openOverlayModal(existing) {
     });
 }
 
+// 重ね合わせの削除。主画面のチップとプレビューの一覧の両方から呼ぶので、
+// 確認・後始末 (表示中なら単一表示へ戻す・保存・チップ再描画) を 1 か所に置く。
+// 戻り値は実際に消したかどうか。
+function deleteOverlayById(id) {
+    const overlays = (App.project && App.project.overlays) || [];
+    const o = overlays.find(x => x.id === id);
+    if (!o) return false;
+    if (!confirm('重ね合わせ "' + (o.name || '') + '" を削除しますか?')) return false;
+    App.project.overlays = overlays.filter(x => x.id !== id);
+    if (App.activeOverlay && App.activeOverlay.id === id) App.clearActiveOverlay();
+    App.queueSave();
+    try { renderOverlayBar(); } catch (e) {}
+    try {
+        if (typeof SharePreview !== 'undefined' && SharePreview.isOpen()) {
+            // プレビューは「開いた時点の重ね合わせ」を控えていて close() で戻す。
+            // 消したものがその控えだと、閉じた瞬間に **登録されていない重ね合わせ**
+            // として主画面に復活してしまう (一覧にもチップにも無いので、以後
+            // 選ぶことも消すこともできない幽霊になる)。控えも一緒に落とす。
+            if (SharePreview._overlaySnapshot && SharePreview._overlaySnapshot.id === id) {
+                SharePreview._overlaySnapshot = null;
+            }
+            SharePreview.refresh(App.project);
+        }
+    } catch (e) { console.warn('SharePreview refresh after overlay delete failed', e); }
+    return true;
+}
+
 function bindOverlayUi() {
     const addBtn = document.getElementById('btn-add-overlay');
     if (addBtn && !addBtn._ovBound) { addBtn._ovBound = true; addBtn.addEventListener('click', () => openOverlayModal(null)); }
@@ -11988,15 +12051,7 @@ function bindOverlayUi() {
             const editEl = ev.target.closest && ev.target.closest('[data-ov-edit]');
             if (editEl) { const o = byId(editEl.getAttribute('data-ov-edit')); if (o) openOverlayModal(o); return; }
             const delEl = ev.target.closest && ev.target.closest('[data-ov-del]');
-            if (delEl) {
-                const id = delEl.getAttribute('data-ov-del'); const o = byId(id);
-                if (o && confirm('重ね合わせ "' + (o.name || '') + '" を削除しますか?')) {
-                    App.project.overlays = overlays.filter(x => x.id !== id);
-                    if (App.activeOverlay && App.activeOverlay.id === id) App.clearActiveOverlay();
-                    App.queueSave(); renderOverlayBar();
-                }
-                return;
-            }
+            if (delEl) { deleteOverlayById(delEl.getAttribute('data-ov-del')); return; }
             if (ev.target.closest && ev.target.closest('[data-ov-reset]')) { App.clearActiveOverlay(); return; }
             const chip = ev.target.closest && ev.target.closest('[data-ov-id]');
             if (chip) {
@@ -17086,7 +17141,6 @@ const SharePreview = {
     _savedColormap: null,       // colormap name to restore on close
     _overlaySnapshot: undefined, // App.activeOverlay to restore on close (undefined = not open)
     _savedViewMode: null,       // App.viewMode to restore on close ('free' / 'compound')
-    _methodListOvSig: null,     // 重ね合わせ一覧の署名。変わったら Method 表を組み直す
     _opacityRaf: 0,             // rAF handle coalescing slider events
     _pendingOpacity: 1,         // last slider value queued for next rAF
     _cellTransforms: [],        // per-cell {tx, ty, scale}
@@ -17642,6 +17696,11 @@ const SharePreview = {
                     </div>
                 </div>
                 <div class="preview-colorbar">
+                    <div class="cb-ov" data-ov-panel hidden>
+                        <div class="cb-ov-head">重ね合わせ</div>
+                        <div class="cb-ov-list" data-ov-list></div>
+                        <button type="button" class="cb-ov-single" data-ov-single hidden>単一表示へ戻る</button>
+                    </div>
                     <span class="cb-label" data-cb-label>×10<sup>4</sup></span>
                     <canvas data-colorbar></canvas>
                     <div class="cb-legend" data-cb-legend hidden></div>
@@ -17802,6 +17861,7 @@ const SharePreview = {
 
         this._drawColorbar();
         this._renderMethodList(project);
+        this._renderOverlayPanel(project);
         // The first Preview render follows the same await/rebake path as every
         // later MRM selection, so an uncached initial compound cannot snapshot
         // the previous HE/TIC-only canvas and remain stale indefinitely.
@@ -17862,13 +17922,9 @@ const SharePreview = {
         if (titleEl) titleEl.textContent = App.activeOverlay
             ? ('重ね合わせ: ' + (App.activeOverlay.name || ''))
             : buildCompoundTitle(focusKey, project, this.role);
-        // Method 表は open() でしか組んでいなかったので、プレビューの中で
-        // 重ね合わせを登録しても、その行が一覧に出てくるのは開き直したあとだった
-        // (2 セット目以降を作っても画面上は増えない)。一覧が変わったときだけ
-        // 組み直す — 化合物の行まで毎回作り直すのは重いので、署名で見分ける。
-        if (this._overlayListSignature(project) !== this._methodListOvSig) {
-            this._renderMethodList(project);
-        }
+        // 重ね合わせの一覧は右端の列。登録・削除・改名にその場で追随させたいので
+        // 毎回組み直す (行数は数件で、化合物の表と違って作り直しても軽い)。
+        this._renderOverlayPanel(project);
         this._renderMethodHighlight(focusKey);
         this._renderImageGrid(project, focusKey);
         this._renderStatsTable(project, focusKey);
@@ -18163,7 +18219,6 @@ const SharePreview = {
         // 「分子 = 色」の凡例に差し替える。
         if (ov && Array.isArray(ov.layers) && ov.layers.length) {
             cv.hidden = true;
-            this.overlay.classList.add('ov-mode');
             if (cbLabel) cbLabel.hidden = true;
             if (legend) {
                 const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
@@ -18180,12 +18235,13 @@ const SharePreview = {
                     + '色は「＋重ね合わせ」で分子ごとに変更できます</div>';
                 legend.hidden = false;
             }
+            this._syncColorbarWidth();
             return;
         }
         cv.hidden = false;
-        this.overlay.classList.remove('ov-mode');
         if (cbLabel) cbLabel.hidden = false;
         if (legend) { legend.hidden = true; legend.innerHTML = ''; }
+        this._syncColorbarWidth();
         cv.width = 18;
         cv.height = 256;
         const ctx = get2dContext(cv);
@@ -18292,19 +18348,10 @@ const SharePreview = {
                     : [compoundTd, precursorTd, productTd]);
             return `<tr data-key="${safe(key)}">${tds.join('')}</tr>`;
         });
-        // Registered molecule overlays appear after the compounds — but only
-        // when the master registered any (project.overlays non-empty), which
-        // satisfies "show in the shared preview only if master registered it".
-        const esc2 = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-        const ncol = colDefs.length;
-        const overlayRows = ((project.overlays) || []).map(ov => {
-            const dots = (ov.layers || []).map(l => `<span style="display:inline-block;width:9px;height:9px;border-radius:50%;background:${esc2(l.color || '#fff')};margin-right:2px;border:1px solid rgba(0,0,0,0.3);vertical-align:middle;"></span>`).join('');
-            // ✎ は「この行の重ね合わせを編集」。主画面のチップの ✎ と同じ役割で、
-            // master だけに出す (CSS)。行そのもののクリックは従来どおり表示切替。
-            return `<tr data-overlay-id="${esc2(ov.id)}" class="overlay-row"><td class="compound-cell" colspan="${ncol}">${dots}${esc2(ov.name || 'overlay')} <span style="color:#94a3b8;">(重ね合わせ)</span><span class="ov-row-edit" data-ov-edit-row="${esc2(ov.id)}" title="この重ね合わせを編集">✎</span></td></tr>`;
-        }).join('');
-        body.innerHTML = rows.join('') + overlayRows;
-        this._methodListOvSig = this._overlayListSignature(project);
+        // 重ね合わせは右端の列 (_renderOverlayPanel) にまとめる。以前はこの表の
+        // 末尾に混ぜていたが、化合物が数十行ある中に埋もれ、セットが増えるほど
+        // 探しづらくなっていた。
+        body.innerHTML = rows.join('');
 
         body.querySelectorAll('tr[data-key]').forEach(tr => {
             tr.addEventListener('click', () => {
@@ -18320,18 +18367,57 @@ const SharePreview = {
                 this._selectCompound(key).catch(e => console.warn('Preview MRM load failed', e));
             });
         });
-        body.querySelectorAll('tr[data-overlay-id]').forEach(tr => {
-            tr.addEventListener('click', (ev) => {
-                const ov = ((project.overlays) || []).find(o => o.id === tr.getAttribute('data-overlay-id'));
+    },
+
+    // 右端の列にまとめた重ね合わせの一覧。登録済みセットをクリックで切り替え、
+    // master は ✎ で編集 / × で削除できる (権限の出し分けは CSS)。
+    // 化合物の行 (数十〜千行) とは分けてあるので、毎回の refresh で作り直しても軽い。
+    _renderOverlayPanel(project) {
+        const panel = this.overlay && this.overlay.querySelector('[data-ov-panel]');
+        const list = this.overlay && this.overlay.querySelector('[data-ov-list]');
+        const single = this.overlay && this.overlay.querySelector('[data-ov-single]');
+        if (!panel || !list) return;
+        const overlays = (project && project.overlays) || [];
+        panel.hidden = overlays.length === 0;
+        this._syncColorbarWidth();
+        if (!overlays.length) { list.innerHTML = ''; if (single) single.hidden = true; return; }
+
+        const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+        const activeId = App.activeOverlay && App.activeOverlay.id;
+        list.innerHTML = overlays.map(ov => {
+            const dots = (ov.layers || []).map(l =>
+                `<i style="background:${esc(l.color || '#fff')};"></i>`).join('');
+            const nm = ov.name || 'overlay';
+            return '<div class="cb-ov-item' + (ov.id === activeId ? ' on' : '') + '"'
+                + ' data-ov-id="' + esc(ov.id) + '" title="' + esc(nm) + '">'
+                + '<span class="cb-ov-dots">' + dots + '</span>'
+                + '<span class="cb-ov-name">' + esc(nm) + '</span>'
+                + '<span class="cb-ov-edit" data-ov-edit-row="' + esc(ov.id) + '" title="編集">✎</span>'
+                + '<span class="cb-ov-del" data-ov-del-row="' + esc(ov.id) + '" title="削除">×</span>'
+                + '</div>';
+        }).join('');
+        if (single) single.hidden = !App.activeOverlay;
+
+        list.querySelectorAll('.cb-ov-item').forEach(el => {
+            el.addEventListener('click', (ev) => {
+                const id = el.getAttribute('data-ov-id');
+                const ov = ((App.project && App.project.overlays) || []).find(o => o.id === id);
                 if (!ov) return;
-                // ✎ は編集。行の表示切替と両方走らないよう、ここで打ち切る。
-                if (ev && ev.target && ev.target.closest && ev.target.closest('[data-ov-edit-row]')) {
+                const t = ev && ev.target;
+                // ✎ / × は表示切替と両方走らせない。
+                if (t && t.closest && t.closest('[data-ov-edit-row]')) {
                     ev.stopPropagation();
                     const editable = overlayForEditing(ov, App.project);
                     if (editable) {
                         try { openOverlayModal(editable); }
-                        catch (e) { console.warn('openOverlayModal from preview row failed', e); }
+                        catch (e) { console.warn('openOverlayModal from preview list failed', e); }
                     }
+                    return;
+                }
+                if (t && t.closest && t.closest('[data-ov-del-row]')) {
+                    ev.stopPropagation();
+                    // 確認・後始末・再描画は deleteOverlayById が持つ (主画面と共通)。
+                    try { deleteOverlayById(id); } catch (e) { console.warn('overlay delete failed', e); }
                     return;
                 }
                 this._focusLoadSeq++;
@@ -18342,25 +18428,32 @@ const SharePreview = {
                 this.refresh(App.project);
             });
         });
+        if (single && !single._ovBound) {
+            single._ovBound = true;
+            single.addEventListener('click', () => {
+                try { App.clearActiveOverlay(); } catch (e) {}
+                this.refresh(App.project);
+            });
+        }
     },
 
-    // 登録済み重ね合わせの一覧が変わったかを見る署名。件数だけでなく名前・色・
-    // 構成分子も含めるので、改名や色替えでも行の表示が追随する。
-    _overlayListSignature(project) {
-        return ((project && project.overlays) || [])
-            .map(o => o.id + '\u0000' + (o.name || '') + '\u0000'
-                + (o.layers || []).map(l => l.key + ':' + l.color).join(','))
-            .join('\u0001');
+    // 右端の列を広げるか。一覧か凡例のどちらかが出ているときは広げる。
+    _syncColorbarWidth() {
+        if (!this.overlay) return;
+        const panel = this.overlay.querySelector('[data-ov-panel]');
+        const legend = this.overlay.querySelector('[data-cb-legend]');
+        const wide = !!((panel && !panel.hidden) || (legend && !legend.hidden));
+        this.overlay.classList.toggle('ov-wide', wide);
     },
 
     _renderMethodHighlight(focusKey) {
         const body = this.overlay.querySelector('[data-method-body]');
         if (!body) return;
+        // 重ね合わせは右端の一覧が自分で on/off を描くので、ここは化合物の行だけ。
+        // 重ね合わせ表示中はどの化合物も選ばれていないので全部外す。
         const ov = App.activeOverlay;
         body.querySelectorAll('tr').forEach(tr => {
-            const ovId = tr.getAttribute('data-overlay-id');
-            if (ovId) tr.classList.toggle('active', !!(ov && ov.id === ovId));
-            else tr.classList.toggle('active', !ov && tr.getAttribute('data-key') === focusKey);
+            tr.classList.toggle('active', !ov && tr.getAttribute('data-key') === focusKey);
         });
     },
 
