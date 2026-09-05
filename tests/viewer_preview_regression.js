@@ -239,6 +239,234 @@ function testRangeResetAndSingleRepaint() {
     'one Range change should repaint each panel exactly once');
 }
 
+// 重ね合わせの既定色。加算合成 (globalCompositeOperation='lighter') なので、
+// 先頭 2 色は光の成分が重ならない組でなければ「白 = 共局在」と読めない。
+// 旧既定は赤+緑で、最も多い色覚型では区別できなかった。
+function testOverlayDefaultPalette() {
+  const m = /const OVERLAY_DEFAULT_PALETTE = (\[[^\]]*\]);/.exec(html);
+  assert.ok(m, 'missing OVERLAY_DEFAULT_PALETTE');
+  const palette = JSON.parse(m[1].replace(/'/g, '"'));
+  assert.ok(palette.length >= 3, 'need at least three default channels');
+
+  const rgb = (hex) => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16));
+  const [c1, c2] = palette.slice(0, 2).map(rgb);
+  // 1 色目と 2 色目は成分が排他 (どのチャンネルも両方には現れない)。
+  for (let ch = 0; ch < 3; ch++) {
+    assert.ok(!(c1[ch] > 0 && c2[ch] > 0),
+      '1色目と2色目は光の成分が重なってはいけない (共局在が白として読めなくなる): ' + palette.slice(0, 2));
+  }
+  // 赤+緑 (最も多い色覚型で区別できない組) を既定の隣り合わせにしない。
+  const isRedish = (c) => c[0] > 150 && c[1] < 100 && c[2] < 100;
+  const isGreenish = (c) => c[1] > 150 && c[0] < 100 && c[2] < 100;
+  for (let i = 1; i < palette.length; i++) {
+    const a = rgb(palette[i - 1]); const b = rgb(palette[i]);
+    assert.ok(!((isRedish(a) && isGreenish(b)) || (isGreenish(a) && isRedish(b))),
+      '赤と緑を既定で隣り合わせにしない: ' + palette[i - 1] + ' / ' + palette[i]);
+  }
+
+  const limit = /const OVERLAY_ADDITIVE_LIMIT = (\d+);/.exec(html);
+  assert.ok(limit && Number(limit[1]) >= 2, 'missing OVERLAY_ADDITIVE_LIMIT');
+}
+
+// _rebakeCellImages は「中身があるか」を focusKey だけで見ていたので、重ね合わせ中に
+// その切片へ focusKey の化合物が無いと黙って早期 return し、Otsu の切り替えも
+// Range の変更もセルへ反映されなかった。_renderImageGrid と同じ判定に揃える。
+function testRebakeCellImagesFollowsOverlay() {
+  const img = { src: 'OLD', decode() { return Promise.resolve(); } };
+  const wrap = { querySelector: (sel) => (sel === '[data-cell-img]' ? img : null) };
+  const grid = { querySelector: (sel) => (/cell-img-wrap/.test(sel) ? wrap : null) };
+  const section = { id: 's1', msiSeries: { MSI_OVERLAY_MEMBER: {} } };   // focusKey の層は無い
+  const panel = { dom: { cdisp: { width: 10, height: 10 } } };
+  const App = {
+    activeOverlay: { layers: [{ key: 'MSI_OVERLAY_MEMBER', color: '#ff00ff' }] },
+    panels: new Map([['s1', panel]]),
+    project: { sections: [section] },
+  };
+  const { preview } = makePreviewContext({ App });
+  preview.overlay = { querySelector: (sel) => (sel === '[data-image-grid]' ? grid : null) };
+  preview._sectionsForGrid = () => [section];
+  preview._sectionRotations = [0];
+  preview._bakeRotatedCanvas = () => ({ toDataURL: () => 'NEW' });
+
+  // 重ね合わせ中 + focusKey がこの切片に無い = 判定が食い違う条件
+  preview._rebakeCellImages(App.project, 'MSI_NOT_IN_THIS_SECTION');
+  assert.equal(img.src, 'NEW',
+    '重ね合わせ中は focusKey がその切片に無くてもセルを焼き直すこと');
+
+  // 重ね合わせが無いときは従来どおり focusKey で判断する
+  img.src = 'OLD';
+  App.activeOverlay = null;
+  preview._rebakeCellImages(App.project, 'MSI_NOT_IN_THIS_SECTION');
+  assert.equal(img.src, 'OLD', '単一表示では存在しない focusKey を焼かない');
+  preview._rebakeCellImages(App.project, 'MSI_OVERLAY_MEMBER');
+  assert.equal(img.src, 'NEW', '単一表示でも存在する focusKey なら焼く');
+}
+
+// カラーバーは単一化合物の強度目盛り。重ね合わせ中に出し続けると、画面の色
+// (分子ごとの単色 LUT の加算) と対応しない目盛りを見せることになる。
+function testColorbarBecomesLegendInOverlayMode() {
+  const mkEl = () => ({
+    hidden: false, innerHTML: '', width: 0, height: 0,
+    getContext: () => ({
+      createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+      putImageData() {},
+    }),
+  });
+  const cv = mkEl(); const legend = mkEl(); const label = mkEl();
+  const classes = new Set();
+  const App = {
+    activeOverlay: { layers: [{ key: 'MSI_Lactate', color: '#ff00ff' }, { key: 'MSI_Citrate', color: '#00ff00' }] },
+    project: {},
+  };
+  const { preview } = makePreviewContext({
+    App,
+    findCompoundMeta: () => null,
+    formatDisplayName: (k) => String(k).replace(/^MSI_/, ''),
+    get2dContext: (c) => c.getContext('2d'),
+    getActiveColormap: () => Array.from({ length: 256 }, () => [0, 0, 0]),
+  });
+  const bySel = { '[data-colorbar]': cv, '[data-cb-legend]': legend, '[data-cb-label]': label };
+  preview.overlay = {
+    querySelector: (sel) => bySel[sel] || null,
+    classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c) },
+  };
+
+  preview._drawColorbar();
+  assert.equal(cv.hidden, true, '重ね合わせ中はグラデーションを出さない');
+  assert.equal(legend.hidden, false);
+  assert.ok(classes.has('ov-mode'), '凡例のぶん右端の列を広げるクラスが付くこと');
+  assert.match(legend.innerHTML, /#ff00ff/, '1色目の色見本');
+  assert.match(legend.innerHTML, /Lactate/, '分子名');
+  assert.match(legend.innerHTML, /共局在/, '白 = 共局在 の説明');
+
+  App.activeOverlay = null;
+  preview._drawColorbar();
+  assert.equal(cv.hidden, false, '単一表示ではグラデーションへ戻す');
+  assert.equal(legend.hidden, true);
+  assert.equal(legend.innerHTML, '');
+  assert.ok(!classes.has('ov-mode'));
+}
+
+// close() は opacity / 表示レイヤー / HE グレースケール / 配色 を戻すのに、
+// 重ね合わせだけ戻していなかった。プレビューで重ね合わせにして閉じると主画面が
+// 重ね合わせのまま残る。master がプレビューを使い始めると必ず踏む。
+function testCloseRestoresOverlay() {
+  const before = { id: 'ov_before', layers: [] };
+  const after = { id: 'ov_after', layers: [] };
+  const setCalls = [];
+  const modeCalls = [];
+  const App = {
+    activeOverlay: before,
+    setActiveOverlay(def) { setCalls.push(def); this.activeOverlay = def; },
+    // open() は Compound へ倒すが setViewMode は localStorage にも書くので、
+    // 戻さないと「相手の見え方を確かめただけ」で master の主画面が恒久的に
+    // Compound へ変わる。
+    viewMode: 'compound',
+    setViewMode(m) { modeCalls.push(m); this.viewMode = m; },
+    panels: new Map(),
+    roiOnlyMode: false,
+  };
+  const { preview } = makePreviewContext({ App, cancelAnimationFrame() {} });
+  // open() が撮る控えだけを再現し、DOM に触る復元は差し替える。
+  preview._overlaySnapshot = before;
+  preview._savedViewMode = 'free';    // 開く前は Free だった
+  preview.overlay = { remove() {} };
+  for (const m of ['_restoreGrayscale', '_removeTicBackdrop', '_restoreOpacity',
+                   '_restoreVisibility', '_cancelAdjacentPrefetch']) {
+    preview[m] = () => {};
+  }
+
+  App.activeOverlay = after;          // プレビューの中で別の重ね合わせに切り替えた
+  preview.close();
+  assert.deepEqual(setCalls, [before], 'close() は開いた時点の重ね合わせへ戻すこと');
+  assert.equal(App.activeOverlay, before);
+  assert.equal(preview._overlaySnapshot, undefined, '控えは使い切って捨てること');
+  assert.deepEqual(modeCalls, ['free'], 'close() は開いた時点の表示モードへ戻すこと');
+  assert.equal(preview._savedViewMode, null, '表示モードの控えも使い切ること');
+
+  // 変わっていなければ余計な再描画を起こさない
+  setCalls.length = 0;
+  modeCalls.length = 0;
+  preview._overlaySnapshot = before;
+  preview.overlay = { remove() {} };
+  preview.close();
+  assert.deepEqual(setCalls, [], '変化が無いときは setActiveOverlay を呼ばない');
+  assert.deepEqual(modeCalls, [], '控えが無ければ setViewMode も呼ばない');
+
+  // open() 側で控えを取っていなければ close() は何も戻せない
+  assert.match(html, /this\._savedViewMode = App\.viewMode;/,
+    'open() が表示モードを控えること');
+}
+
+// プレビューは開いている間だけ HE/IF を強制表示する。toggleLayer は
+// section.meta.visibleLayers を書いて App.queueSave() まで呼ぶので、そのまま
+// 使うと「意図的に隠していた histology が、プレビューを開いただけでローカルにも
+// 共有先にも表示状態で保存される」。共有プロジェクトは _doSave が __share で
+// 弾いていたので無害だったが、master で開けるようにした以上そうはいかない。
+function testForcedHeBackdropDoesNotPersist() {
+  const calls = [];
+  const panel = {
+    section: { images: { HE_STAIN_1: {} } },
+    imageSources: { HE_STAIN_1: {} },
+    visibleLayers: new Set(),
+    toggleLayer(key, force, opts) { calls.push({ key, force, opts }); this.visibleLayers.add(key); },
+  };
+  const App = { panels: new Map([['s1', panel]]) };
+  const { preview } = makePreviewContext({ App });
+
+  const touched = preview._forceHeBackdrop();
+  assert.equal(touched, 1, '隠れている HE/IF を 1 枚点けること');
+  assert.equal(calls.length, 1);
+  // vm は別レアルムなので deepEqual はプロトタイプ違いで落ちる。値を直接見る。
+  assert.equal(calls[0].opts && calls[0].opts.persist, false,
+    'プレビューの強制表示は永続化してはいけない (persist:false を渡すこと)');
+
+  // toggleLayer 側がその指示を実際に見ていること
+  assert.match(html, /if \(!opts \|\| opts\.persist !== false\) this\._persistVisibleLayers\(\);/,
+    'toggleLayer が persist:false を尊重すること');
+}
+
+// KMD の「重ねる」が作る kmd-tmp は project.overlays に載らない一時的な定義。
+// それを existing として openOverlayModal に渡すと編集分岐に入り、その場限りの
+// オブジェクトを書き換えて登録しないまま終わる。
+function testOverlayForEditingIgnoresUnregistered() {
+  const context = vm.createContext({});
+  vm.runInContext(
+    extractTopLevelFunction('overlayForEditing') + '\nthis.api = { overlayForEditing };',
+    context,
+  );
+  const { overlayForEditing } = context.api;
+  const registered = { id: 'ov_1', layers: [] };
+  const tmp = { id: 'kmd-tmp', layers: [] };
+  const project = { overlays: [registered] };
+
+  assert.equal(overlayForEditing(registered, project), registered, '登録済みは編集として開く');
+  assert.equal(overlayForEditing(tmp, project), null, 'kmd-tmp は新規登録として開く');
+  assert.equal(overlayForEditing(null, project), null);
+  assert.equal(overlayForEditing(registered, {}), null, 'overlays が無ければ新規扱い');
+  assert.equal(overlayForEditing(registered, null), null);
+  // id が同じでも別オブジェクトなら編集対象にしない (同一性で判定する)
+  assert.equal(overlayForEditing({ id: 'ov_1', layers: [] }, project), null);
+}
+
+// master でも Preview を開けること。CSS の share 限定表示と JS の早期 return が
+// 両方外れていないと「ボタンが出ない / 押しても何も起きない」に戻る。
+function testMasterCanOpenPreview() {
+  assert.doesNotMatch(html, /body\.share-mode #btn-share-preview \{ display:inline-flex; \}/,
+    'Preview ボタンを share 限定で出す CSS が残っている');
+  // 日本語コメントを含むので固定長では切り出さない。ハンドラの始点と、その中で
+  // 必ず一度だけ現れる SharePreview.open の catch までを本文とする。
+  const startAt = html.indexOf("getElementById('btn-share-preview')");
+  assert.notEqual(startAt, -1, 'missing #btn-share-preview handler');
+  const endAt = html.indexOf("console.warn('SharePreview.open failed'", startAt);
+  assert.notEqual(endAt, -1, 'missing SharePreview.open call in the handler');
+  const handler = html.slice(startAt, endAt);
+  assert.doesNotMatch(handler, /!this\.shareMode\s*\|\|/,
+    'ハンドラに share 限定の早期 return が残っている');
+  assert.match(handler, /this\.shareMode \? \(this\.shareMode\.role \|\| 'viewer'\) : 'admin'/,
+    'master には admin role を渡すこと (CE/CV 列が出なくなる)');
+}
+
 async function testWorkerXlsxDecodeCache() {
   let arrayBufferCalls = 0;
   let parseCalls = 0;
@@ -845,6 +1073,8 @@ async function main() {
   compileInlineScripts('index.html', 1);
   compileInlineScripts('mrm.html', 1);
   assert.match(html, /data-preview-range-reset/);
+  assert.match(html, /data-otsu-toggle/);   // プレビューの背景除去(Otsu)
+  assert.match(html, /data-add-overlay/);   // プレビューの ＋重ね合わせ
   assert.doesNotMatch(html, /data-organ-select/);
   assert.match(html, /parseXlsxSheet, rowsFromParsedXlsx, parseXlsxToRows/);
   await testFocusLoadAndRaceGuard();
@@ -856,6 +1086,13 @@ async function main() {
   testWorkerBakePath();
   await testWorkerRawDecodePath();
   testFunctionTypeFlagsAreMasked();
+  testOverlayDefaultPalette();
+  testRebakeCellImagesFollowsOverlay();
+  testColorbarBecomesLegendInOverlayMode();
+  testCloseRestoresOverlay();
+  testForcedHeBackdropDoesNotPersist();
+  testOverlayForEditingIgnoresUnregistered();
+  testMasterCanOpenPreview();
   testStoragePathRule();
   testImportSectionIdKeying();
   console.log('viewer preview regression tests: PASS');

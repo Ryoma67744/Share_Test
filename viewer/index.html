@@ -285,7 +285,11 @@ body.splitting-v { cursor:row-resize !important; }
 .empty-shell { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; height:100%; color:#475569; padding:30px; text-align:center; }
 .empty-shell h2 { font-size:18px; font-weight:600; color:#0f172a; }
 .empty-shell p { max-width:520px; font-size:13px; line-height:1.5; }
-.toast-host { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); z-index:80; display:flex; flex-direction:column; gap:6px; pointer-events:none; }
+/* トーストはプレビュー (z-index:9000) やモーダル (10000) の上に出す。
+   80 のままだと、背景除去の「計算中… (N 切片)」のような進捗が
+   プレビューを開いている間ずっと見えなかった。pointer-events:none なので
+   最前面に置いても操作を邪魔しない。 */
+.toast-host { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); z-index:10050; display:flex; flex-direction:column; gap:6px; pointer-events:none; }
 .toast { background:#0f172a; color:#fff; padding:6px 14px; font-size:12px; border-radius:9999px; opacity:0.92; }
 #method-rows tr.method-row { cursor:pointer; }
 #method-rows tr.method-row:hover { background:#f1f5f9; }
@@ -598,15 +602,61 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
 #share-preview-overlay .preview-colorbar canvas {
     flex:1 1 auto; width:18px; min-height:0; image-rendering:pixelated;
 }
+/* 重ね合わせ中はグラデーションの代わりに「分子 = 色」の凡例を出す。カラーバーは
+   単一化合物の強度目盛りなので、加算合成の画面に並べると画面の色と対応しない
+   目盛りを見せることになる。
+   右端の列は .preview-body の grid で 80px 固定 (カラーバー 18px 前提) なので、
+   凡例のときは分子名が読める幅まで広げる。grid のトラック幅は親でしか変えられず、
+   クラスはオーバーレイ本体に付ける (_drawColorbar が付け外しする)。 */
+#share-preview-overlay.ov-mode .preview-body {
+    grid-template-columns: var(--preview-method-w, 260px) 6px 1fr 180px;
+}
+#share-preview-overlay.ov-mode .preview-colorbar { justify-content:flex-start; }
+#share-preview-overlay .preview-colorbar .cb-legend {
+    display:flex; flex-direction:column; gap:6px; align-self:stretch;
+    overflow-y:auto; min-height:0;
+}
+#share-preview-overlay .preview-colorbar .cb-legend .cb-item {
+    display:flex; align-items:center; gap:6px; font-size:11px; color:#e2e8f0;
+}
+#share-preview-overlay .preview-colorbar .cb-legend .cb-swatch {
+    width:14px; height:14px; border-radius:2px; flex:0 0 auto;
+    border:1px solid rgba(255,255,255,0.35);
+}
+#share-preview-overlay .preview-colorbar .cb-legend .cb-name {
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+#share-preview-overlay .preview-colorbar .cb-legend .cb-note {
+    font-size:10px; color:#94a3b8; margin-top:2px; line-height:1.4; white-space:normal;
+}
+/* 重ね合わせの登録は master だけ (主画面の #btn-add-overlay と同じ権限設計。
+   共有相手は master が登録した重ね合わせを見るだけ)。 */
+#share-preview-overlay [data-add-overlay] { display:none; }
+body:not(.share-mode) #share-preview-overlay [data-add-overlay] {
+    display:inline-flex; align-items:center; padding:2px 8px; font-size:11px;
+    border:1px solid #64748b; border-radius:3px; background:#1e293b; color:#e2e8f0; cursor:pointer;
+}
+body:not(.share-mode) #share-preview-overlay [data-add-overlay]:hover { background:#334155; }
 
-/* Re-open button injected next to the share-mode banner. */
+/* share-mode バナーの隣に置いた Preview の開閉ボタン。
+   共有相手だけでなく master でも出す。プレビューは「相手にどう見えるか」を
+   公開前に確かめる画面なので、作る側こそ必要になる。SharePreview 自体は
+   share mode に依存していない (App.project と MSI レイヤーがあれば動く)。
+   青は共有時のまま、master 側は隣に並ぶ .btn と同じ見た目にする。 */
 #btn-share-preview {
-    display:none; align-items:center; gap:4px; padding:2px 8px;
+    display:inline-flex; align-items:center; gap:4px; padding:2px 8px;
     background:#1d4ed8; color:#fff; font-size:11px; border-radius:3px;
     border:1px solid #1d4ed8; cursor:pointer; margin-right:4px;
 }
 #btn-share-preview:hover { background:#1e40af; border-color:#1e40af; }
-body.share-mode #btn-share-preview { display:inline-flex; }
+body:not(.share-mode) #btn-share-preview {
+    background:#fff; color:#374151; border-color:#d1d5db;
+}
+body:not(.share-mode) #btn-share-preview:hover { background:#f3f4f6; border-color:#9ca3af; }
+/* プレビュー内の「🔑 Admin」は共有相手が昇格するためのものなので master には
+   出さないが、その出し分けは open() が既に inline style で行っている
+   (`if (!inShareMode || isAdmin) ... display='none'`)。CSS を重ねると
+   片方だけ直されて食い違うので、ここには書かない。 */
 
 /* ===== Mobile bottom tab bar + drawers (active only ≤900px) ===== */
 #m-tabbar, #m-drawer-backdrop { display:none; }
@@ -2979,6 +3029,12 @@ function _hexToRgb(hex) {
     const m = /^#?([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(String(hex || '').trim());
     return m ? [parseInt(m[1], 16), parseInt(m[2], 16), parseInt(m[3], 16)] : [255, 255, 255];
 }
+// 重ね合わせの既定色。色覚多様性に配慮し、先頭 2 色をマゼンタ+緑にしてある
+// (理由は openOverlayModal のコメント)。テストがこの並びを固定している。
+const OVERLAY_DEFAULT_PALETTE = ['#ff00ff', '#00ff00', '#00ffff', '#ffff00', '#ff8c00', '#b388ff'];
+// 加算合成でまだ色を読み分けられるチャンネル数の上限。超えたら注意を出す。
+const OVERLAY_ADDITIVE_LIMIT = 3;
+
 const _monoLutCache = {};
 function monoLut(hex) {
     const key = String(hex || '#ffffff').toLowerCase();
@@ -8053,14 +8109,17 @@ class SectionPanel {
         if (typeof App !== 'undefined' && App && App.queueSave) App.queueSave();
     }
 
-    toggleLayer(key, force) {
+    // opts.persist === false: 表示だけ変えて section.meta.visibleLayers に書かず
+    // App.queueSave() も呼ばない。プレビューのように「開いている間だけ強制的に
+    // 見せて、閉じたら元に戻す」一時的な切り替え専用。
+    toggleLayer(key, force, opts) {
         const want = (force === undefined) ? !this.visibleLayers.has(key) : !!force;
         if (want) this.visibleLayers.add(key); else this.visibleLayers.delete(key);
         if (/^MSI_/i.test(key)) {
             if (want) this.activeMsiKey = key;
             else if (this.activeMsiKey === key) this.activeMsiKey = this.fallbackActiveMsiKey();
         }
-        this._persistVisibleLayers();
+        if (!opts || opts.persist !== false) this._persistVisibleLayers();
         this.rebuildLayerBar();
         this.renderComposite();
         this.drawAllRois();
@@ -11801,11 +11860,30 @@ function renderOverlayBar() {
     host.innerHTML = html;
 }
 
+// 「編集として開いてよい重ね合わせか」。project.overlays に載っている定義だけが
+// 編集対象で、KMD の「重ねる」が作る kmd-tmp のような保存されない一時定義は
+// null を返す (existing として渡すと openOverlayModal が編集分岐に入り、その場
+// 限りのオブジェクトを書き換えて登録しないまま終わるため)。
+function overlayForEditing(ov, project) {
+    if (!ov) return null;
+    const list = (project && project.overlays) || [];
+    return list.indexOf(ov) >= 0 ? ov : null;
+}
+
 function openOverlayModal(existing) {
     const ov = existing || { name: '', layers: [], bg: 'black' };
     const compounds = _allMsiCompounds();
     if (compounds.length < 2) { showToast('重ね合わせには2つ以上のMSI化合物が必要です'); return; }
-    const palette = ['#ff3030', '#30ff30', '#3090ff', '#ffcf00', '#ff30ff', '#30ffff'];
+    // 重ね合わせは加算合成 (renderComposite の globalCompositeOperation='lighter')
+    // なので、既定色は「光の成分が重ならない順」に並べる。
+    //   1 マゼンタ (R+B) / 2 緑 (G) … この 2 色は成分が排他なので
+    //     マゼンタ単独 = 分子A / 緑単独 = 分子B / 白 = 共局在
+    //   と色だけで読める。旧既定の 1 番目 2 番目は赤+緑で、最も多い色覚型では
+    //   区別できなかった (顕微鏡分野で赤緑をこの組に置き換えるのは定石)。
+    //   3 シアン (G+B) は緑と G 成分を共有するので厳密には排他ではない。
+    //   4 色目以降は加算合成では原理的に白へ飽和するため、4 分子以上を選んだら
+    //   OVERLAY_ADDITIVE_LIMIT の注意を出す (登録は止めない)。
+    const palette = OVERLAY_DEFAULT_PALETTE;
     const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
     const optionsHtml = (sel) => compounds.map(([k, n]) => '<option value="' + esc(k) + '"' + (k === sel ? ' selected' : '') + '>' + esc(n) + '</option>').join('');
     const rowHtml = (layer, idx) => {
@@ -11828,6 +11906,7 @@ function openOverlayModal(existing) {
         + '<label style="display:block;font-size:11px;color:#475569;margin-top:8px;">背景'
         +   '<select name="ovbg" style="width:100%;padding:5px 7px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;margin-top:2px;background:#fff;"><option value="black"' + (ov.bg !== 'he' ? ' selected' : '') + '>黒（MSIのみ加算）</option><option value="he"' + (ov.bg === 'he' ? ' selected' : '') + '>HE/IF背景の上</option></select>'
         + '</label>'
+        + '<p data-ov-note style="color:#b45309;font-size:11px;min-height:14px;margin-top:6px;"></p>'
         + '<p data-err style="color:#b91c1c;font-size:11px;min-height:14px;"></p>'
         + '<div class="modal-actions" style="display:flex;gap:6px;justify-content:flex-end;margin-top:14px;">'
         +   '<button type="button" class="btn" data-modal-cancel>Cancel</button>'
@@ -11836,18 +11915,33 @@ function openOverlayModal(existing) {
     const p = openModal(html);
     const card = openModal._card;
     const rowsHost = card.querySelector('[data-ov-rows]');
+    // 4 色以上は加算合成ではどの色も白に近づき、どこに何があるのか読めなくなる。
+    // 止めはしない (「警告はするが止めない」方針) が、黙って通しもしない。
+    // 保存時ではなく行を足した時点で出す — 保存時に出してもモーダルが閉じて
+    // 読まれないため。
+    const noteEl = card.querySelector('[data-ov-note]');
+    const syncOvNote = () => {
+        const n = rowsHost.querySelectorAll('.ov-row').length;
+        noteEl.textContent = n > OVERLAY_ADDITIVE_LIMIT
+            ? ('⚠ ' + n + ' 色の加算合成はどの色も白に近づき、共局在を読み取れなくなります ('
+               + OVERLAY_ADDITIVE_LIMIT + ' 分子までを推奨。登録はできます)')
+            : '';
+    };
     card.querySelector('[data-ov-addrow]').addEventListener('click', () => {
         const idx = rowsHost.querySelectorAll('.ov-row').length;
         const tmp = document.createElement('div');
         tmp.innerHTML = rowHtml(null, idx);
         rowsHost.appendChild(tmp.firstChild);
+        syncOvNote();
     });
     rowsHost.addEventListener('click', (ev) => {
         const del = ev.target.closest && ev.target.closest('.ov-row-del');
         if (!del) return;
         if (rowsHost.querySelectorAll('.ov-row').length <= 1) return;
         del.closest('.ov-row').remove();
+        syncOvNote();
     });
+    syncOvNote();   // 既存の 4 色以上の重ね合わせを編集で開いたときにも出す
     card._collect = () => {
         const name = (card.querySelector('[name="ovname"]').value || '').trim();
         const rows = Array.from(rowsHost.querySelectorAll('.ov-row')).map(r => ({
@@ -16983,6 +17077,8 @@ const SharePreview = {
     // Preview-only state — restored / cleared on close.
     _opacitySnapshot: null,    // Array<{panelId, byKey: Map<msiKey, opacity>}>
     _savedColormap: null,       // colormap name to restore on close
+    _overlaySnapshot: undefined, // App.activeOverlay to restore on close (undefined = not open)
+    _savedViewMode: null,       // App.viewMode to restore on close ('free' / 'compound')
     _opacityRaf: 0,             // rAF handle coalescing slider events
     _pendingOpacity: 1,         // last slider value queued for next rAF
     _cellTransforms: [],        // per-cell {tx, ty, scale}
@@ -17021,6 +17117,24 @@ const SharePreview = {
         }
         this._hiddenSectionIds = null;
         App.activeSectionScope = null;   // stop scoping the main view's window
+        // 重ね合わせを開いた時点の状態へ戻す。opacity / 表示レイヤー / 配色は
+        // 戻していたのにこれだけ抜けており、プレビューで重ね合わせにして閉じると
+        // 主画面が重ね合わせのままだった。setActiveOverlay は自分でパネルを描き
+        // 直すが、下の配色復元ループが最後にもう一度描くので最終状態は正しい。
+        // 表示モードも戻す (setViewMode 経由なので localStorage も一緒に戻る)。
+        if (this._savedViewMode) {
+            const wantMode = this._savedViewMode;
+            this._savedViewMode = null;
+            try { App.setViewMode(wantMode); } catch (e) { console.warn('SharePreview restore viewMode failed', e); }
+        }
+        if (this._overlaySnapshot !== undefined) {
+            const wantOverlay = this._overlaySnapshot;
+            this._overlaySnapshot = undefined;
+            if ((App.activeOverlay || null) !== wantOverlay) {
+                try { App.setActiveOverlay(wantOverlay); }
+                catch (e) { console.warn('SharePreview restore overlay failed', e); }
+            }
+        }
         // サムネイルの焼き直しは 1 枚ずつ同期の toDataURL() なので、配色が
         // 実際に変わったときだけにする (_savedColormap は開くたびに必ず入るので、
         // 「戻した結果いまと同じ」なら焼き直す必要が無い)。
@@ -17129,7 +17243,15 @@ const SharePreview = {
             for (const k of heKeys) {
                 if (panel.imageSources && panel.imageSources[k]
                     && !panel.visibleLayers.has(k)) {
-                    try { panel.toggleLayer(k, true); touched++; } catch (e) {}
+                    // persist:false が要る。プレビューを開いている間だけの強制表示
+                    // なのに、toggleLayer は section.meta.visibleLayers を書いて
+                    // App.queueSave() まで呼ぶ。共有プロジェクトは _doSave が
+                    // __share で弾くので無害だったが、master で開けるようにした
+                    // 以上そのまま 400ms 後に IndexedDB へ、5 秒後に auto-publish
+                    // へ流れる。_restoreVisibility はメモリしか戻さないので、
+                    // 「意図的に隠していた HE/IF が、プレビューを開いただけで
+                    // ローカルにも共有先にも表示状態で残る」ことになる。
+                    try { panel.toggleLayer(k, true, { persist: false }); touched++; } catch (e) {}
                 }
             }
         }
@@ -17413,6 +17535,10 @@ const SharePreview = {
         // Save state we'll need to restore on close. Snapshot must run before
         // any preview-only mutation so we capture the pre-preview values.
         this._savedColormap = _activeColormapName;
+        // 重ね合わせもプレビュー内で切り替えられるので、開いた時点の状態を控える。
+        // close() が戻す (この 1 行が無かったせいで、プレビューで重ね合わせに
+        // してから閉じると主画面が重ね合わせのまま残っていた)。
+        this._overlaySnapshot = App.activeOverlay || null;
         this._snapshotOpacity();
         this._snapshotVisibility();
         this._snapshotGrayscale();
@@ -17430,6 +17556,11 @@ const SharePreview = {
         this._cellTransforms = [];
         this._sectionRotations = [];
 
+        // プレビューは「1 化合物 × 全切片」の画面なので Compound へ倒すが、
+        // setViewMode は localStorage にも書く。戻さないと、相手の見え方を
+        // 確かめただけで master の主画面が (次のセッション以降も) Compound に
+        // 変わってしまうので、開く前のモードを控えて close() で戻す。
+        this._savedViewMode = App.viewMode;
         if (App.viewMode !== 'compound') App.setViewMode('compound');
         const desiredFocus = (App.focusCompoundKey && allKeys.has(App.focusCompoundKey))
             ? App.focusCompoundKey
@@ -17466,9 +17597,13 @@ const SharePreview = {
                     <label>
                         <input type="checkbox" data-he-mono> HE モノクロ
                     </label>
+                    <label title="背景除去(Otsu): 各ピクセルの総信号量(TIC)で背景スポットを自動判定し、全イオン像から一括で非表示にします。生データは変更しません。主画面のツールバーと同じ設定なので、プレビューを閉じても残ります。強度の微調整はプレビューを閉じて ANALYSIS パネルで行ってください。">
+                        <input type="checkbox" data-otsu-toggle> 背景除去(Otsu)
+                    </label>
                     <label data-roi-only-wrap style="display:none;">
                         <input type="checkbox" data-roi-only> ROIのみ
                     </label>
+                    <button type="button" class="preview-add-overlay" data-add-overlay title="2分子以上のカラー重ね合わせを登録・編集する">＋重ね合わせ</button>
                     <button type="button" class="preview-reset-zoom" data-reset-zoom>Reset zoom</button>
                     <button type="button" class="preview-admin-login" data-admin-login title="Admin password でログイン">🔑 Admin</button>
                 </div>
@@ -17499,8 +17634,9 @@ const SharePreview = {
                     </div>
                 </div>
                 <div class="preview-colorbar">
-                    <span class="cb-label">×10<sup>4</sup></span>
+                    <span class="cb-label" data-cb-label>×10<sup>4</sup></span>
                     <canvas data-colorbar></canvas>
+                    <div class="cb-legend" data-cb-legend hidden></div>
                 </div>
             </div>`;
         document.body.appendChild(overlay);
@@ -17557,6 +17693,43 @@ const SharePreview = {
                     }
                 }
                 this.refresh(project);
+            });
+        }
+
+        // 背景除去(Otsu)。Colormap と違い **プレビュー限定ではない**: 主画面
+        // ツールバーの #tb-bg-remove とまったく同じ 1 つの設定 (App.otsuBgRemove)
+        // を切り替える。同じ名前のスイッチが 2 つあって意味が違う状態を作らない
+        // ため。したがって close() の復元対象には入れないこと (配色は「見え方の
+        // 好み」なので戻すが、背景除去は解析の設定なので残す)。
+        const otsuCb = overlay.querySelector('[data-otsu-toggle]');
+        if (otsuCb) {
+            otsuCb.checked = !!App.otsuBgRemove;
+            otsuCb.addEventListener('change', async () => {
+                // setOtsuBgRemove は未計算の切片ぶんマスクを計算するので数秒
+                // かかることがある。連打で多重に走らせない。
+                otsuCb.disabled = true;
+                try { await App.setOtsuBgRemove(otsuCb.checked); }
+                catch (e) { console.warn('[otsu] preview toggle failed', e); }
+                finally { otsuCb.disabled = false; }
+                if (!this.isOpen()) return;
+                // セルの焼き直しとチェック状態の追随は App._rerenderOtsu が
+                // まとめて行う (Otsu の入口 3 つを 1 か所で拾うため)。ここは
+                // 主画面ツールバー側の見た目を揃えるだけ。
+                const tb = document.getElementById('tb-bg-remove');
+                if (tb) tb.checked = !!App.otsuBgRemove;
+            });
+        }
+
+        // ＋重ね合わせ。既存の登録モーダルをそのまま呼ぶ (.modal-backdrop は
+        // z-index:10000、プレビューは 9000 なのでプレビューの上に出る)。
+        // 保存後の追随は App.setActiveOverlay が面倒を見る。
+        const addOvBtn = overlay.querySelector('[data-add-overlay]');
+        if (addOvBtn) {
+            addOvBtn.addEventListener('click', () => {
+                // 編集として開くのは project.overlays に載っている定義だけ
+                // (理由は overlayForEditing のコメント)。
+                try { openOverlayModal(overlayForEditing(App.activeOverlay, App.project)); }
+                catch (e) { console.warn('openOverlayModal from preview failed', e); }
             });
         }
 
@@ -17682,6 +17855,11 @@ const SharePreview = {
         this._renderStatsTable(project, focusKey);
         this._renderHeaderScalebar(project);
         this._refreshRangeInputs(project, focusKey);
+        // 単一化合物 ⇄ 重ね合わせ の切り替えで右端の見せ方が変わる (グラデーション
+        // ⇄ 分子=色の凡例)。open() と配色変更でしか描き直していなかったので、
+        // 重ね合わせに入っても Plasma のバーが残っていた。18x256 の描画なので
+        // 毎回呼んでも実質ゼロコスト。
+        this._drawColorbar();
     },
 
     _cancelAdjacentPrefetch() {
@@ -17957,6 +18135,38 @@ const SharePreview = {
     _drawColorbar() {
         const cv = this.overlay.querySelector('[data-colorbar]');
         if (!cv) return;
+        const legend = this.overlay.querySelector('[data-cb-legend]');
+        const cbLabel = this.overlay.querySelector('[data-cb-label]');
+        const ov = App.activeOverlay;
+        // 重ね合わせ中はカラーバーが嘘になる。画面は分子ごとの単色 LUT を加算
+        // 合成しているのに、バーは単一化合物用のグラデーション (Plasma など) を
+        // 出し続けていた。目盛りとして読めないどころか誤読の原因になるので、
+        // 「分子 = 色」の凡例に差し替える。
+        if (ov && Array.isArray(ov.layers) && ov.layers.length) {
+            cv.hidden = true;
+            this.overlay.classList.add('ov-mode');
+            if (cbLabel) cbLabel.hidden = true;
+            if (legend) {
+                const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                const rows = ov.layers.filter(l => l && l.key).map(l => {
+                    // 名前の出し方は重ね合わせ登録モーダル (_allMsiCompounds) と同じ。
+                    const meta = findCompoundMeta(App.project, l.key);
+                    const nm = (meta && (meta.base || meta.name)) || formatDisplayName(l.key);
+                    return '<div class="cb-item" title="' + esc(nm) + '">'
+                        + '<span class="cb-swatch" style="background:' + esc(l.color || '#ffffff') + ';"></span>'
+                        + '<span class="cb-name">' + esc(nm) + '</span></div>';
+                }).join('');
+                legend.innerHTML = rows
+                    + '<div class="cb-note">白 = 共局在 (色の足し算)<br>'
+                    + '色は「＋重ね合わせ」で分子ごとに変更できます</div>';
+                legend.hidden = false;
+            }
+            return;
+        }
+        cv.hidden = false;
+        this.overlay.classList.remove('ov-mode');
+        if (cbLabel) cbLabel.hidden = false;
+        if (legend) { legend.hidden = true; legend.innerHTML = ''; }
         cv.width = 18;
         cv.height = 256;
         const ctx = get2dContext(cv);
@@ -18430,8 +18640,16 @@ const SharePreview = {
             if (!img) return;
             const panel = App && App.panels && App.panels.get(sec.id);
             if (!panel || !panel.dom || !panel.dom.cdisp || panel.dom.cdisp.width === 0) return;
-            const ent = focusKey ? (sec.msiSeries || {})[focusKey] : null;
-            if (!ent) return;
+            // 「中身があるか」を focusKey だけで見ていた。重ね合わせ表示中でも
+            // focusKey は前に選んでいた化合物のまま残るので、その化合物を持たない
+            // 切片 (切片ごとに測る化合物が違う PJ) では早期 return し、Otsu の
+            // 切り替えも Range の変更もそのセルに反映されなかった。
+            // _renderImageGrid の hasContent と同じ式に揃えて食い違いを無くす。
+            const _ov = App.activeOverlay;
+            const hasContent = _ov
+                ? (_ov.layers || []).some(l => l && (sec.msiSeries || {})[l.key])
+                : !!(focusKey && (sec.msiSeries || {})[focusKey]);
+            if (!hasContent) return;
             try {
                 const rotDeg = (this._sectionRotations[idx] || 0) - 90;
                 const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
@@ -19965,6 +20183,14 @@ const App = {
         try { renderOverlayBar(); } catch (e) {}
         _refreshMethodRowState();   // 行の中身は変わらない (active/focus のみ)
         if (typeof Toolbar !== 'undefined' && Toolbar.refreshAll) Toolbar.refreshAll();
+        // プレビューが開いていれば追随させる。Method 表の行クリックは自前で
+        // refresh を呼んでいたが、プレビュー内の「＋重ね合わせ」からも来る
+        // ようになったので、入口ごとに書かず 1 か所に寄せる。
+        try {
+            if (typeof SharePreview !== 'undefined' && SharePreview.isOpen()) {
+                SharePreview.refresh(this.project);
+            }
+        } catch (e) { console.warn('SharePreview refresh after setActiveOverlay failed', e); }
     },
     clearActiveOverlay() {
         if (!this.activeOverlay) return;
@@ -20703,6 +20929,17 @@ const App = {
             // 入ったときに焼く (遅延読み込みのため全レイヤーは手元にない)。
             try { p.markAllThumbsDirty(); } catch (e) {}
         }
+        // プレビューのセルはパネルの cdisp を写し取った画像なので、パネルを
+        // 描き直しただけでは古いままになる。Otsu を切り替える入口は
+        // setOtsuBgRemove / applyOtsuToAllSections / setOtsuStrength の 3 つ
+        // あって全部ここを通るので、追随は 1 か所に寄せる。
+        try {
+            if (typeof SharePreview !== 'undefined' && SharePreview.isOpen()) {
+                const cb = SharePreview.overlay.querySelector('[data-otsu-toggle]');
+                if (cb) cb.checked = !!this.otsuBgRemove;
+                SharePreview._rebakeCellImages(this.project, this.focusCompoundKey);
+            }
+        } catch (e) { console.warn('[otsu] preview refresh failed', e); }
     },
     // 背景除去トグル。ON 時は表示中(全)切片のマスクを確保してから再描画。
     async setOtsuBgRemove(on) {
@@ -23834,8 +24071,18 @@ const App = {
         });
         const sharePreviewBtn = document.getElementById('btn-share-preview');
         if (sharePreviewBtn) sharePreviewBtn.addEventListener('click', () => {
-            if (!this.shareMode || !this.project) return;
-            const role = this.shareMode.role || 'viewer';
+            // プロジェクト未読込 / MSI 未登録でも黙って無反応にはしない。
+            // Export ZIP や Publish と同じで、ボタンは常に出したまま JS で弾く。
+            if (!this.project) { showToast('プロジェクトを開いてください'); return; }
+            // master は admin 相当なので CE / CV 列を出す。共有時は付与された
+            // role をそのまま渡す (viewer は CE/CV が伏せられたまま)。
+            const role = this.shareMode ? (this.shareMode.role || 'viewer') : 'admin';
+            // SharePreview.open は MSI レイヤーが 1 つも無いと黙って何もしない。
+            // master は MSI 未登録のプロジェクトを開いていることがあるので、
+            // 「押しても反応しない」に見えないよう理由を出す。
+            const hasMsi = (this.project.sections || []).some(
+                sec => Object.keys((sec && sec.msiSeries) || {}).some(k => /^MSI_/i.test(k)));
+            if (!hasMsi) { showToast('MSI レイヤーがまだありません。プレビューには表示するものがありません'); return; }
             try { SharePreview.open(this.project, role); }
             catch (e) { console.warn('SharePreview.open failed', e); }
         });

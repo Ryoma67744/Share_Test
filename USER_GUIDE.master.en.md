@@ -16,6 +16,8 @@ This guide is for the **master / admin** publishing data with DESI Data Share. I
 8. [Filling in the Memo](#8-filling-in-the-memo)
 9. [Renaming sections / compounds](#9-renaming-sections--compounds)
 10. [Export ZIP — local backup & distribution](#10-export-zip--local-backup--distribution)
+10-bis. [Preview — see what the recipient sees, before publishing](#10-bis-preview--see-what-the-recipient-sees-before-publishing)
+10-ter. [Overlays (multi-molecule colour composites)](#10-ter-overlays-multi-molecule-colour-composites)
 11. [Publish to share / Auto-publish / Sync indicator](#11-publish-to-share--auto-publish--sync-indicator)
 12. [Sharing the URL & passwords](#12-sharing-the-url--passwords)
 13. [What happens on re-publish](#13-what-happens-on-re-publish)
@@ -502,6 +504,57 @@ Use the header's **Import ZIP**:
 - For projects > 1 GB, ZIP distribution is often more practical than Publish (avoids upload-bandwidth bottleneck)
 
 ---
+
+---
+
+## 10-bis. Preview — see what the recipient sees, before publishing
+
+The header **`Preview`** button opens **exactly the screen a share recipient gets**, from the master side too. It is a grid of every section for one compound — useful for checking how figures will look and for a quick cross-section overview.
+
+Opened from master it runs with admin rights, so the Method table also shows **CE / CV** (these stay hidden from share viewers).
+
+| Area | Role |
+| --- | --- |
+| **Method (MRM) panel (left)** | Compound table. ↑↓ / click switches the displayed compound. Drag the splitter to resize |
+| **Image grid (centre)** | Every section × the selected compound, each cell with a scalebar and Section name + pixel pitch. Drag to pan, wheel to zoom |
+| **Range (top)** | vmin / vmax shared by all sections. `Reset` returns to the automatic range |
+| **背景除去(Otsu) (top)** | The **same setting** as the main toolbar, reachable without closing the preview (see below) |
+| **`＋重ね合わせ` (top)** | Register / edit a multi-molecule colour overlay (master only, see §10-ter) |
+| **Stats / colourbar (right)** | Statistics for the selected compound. In overlay mode this becomes a molecule-to-colour legend |
+
+> **About background removal**: the preview checkbox drives the same single setting as the main toolbar's `背景除去(Otsu)`, and **it survives closing the preview** — unlike the Colormap, which is restored on close. The split is deliberate: colormap is a display preference, background removal is an analysis setting. **Adjusting the strength** needs the draggable histogram line, so close the preview and use the ANALYSIS panel.
+
+> With many sections the first switch-on spends a few seconds computing masks. The checkbox is disabled while that runs and progress appears as a toast.
+
+---
+
+## 10-ter. Overlays (multi-molecule colour composites)
+
+**`＋重ね合わせ`** in the Method (MRM) panel — or the same button at the top of the preview — registers an image with **two or more molecules drawn in different colours on one picture**. Share recipients can **view** master-registered overlays but cannot create or edit them.
+
+The composite is an **additive (light-sum) blend**, so:
+
+- a pure colour = only that molecule is present
+- **white = the overlaid molecules are in the same place (co-localisation)**
+
+### Default colours
+
+| Slot | Colour | Why |
+| --- | --- | --- |
+| 1 | magenta | red + blue components |
+| 2 | green | green component |
+| 3 | cyan | green + blue components |
+| 4+ | yellow → orange → light violet | (see the caution below) |
+
+**Slots 1 and 2 (magenta + green) share no light component**, so "only this molecule" and "both" (white) are distinguishable by colour alone. Red + green is not the default because it is the pair the most common colour-vision type cannot separate; substituting this pair for red/green is standard practice in microscopy.
+
+**Every molecule's colour can be changed individually** — only the starting value is fixed. Use the colour picker on each row of the registration dialog.
+
+> **Three molecules is the practical limit**: with additive blending, four or more channels drive every colour towards white and co-localisation stops being readable at all. Selecting four or more raises a caution in the dialog, but **registration is never blocked**.
+
+> **Note**: overlays are honoured by the main canvas and the Preview image grid. Method-table thumbnails and the Align modal always draw a single compound with the active colormap.
+
+> **On brightness**: for the same signal, green looks brighter than magenta (human eye sensitivity). To compare amounts rigorously, read the Stats numbers or ROI statistics rather than the colours.
 
 ## 11. Publish to share / Auto-publish / Sync indicator
 
