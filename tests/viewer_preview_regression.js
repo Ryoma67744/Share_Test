@@ -1261,6 +1261,85 @@ function testDefaultWindowClipsOneTenthOfAPercent() {
   assert.equal(context.out.api.deriveBakeStats(values, null, 'full').rawDispMax, 9999);
 }
 
+// 相対輝度と「明るさを揃える」倍率。①の根拠そのものなので数値で縛る。
+function testOverlayBrightnessMatching() {
+  const constOf = (name) => new RegExp('const ' + name + ' = ([0-9.]+);').exec(html)[1];
+  const context = vm.createContext({ Math, Number, String, out: {} });
+  vm.runInContext(
+    'const OVERLAY_MATCH_MIN_SCALE = ' + constOf('OVERLAY_MATCH_MIN_SCALE') + ';\n'
+    + ['_hexToRgb', '_srgbLinear', '_srgbEncode', '_srgbLuminance',
+       'scaleColorLuminance', 'overlayBrightnessScales'].map(extractTopLevelFunction).join('\n')
+    + '\nout.api = { _srgbLuminance, scaleColorLuminance, overlayBrightnessScales };',
+    context,
+  );
+  const api = context.out.api;
+
+  // Rec.709 の端点と、①の動機になっている 2.5 倍差。
+  assert.equal(api._srgbLuminance('#ffffff'), 1);
+  assert.equal(api._srgbLuminance('#000000'), 0);
+  const green = api._srgbLuminance('#00ff00');
+  const magenta = api._srgbLuminance('#ff00ff');
+  assert.ok(Math.abs(green - 0.7152) < 1e-4, 'green ' + green);
+  assert.ok(Math.abs(magenta - 0.2848) < 1e-4, 'magenta ' + magenta);
+  assert.ok(Math.abs(green / magenta - 2.51) < 0.01,
+    `緑/マゼンタ = ${(green / magenta).toFixed(3)} (期待 ~2.51)`);
+
+  // 既定パレット先頭 2 色。いちばん暗いマゼンタは据え置き、緑を約 0.40 倍に落とす。
+  const two = api.overlayBrightnessScales([{ key: 'a', color: '#ff00ff' }, { key: 'b', color: '#00ff00' }]);
+  assert.equal(two.scale['#ff00ff'], 1, 'いちばん暗い色は据え置き (上げると白飛びする)');
+  assert.ok(Math.abs(two.scale['#00ff00'] - 0.3982) < 1e-3, '緑の倍率 ' + two.scale['#00ff00']);
+  assert.equal(two.floored.length, 0);
+
+  // ★ 倍率は線形光でかけること。sRGB のまま掛けるとガンマが乗って輝度が合わない
+  //   (実測: 目標 0.2848 に対し 0.0950 = 3 倍暗い)。掛けた後の実効輝度で確かめる。
+  const dimmed = api.scaleColorLuminance('#00ff00', two.scale['#00ff00']);
+  assert.ok(Math.abs(api._srgbLuminance(dimmed) - magenta) < 0.005,
+    `揃えた緑 ${dimmed} の輝度 ${api._srgbLuminance(dimmed).toFixed(4)} がマゼンタ ${magenta.toFixed(4)} と合わない`
+    + ' — 線形光を経由していない可能性');
+  assert.equal(api.scaleColorLuminance('#00ff00', 1), '#00ff00', '1 倍は素通し');
+
+  // 下限ガード: 濃紺 (輝度 0.0156) を混ぜても他が黒に潰れない。止めはしない。
+  const guarded = api.overlayBrightnessScales([
+    { key: 'a', color: '#000080' }, { key: 'b', color: '#00ff00' }, { key: 'c', color: '#ff00ff' }]);
+  assert.equal(guarded.scale['#00ff00'], 0.25, '下限 OVERLAY_MATCH_MIN_SCALE で止まること');
+  assert.equal(guarded.scale['#ff00ff'], 0.25);
+  assert.equal(guarded.floored.length, 2, '下限に当たった色を報告すること (モーダルの注意欄が読む)');
+}
+
+// LUT キャッシュと署名。どちらも「静かに古い絵を返す」種類の壊れ方をする。
+function testOverlayScaleReachesTheBake() {
+  const context = vm.createContext({ Math, Number, String, Array, out: {} });
+  vm.runInContext(
+    ['buildLut', '_hexToRgb', '_srgbLinear', '_srgbEncode', 'scaleColorLuminance', 'monoLut']
+      .map(extractTopLevelFunction).join('\n')
+    + '\nconst _monoLutCache = {};\nout.api = { monoLut, _monoLutCache };',
+    context,
+  );
+  const { monoLut } = context.out.api;
+  const plain = monoLut('#00ff00');
+  const scaled = monoLut('#00ff00', 0.3982);
+  // ★ hex だけをキーにしていると、ここで plain がそのまま返ってくる。
+  assert.notEqual(scaled[255][1], plain[255][1],
+    'monoLut のキャッシュキーに倍率が入っていない — 同じ色の揃えあり/なしが衝突している');
+  assert.equal(plain[255][1], 255);
+  assert.ok(scaled[255][1] > 150 && scaled[255][1] < 190, '揃えた緑の上端 ' + scaled[255][1]);
+  assert.equal(monoLut('#00ff00', 1)[255][1], 255, '倍率 1 は従来と同じ');
+  assert.equal(monoLut('#00ff00'), monoLut('#00ff00', 1), '倍率省略と 1 は同じキー');
+
+  // renderComposite の焼き済みキャンバス署名。倍率を入れ忘れると、揃えを切り替えても
+  // 署名が変わらず古い焼きが返る (絵が変わらないだけでエラーは出ない)。
+  const sigAt = html.indexOf('const lutSig = identStamp(img)');
+  assert.ok(sigAt > 0, 'lutSig が見つからない');
+  const sig = html.slice(sigAt, html.indexOf(';', html.indexOf('identStamp(keepGrid', sigAt)));
+  assert.match(sig, /overlay \? \('o' \+ ovColor \+ '@' \+ ovScale\)/,
+    'lutSig の重ね合わせ項に解決済みの倍率 ovScale が入っていない');
+  // 倍率は定義の参照ではなく解決済みの値であること (モーダルが existing をその場で書き換えるため)。
+  assert.match(html, /const ovScale = \(overlay && overlayScale\) \? \(overlayScale\[ovColor\] \|\| 1\) : 1;/);
+  assert.match(html, /const lut = overlay \? monoLut\(ovColor, ovScale\) : getActiveColormap\(\);/);
+  // 倍率表は matchBrightness が ON のときだけ作る (OFF は従来とビット単位で同じ絵)。
+  assert.match(html, /overlay && overlay\.matchBrightness\)\s*\n\s*\? overlayBrightnessScales\(overlay\.layers\)\.scale : null/);
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -1282,6 +1361,8 @@ async function main() {
   testDisplayAndBakePercentilesMoveTogether();
   testDefaultWindowClipsOneTenthOfAPercent();
   testOverlayDefaultPalette();
+  testOverlayBrightnessMatching();
+  testOverlayScaleReachesTheBake();
   testRebakeCellImagesFollowsOverlay();
   testColorbarBecomesLegendInOverlayMode();
   testCloseRestoresOverlay();

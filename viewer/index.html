@@ -3070,11 +3070,72 @@ const OVERLAY_DEFAULT_PALETTE = ['#ff00ff', '#00ff00', '#00ffff', '#ffff00', '#f
 // 加算合成でまだ色を読み分けられるチャンネル数の上限。超えたら注意を出す。
 const OVERLAY_ADDITIVE_LIMIT = 3;
 
+// ---- 相対輝度 (Rec.709) -----------------------------------------------------
+// 重ね合わせの「明るさを揃える」でのみ使う。同じ信号量でも緑 (輝度 0.715) は
+// マゼンタ (0.285) より約 2.5 倍明るく見えるため、量を見比べる用途で誤読の
+// 原因になる。それを打ち消すための計算。
+// ★ ファイル内の 0.299/0.587/0.114 は BT.601 の**グレースケール化** (強度画像を
+//   1 チャンネルに潰す) で目的が違うので流用しないこと。labToSrgb は CIELAB→sRGB
+//   の片道だけで逆変換が無いので、これも使えない。
+function _srgbLinear(c) {          // 0..255 (sRGB) -> 0..1 (線形光)
+    const s = c / 255;
+    return s <= 0.04045 ? (s / 12.92) : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+function _srgbEncode(v) {          // 0..1 (線形光) -> 0..255 (sRGB)
+    const x = v <= 0 ? 0 : (v >= 1 ? 1 : v);
+    const s = x <= 0.0031308 ? (x * 12.92) : (1.055 * Math.pow(x, 1 / 2.4) - 0.055);
+    return Math.round(s * 255);
+}
+function _srgbLuminance(hex) {
+    const rgb = _hexToRgb(hex);
+    return 0.2126 * _srgbLinear(rgb[0]) + 0.7152 * _srgbLinear(rgb[1]) + 0.0722 * _srgbLinear(rgb[2]);
+}
+// 輝度が scale 倍になる色を返す。★ 線形光にしてから掛けて戻すこと。sRGB のまま
+// 掛けるとガンマ (~2.4) が乗って輝度は scale 倍にならない (0.4 倍のつもりが
+// 実際は 0.11 倍になる)。
+function scaleColorLuminance(hex, scale) {
+    const base = String(hex || '#ffffff').toLowerCase();
+    if (!(scale > 0) || scale >= 1) return base;
+    return '#' + _hexToRgb(base)
+        .map((c) => _srgbEncode(_srgbLinear(c) * scale).toString(16).padStart(2, '0'))
+        .join('');
+}
+// 倍率の下限。濃紺 (#000080, 輝度 0.0072) のような極端に暗い色を 1 つ混ぜると、
+// そこへ揃えたとき他の色が全部黒に潰れて何も見えなくなる。下限で止め、当たった
+// ことをモーダルの注意欄で知らせる (止めはしない — このアプリの方針)。
+const OVERLAY_MATCH_MIN_SCALE = 0.25;
+// 「明るさを揃える」の倍率を色ごとに決める。**いちばん暗い色に合わせて他を下げる**。
+// 明るい方へ揃えると白飛びするので、上げる方向は取らない (倍率は必ず 1 以下)。
+// 返り値 scale は 色 hex → 倍率、floored は下限に当たった色の一覧。
+function overlayBrightnessScales(layers) {
+    const out = { scale: {}, floored: [] };
+    const list = (layers || []).filter((l) => l && l.color);
+    let lo = Infinity;
+    for (const l of list) { const y = _srgbLuminance(l.color); if (y > 0 && y < lo) lo = y; }
+    const usable = Number.isFinite(lo) && lo > 0;
+    for (const l of list) {
+        const hex = String(l.color).toLowerCase();
+        const y = usable ? _srgbLuminance(hex) : 0;
+        let s = (usable && y > 0) ? Math.min(1, lo / y) : 1;
+        if (s < OVERLAY_MATCH_MIN_SCALE) {
+            s = OVERLAY_MATCH_MIN_SCALE;
+            if (out.floored.indexOf(hex) < 0) out.floored.push(hex);
+        }
+        out.scale[hex] = s;
+    }
+    return out;
+}
+
 const _monoLutCache = {};
-function monoLut(hex) {
-    const key = String(hex || '#ffffff').toLowerCase();
+// scale = 「明るさを揃える」の倍率 (1 = そのまま)。
+// ★ 倍率は必ずキャッシュキーに入れること。hex だけをキーにしていた頃の作りのまま
+//   倍率を LUT に焼くと、同じ色の「揃えあり」と「揃えなし」が衝突して古い焼きが返る。
+function monoLut(hex, scale) {
+    const base = String(hex || '#ffffff').toLowerCase();
+    const s = (Number.isFinite(scale) && scale > 0 && scale < 1) ? scale : 1;
+    const key = base + '|' + s;
     if (_monoLutCache[key]) return _monoLutCache[key];
-    const rgb = _hexToRgb(key);
+    const rgb = _hexToRgb(s < 1 ? scaleColorLuminance(base, s) : base);
     const lut = buildLut([[0, 0, 0, 0], [1, rgb[0], rgb[1], rgb[2]]]);
     _monoLutCache[key] = lut;
     return lut;
@@ -7442,6 +7503,11 @@ class SectionPanel {
         const overlay = (typeof App !== 'undefined' && App && App.activeOverlay) || null;
         const overlayColor = {};
         if (overlay) for (const l of (overlay.layers || [])) { if (l && l.key) overlayColor[l.key] = l.color || '#ffffff'; }
+        // 「明るさを揃える」(matchBrightness): 同じ信号量が同じ明るさに見えるよう、
+        // いちばん暗い色に合わせて他の色の輝度を下げる。OFF なら倍率表を作らない
+        // (= 全部 1 倍で、従来とビット単位で同じ絵になる)。
+        const overlayScale = (overlay && overlay.matchBrightness)
+            ? overlayBrightnessScales(overlay.layers).scale : null;
         const overlayBlack = !!(overlay && overlay.bg !== 'he');
         if (overlayBlack) { ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, this.dom.cdisp.width, this.dom.cdisp.height); }
 
@@ -7563,7 +7629,8 @@ class SectionPanel {
                 const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
                 const winC = App.getMsiWindow(key, rrC, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
                 const ovColor = overlay ? (overlayColor[key] || '#ffffff') : null;
-                const lut = overlay ? monoLut(ovColor) : getActiveColormap();
+                const ovScale = (overlay && overlayScale) ? (overlayScale[ovColor] || 1) : 1;
+                const lut = overlay ? monoLut(ovColor, ovScale) : getActiveColormap();
                 const bg = overlay ? [0, 0, 0] : getColormapBackground();
                 // 背景除去(Otsu): keep grid が 0 のピクセルは背景として backdrop に
                 // 落とす(out-of-grid と同じ扱い)。全イオン像で同一マスクを共有する。
@@ -7582,7 +7649,9 @@ class SectionPanel {
                 //  - getColormapBackground() は毎回新しい [0,0,0] を返すので、
                 //    参照ではなくカラーマップ名 (bg を一意に決める) を入れる。
                 //  - オーバーレイ定義は色ピッカーでその場で書き換えられるので、
-                //    定義の参照ではなく解決済みの色文字列を入れる。
+                //    定義の参照ではなく解決済みの色文字列を入れる。「明るさを揃える」の
+                //    倍率も同じ理由で**解決済みの数値**を入れる。入れ忘れると、揃えを
+                //    切り替えても同じ署名になって古い焼きがそのまま返る。
                 //  - img / 値ラスタ / keep グリッドは作り直されたら必ず別オブジェクト
                 //    になるので、同一性スタンプで足りる。
                 //
@@ -7594,7 +7663,7 @@ class SectionPanel {
                     + '|' + identStamp(vrCache)
                     + '|' + (rrC ? (rrC[0] + ',' + rrC[1]) : '-')
                     + '|' + (winC ? (winC.min + ',' + winC.max) : '-')
-                    + '|' + (overlay ? ('o' + ovColor) : ('c' + _activeColormapName))
+                    + '|' + (overlay ? ('o' + ovColor + '@' + ovScale) : ('c' + _activeColormapName))
                     + '|' + (App.otsuBgRemove ? '1' : '0')
                     + '|' + identStamp(keepGrid && keepGrid.keep);
                 this._msiLutCache = this._msiLutCache || new Map();
