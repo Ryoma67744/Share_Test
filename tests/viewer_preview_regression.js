@@ -535,19 +535,23 @@ function testDeleteOverlayIsShared() {
   let confirmed = true;
   const cleared = [];
   const saves = [];
+  const a = { id: 'ov_1', name: 'A' };
+  const b = { id: 'ov_2', name: 'B' };
   const App = {
-    project: { overlays: [{ id: 'ov_1', name: 'A' }, { id: 'ov_2', name: 'B' }] },
+    project: { overlays: [a, b] },
     activeOverlay: null,
     clearActiveOverlay() { cleared.push(true); this.activeOverlay = null; },
     queueSave() { saves.push(true); },
   };
+  // プレビューが開いていて、消すセットを「開いた時点の重ね合わせ」として
+  // 控えている状態を作る。控えを落とさないと close() で幽霊が復活する。
+  const SharePreview = { _overlaySnapshot: a, isOpen: () => true, refresh() {} };
   vm.runInContext(
-    'const App = this.App, confirm = this.confirm;\n'
+    'const App = this.App, confirm = this.confirm, SharePreview = this.SharePreview;\n'
     + 'function renderOverlayBar() {}\n'
-    + 'const SharePreview = { isOpen: () => false };\n'
     + extractTopLevelFunction('deleteOverlayById')
     + '\nthis.api = { deleteOverlayById };',
-    Object.assign(context, { App, confirm: () => confirmed, console }),
+    Object.assign(context, { App, SharePreview, confirm: () => confirmed, console }),
   );
   const { deleteOverlayById } = context.api;
 
@@ -562,9 +566,14 @@ function testDeleteOverlayIsShared() {
   assert.equal(saves.length, 1, '削除は保存すること');
   assert.equal(cleared.length, 0, '表示中でなければ単一表示へは戻さない');
 
+  assert.equal(SharePreview._overlaySnapshot, null,
+    'プレビューの控えが消したセットなら落とすこと (閉じたときに幽霊として復活する)');
+
   App.activeOverlay = App.project.overlays[0];
+  SharePreview._overlaySnapshot = b;   // 別のセットを控えている場合は残す
   assert.equal(deleteOverlayById('ov_2'), true);
   assert.equal(cleared.length, 1, '表示中のセットを消したら単一表示へ戻すこと');
+  assert.equal(SharePreview._overlaySnapshot, null, '控えていたセットを消したら落とすこと');
 
   // 主画面のチップ側も同じ関数を通ること
   assert.match(html, /deleteOverlayById\(delEl\.getAttribute\('data-ov-del'\)\)/,

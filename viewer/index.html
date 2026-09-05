@@ -12026,6 +12026,13 @@ function deleteOverlayById(id) {
     try { renderOverlayBar(); } catch (e) {}
     try {
         if (typeof SharePreview !== 'undefined' && SharePreview.isOpen()) {
+            // プレビューは「開いた時点の重ね合わせ」を控えていて close() で戻す。
+            // 消したものがその控えだと、閉じた瞬間に **登録されていない重ね合わせ**
+            // として主画面に復活してしまう (一覧にもチップにも無いので、以後
+            // 選ぶことも消すこともできない幽霊になる)。控えも一緒に落とす。
+            if (SharePreview._overlaySnapshot && SharePreview._overlaySnapshot.id === id) {
+                SharePreview._overlaySnapshot = null;
+            }
             SharePreview.refresh(App.project);
         }
     } catch (e) { console.warn('SharePreview refresh after overlay delete failed', e); }
