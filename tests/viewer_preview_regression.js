@@ -313,6 +313,7 @@ function testColorbarBecomesLegendInOverlayMode() {
     }),
   });
   const cv = mkEl(); const legend = mkEl(); const label = mkEl();
+  const ovPanel = mkEl(); ovPanel.hidden = true;
   const classes = new Set();
   const App = {
     activeOverlay: { layers: [{ key: 'MSI_Lactate', color: '#ff00ff' }, { key: 'MSI_Citrate', color: '#00ff00' }] },
@@ -325,16 +326,20 @@ function testColorbarBecomesLegendInOverlayMode() {
     get2dContext: (c) => c.getContext('2d'),
     getActiveColormap: () => Array.from({ length: 256 }, () => [0, 0, 0]),
   });
-  const bySel = { '[data-colorbar]': cv, '[data-cb-legend]': legend, '[data-cb-label]': label };
+  const bySel = { '[data-colorbar]': cv, '[data-cb-legend]': legend, '[data-cb-label]': label,
+                  '[data-ov-panel]': ovPanel };
   preview.overlay = {
     querySelector: (sel) => bySel[sel] || null,
-    classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c) },
+    classList: {
+      add: (c) => classes.add(c), remove: (c) => classes.delete(c),
+      toggle: (c, on) => { if (on) classes.add(c); else classes.delete(c); },
+    },
   };
 
   preview._drawColorbar();
   assert.equal(cv.hidden, true, '重ね合わせ中はグラデーションを出さない');
   assert.equal(legend.hidden, false);
-  assert.ok(classes.has('ov-mode'), '凡例のぶん右端の列を広げるクラスが付くこと');
+  assert.ok(classes.has('ov-wide'), '凡例のぶん右端の列を広げるクラスが付くこと');
   assert.match(legend.innerHTML, /#ff00ff/, '1色目の色見本');
   assert.match(legend.innerHTML, /Lactate/, '分子名');
   assert.match(legend.innerHTML, /共局在/, '白 = 共局在 の説明');
@@ -344,7 +349,7 @@ function testColorbarBecomesLegendInOverlayMode() {
   assert.equal(cv.hidden, false, '単一表示ではグラデーションへ戻す');
   assert.equal(legend.hidden, true);
   assert.equal(legend.innerHTML, '');
-  assert.ok(!classes.has('ov-mode'));
+  assert.ok(!classes.has('ov-wide'), '一覧も凡例も無ければ元の幅へ戻す');
 }
 
 // close() は opacity / 表示レイヤー / HE グレースケール / 配色 を戻すのに、
@@ -469,59 +474,101 @@ function testPreviewAddOverlayAlwaysAdds() {
   assert.match(html, /data-ov-edit-row/, '行ごとの編集ボタンがあること');
 }
 
-// 登録済み一覧の署名。件数・名前・色・構成分子のどれが変わっても違う値になること。
-function testOverlayListSignature() {
-  const { preview } = makePreviewContext({});
-  const sig = (overlays) => preview._overlayListSignature({ overlays });
-  const a = { id: 'ov_1', name: 'A', layers: [{ key: 'MSI_x', color: '#ff00ff' }] };
+// 重ね合わせの一覧は右端の列にまとめる。Method 表の末尾に混ぜていたときは
+// 化合物が数十行ある中に埋もれ、セットが増えるほど探しづらかった。
+// 一覧は登録・削除・改名にその場で追随する必要があるので毎回組み直す。
+function testOverlayPanelRendersInRightColumn() {
+  const mk = () => ({ innerHTML: '', hidden: false, listeners: [],
+    addEventListener(t, fn) { this.listeners.push(fn); },
+    querySelectorAll() { return items; } });
+  let items = [];
+  const panel = mk(); const list = mk(); const single = mk();
+  const classes = new Set();
+  const project = { overlays: [] };
+  const App = { activeOverlay: null, project };
+  const { preview } = makePreviewContext({ App });
+  const bySel = { '[data-ov-panel]': panel, '[data-ov-list]': list, '[data-ov-single]': single,
+                  '[data-cb-legend]': { hidden: true } };
+  preview.overlay = {
+    querySelector: (sel) => bySel[sel] || null,
+    classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c),
+                 toggle: (c, on) => { if (on) classes.add(c); else classes.delete(c); } },
+  };
 
-  assert.equal(sig([]), sig([]), '空同士は同じ');
-  assert.notEqual(sig([a]), sig([]), '追加で変わる');
-  assert.notEqual(sig([a]), sig([Object.assign({}, a, { name: 'B' })]), '改名で変わる');
-  assert.notEqual(sig([a]), sig([Object.assign({}, a, { layers: [{ key: 'MSI_x', color: '#00ff00' }] })]),
-    '色替えで変わる');
-  assert.notEqual(sig([a]), sig([Object.assign({}, a, { layers: [{ key: 'MSI_y', color: '#ff00ff' }] })]),
-    '構成分子の入れ替えで変わる');
-  assert.equal(sig([a]), sig([Object.assign({}, a)]), '同じ内容なら同じ');
+  // 0 件なら出さないし、列も広げない
+  preview._renderOverlayPanel(project);
+  assert.equal(panel.hidden, true, '登録が無ければ一覧は出さない');
+  assert.ok(!classes.has('ov-wide'), '一覧が無ければ列は広げない');
+
+  const a = { id: 'ov_1', name: 'セットA', layers: [{ key: 'MSI_x', color: '#ff00ff' }] };
+  const b = { id: 'ov_2', name: 'セットB', layers: [{ key: 'MSI_y', color: '#00ff00' }] };
+  project.overlays.push(a, b);
+  preview._renderOverlayPanel(project);
+  assert.equal(panel.hidden, false, '登録があれば一覧を出す');
+  assert.ok(classes.has('ov-wide'), '一覧のぶん列を広げる');
+  assert.match(list.innerHTML, /セットA/);
+  assert.match(list.innerHTML, /セットB/, '2 セット目も並ぶこと');
+  assert.match(list.innerHTML, /data-ov-edit-row="ov_1"/, '各セットに編集');
+  assert.match(list.innerHTML, /data-ov-del-row="ov_1"/, '各セットに削除');
+  assert.equal(single.hidden, true, '重ね合わせ表示中でなければ「単一表示へ戻る」は隠す');
+  assert.doesNotMatch(list.innerHTML, /class="cb-ov-item on"/, '表示中が無ければどれも on にしない');
+
+  App.activeOverlay = b;
+  preview._renderOverlayPanel(project);
+  assert.match(list.innerHTML, /cb-ov-item on" data-ov-id="ov_2"/, '表示中のセットに印を付ける');
+  assert.equal(single.hidden, false, '重ね合わせ表示中は「単一表示へ戻る」を出す');
+
+  // 削除された分は消える
+  project.overlays = [a];
+  App.activeOverlay = null;
+  preview._renderOverlayPanel(project);
+  assert.doesNotMatch(list.innerHTML, /セットB/, '削除したセットは一覧から消えること');
+
+  // Method 表には重ね合わせの行を残さない (化合物だけ)
+  assert.doesNotMatch(html, /tr data-overlay-id=/, 'Method 表に重ね合わせの行を残さないこと');
 }
 
-// Method 表は open() でしか組んでいなかったので、プレビューの中で重ね合わせを
-// 登録しても行が一覧に出てくるのは開き直したあとだった。一覧が変わったときだけ
-// 組み直す (化合物の行まで毎回作り直すのは重い)。
-function testRefreshRebuildsMethodListOnOverlayChange() {
-  const project = { overlays: [] };
-  const App = { focusCompoundKey: 'MSI_A', activeOverlay: null, project };
-  const { preview } = makePreviewContext({ App, buildCompoundTitle: () => 'title' });
-  let listRenders = 0;
-  preview.isOpen = () => true;
-  preview.overlay = { querySelector: () => null };
-  preview._renderMethodList = () => {
-    listRenders++;
-    preview._methodListOvSig = preview._overlayListSignature(project);
+// 削除は主画面のチップとプレビューの一覧の両方から呼ぶので、確認・後始末を
+// 1 か所 (deleteOverlayById) に置く。片方だけ直して食い違うのを防ぐ。
+function testDeleteOverlayIsShared() {
+  const context = vm.createContext({});
+  let confirmed = true;
+  const cleared = [];
+  const saves = [];
+  const App = {
+    project: { overlays: [{ id: 'ov_1', name: 'A' }, { id: 'ov_2', name: 'B' }] },
+    activeOverlay: null,
+    clearActiveOverlay() { cleared.push(true); this.activeOverlay = null; },
+    queueSave() { saves.push(true); },
   };
-  for (const m of ['_renderMethodHighlight', '_renderImageGrid', '_renderStatsTable',
-                   '_renderHeaderScalebar', '_refreshRangeInputs', '_drawColorbar']) {
-    preview[m] = () => {};
-  }
-  preview._methodListOvSig = preview._overlayListSignature(project);
+  vm.runInContext(
+    'const App = this.App, confirm = this.confirm;\n'
+    + 'function renderOverlayBar() {}\n'
+    + 'const SharePreview = { isOpen: () => false };\n'
+    + extractTopLevelFunction('deleteOverlayById')
+    + '\nthis.api = { deleteOverlayById };',
+    Object.assign(context, { App, confirm: () => confirmed, console }),
+  );
+  const { deleteOverlayById } = context.api;
 
-  preview.refresh(project);
-  assert.equal(listRenders, 0, '一覧が変わっていなければ組み直さない');
+  confirmed = false;
+  assert.equal(deleteOverlayById('ov_1'), false, '確認でキャンセルしたら消さない');
+  assert.equal(App.project.overlays.length, 2);
 
-  project.overlays.push({ id: 'ov_1', name: 'A', layers: [{ key: 'MSI_x', color: '#ff00ff' }] });
-  preview.refresh(project);
-  assert.equal(listRenders, 1, '1 セット目の登録で組み直すこと');
+  confirmed = true;
+  assert.equal(deleteOverlayById('nope'), false, '知らない id は何もしない');
+  assert.equal(deleteOverlayById('ov_1'), true);
+  assert.deepEqual(App.project.overlays.map(o => o.id), ['ov_2'], '指定したセットだけ消す');
+  assert.equal(saves.length, 1, '削除は保存すること');
+  assert.equal(cleared.length, 0, '表示中でなければ単一表示へは戻さない');
 
-  project.overlays.push({ id: 'ov_2', name: 'B', layers: [{ key: 'MSI_y', color: '#00ff00' }] });
-  preview.refresh(project);
-  assert.equal(listRenders, 2, '2 セット目の登録でも組み直すこと');
+  App.activeOverlay = App.project.overlays[0];
+  assert.equal(deleteOverlayById('ov_2'), true);
+  assert.equal(cleared.length, 1, '表示中のセットを消したら単一表示へ戻すこと');
 
-  preview.refresh(project);
-  assert.equal(listRenders, 2, '変化が無ければ組み直さない');
-
-  project.overlays[0].name = 'A2';
-  preview.refresh(project);
-  assert.equal(listRenders, 3, '改名でも行の表示を追随させること');
+  // 主画面のチップ側も同じ関数を通ること
+  assert.match(html, /deleteOverlayById\(delEl\.getAttribute\('data-ov-del'\)\)/,
+    '主画面の × も共通の削除を通すこと');
 }
 
 // master でも Preview を開けること。CSS の share 限定表示と JS の早期 return が
@@ -1168,8 +1215,8 @@ async function main() {
   testForcedHeBackdropDoesNotPersist();
   testOverlayForEditingIgnoresUnregistered();
   testPreviewAddOverlayAlwaysAdds();
-  testOverlayListSignature();
-  testRefreshRebuildsMethodListOnOverlayChange();
+  testOverlayPanelRendersInRightColumn();
+  testDeleteOverlayIsShared();
   testMasterCanOpenPreview();
   testStoragePathRule();
   testImportSectionIdKeying();
