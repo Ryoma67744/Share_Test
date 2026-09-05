@@ -462,7 +462,11 @@ export async function rawDecodeFunction(bundle, funcNo) {
     return { nScans: idx.n, nCh, xs, ys, chans, tic: idx.tic, rt: idx.rt, gridX: gx, gridY: gy };
 }
 
-// Everything the registration wizard needs, WITHOUT opening .DAT.
+// Everything the registration wizard needs. This DOES open .IDX + .DAT + .STS
+// (via rawDecodeFunction): the channel count, grid and pitch it reports all come
+// out of a full decode. Only imaging/ is left untouched. The comment here used to
+// claim the opposite, which mattered because it is the cost model for a large .raw
+// - a 117,449-scan acquisition reads 28 MB before the wizard can draw its summary.
 export async function parseRawArchiveMeta(bundle) {
     const names = bundle.names();
     const read = async (re) => {
