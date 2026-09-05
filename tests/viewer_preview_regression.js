@@ -1340,6 +1340,64 @@ function testOverlayScaleReachesTheBake() {
   assert.match(html, /overlay && overlay\.matchBrightness\)\s*\n\s*\? overlayBrightnessScales\(overlay\.layers\)\.scale : null/);
 }
 
+// Codex 指摘: 真っ黒 (#000000) は倍率をどうかけても黒のままで、そもそも揃えようが
+// ない。基準 (lo) からも外してあるので、黙っていると「揃えました」と言いながらその
+// 分子だけ何も出ない。invisible で報告してモーダルが注意を出せるようにしてある。
+function testBlackOverlayColorIsReported() {
+  const constOf = (name) => new RegExp('const ' + name + ' = ([0-9.]+);').exec(html)[1];
+  const context = vm.createContext({ Math, Number, String, out: {} });
+  vm.runInContext(
+    'const OVERLAY_MATCH_MIN_SCALE = ' + constOf('OVERLAY_MATCH_MIN_SCALE') + ';\n'
+    + ['_hexToRgb', '_srgbLinear', '_srgbEncode', '_srgbLuminance',
+       'scaleColorLuminance', 'overlayBrightnessScales'].map(extractTopLevelFunction).join('\n')
+    + '\nout.api = { overlayBrightnessScales };',
+    context,
+  );
+  const f = context.out.api.overlayBrightnessScales;
+
+  const withBlack = f([{ key: 'a', color: '#000000' }, { key: 'b', color: '#00ff00' },
+                       { key: 'c', color: '#ff00ff' }]);
+  assert.deepEqual(Array.from(withBlack.invisible), ['#000000'],
+    '真っ黒を invisible で報告していない — 注意が出ないまま分子が消える');
+  assert.equal(withBlack.scale['#000000'], 1, '黒は倍率をいじっても黒なので 1 のまま');
+  // ★ 黒を基準 (lo) にしてはいけない。したら他の色が全部 0 倍 = 真っ暗になる。
+  assert.ok(Math.abs(withBlack.scale['#00ff00'] - 0.3982) < 1e-3,
+    '黒を基準にしてしまっている: 緑の倍率 ' + withBlack.scale['#00ff00']);
+  assert.equal(withBlack.scale['#ff00ff'], 1, '見える色のうちいちばん暗いものは据え置き');
+  assert.equal(withBlack.floored.length, 0, '黒は floored ではなく invisible');
+
+  // 全部黒でも例外にせず、全色を invisible として返す。
+  const allBlack = f([{ key: 'a', color: '#000000' }, { key: 'b', color: '#000000' }]);
+  assert.equal(allBlack.invisible.length, 1, '同じ色は 1 回だけ報告する');
+  assert.equal(allBlack.scale['#000000'], 1);
+  // 黒が無いときは invisible は空。
+  assert.equal(f([{ key: 'a', color: '#ff00ff' }, { key: 'b', color: '#00ff00' }]).invisible.length, 0);
+}
+
+// Codex 指摘: 色を揃えても、合成の直前にかかる ctx.globalAlpha がメンバーごとに
+// 違うと画面では揃わない。実測で輝度比が 1.00 → 4.62 に開いた。揃えている間は
+// メンバー全員を共通の透明度で乗せる。
+function testMatchedOverlayUsesOneOpacity() {
+  const at = html.indexOf('const overlayCommonAlpha =');
+  assert.notEqual(at, -1, '揃えているときの共通透明度を計算していない');
+  const calc = html.slice(at, html.indexOf('\n            : null;', at));
+  // 実効透明度は「applyOpacity が false なら 1、そうでなければ opacity」。
+  assert.match(calc, /st\.applyOpacity === false\) \? 1 : st\.opacity/,
+    'レイヤーごとの Apply opacity を実効透明度に織り込んでいない');
+  assert.match(calc, /Math\.min\(lo, a\)/,
+    'いちばん低い実効透明度に揃えること (どのレイヤーも指定より明るくしない)');
+  assert.match(calc, /overlay && overlay\.matchBrightness/, '揃えていないときは従来どおりにすること');
+
+  // ★ 実際に globalAlpha へ流し込んでいること。計算しただけでは絵は変わらない。
+  const alphaAt = html.indexOf('ctx.globalAlpha = (overlayCommonAlpha');
+  assert.notEqual(alphaAt, -1, '共通透明度を ctx.globalAlpha に渡していない');
+  const line = html.slice(alphaAt, html.indexOf(';', html.indexOf('settings.opacity', alphaAt)));
+  assert.match(line, /overlayCommonAlpha != null && overlay && isMsiLayer/,
+    '重ね合わせメンバーの MSI だけに効かせること (HE/IF 背景は従来どおり)');
+  assert.match(line, /settings\.applyOpacity === false\) \? 1\.0 : settings\.opacity/,
+    '揃えていないときの従来の式を残すこと');
+}
+
 // vm へ渡す輝度ヘルパー一式 (SharePreview から呼ばれるのでコンテキストに要る)。
 function luminanceApi() {
   const constOf = (name) => new RegExp('const ' + name + ' = ([0-9.]+);').exec(html)[1];
@@ -1376,8 +1434,12 @@ function testEditKeepsMatchBrightness() {
     '編集分岐で matchBrightness を代入していない — 編集するたび設定が消える');
 
   // 下限に当たったら注意を出す。止めはしない。
-  assert.match(body, /overlayBrightnessScales\(colors\)\.floored/, '下限の判定をしていない');
+  assert.match(body, /const rep = overlayBrightnessScales\(colors\);/, '下限の判定をしていない');
+  assert.match(body, /rep\.floored\.length/, '下限の判定結果を読んでいない');
   assert.match(body, /登録はできます/, '注意は出すが止めない方針');
+  // 真っ黒はその分子が丸ごと出なくなるので、揃えの ON/OFF に関わらず先に知らせる。
+  assert.match(body, /rep\.invisible\.length/, '真っ黒の判定をしていない');
+  assert.match(body, /その分子は画面に出ません/, '真っ黒の注意文が無い');
   assert.match(body, /matchEl\.addEventListener\('change', syncOvNote\)/,
     'チェックを切り替えたときに注意を出し直していない');
 
@@ -1460,6 +1522,8 @@ async function main() {
   testRebakeCellImagesFollowsOverlay();
   testColorbarBecomesLegendInOverlayMode();
   testEditKeepsMatchBrightness();
+  testBlackOverlayColorIsReported();
+  testMatchedOverlayUsesOneOpacity();
   testLegendFollowsBrightnessMatching();
   testCloseRestoresOverlay();
   testForcedHeBackdropDoesNotPersist();

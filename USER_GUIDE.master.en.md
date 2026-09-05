@@ -558,6 +558,10 @@ The composite is an **additive (light-sum) blend**, so:
 
 **Every molecule's colour can be changed individually** — only the starting value is fixed. Use the colour picker on each row of the registration dialog.
 
+> **Do not pick pure black (`#000000`)**: in an additive blend black adds nothing, so
+> **that molecule never appears on screen at all**. Picking it raises a caution in the
+> dialog (registration is never blocked). This is unrelated to brightness matching.
+
 > **Three molecules is the practical limit**: with additive blending, four or more channels drive every colour towards white and co-localisation stops being readable at all. Selecting four or more raises a caution in the dialog, but **registration is never blocked**.
 
 > **Note**: overlays are honoured by the main canvas and the Preview image grid. Method-table thumbnails and the Align modal always draw a single compound with the active colormap.
@@ -572,6 +576,11 @@ Ticking **`明るさを揃える` (match brightness)** in the registration dialo
 - **Off by default**, because matching narrows the bright end of the scale — for the usual "where is it" reading, off is easier to see
 - Brightness is only ever **reduced** (raising it would blow out highlights). The darkest colour is left alone
 - While it is on, the **legend swatches show the colours as actually drawn**, and the note changes to "co-localisation is a pale colour (never pure white)" — with every channel topping out below 100%, the sum cannot reach white
+
+> **Opacity is matched too**: in a set with brightness matching on, every overlaid
+> molecule is drawn at **the same opacity** (the lowest effective one among them).
+> Otherwise a per-layer `Apply opacity` toggle in the gear popover would undo the
+> colour matching on screen. The toolbar's **MSI Opacity** still works as before.
 
 > **If you mix in a very dark colour**: with something like navy (`#000080`), matching to it would crush every other colour to black. The scale factor is floored at **0.25x** and the dialog raises a caution when the floor is hit. **Registration is never blocked**, but brightness is not fully matched in that case.
 
