@@ -3070,11 +3070,84 @@ const OVERLAY_DEFAULT_PALETTE = ['#ff00ff', '#00ff00', '#00ffff', '#ffff00', '#f
 // 加算合成でまだ色を読み分けられるチャンネル数の上限。超えたら注意を出す。
 const OVERLAY_ADDITIVE_LIMIT = 3;
 
+// ---- 相対輝度 (Rec.709) -----------------------------------------------------
+// 重ね合わせの「明るさを揃える」でのみ使う。同じ信号量でも緑 (輝度 0.715) は
+// マゼンタ (0.285) より約 2.5 倍明るく見えるため、量を見比べる用途で誤読の
+// 原因になる。それを打ち消すための計算。
+// ★ ファイル内の 0.299/0.587/0.114 は BT.601 の**グレースケール化** (強度画像を
+//   1 チャンネルに潰す) で目的が違うので流用しないこと。labToSrgb は CIELAB→sRGB
+//   の片道だけで逆変換が無いので、これも使えない。
+function _srgbLinear(c) {          // 0..255 (sRGB) -> 0..1 (線形光)
+    const s = c / 255;
+    return s <= 0.04045 ? (s / 12.92) : Math.pow((s + 0.055) / 1.055, 2.4);
+}
+function _srgbEncode(v) {          // 0..1 (線形光) -> 0..255 (sRGB)
+    const x = v <= 0 ? 0 : (v >= 1 ? 1 : v);
+    const s = x <= 0.0031308 ? (x * 12.92) : (1.055 * Math.pow(x, 1 / 2.4) - 0.055);
+    return Math.round(s * 255);
+}
+function _srgbLuminance(hex) {
+    const rgb = _hexToRgb(hex);
+    return 0.2126 * _srgbLinear(rgb[0]) + 0.7152 * _srgbLinear(rgb[1]) + 0.0722 * _srgbLinear(rgb[2]);
+}
+// 輝度が scale 倍になる色を返す。★ 線形光にしてから掛けて戻すこと。sRGB のまま
+// 掛けるとガンマ (~2.4) が乗って輝度は scale 倍にならない (0.4 倍のつもりが
+// 実際は 0.11 倍になる)。
+function scaleColorLuminance(hex, scale) {
+    const base = String(hex || '#ffffff').toLowerCase();
+    if (!(scale > 0) || scale >= 1) return base;
+    return '#' + _hexToRgb(base)
+        .map((c) => _srgbEncode(_srgbLinear(c) * scale).toString(16).padStart(2, '0'))
+        .join('');
+}
+// 倍率の下限。濃紺 (#000080, 輝度 0.0072) のような極端に暗い色を 1 つ混ぜると、
+// そこへ揃えたとき他の色が全部黒に潰れて何も見えなくなる。下限で止め、当たった
+// ことをモーダルの注意欄で知らせる (止めはしない — このアプリの方針)。
+const OVERLAY_MATCH_MIN_SCALE = 0.25;
+// 「明るさを揃える」の倍率を色ごとに決める。**いちばん暗い色に合わせて他を下げる**。
+// 明るい方へ揃えると白飛びするので、上げる方向は取らない (倍率は必ず 1 以下)。
+// 返り値 scale は 色 hex → 倍率、floored は下限に当たった色、invisible は輝度 0
+// (真っ黒) で揃えようがない色の一覧。
+function overlayBrightnessScales(layers) {
+    const out = { scale: {}, floored: [], invisible: [] };
+    const list = (layers || []).filter((l) => l && l.color);
+    // 基準はいちばん暗い**見える**色。輝度 0 を基準にすると全部黒に潰れるので外す。
+    let lo = Infinity;
+    for (const l of list) { const y = _srgbLuminance(l.color); if (y > 0 && y < lo) lo = y; }
+    for (const l of list) {
+        const hex = String(l.color).toLowerCase();
+        const y = _srgbLuminance(hex);
+        // ★ 真っ黒 (#000000) は倍率をどうかけても黒のままで、そもそも揃えようが
+        //   ない。基準からも外してあるので黙っていると「揃えました」と言いながら
+        //   その分子だけ何も出ない状態になる。倍率 1 のまま invisible で報告し、
+        //   モーダルの注意欄に出す。monoLut が黒→黒のランプを作るため、この分子が
+        //   見えないのは揃えの ON/OFF とは無関係 (元から見えない)。
+        if (!(y > 0)) {
+            out.scale[hex] = 1;
+            if (out.invisible.indexOf(hex) < 0) out.invisible.push(hex);
+            continue;
+        }
+        // ここに来た時点で見える色が 1 つ以上あるので lo は有限。
+        let s = Math.min(1, lo / y);
+        if (s < OVERLAY_MATCH_MIN_SCALE) {
+            s = OVERLAY_MATCH_MIN_SCALE;
+            if (out.floored.indexOf(hex) < 0) out.floored.push(hex);
+        }
+        out.scale[hex] = s;
+    }
+    return out;
+}
+
 const _monoLutCache = {};
-function monoLut(hex) {
-    const key = String(hex || '#ffffff').toLowerCase();
+// scale = 「明るさを揃える」の倍率 (1 = そのまま)。
+// ★ 倍率は必ずキャッシュキーに入れること。hex だけをキーにしていた頃の作りのまま
+//   倍率を LUT に焼くと、同じ色の「揃えあり」と「揃えなし」が衝突して古い焼きが返る。
+function monoLut(hex, scale) {
+    const base = String(hex || '#ffffff').toLowerCase();
+    const s = (Number.isFinite(scale) && scale > 0 && scale < 1) ? scale : 1;
+    const key = base + '|' + s;
     if (_monoLutCache[key]) return _monoLutCache[key];
-    const rgb = _hexToRgb(key);
+    const rgb = _hexToRgb(s < 1 ? scaleColorLuminance(base, s) : base);
     const lut = buildLut([[0, 0, 0, 0], [1, rgb[0], rgb[1], rgb[2]]]);
     _monoLutCache[key] = lut;
     return lut;
@@ -3097,18 +3170,33 @@ function identStamp(o) {
     return id;
 }
 
+// ★ この 2 つは必ず一緒に動かすこと。表示側だけ上げても効かない。
+//   deriveBakeStats の最後が rawDispMax = Math.min(disp, bakeHi) で、bakeHi は
+//   MSI_ROBUST_PERCENTILE そのもの。表示分位点だけ上げるとそこで頭打ちになる
+//   (実測: p99.9 は p99.5 の 1.12〜1.66 倍なので必ず当たる)。8bit ベイク経路が
+//   表示ウィンドウより狭くなる逆転も同時に防いでいる。
+//
+// 白飛びする画素の割合は「1 − 分位点」でそのまま決まる。上限を超えた画素は
+// msiValueEval が n を [0,1] にクランプするので全部同じ色に潰れるため:
+//     0.99  → ちょうど 1.00% が飽和 (旧既定。実データ 17 分子すべてで 1.00%)
+//     0.999 → ちょうど 0.10% が飽和 (現行)
+// 「白飛びをなくしたい」という要望に対し、真の最大値まで上げる案は採らなかった。
+// 外れ値 1 画素で全体が決まり、実データでは分子により 1.7〜4.9 倍暗くなるため。
+// 0.999 なら暗くなるのは中央値 1.40 倍 (実測 1.18〜2.17 倍) に収まる。
+//
 // Display ceiling percentile for MSI rasters. Using the raw max as the absolute
 // ceiling lets a single hot pixel (or one high-signal section) crush all tissue
 // to the colormap floor; a high percentile clips those outliers so tissue stays
 // visible while the per-MRM absolute comparison is preserved. Tune here.
-const MSI_ROBUST_PERCENTILE = 0.995;
+const MSI_ROBUST_PERCENTILE = 0.999;
 // 既定表示ウィンドウ上限の分位点(データ適応オートスケール)。各切片の強度分布の
 // この分位点(生単位)を既定の表示上限 rawDispMax とする(computeRasterPixels で算出、
 // getMsiWindow で使用)。暗い切片は自分のレンジで明るく、明るい切片は上位数%だけ
 // クリップして飛ばさない。ラスタは MSI_ROBUST_PERCENTILE でベイク・クリップ済みの
-// ため rawDispMax は bakeHi(=p99.5)が上限。値を下げるほど初期表示は明るく(上位
-// クリップ増)。ユーザーが Range を手入力した上書きには影響しない(getMsiWindow 参照)。
-const MSI_DEFAULT_DISPLAY_PERCENTILE = 0.99;
+// ため rawDispMax は bakeHi が上限 (上のコメント参照 — だから 2 つを揃えてある)。
+// 値を下げるほど初期表示は明るく(上位クリップ増)。ユーザーが Range を手入力した
+// 上書きには影響しない(getMsiWindow 参照)。
+const MSI_DEFAULT_DISPLAY_PERCENTILE = 0.999;
 // 既にソート済みの配列から分位点を取る。呼び出し側が 1 回だけソートして
 // 複数の分位点を取れるようにするため、添字の計算だけを切り出してある。
 function percentileOfSorted(a, p) {
@@ -7427,6 +7515,28 @@ class SectionPanel {
         const overlay = (typeof App !== 'undefined' && App && App.activeOverlay) || null;
         const overlayColor = {};
         if (overlay) for (const l of (overlay.layers || [])) { if (l && l.key) overlayColor[l.key] = l.color || '#ffffff'; }
+        // 「明るさを揃える」(matchBrightness): 同じ信号量が同じ明るさに見えるよう、
+        // いちばん暗い色に合わせて他の色の輝度を下げる。OFF なら倍率表を作らない
+        // (= 全部 1 倍で、従来とビット単位で同じ絵になる)。
+        const overlayScale = (overlay && overlay.matchBrightness)
+            ? overlayBrightnessScales(overlay.layers).scale : null;
+        // ★ 色を揃えるだけでは足りない。合成の直前にレイヤーごとの
+        //   ctx.globalAlpha がかかる (下の「重ね合わせで明るさを揃えている間は」
+        //   の行) ので、メンバーの実効透明度が食い違うと LUT で揃えた色が画面では
+        //   揃わない。opacity 自体は _propagateMsiOpacity が同じ切片の全 MSI へ
+        //   配るので食い違わないが、歯車の**レイヤーごとの Apply opacity**
+        //   チェックだけは食い違う (OFF のレイヤーは常に不透明になる)。
+        //   実測: 緑だけ Apply opacity を OFF にすると輝度比が 1.00 → 4.62 に開いた。
+        //   いちばん低い実効透明度に揃える。こうするとツールバーの MSI Opacity は
+        //   従来どおり効き、どのレイヤーも指定より明るくはならない。
+        const overlayCommonAlpha = (overlay && overlay.matchBrightness)
+            ? (overlay.layers || []).reduce((lo, l) => {
+                const st = (l && l.key) ? this.imageSettings[l.key] : null;
+                if (!st) return lo;
+                const a = (st.applyOpacity === false) ? 1 : st.opacity;
+                return Number.isFinite(a) ? Math.min(lo, a) : lo;
+            }, 1)
+            : null;
         const overlayBlack = !!(overlay && overlay.bg !== 'he');
         if (overlayBlack) { ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, this.dom.cdisp.width, this.dom.cdisp.height); }
 
@@ -7548,7 +7658,8 @@ class SectionPanel {
                 const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
                 const winC = App.getMsiWindow(key, rrC, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
                 const ovColor = overlay ? (overlayColor[key] || '#ffffff') : null;
-                const lut = overlay ? monoLut(ovColor) : getActiveColormap();
+                const ovScale = (overlay && overlayScale) ? (overlayScale[ovColor] || 1) : 1;
+                const lut = overlay ? monoLut(ovColor, ovScale) : getActiveColormap();
                 const bg = overlay ? [0, 0, 0] : getColormapBackground();
                 // 背景除去(Otsu): keep grid が 0 のピクセルは背景として backdrop に
                 // 落とす(out-of-grid と同じ扱い)。全イオン像で同一マスクを共有する。
@@ -7567,7 +7678,9 @@ class SectionPanel {
                 //  - getColormapBackground() は毎回新しい [0,0,0] を返すので、
                 //    参照ではなくカラーマップ名 (bg を一意に決める) を入れる。
                 //  - オーバーレイ定義は色ピッカーでその場で書き換えられるので、
-                //    定義の参照ではなく解決済みの色文字列を入れる。
+                //    定義の参照ではなく解決済みの色文字列を入れる。「明るさを揃える」の
+                //    倍率も同じ理由で**解決済みの数値**を入れる。入れ忘れると、揃えを
+                //    切り替えても同じ署名になって古い焼きがそのまま返る。
                 //  - img / 値ラスタ / keep グリッドは作り直されたら必ず別オブジェクト
                 //    になるので、同一性スタンプで足りる。
                 //
@@ -7579,7 +7692,7 @@ class SectionPanel {
                     + '|' + identStamp(vrCache)
                     + '|' + (rrC ? (rrC[0] + ',' + rrC[1]) : '-')
                     + '|' + (winC ? (winC.min + ',' + winC.max) : '-')
-                    + '|' + (overlay ? ('o' + ovColor) : ('c' + _activeColormapName))
+                    + '|' + (overlay ? ('o' + ovColor + '@' + ovScale) : ('c' + _activeColormapName))
                     + '|' + (App.otsuBgRemove ? '1' : '0')
                     + '|' + identStamp(keepGrid && keepGrid.keep);
                 this._msiLutCache = this._msiLutCache || new Map();
@@ -7660,7 +7773,13 @@ class SectionPanel {
                 drawSource = img;
             }
 
-            ctx.globalAlpha = (settings.applyOpacity === false) ? 1.0 : settings.opacity;
+            // 重ね合わせで明るさを揃えている間は、メンバー全員を共通の透明度で
+            // 乗せる (理由は overlayCommonAlpha のコメント)。重ね合わせ中に描く
+            // MSI はメンバーだけなので (layersToDraw の overlay 分岐)、この条件で
+            // メンバーを指せる。HE/IF の背景は従来どおり自分の透明度のまま。
+            ctx.globalAlpha = (overlayCommonAlpha != null && overlay && isMsiLayer)
+                ? overlayCommonAlpha
+                : ((settings.applyOpacity === false) ? 1.0 : settings.opacity);
             // Normally source-over (MSI Opacity covers HE intuitively). In the
             // molecule-overlay mode each MSI member composites additively so
             // co-localisation reads as colour mixing (e.g. red + green → yellow).
@@ -11941,6 +12060,11 @@ function openOverlayModal(existing) {
         + '<label style="display:block;font-size:11px;color:#475569;margin-top:8px;">背景'
         +   '<select name="ovbg" style="width:100%;padding:5px 7px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;margin-top:2px;background:#fff;"><option value="black"' + (ov.bg !== 'he' ? ' selected' : '') + '>黒（MSIのみ加算）</option><option value="he"' + (ov.bg === 'he' ? ' selected' : '') + '>HE/IF背景の上</option></select>'
         + '</label>'
+        + '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#475569;margin-top:8px;cursor:pointer;">'
+        +   '<input type="checkbox" name="ovmatch"' + (ov.matchBrightness ? ' checked' : '') + ' style="margin:0;">'
+        +   '<span>明るさを揃える（量を見比べる用）</span>'
+        + '</label>'
+        + '<div style="font-size:10px;color:#94a3b8;margin-left:20px;">同じ信号量が同じ明るさに見えるよう、いちばん暗い色に合わせて他の色を落とします</div>'
         + '<p data-ov-note style="color:#b45309;font-size:11px;min-height:14px;margin-top:6px;"></p>'
         + '<p data-err style="color:#b91c1c;font-size:11px;min-height:14px;"></p>'
         + '<div class="modal-actions" style="display:flex;gap:6px;justify-content:flex-end;margin-top:14px;">'
@@ -11955,13 +12079,40 @@ function openOverlayModal(existing) {
     // 保存時ではなく行を足した時点で出す — 保存時に出してもモーダルが閉じて
     // 読まれないため。
     const noteEl = card.querySelector('[data-ov-note]');
+    const matchEl = card.querySelector('[name="ovmatch"]');
     const syncOvNote = () => {
         const n = rowsHost.querySelectorAll('.ov-row').length;
-        noteEl.textContent = n > OVERLAY_ADDITIVE_LIMIT
-            ? ('⚠ ' + n + ' 色の加算合成はどの色も白に近づき、共局在を読み取れなくなります ('
-               + OVERLAY_ADDITIVE_LIMIT + ' 分子までを推奨。登録はできます)')
-            : '';
+        const colors = Array.from(rowsHost.querySelectorAll('.ov-row-color'))
+            .map(el => ({ color: el.value }));
+        const rep = overlayBrightnessScales(colors);
+        // 真っ黒 (#000000) を選ぶとその分子は**まったく表示されない**。これは
+        // 「明るさを揃える」とは無関係に起きるので、チェックの ON/OFF によらず
+        // 先に知らせる (いちばん重い誤設定なので他の注意より優先)。
+        if (rep.invisible.length) {
+            noteEl.textContent = '⚠ 真っ黒 (#000000) の色が ' + rep.invisible.length
+                + ' 色あります。その分子は画面に出ません (登録はできます)';
+            return;
+        }
+        if (n > OVERLAY_ADDITIVE_LIMIT) {
+            noteEl.textContent = '⚠ ' + n + ' 色の加算合成はどの色も白に近づき、共局在を読み取れなくなります ('
+                + OVERLAY_ADDITIVE_LIMIT + ' 分子までを推奨。登録はできます)';
+            return;
+        }
+        // 「明るさを揃える」で倍率が下限に当たったとき。極端に暗い色 (濃紺など) が
+        // 1 つ混ざると、そこへ揃えた他の色が黒に潰れて何も見えなくなる。下限で
+        // 止めてあるので**完全には揃わない**。その事実を伝える。ここも止めはしない。
+        if (matchEl && matchEl.checked && rep.floored.length) {
+            noteEl.textContent = '⚠ 暗すぎる色が混ざっているため、明るさを完全には揃えられません ('
+                + rep.floored.length + ' 色が下限 ' + OVERLAY_MATCH_MIN_SCALE + ' 倍で止まりました。登録はできます)';
+            return;
+        }
+        noteEl.textContent = '';
     };
+    matchEl.addEventListener('change', syncOvNote);
+    // 色を変えると倍率が変わるので、下限の判定もやり直す。
+    rowsHost.addEventListener('input', (ev) => {
+        if (ev.target && ev.target.classList && ev.target.classList.contains('ov-row-color')) syncOvNote();
+    });
     card.querySelector('[data-ov-addrow]').addEventListener('click', () => {
         const idx = rowsHost.querySelectorAll('.ov-row').length;
         const tmp = document.createElement('div');
@@ -11992,6 +12143,7 @@ function openOverlayModal(existing) {
             name: name || (auto.length > 60 ? (rows.length + '色重ね合わせ') : auto),
             layers: rows,
             bg: card.querySelector('[name="ovbg"]').value || 'black',
+            matchBrightness: !!(matchEl && matchEl.checked),
         };
     };
     p.then((res) => {
@@ -12000,7 +12152,11 @@ function openOverlayModal(existing) {
         App.project.overlays = App.project.overlays || [];
         let target;
         if (existing && existing.id) {
+            // ★ ここは代入する項目を並べているので、新しい項目を足したら**必ず**
+            //   ここにも足すこと。抜けると保存はできるのに編集するたび設定が消える
+            //   (エラーも出ないので気づきにくい)。
             existing.name = res.name; existing.layers = res.layers; existing.bg = res.bg;
+            existing.matchBrightness = res.matchBrightness;
             target = existing;
         } else {
             res.id = 'ov_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
@@ -18222,17 +18378,28 @@ const SharePreview = {
             if (cbLabel) cbLabel.hidden = true;
             if (legend) {
                 const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                // 「明るさを揃える」中は画面に出ている色が定義の色そのものではない。
+                // 色見本に生の l.color を出すと**実際の見え方と食い違う**ので、
+                // 描画と同じ倍率をかけた色を出す (倍率表は renderComposite と同じ関数)。
+                const ovScale = ov.matchBrightness ? overlayBrightnessScales(ov.layers).scale : null;
                 const rows = ov.layers.filter(l => l && l.key).map(l => {
                     // 名前の出し方は重ね合わせ登録モーダル (_allMsiCompounds) と同じ。
                     const meta = findCompoundMeta(App.project, l.key);
                     const nm = (meta && (meta.base || meta.name)) || formatDisplayName(l.key);
+                    const raw = l.color || '#ffffff';
+                    const shown = ovScale ? scaleColorLuminance(raw, ovScale[String(raw).toLowerCase()] || 1) : raw;
                     return '<div class="cb-item" title="' + esc(nm) + '">'
-                        + '<span class="cb-swatch" style="background:' + esc(l.color || '#ffffff') + ';"></span>'
+                        + '<span class="cb-swatch" style="background:' + esc(shown) + ';"></span>'
                         + '<span class="cb-name">' + esc(nm) + '</span></div>';
                 }).join('');
+                // 明るさを揃えると共局在は純白にならない (どの色も上端が 1 未満のため
+                // 足し合わせても 255 に届かない)。注記も実態に合わせて書き換える。
                 legend.innerHTML = rows
-                    + '<div class="cb-note">白 = 共局在 (色の足し算)<br>'
-                    + '色は「＋重ね合わせ」で分子ごとに変更できます</div>';
+                    + '<div class="cb-note">'
+                    + (ov.matchBrightness
+                        ? '明るさを揃えています（量の比較用）<br>共局在は淡い色（純白にはなりません）'
+                        : '白 = 共局在 (色の足し算)')
+                    + '<br>色は「＋重ね合わせ」で分子ごとに変更できます</div>';
                 legend.hidden = false;
             }
             this._syncColorbarWidth();
