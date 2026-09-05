@@ -1340,6 +1340,100 @@ function testOverlayScaleReachesTheBake() {
   assert.match(html, /overlay && overlay\.matchBrightness\)\s*\n\s*\? overlayBrightnessScales\(overlay\.layers\)\.scale : null/);
 }
 
+// vm へ渡す輝度ヘルパー一式 (SharePreview から呼ばれるのでコンテキストに要る)。
+function luminanceApi() {
+  const constOf = (name) => new RegExp('const ' + name + ' = ([0-9.]+);').exec(html)[1];
+  const context = vm.createContext({ Math, Number, String, out: {} });
+  vm.runInContext(
+    'const OVERLAY_MATCH_MIN_SCALE = ' + constOf('OVERLAY_MATCH_MIN_SCALE') + ';\n'
+    + ['_hexToRgb', '_srgbLinear', '_srgbEncode', '_srgbLuminance',
+       'scaleColorLuminance', 'overlayBrightnessScales'].map(extractTopLevelFunction).join('\n')
+    + '\nout.api = { scaleColorLuminance, overlayBrightnessScales };',
+    context,
+  );
+  return context.out.api;
+}
+
+// ★ openOverlayModal の編集分岐は「代入する項目を並べる」書き方なので、新しい
+//   項目を足したときにここだけ抜けやすい。抜けると保存はできるのに**編集する
+//   たびに設定が消える**。エラーも出ないので気づけない。
+function testEditKeepsMatchBrightness() {
+  const at = html.indexOf('function openOverlayModal(');
+  assert.notEqual(at, -1);
+  const body = html.slice(at, html.indexOf('\nfunction deleteOverlayById', at));
+
+  // モーダルにチェックがあり、初期値は既存の設定を映すこと。
+  assert.match(body, /name="ovmatch"/, '「明るさを揃える」のチェックが無い');
+  assert.match(body, /\(ov\.matchBrightness \? ' checked' : ''\)/,
+    '編集で開いたときにチェックの状態が復元されていない');
+  // 既定は OFF (新規は matchBrightness を持たない → falsy)。
+  assert.match(body, /const ov = existing \|\| \{ name: '', layers: \[\], bg: 'black' \};/,
+    '新規の既定に matchBrightness を書かないこと (既定 OFF)');
+
+  // 読み出しと、編集分岐への引き回し。
+  assert.match(body, /matchBrightness: !!\(matchEl && matchEl\.checked\)/, '_collect が読んでいない');
+  assert.match(body, /existing\.matchBrightness = res\.matchBrightness;/,
+    '編集分岐で matchBrightness を代入していない — 編集するたび設定が消える');
+
+  // 下限に当たったら注意を出す。止めはしない。
+  assert.match(body, /overlayBrightnessScales\(colors\)\.floored/, '下限の判定をしていない');
+  assert.match(body, /登録はできます/, '注意は出すが止めない方針');
+  assert.match(body, /matchEl\.addEventListener\('change', syncOvNote\)/,
+    'チェックを切り替えたときに注意を出し直していない');
+
+  // 保存・公開・取り込みは素通しなので、明示的な whitelist が増えていないこと。
+  assert.match(html, /overlays: project\.overlays \|\| \[\]/, 'publish は overlays を verbatim で載せる');
+  assert.match(html, /return s \? s\.meta\.overlays : \[\];/, '取り込みも verbatim');
+}
+
+// 揃えている間、凡例の色見本は**実際に描かれている色**を出す。生の l.color を
+// 出すと画面と食い違い、「凡例のとおりの色が出ていない」と読まれる。
+function testLegendFollowsBrightnessMatching() {
+  const mkEl = () => ({
+    hidden: false, innerHTML: '', width: 0, height: 0,
+    getContext: () => ({
+      createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }),
+      putImageData() {},
+    }),
+  });
+  const cv = mkEl(); const legend = mkEl(); const label = mkEl();
+  const ovPanel = mkEl(); ovPanel.hidden = true;
+  const classes = new Set();
+  const layers = [{ key: 'MSI_Lactate', color: '#ff00ff' }, { key: 'MSI_Citrate', color: '#00ff00' }];
+  const App = { activeOverlay: { layers, matchBrightness: true }, project: {} };
+  const { preview } = makePreviewContext({
+    App,
+    findCompoundMeta: () => null,
+    formatDisplayName: (k) => String(k).replace(/^MSI_/, ''),
+    get2dContext: (c) => c.getContext('2d'),
+    getActiveColormap: () => Array.from({ length: 256 }, () => [0, 0, 0]),
+    ...luminanceApi(),
+  });
+  const bySel = { '[data-colorbar]': cv, '[data-cb-legend]': legend, '[data-cb-label]': label,
+                  '[data-ov-panel]': ovPanel };
+  preview.overlay = {
+    querySelector: (sel) => bySel[sel] || null,
+    classList: { add: (c) => classes.add(c), remove: (c) => classes.delete(c),
+                 toggle: (c, on) => { if (on) classes.add(c); else classes.delete(c); } },
+  };
+
+  preview._drawColorbar();
+  // いちばん暗いマゼンタは据え置き、緑は落とした色 (#00a900) で出る。
+  assert.match(legend.innerHTML, /#ff00ff/, 'いちばん暗い色は据え置きなので生の色のまま');
+  assert.match(legend.innerHTML, /#00a900/,
+    '揃えているのに色見本が生の #00ff00 のまま — 画面の見え方と食い違う');
+  assert.doesNotMatch(legend.innerHTML, /background:#00ff00/, '生の緑を出さないこと');
+  // 揃えると共局在は純白にならないので、注記も書き換える。
+  assert.match(legend.innerHTML, /純白にはなりません/, '注記が「白 = 共局在」のまま');
+  assert.doesNotMatch(legend.innerHTML, /白 = 共局在/);
+
+  // OFF なら従来どおり。
+  App.activeOverlay = { layers, matchBrightness: false };
+  preview._drawColorbar();
+  assert.match(legend.innerHTML, /#00ff00/, 'OFF では生の色');
+  assert.match(legend.innerHTML, /白 = 共局在/, 'OFF では従来の注記');
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -1365,6 +1459,8 @@ async function main() {
   testOverlayScaleReachesTheBake();
   testRebakeCellImagesFollowsOverlay();
   testColorbarBecomesLegendInOverlayMode();
+  testEditKeepsMatchBrightness();
+  testLegendFollowsBrightnessMatching();
   testCloseRestoresOverlay();
   testForcedHeBackdropDoesNotPersist();
   testOverlayForEditingIgnoresUnregistered();

@@ -18,6 +18,7 @@ This guide is for the **master / admin** publishing data with DESI Data Share. I
 10. [Export ZIP — local backup & distribution](#10-export-zip--local-backup--distribution)
 10-bis. [Preview — see what the recipient sees, before publishing](#10-bis-preview--see-what-the-recipient-sees-before-publishing)
 10-ter. [Overlays (multi-molecule colour composites)](#10-ter-overlays-multi-molecule-colour-composites)
+10-quater. [Range defaults (about blown-out highlights)](#10-quater-range-defaults-about-blown-out-highlights)
 11. [Publish to share / Auto-publish / Sync indicator](#11-publish-to-share--auto-publish--sync-indicator)
 12. [Sharing the URL & passwords](#12-sharing-the-url--passwords)
 13. [What happens on re-publish](#13-what-happens-on-re-publish)
@@ -561,7 +562,36 @@ The composite is an **additive (light-sum) blend**, so:
 
 > **Note**: overlays are honoured by the main canvas and the Preview image grid. Method-table thumbnails and the Align modal always draw a single compound with the active colormap.
 
-> **On brightness**: for the same signal, green looks brighter than magenta (human eye sensitivity). To compare amounts rigorously, read the Stats numbers or ROI statistics rather than the colours.
+### Match brightness (for comparing amounts)
+
+For the same signal, **green looks about 2.5x brighter than magenta**. That is human eye sensitivity (Rec.709 relative luminance: green 0.715, magenta 0.285), and left alone it reads as "there is more of the green molecule".
+
+Ticking **`明るさを揃える` (match brightness)** in the registration dialog **dims every colour down to the darkest one**, so equal signal looks equally bright. For the default magenta + green that puts green at about 0.40x (measured: 2.51x before, 1.00x after).
+
+- **The setting is stored per set**, so you can mark one set "for comparing amounts" and **share recipients see it the same way**
+- **Off by default**, because matching narrows the bright end of the scale — for the usual "where is it" reading, off is easier to see
+- Brightness is only ever **reduced** (raising it would blow out highlights). The darkest colour is left alone
+- While it is on, the **legend swatches show the colours as actually drawn**, and the note changes to "co-localisation is a pale colour (never pure white)" — with every channel topping out below 100%, the sum cannot reach white
+
+> **If you mix in a very dark colour**: with something like navy (`#000080`), matching to it would crush every other colour to black. The scale factor is floored at **0.25x** and the dialog raises a caution when the floor is hit. **Registration is never blocked**, but brightness is not fully matched in that case.
+
+> Matching **never changes the Stats numbers or ROI statistics** — only the on-screen brightness. Keep reading the numbers when you need a rigorous comparison.
+
+## 10-quater. Range defaults (about blown-out highlights)
+
+While you have not touched Range, the display ceiling is set automatically to **the top 0.1% value of that molecule's intensity distribution**. Every pixel above the ceiling collapses to the same colour, so **the fraction of blown-out pixels is exactly `1 - percentile`**.
+
+| | Blown-out pixels |
+| --- | --- |
+| Old (top 1%) | exactly 1.00% |
+| **Current (top 0.1%)** | **exactly 0.10%** |
+
+The true maximum is not used as the ceiling because **a single outlier pixel would then set the brightness of the whole image** (on real data that made molecules 1.7-4.9x darker). At the top 0.1% the darkening stays at a median of 1.40x.
+
+- **If it looks too dark, lower the Range ceiling by hand.** A typed value always wins over the automatic one
+- `Reset` discards that typed value and returns to the automatic ceiling above
+- Turning the toolbar's **outlier clip off** restores the **true maximum** as the ceiling, as before
+- The ceiling is recorded per layer at registration time and **the main view, the preview and share recipients all read the same value**. Already-published projects pick up the new look as soon as a viewer reloads the layer — no re-publish needed
 
 ## 11. Publish to share / Auto-publish / Sync indicator
 

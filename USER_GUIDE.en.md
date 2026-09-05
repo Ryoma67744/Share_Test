@@ -287,6 +287,8 @@ Three groups in each section's toolbar:
 
 > These tweaks are **temporary** — they revert to the server state on reload, and other viewers don't see them.
 
+> **Range defaults and blown-out highlights**: while you have not touched Range, the ceiling is set automatically to **the top 0.1% value of that molecule's intensity distribution**. Pixels above the ceiling collapse to the same colour, so **exactly 0.10% of pixels blow out**. The old ceiling was the top 1%, which blew out 1.00%. The trade-off is that **images look somewhat darker** (median 1.4x). **If it looks too dark, lower the Range ceiling by hand** — a typed value always wins, and `Reset` returns to the automatic one.
+
 > **Range initial values are inherited from the master**: the per-MSI Range slider (vmin/vmax) loads with the value the master set at publish time. Viewers can still adjust freely, but the change is local — reloading restores the master's value. If the master later re-tunes Range and re-publishes, the new value becomes the next-load initial.
 
 > **Range stays the same window — same width — across sections of one compound**: changing the Range min or max on one section snaps the min/max of **every section showing the same MRM (compound)** to the same values (so the widths match too). Editing via the gear ⚙ Intensity range does the same. Other compounds are unaffected. This lets you compare several sections on one identical scale.
@@ -389,6 +391,8 @@ The header **Preview** button opens a side-by-side overlay that shows every sect
 | **🔑 Admin (top-right)** | When opened with a viewer password, this **escalates** to admin without closing Preview — the admin password modal now appears on top of the overlay. |
 
 > **Overlays (multi-molecule colour composites)**: overlays registered by the master are listed **at the right edge of the screen**; click one to display it (creating, editing and deleting are master-only). While one is shown, `単一表示へ戻る` under the list returns to a single compound. The blend is an **additive light-sum**, so **a pure colour = only that molecule, white = the overlaid molecules co-localise**. The defaults are magenta then green — two colours that share no light component, so "only this one" and "both" are separable by colour alone. (Red + green is not the default because it is the pair the most common colour-vision type cannot separate.) Additive blending stops being readable past about **three molecules**.
+
+> **Sets with brightness matching on**: for the same signal, green looks about 2.5x brighter than magenta (human eye sensitivity), so the master can register a set **for comparing amounts** with brightness matching enabled. In such a set **every colour is dimmed down to the darkest one**, so equal signal looks equally bright. Co-localisation is then **a pale colour rather than pure white**, and the legend note says so. The legend swatches always show **the colours as actually drawn**. Only the master can toggle this; viewers cannot change it. Matching **never changes the Stats numbers or ROI statistics**.
 
 > Preview Range and the main toolbar use the same values. Closing Preview keeps the current values; reloading restores the master's published values.
 > Sections with multiple sources can flip between `TIC_<filename>` rows to inspect each source's TIC separately.

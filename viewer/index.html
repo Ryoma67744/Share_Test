@@ -12025,6 +12025,11 @@ function openOverlayModal(existing) {
         + '<label style="display:block;font-size:11px;color:#475569;margin-top:8px;">背景'
         +   '<select name="ovbg" style="width:100%;padding:5px 7px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;margin-top:2px;background:#fff;"><option value="black"' + (ov.bg !== 'he' ? ' selected' : '') + '>黒（MSIのみ加算）</option><option value="he"' + (ov.bg === 'he' ? ' selected' : '') + '>HE/IF背景の上</option></select>'
         + '</label>'
+        + '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#475569;margin-top:8px;cursor:pointer;">'
+        +   '<input type="checkbox" name="ovmatch"' + (ov.matchBrightness ? ' checked' : '') + ' style="margin:0;">'
+        +   '<span>明るさを揃える（量を見比べる用）</span>'
+        + '</label>'
+        + '<div style="font-size:10px;color:#94a3b8;margin-left:20px;">同じ信号量が同じ明るさに見えるよう、いちばん暗い色に合わせて他の色を落とします</div>'
         + '<p data-ov-note style="color:#b45309;font-size:11px;min-height:14px;margin-top:6px;"></p>'
         + '<p data-err style="color:#b91c1c;font-size:11px;min-height:14px;"></p>'
         + '<div class="modal-actions" style="display:flex;gap:6px;justify-content:flex-end;margin-top:14px;">'
@@ -12039,13 +12044,34 @@ function openOverlayModal(existing) {
     // 保存時ではなく行を足した時点で出す — 保存時に出してもモーダルが閉じて
     // 読まれないため。
     const noteEl = card.querySelector('[data-ov-note]');
+    const matchEl = card.querySelector('[name="ovmatch"]');
     const syncOvNote = () => {
         const n = rowsHost.querySelectorAll('.ov-row').length;
-        noteEl.textContent = n > OVERLAY_ADDITIVE_LIMIT
-            ? ('⚠ ' + n + ' 色の加算合成はどの色も白に近づき、共局在を読み取れなくなります ('
-               + OVERLAY_ADDITIVE_LIMIT + ' 分子までを推奨。登録はできます)')
-            : '';
+        if (n > OVERLAY_ADDITIVE_LIMIT) {
+            noteEl.textContent = '⚠ ' + n + ' 色の加算合成はどの色も白に近づき、共局在を読み取れなくなります ('
+                + OVERLAY_ADDITIVE_LIMIT + ' 分子までを推奨。登録はできます)';
+            return;
+        }
+        // 「明るさを揃える」で倍率が下限に当たったとき。極端に暗い色 (濃紺など) が
+        // 1 つ混ざると、そこへ揃えた他の色が黒に潰れて何も見えなくなる。下限で
+        // 止めてあるので**完全には揃わない**。その事実を伝える。ここも止めはしない。
+        if (matchEl && matchEl.checked) {
+            const colors = Array.from(rowsHost.querySelectorAll('.ov-row-color'))
+                .map(el => ({ color: el.value }));
+            const floored = overlayBrightnessScales(colors).floored;
+            if (floored.length) {
+                noteEl.textContent = '⚠ 暗すぎる色が混ざっているため、明るさを完全には揃えられません ('
+                    + floored.length + ' 色が下限 ' + OVERLAY_MATCH_MIN_SCALE + ' 倍で止まりました。登録はできます)';
+                return;
+            }
+        }
+        noteEl.textContent = '';
     };
+    matchEl.addEventListener('change', syncOvNote);
+    // 色を変えると倍率が変わるので、下限の判定もやり直す。
+    rowsHost.addEventListener('input', (ev) => {
+        if (ev.target && ev.target.classList && ev.target.classList.contains('ov-row-color')) syncOvNote();
+    });
     card.querySelector('[data-ov-addrow]').addEventListener('click', () => {
         const idx = rowsHost.querySelectorAll('.ov-row').length;
         const tmp = document.createElement('div');
@@ -12076,6 +12102,7 @@ function openOverlayModal(existing) {
             name: name || (auto.length > 60 ? (rows.length + '色重ね合わせ') : auto),
             layers: rows,
             bg: card.querySelector('[name="ovbg"]').value || 'black',
+            matchBrightness: !!(matchEl && matchEl.checked),
         };
     };
     p.then((res) => {
@@ -12084,7 +12111,11 @@ function openOverlayModal(existing) {
         App.project.overlays = App.project.overlays || [];
         let target;
         if (existing && existing.id) {
+            // ★ ここは代入する項目を並べているので、新しい項目を足したら**必ず**
+            //   ここにも足すこと。抜けると保存はできるのに編集するたび設定が消える
+            //   (エラーも出ないので気づきにくい)。
             existing.name = res.name; existing.layers = res.layers; existing.bg = res.bg;
+            existing.matchBrightness = res.matchBrightness;
             target = existing;
         } else {
             res.id = 'ov_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
@@ -18306,17 +18337,28 @@ const SharePreview = {
             if (cbLabel) cbLabel.hidden = true;
             if (legend) {
                 const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+                // 「明るさを揃える」中は画面に出ている色が定義の色そのものではない。
+                // 色見本に生の l.color を出すと**実際の見え方と食い違う**ので、
+                // 描画と同じ倍率をかけた色を出す (倍率表は renderComposite と同じ関数)。
+                const ovScale = ov.matchBrightness ? overlayBrightnessScales(ov.layers).scale : null;
                 const rows = ov.layers.filter(l => l && l.key).map(l => {
                     // 名前の出し方は重ね合わせ登録モーダル (_allMsiCompounds) と同じ。
                     const meta = findCompoundMeta(App.project, l.key);
                     const nm = (meta && (meta.base || meta.name)) || formatDisplayName(l.key);
+                    const raw = l.color || '#ffffff';
+                    const shown = ovScale ? scaleColorLuminance(raw, ovScale[String(raw).toLowerCase()] || 1) : raw;
                     return '<div class="cb-item" title="' + esc(nm) + '">'
-                        + '<span class="cb-swatch" style="background:' + esc(l.color || '#ffffff') + ';"></span>'
+                        + '<span class="cb-swatch" style="background:' + esc(shown) + ';"></span>'
                         + '<span class="cb-name">' + esc(nm) + '</span></div>';
                 }).join('');
+                // 明るさを揃えると共局在は純白にならない (どの色も上端が 1 未満のため
+                // 足し合わせても 255 に届かない)。注記も実態に合わせて書き換える。
                 legend.innerHTML = rows
-                    + '<div class="cb-note">白 = 共局在 (色の足し算)<br>'
-                    + '色は「＋重ね合わせ」で分子ごとに変更できます</div>';
+                    + '<div class="cb-note">'
+                    + (ov.matchBrightness
+                        ? '明るさを揃えています（量の比較用）<br>共局在は淡い色（純白にはなりません）'
+                        : '白 = 共局在 (色の足し算)')
+                    + '<br>色は「＋重ね合わせ」で分子ごとに変更できます</div>';
                 legend.hidden = false;
             }
             this._syncColorbarWidth();
