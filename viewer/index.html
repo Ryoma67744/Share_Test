@@ -8109,14 +8109,17 @@ class SectionPanel {
         if (typeof App !== 'undefined' && App && App.queueSave) App.queueSave();
     }
 
-    toggleLayer(key, force) {
+    // opts.persist === false: 表示だけ変えて section.meta.visibleLayers に書かず
+    // App.queueSave() も呼ばない。プレビューのように「開いている間だけ強制的に
+    // 見せて、閉じたら元に戻す」一時的な切り替え専用。
+    toggleLayer(key, force, opts) {
         const want = (force === undefined) ? !this.visibleLayers.has(key) : !!force;
         if (want) this.visibleLayers.add(key); else this.visibleLayers.delete(key);
         if (/^MSI_/i.test(key)) {
             if (want) this.activeMsiKey = key;
             else if (this.activeMsiKey === key) this.activeMsiKey = this.fallbackActiveMsiKey();
         }
-        this._persistVisibleLayers();
+        if (!opts || opts.persist !== false) this._persistVisibleLayers();
         this.rebuildLayerBar();
         this.renderComposite();
         this.drawAllRois();
@@ -11855,6 +11858,16 @@ function renderOverlayBar() {
     }
     if (active) html += '<button type="button" class="ov-reset" data-ov-reset title="単一化合物表示に戻す">単一表示へ</button>';
     host.innerHTML = html;
+}
+
+// 「編集として開いてよい重ね合わせか」。project.overlays に載っている定義だけが
+// 編集対象で、KMD の「重ねる」が作る kmd-tmp のような保存されない一時定義は
+// null を返す (existing として渡すと openOverlayModal が編集分岐に入り、その場
+// 限りのオブジェクトを書き換えて登録しないまま終わるため)。
+function overlayForEditing(ov, project) {
+    if (!ov) return null;
+    const list = (project && project.overlays) || [];
+    return list.indexOf(ov) >= 0 ? ov : null;
 }
 
 function openOverlayModal(existing) {
@@ -17065,6 +17078,7 @@ const SharePreview = {
     _opacitySnapshot: null,    // Array<{panelId, byKey: Map<msiKey, opacity>}>
     _savedColormap: null,       // colormap name to restore on close
     _overlaySnapshot: undefined, // App.activeOverlay to restore on close (undefined = not open)
+    _savedViewMode: null,       // App.viewMode to restore on close ('free' / 'compound')
     _opacityRaf: 0,             // rAF handle coalescing slider events
     _pendingOpacity: 1,         // last slider value queued for next rAF
     _cellTransforms: [],        // per-cell {tx, ty, scale}
@@ -17107,6 +17121,12 @@ const SharePreview = {
         // 戻していたのにこれだけ抜けており、プレビューで重ね合わせにして閉じると
         // 主画面が重ね合わせのままだった。setActiveOverlay は自分でパネルを描き
         // 直すが、下の配色復元ループが最後にもう一度描くので最終状態は正しい。
+        // 表示モードも戻す (setViewMode 経由なので localStorage も一緒に戻る)。
+        if (this._savedViewMode) {
+            const wantMode = this._savedViewMode;
+            this._savedViewMode = null;
+            try { App.setViewMode(wantMode); } catch (e) { console.warn('SharePreview restore viewMode failed', e); }
+        }
         if (this._overlaySnapshot !== undefined) {
             const wantOverlay = this._overlaySnapshot;
             this._overlaySnapshot = undefined;
@@ -17223,7 +17243,15 @@ const SharePreview = {
             for (const k of heKeys) {
                 if (panel.imageSources && panel.imageSources[k]
                     && !panel.visibleLayers.has(k)) {
-                    try { panel.toggleLayer(k, true); touched++; } catch (e) {}
+                    // persist:false が要る。プレビューを開いている間だけの強制表示
+                    // なのに、toggleLayer は section.meta.visibleLayers を書いて
+                    // App.queueSave() まで呼ぶ。共有プロジェクトは _doSave が
+                    // __share で弾くので無害だったが、master で開けるようにした
+                    // 以上そのまま 400ms 後に IndexedDB へ、5 秒後に auto-publish
+                    // へ流れる。_restoreVisibility はメモリしか戻さないので、
+                    // 「意図的に隠していた HE/IF が、プレビューを開いただけで
+                    // ローカルにも共有先にも表示状態で残る」ことになる。
+                    try { panel.toggleLayer(k, true, { persist: false }); touched++; } catch (e) {}
                 }
             }
         }
@@ -17528,6 +17556,11 @@ const SharePreview = {
         this._cellTransforms = [];
         this._sectionRotations = [];
 
+        // プレビューは「1 化合物 × 全切片」の画面なので Compound へ倒すが、
+        // setViewMode は localStorage にも書く。戻さないと、相手の見え方を
+        // 確かめただけで master の主画面が (次のセッション以降も) Compound に
+        // 変わってしまうので、開く前のモードを控えて close() で戻す。
+        this._savedViewMode = App.viewMode;
         if (App.viewMode !== 'compound') App.setViewMode('compound');
         const desiredFocus = (App.focusCompoundKey && allKeys.has(App.focusCompoundKey))
             ? App.focusCompoundKey
@@ -17693,7 +17726,9 @@ const SharePreview = {
         const addOvBtn = overlay.querySelector('[data-add-overlay]');
         if (addOvBtn) {
             addOvBtn.addEventListener('click', () => {
-                try { openOverlayModal(App.activeOverlay || null); }
+                // 編集として開くのは project.overlays に載っている定義だけ
+                // (理由は overlayForEditing のコメント)。
+                try { openOverlayModal(overlayForEditing(App.activeOverlay, App.project)); }
                 catch (e) { console.warn('openOverlayModal from preview failed', e); }
             });
         }

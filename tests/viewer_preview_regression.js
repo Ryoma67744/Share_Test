@@ -354,15 +354,22 @@ function testCloseRestoresOverlay() {
   const before = { id: 'ov_before', layers: [] };
   const after = { id: 'ov_after', layers: [] };
   const setCalls = [];
+  const modeCalls = [];
   const App = {
     activeOverlay: before,
     setActiveOverlay(def) { setCalls.push(def); this.activeOverlay = def; },
+    // open() は Compound へ倒すが setViewMode は localStorage にも書くので、
+    // 戻さないと「相手の見え方を確かめただけ」で master の主画面が恒久的に
+    // Compound へ変わる。
+    viewMode: 'compound',
+    setViewMode(m) { modeCalls.push(m); this.viewMode = m; },
     panels: new Map(),
     roiOnlyMode: false,
   };
   const { preview } = makePreviewContext({ App, cancelAnimationFrame() {} });
   // open() が撮る控えだけを再現し、DOM に触る復元は差し替える。
   preview._overlaySnapshot = before;
+  preview._savedViewMode = 'free';    // 開く前は Free だった
   preview.overlay = { remove() {} };
   for (const m of ['_restoreGrayscale', '_removeTicBackdrop', '_restoreOpacity',
                    '_restoreVisibility', '_cancelAdjacentPrefetch']) {
@@ -374,13 +381,72 @@ function testCloseRestoresOverlay() {
   assert.deepEqual(setCalls, [before], 'close() は開いた時点の重ね合わせへ戻すこと');
   assert.equal(App.activeOverlay, before);
   assert.equal(preview._overlaySnapshot, undefined, '控えは使い切って捨てること');
+  assert.deepEqual(modeCalls, ['free'], 'close() は開いた時点の表示モードへ戻すこと');
+  assert.equal(preview._savedViewMode, null, '表示モードの控えも使い切ること');
 
   // 変わっていなければ余計な再描画を起こさない
   setCalls.length = 0;
+  modeCalls.length = 0;
   preview._overlaySnapshot = before;
   preview.overlay = { remove() {} };
   preview.close();
   assert.deepEqual(setCalls, [], '変化が無いときは setActiveOverlay を呼ばない');
+  assert.deepEqual(modeCalls, [], '控えが無ければ setViewMode も呼ばない');
+
+  // open() 側で控えを取っていなければ close() は何も戻せない
+  assert.match(html, /this\._savedViewMode = App\.viewMode;/,
+    'open() が表示モードを控えること');
+}
+
+// プレビューは開いている間だけ HE/IF を強制表示する。toggleLayer は
+// section.meta.visibleLayers を書いて App.queueSave() まで呼ぶので、そのまま
+// 使うと「意図的に隠していた histology が、プレビューを開いただけでローカルにも
+// 共有先にも表示状態で保存される」。共有プロジェクトは _doSave が __share で
+// 弾いていたので無害だったが、master で開けるようにした以上そうはいかない。
+function testForcedHeBackdropDoesNotPersist() {
+  const calls = [];
+  const panel = {
+    section: { images: { HE_STAIN_1: {} } },
+    imageSources: { HE_STAIN_1: {} },
+    visibleLayers: new Set(),
+    toggleLayer(key, force, opts) { calls.push({ key, force, opts }); this.visibleLayers.add(key); },
+  };
+  const App = { panels: new Map([['s1', panel]]) };
+  const { preview } = makePreviewContext({ App });
+
+  const touched = preview._forceHeBackdrop();
+  assert.equal(touched, 1, '隠れている HE/IF を 1 枚点けること');
+  assert.equal(calls.length, 1);
+  // vm は別レアルムなので deepEqual はプロトタイプ違いで落ちる。値を直接見る。
+  assert.equal(calls[0].opts && calls[0].opts.persist, false,
+    'プレビューの強制表示は永続化してはいけない (persist:false を渡すこと)');
+
+  // toggleLayer 側がその指示を実際に見ていること
+  assert.match(html, /if \(!opts \|\| opts\.persist !== false\) this\._persistVisibleLayers\(\);/,
+    'toggleLayer が persist:false を尊重すること');
+}
+
+// KMD の「重ねる」が作る kmd-tmp は project.overlays に載らない一時的な定義。
+// それを existing として openOverlayModal に渡すと編集分岐に入り、その場限りの
+// オブジェクトを書き換えて登録しないまま終わる。
+function testOverlayForEditingIgnoresUnregistered() {
+  const context = vm.createContext({});
+  vm.runInContext(
+    extractTopLevelFunction('overlayForEditing') + '\nthis.api = { overlayForEditing };',
+    context,
+  );
+  const { overlayForEditing } = context.api;
+  const registered = { id: 'ov_1', layers: [] };
+  const tmp = { id: 'kmd-tmp', layers: [] };
+  const project = { overlays: [registered] };
+
+  assert.equal(overlayForEditing(registered, project), registered, '登録済みは編集として開く');
+  assert.equal(overlayForEditing(tmp, project), null, 'kmd-tmp は新規登録として開く');
+  assert.equal(overlayForEditing(null, project), null);
+  assert.equal(overlayForEditing(registered, {}), null, 'overlays が無ければ新規扱い');
+  assert.equal(overlayForEditing(registered, null), null);
+  // id が同じでも別オブジェクトなら編集対象にしない (同一性で判定する)
+  assert.equal(overlayForEditing({ id: 'ov_1', layers: [] }, project), null);
 }
 
 // master でも Preview を開けること。CSS の share 限定表示と JS の早期 return が
@@ -1024,6 +1090,8 @@ async function main() {
   testRebakeCellImagesFollowsOverlay();
   testColorbarBecomesLegendInOverlayMode();
   testCloseRestoresOverlay();
+  testForcedHeBackdropDoesNotPersist();
+  testOverlayForEditingIgnoresUnregistered();
   testMasterCanOpenPreview();
   testStoragePathRule();
   testImportSectionIdKeying();
