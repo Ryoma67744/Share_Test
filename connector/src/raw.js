@@ -300,6 +300,13 @@ function rawRoundMz(v) { return v > 0 ? Math.round(v * 1e4) / 1e4 : v; }
 function rawRoundDwell(v) { return v > 0 ? Math.round(v * 1e6) / 1e6 : v; }
 
 // 416 bytes per function; the file length divides by it to give the count.
+//
+// The type byte is NOT a plain enum: its low 5 bits are the MassLynx function
+// type code and the upper bits are acquisition flags. Two acquisitions from the
+// same Xevo TQ Absolute came back 0x09 and 0x29 - both MRM (type 9), the second
+// with a flag set - and comparing the raw byte against 9 rejected the second
+// outright, so the wizard reported "no MRM function" for a file whose 1,996,633
+// intensities all matched the instrument's own text export. Mask first.
 export function parseWatersFunctions(buf) {
     const dv = new DataView(buf);
     const REC = 416;
@@ -316,11 +323,16 @@ export function parseWatersFunctions(buf) {
         const product = slots(288).map(rawRoundMz);
         let nChannels = 0;
         for (let i = 0; i < RAW_MAX_CHANNELS; i++) if (precursor[i] > 0) nChannels = i + 1;
+        const typeByte = dv.getUint8(b);
+        const type = typeByte & 0x1F;
         out.push({
             index: f + 1,
-            type: dv.getUint8(b),
-            isMrm: dv.getUint8(b) === 9,
-            ionModeByte: dv.getUint8(b + 1),
+            type,
+            typeByte,
+            isMrm: type === 9,
+            // NOT the ion mode: an ES+ and an ES- acquisition both carry 0x2d
+            // here. Polarity is read from _extern.inf, never guessed.
+            byte1: dv.getUint8(b + 1),
             massStart: dv.getFloat32(b + 2, true),
             massEnd: dv.getFloat32(b + 6, true),
             rtStart: dv.getFloat32(b + 10, true),
