@@ -1199,6 +1199,68 @@ function testImportSectionIdKeying() {
   assert.match(shareFn, /fetchAllShareRois\(session\.token, project\.sections\)/);
 }
 
+// ★ 表示分位点とベイク分位点は必ず一緒に動かす。deriveBakeStats の最後が
+//   rawDispMax = Math.min(disp, bakeHi) で bakeHi = MSI_ROBUST_PERCENTILE なので、
+//   表示側だけ上げても Math.min に頭打ちされて**静かに効かない**。実測でも
+//   p99.9 は p99.5 の 1.12〜1.66 倍あり、必ず当たる。片方だけ戻したら落とす。
+function testDisplayAndBakePercentilesMoveTogether() {
+  const constOf = (name) => {
+    const m = new RegExp('const ' + name + ' = ([0-9.]+);').exec(html);
+    assert.ok(m, 'missing constant ' + name);
+    return Number(m[1]);
+  };
+  const bake = constOf('MSI_ROBUST_PERCENTILE');
+  const disp = constOf('MSI_DEFAULT_DISPLAY_PERCENTILE');
+  assert.ok(disp <= bake,
+    `MSI_DEFAULT_DISPLAY_PERCENTILE (${disp}) > MSI_ROBUST_PERCENTILE (${bake}): `
+    + 'deriveBakeStats は rawDispMax = Math.min(disp, bakeHi) なので表示側だけ上げても効かない');
+  assert.equal(bake, 0.999,
+    '白飛び率は 1 − 分位点そのもの。0.999 = 0.1% 飽和という前提でコメント・説明書を書いてある');
+  assert.equal(disp, 0.999,
+    '表示上限も 0.999 に揃えること。片方だけ戻すと Math.min で頭打ちして白飛びが減らない');
+
+  // 同じ 2 値がパース Worker にも注入されている (注入漏れ = Worker とメインで
+  // 見え方が食い違う)。
+  assert.match(html, /'const MSI_ROBUST_PERCENTILE = ' \+ MSI_ROBUST_PERCENTILE/);
+  assert.match(html, /'const MSI_DEFAULT_DISPLAY_PERCENTILE = ' \+ MSI_DEFAULT_DISPLAY_PERCENTILE/);
+}
+
+// 定数を読むだけでなく、**実際に飽和する画素の割合**を数える。
+// 上限を超えた画素は msiValueEval が n を [0,1] にクランプして全部同じ色に潰れる
+// ので、「上限以上の画素の割合」がそのまま白飛び率になる。
+// 0.99 に戻すと 1.0% になって落ちる (実測で確認済み)。
+function testDefaultWindowClipsOneTenthOfAPercent() {
+  const constOf = (name) => Number(new RegExp('const ' + name + ' = ([0-9.]+);').exec(html)[1]);
+  const context = vm.createContext({ Number, Math, Float64Array, out: {} });
+  vm.runInContext(
+    'const MSI_ROBUST_PERCENTILE = ' + constOf('MSI_ROBUST_PERCENTILE') + ';\n'
+    + 'const MSI_DEFAULT_DISPLAY_PERCENTILE = ' + constOf('MSI_DEFAULT_DISPLAY_PERCENTILE') + ';\n'
+    + extractTopLevelFunction('percentileOfSorted') + '\n'
+    + extractTopLevelFunction('deriveBakeStats') + '\n'
+    + 'out.api = { deriveBakeStats };',
+    context,
+  );
+
+  // 既知分布: 0..9999 をちょうど 1 回ずつ。分位点が一意に決まるので
+  // 「上限以上が何画素か」を数え上げで検算できる。
+  const values = new Array(10000);
+  for (let i = 0; i < values.length; i++) values[i] = i;
+  const st = context.out.api.deriveBakeStats(values, null, 'robust');
+
+  // percentileOfSorted の添字は round(p*(N-1)) = round(0.999*9999) = 9989。
+  assert.equal(st.rawDispMax, 9989, '既定表示上限が p99.9 になっていない');
+  // 上限を**超えた**画素が msiValueEval のクランプで上限画素と同じ色に潰れる
+  // (上限ちょうどの画素は正当に 1.0 へ写るので飽和ではない)。
+  const clipped = values.filter((v) => v > st.rawDispMax).length;
+  assert.equal(clipped, 10, `飽和画素 ${clipped}/10000 = ${(clipped / 100).toFixed(2)}% (期待 0.10%)`);
+  // ベイク上限に頭打ちされていないこと = 2 定数が揃っている証拠。
+  assert.equal(st.rawDispMax, st.bakeHi, 'rawDispMax が bakeHi に切られている = 分位点が食い違っている');
+  // 手入力レンジは従来どおり最優先 (この変更で壊していないこと)。
+  assert.equal(context.out.api.deriveBakeStats(values, [0, 500], 'robust').rawDispMax, 500);
+  // 外れ値クリップ OFF は真の最大値のまま。
+  assert.equal(context.out.api.deriveBakeStats(values, null, 'full').rawDispMax, 9999);
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -1217,6 +1279,8 @@ async function main() {
   testWorkerBakePath();
   await testWorkerRawDecodePath();
   testFunctionTypeFlagsAreMasked();
+  testDisplayAndBakePercentilesMoveTogether();
+  testDefaultWindowClipsOneTenthOfAPercent();
   testOverlayDefaultPalette();
   testRebakeCellImagesFollowsOverlay();
   testColorbarBecomesLegendInOverlayMode();

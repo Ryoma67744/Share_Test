@@ -3097,18 +3097,33 @@ function identStamp(o) {
     return id;
 }
 
+// ★ この 2 つは必ず一緒に動かすこと。表示側だけ上げても効かない。
+//   deriveBakeStats の最後が rawDispMax = Math.min(disp, bakeHi) で、bakeHi は
+//   MSI_ROBUST_PERCENTILE そのもの。表示分位点だけ上げるとそこで頭打ちになる
+//   (実測: p99.9 は p99.5 の 1.12〜1.66 倍なので必ず当たる)。8bit ベイク経路が
+//   表示ウィンドウより狭くなる逆転も同時に防いでいる。
+//
+// 白飛びする画素の割合は「1 − 分位点」でそのまま決まる。上限を超えた画素は
+// msiValueEval が n を [0,1] にクランプするので全部同じ色に潰れるため:
+//     0.99  → ちょうど 1.00% が飽和 (旧既定。実データ 17 分子すべてで 1.00%)
+//     0.999 → ちょうど 0.10% が飽和 (現行)
+// 「白飛びをなくしたい」という要望に対し、真の最大値まで上げる案は採らなかった。
+// 外れ値 1 画素で全体が決まり、実データでは分子により 1.7〜4.9 倍暗くなるため。
+// 0.999 なら暗くなるのは中央値 1.40 倍 (実測 1.18〜2.17 倍) に収まる。
+//
 // Display ceiling percentile for MSI rasters. Using the raw max as the absolute
 // ceiling lets a single hot pixel (or one high-signal section) crush all tissue
 // to the colormap floor; a high percentile clips those outliers so tissue stays
 // visible while the per-MRM absolute comparison is preserved. Tune here.
-const MSI_ROBUST_PERCENTILE = 0.995;
+const MSI_ROBUST_PERCENTILE = 0.999;
 // 既定表示ウィンドウ上限の分位点(データ適応オートスケール)。各切片の強度分布の
 // この分位点(生単位)を既定の表示上限 rawDispMax とする(computeRasterPixels で算出、
 // getMsiWindow で使用)。暗い切片は自分のレンジで明るく、明るい切片は上位数%だけ
 // クリップして飛ばさない。ラスタは MSI_ROBUST_PERCENTILE でベイク・クリップ済みの
-// ため rawDispMax は bakeHi(=p99.5)が上限。値を下げるほど初期表示は明るく(上位
-// クリップ増)。ユーザーが Range を手入力した上書きには影響しない(getMsiWindow 参照)。
-const MSI_DEFAULT_DISPLAY_PERCENTILE = 0.99;
+// ため rawDispMax は bakeHi が上限 (上のコメント参照 — だから 2 つを揃えてある)。
+// 値を下げるほど初期表示は明るく(上位クリップ増)。ユーザーが Range を手入力した
+// 上書きには影響しない(getMsiWindow 参照)。
+const MSI_DEFAULT_DISPLAY_PERCENTILE = 0.999;
 // 既にソート済みの配列から分位点を取る。呼び出し側が 1 回だけソートして
 // 複数の分位点を取れるようにするため、添字の計算だけを切り出してある。
 function percentileOfSorted(a, p) {
