@@ -3611,7 +3611,11 @@ const PARQUET_COLUMN_TIMEOUT_MS = 120000;  // 1〜数列の読み出し
 
 
 function _roiGridKey(section, layerKey, ent) {
-    return String(section && section.id) + '|' + layerKey + '|' + String((ent && ent.blobId) || '');
+    // ★ 共有先の parquet は blobId を持たず sourceUrl だけを持つ (parquetKeyForEnt と
+    //   同じ事情)。blobId だけで鍵を作ると、URL 供給のレイヤーが全部 '' の同じ鍵に
+    //   なり、差し替え後も古いグリッドを返してしまう。
+    return String(section && section.id) + '|' + layerKey + '|'
+        + String((ent && (ent.blobId || ent.sourceUrl)) || '');
 }
 function _roiGridCacheGet(key) {
     if (!_roiRawGridCache.has(key)) return null;
@@ -3635,7 +3639,14 @@ function _roiGridCacheSet(key, val) {
 async function _ensureRoiRawGrid(section, layerKey) {
     const series = (section && section.msiSeries) || {};
     const ent = series[layerKey];
-    if (!ent || !ent.blobId) return null;
+    // ★ blobId の有無だけで弾いてはいけない。**共有先の parquet は blobId が null**
+    //   で、在りかは sourceUrl (Storage の URL) にしかない — 836 MB を IndexedDB に
+    //   置かないという設計そのもの (_hydrateSharedProject / parquetSrcForEnt)。
+    //   ここで弾いていたため、共有画面では ROI 統計が必ず unavailable になり、
+    //   棒グラフが全部 0 の高さ = 「右側に何も出ない」状態になっていた
+    //   (下の parquet 分岐は共有先を想定して書いてあるのに、到達できていなかった)。
+    //   表示ラスタ側 (SectionPanel.loadMsiLayer) と同じ判定に揃える。
+    if (!ent || (!ent.blobId && !ent.sourceUrl)) return null;
     const wantKey = _roiGridKey(section, layerKey, ent);
     const hit = _roiGridCacheGet(wantKey);
     if (hit) return hit;
@@ -3680,8 +3691,12 @@ async function _ensureRoiRawGrid(section, layerKey) {
     }
 
     // xlsx/txt はファイル全体を 1 回で読む従来経路。
+    // ★ getBlob 直呼びではなく ensureLocalBlob を通す。ブラウザの容量回収で
+    //   ローカルの blob が消えていても Storage から取り直せる。表示ラスタ側は
+    //   既にこちらを通っているので、揃えないと「絵は出るのに ROI 統計だけ
+    //   『元データが無い』」というちぐはぐが起きる。
     let rec = null;
-    try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
+    try { rec = await ensureLocalBlob(ent, App.project); } catch (e) { rec = null; }
     if (!rec || !rec.blob) return null;
 
     let m = null;
@@ -22266,7 +22281,7 @@ const App = {
                 if (kind === 'msi' && ref.kind === 'parquet') {
                     const url = SupabaseClient.publicUrl('atlases', ref.path);
                     if (!url) throw new Error('publicUrl returned null for ' + ref.path);
-                    sec.msiSeries[key] = Object.assign({}, ref, { blobId: null, sourceUrl: url });
+                    sec.msiSeries[key] = Object.assign({}, ref, { blobId: null, sourceUrl: url, storagePath: ref.path });
                     if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
                         sec.msiFiles[ref.sourceFileId] = {
                             id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, sourceUrl: url,
@@ -22275,10 +22290,15 @@ const App = {
                     return;
                 }
                 const { id, mime } = await ensureBlob(ref);
+                // ★ storagePath を残す。blobId はこの端末で作った id なので、
+                //   ブラウザに blob を回収されたとき storagePathForEnt が
+                //   slug + blobId から組み立てる URL は必ず外れる。取り込み経路
+                //   (_buildLocalProjectFromDoc) は既に path を残していて、共有側
+                //   だけ漏れていた。これで ensureLocalBlob が正しい場所を引ける。
                 if (kind === 'image') {
-                    sec.images[key] = { blobId: id, mime, filename: ref.filename };
+                    sec.images[key] = { blobId: id, mime, filename: ref.filename, storagePath: ref.path };
                 } else {
-                    sec.msiSeries[key] = Object.assign({}, ref, { blobId: id });
+                    sec.msiSeries[key] = Object.assign({}, ref, { blobId: id, storagePath: ref.path });
                     if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
                         sec.msiFiles[ref.sourceFileId] = { id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, blobId: id };
                     }
@@ -23615,6 +23635,16 @@ const App = {
             this.project.rois.push(roi);
         }
         this.activeRoiId = roi.id;
+        // ★ ROI を描き終えた直後は「その ROI の強度」を見たいはず。Analysis パネルの
+        //   既定は背景除去(Otsu) なので、ここで切り替えないと右側は ROI と無関係の
+        //   ヒストグラムのままで、利用者からは「棒グラフが出ない」ように見える
+        //   (renderAnalysisChart は otsu/kmd のとき早期 return する)。
+        //   一覧のクリックでは切り替えない — Otsu を調整しながら ROI を見比べる
+        //   使い方を壊さないため、モードを動かすのは「描いた」ときだけにする。
+        if (this.analysisMode !== 'roi') {
+            this.analysisMode = 'roi';
+            try { updateAnalysisModeUi(); } catch (e) {}
+        }
         this.cancelDrawing();
         populateRoiList();
         this.redrawAllRois();
