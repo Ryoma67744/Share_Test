@@ -536,10 +536,13 @@ Opened from master it runs with admin rights, so the Method table also shows **C
 
 **`＋重ね合わせ`** in the Method (MRM) panel — or the same button at the top of the preview — registers an image with **two or more molecules drawn in different colours on one picture**.
 
-> **Share recipients can build their own overlays too**, but they are stored **only on that person's device** (localStorage) and are never sent to the shared document. So:
+> **Share recipients can build overlays too.** They are stored in the server-side `share_overlays` table, so they appear **in every viewer's list for that share URL** (propagated by the same 12 s poll as ROIs). So:
 > - sets you registered are **read-only** for recipients (click to switch; no ✎ / ×)
-> - sets a recipient builds are **visible only to them**, and survive your re-publishes
-> - they never enter the publish payload, so a recipient's view can never leak into your project
+> - sets a recipient builds are visible to **all recipients**, and anyone on the share can edit or delete them (same policy as ROIs — a set stays manageable after its author leaves)
+> - simultaneous edits are guarded by an optimistic version: the later save is told "someone updated this first" instead of silently overwriting
+> - they survive your re-publishes, and they never enter the publish payload, so a recipient's view can never leak into your project
+>
+> **This needs a SQL migration**: re-run [`supabase/share_locks.sql`](../supabase/share_locks.sql) in the SQL Editor (idempotent). Until then, recipient overlays fall back to **that person's device** (localStorage) and the page says so.
 
 **Register as many sets as you like.** Keep one set per question — "Lactate + Citrate", "Glucose + HVA" — and click through the list to compare them. `＋重ね合わせ` always creates a **new** set.
 
