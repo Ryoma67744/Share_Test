@@ -1496,6 +1496,68 @@ function testLegendFollowsBrightnessMatching() {
   assert.match(legend.innerHTML, /白 = 共局在/, 'OFF では従来の注記');
 }
 
+// ★ 共有先の parquet は blobId を持たない。836 MB を IndexedDB に置かない設計で、
+//   在りかは sourceUrl (Storage の URL) だけ (_hydrateSharedProject)。
+//   _ensureRoiRawGrid が blobId の有無だけで弾いていたため、共有画面の ROI 統計は
+//   必ず unavailable になり、右の棒グラフが全部 0 の高さ =「グラフが出ない」に
+//   なっていた。表示ラスタ (loadMsiLayer) と同じ判定に揃えたことを縛る。
+async function testRoiStatsReadSharedParquet() {
+  const calls = [];
+  const ctx = vm.createContext({
+    console, Promise, Map, Set, Number, Float64Array,
+    App: { project: {} },
+    ProjectStorage: { getBlob: async () => { calls.push('getBlob'); return null; } },
+    ensureLocalBlob: async () => { calls.push('ensureLocalBlob'); return null; },
+    parquetSrcForEnt: async (ent) => {
+      calls.push('src:' + (ent.sourceUrl || ent.blobId));
+      return { url: ent.sourceUrl };
+    },
+    parquetRoiGrid: async () => ({ W: 2, H: 1, values: Float64Array.from([1, 3]) }),
+  });
+  vm.runInContext(
+    'const ROI_RAW_GRID_CACHE_MAX = 24;\n'
+    + 'const _roiRawGridCache = new Map();\n'
+    + `${extractFunction(html, '_roiGridKey')}\n`
+    + `${extractFunction(html, '_roiGridCacheGet')}\n`
+    + `${extractFunction(html, '_roiGridCacheSet')}\n`
+    + `${extractFunction(html, '_ensureRoiRawGrid')}\n`
+    + 'this.out = { _ensureRoiRawGrid, _roiGridKey };',
+    ctx);
+  const { _ensureRoiRawGrid, _roiGridKey } = ctx.out;
+
+  const shareEnt = { kind: 'parquet', blobId: null, sourceUrl: 'https://x/atlases/a.parquet', colIdx: 3 };
+  const section = { id: 'sec_1', msiSeries: { MSI_A: shareEnt } };
+  const grid = await _ensureRoiRawGrid(section, 'MSI_A');
+  assert.ok(grid && grid.W === 2 && grid.H === 1, '共有先の parquet で ROI グリッドが作れていない');
+  assert.ok(calls.includes('src:https://x/atlases/a.parquet'), 'Storage の URL を供給元にしていない');
+
+  // 在りかがどちらも無いレイヤーは従来どおり null (無音で HTTP は投げない)。
+  assert.equal(await _ensureRoiRawGrid({ id: 's', msiSeries: { MSI_A: { kind: 'parquet' } } }, 'MSI_A'), null);
+
+  // 鍵に sourceUrl も混ぜる。blobId だけだと URL 供給のレイヤーが全部同じ鍵になる。
+  assert.notEqual(
+    _roiGridKey(section, 'MSI_A', shareEnt),
+    _roiGridKey(section, 'MSI_A', { sourceUrl: 'https://x/atlases/b.parquet' }));
+
+  // xlsx/txt は消えたローカル blob を Storage から取り直す経路 (ensureLocalBlob)。
+  await _ensureRoiRawGrid({ id: 'sec_2', msiSeries: { MSI_B: { kind: 'xlsx', blobId: 'blob_1' } } }, 'MSI_B');
+  assert.ok(calls.includes('ensureLocalBlob'), 'xlsx 経路が ensureLocalBlob を通っていない');
+}
+
+// ★ Analysis パネルの既定は背景除去(Otsu)。ROI を描き終えた時点で ROI 強度へ
+//   切り替えないと、右側は ROI と無関係のヒストグラムのままで、利用者からは
+//   「棒グラフが出ない」と見える (renderAnalysisChart は otsu/kmd で早期 return)。
+function testDrawingRoiOpensTheRoiChart() {
+  const fn = extractMethod(html, 'finalizeDrawing');
+  const switchAt = fn.indexOf("this.analysisMode = 'roi';");
+  const renderAt = fn.indexOf('this.renderAnalysis();');
+  assert.notEqual(switchAt, -1, 'ROI を描いても Analysis が ROI 強度に切り替わらない');
+  assert.ok(renderAt !== -1 && switchAt < renderAt, 'モード切替は renderAnalysis より前でなければ効かない');
+  assert.match(fn, /updateAnalysisModeUi\(\)/);   // 選択欄の出し分けも一緒に更新する
+  // 切替が要る理由そのもの。早期 return を消すならこのテストも見直すこと。
+  assert.match(html, /if \(App\.analysisMode === 'otsu'\) \{ try \{ renderOtsuAnalysis\(\);/);
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -1534,6 +1596,8 @@ async function main() {
   testMasterCanOpenPreview();
   testStoragePathRule();
   testImportSectionIdKeying();
+  await testRoiStatsReadSharedParquet();
+  testDrawingRoiOpensTheRoiChart();
   console.log('viewer preview regression tests: PASS');
 }
 
