@@ -2,6 +2,8 @@
 # 置いてある。手元で走らせないと働かないままなので、PR で必ず走らせる。
 #   - viewer_preview_regression.js … 22,000 行の単一ファイルの構文ゲート、
 #     parse worker の関数リスト漏れ、Analyte ヘッダ、改名時の CE/CV 保持
+#   - manage_tree_regression.js … 管理画面のフォルダ階層。ノードの身元が
+#     localId だけだと別 PC でフォルダから出てしまう (直したもの) の見張り
 #   - connector selftest … アプリのコードを viewer/index.html から切り出して
 #     connector の移植と数値を突き合わせる (.exp / parquet / .raw /
 #     buildMsiGrid)。ここが落ちたら AI がアプリと違う数値を答える状態。
@@ -34,6 +36,9 @@ jobs:
 
       - name: viewer regression tests
         run: node tests/viewer_preview_regression.js
+
+      - name: manage tree regression tests
+        run: node tests/manage_tree_regression.js
 
       - name: connector dependencies
         working-directory: connector
