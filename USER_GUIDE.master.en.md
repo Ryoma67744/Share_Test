@@ -141,6 +141,14 @@ The `Method (MRM)` table then shows the measured Precursor / Fragment / CE / CV,
 
 Click **`Align`** on a section panel to open a modal that aligns HE/IF layers to the MSI coordinate system. Use this when no transform JSON was supplied at registration time, or whenever you want to re-align manually.
 
+> **Recipients can re-align too, and your alignment is never lost.** Anyone opening the share URL can use `Align`. The result goes to the server-side `share_alignments` table (one row per section) and reaches **everyone on that share URL**. Your published alignment stays in `sections.meta`, so recipients switch between **master / 共有** with the toolbar's `位置合わせ:` selector.
+>
+> - `Align` takes the same **write lock** as ROI editing (one person at a time)
+> - **Your re-publishes never wipe a recipient's alignment**, and a recipient's alignment never enters your publish payload
+> - Simultaneous edits are guarded by an optimistic version: the later save is told "someone updated this first"
+> - A recipient can delete a section's shared alignment with `×`, which returns that section to yours
+> - **This needs a SQL migration**: re-run [`supabase/share_locks.sql`](../supabase/share_locks.sql) in the SQL Editor (idempotent). Until then, re-aligning does not reach anyone else and the page says so.
+
 > **HE resolution in a composite**: on sections that carry MSI, the display canvas is baked **to the MSI grid** (ROI coordinates and μm/px are derived from it). The upscale factor goes up to **8× the MSI grid or a 2048 px canvas long edge, whichever is larger**, and never beyond the HE's own resolution. A multi-thousand-pixel scanner HE is therefore downscaled to that range — but the downscale is **area-averaged**, so nuclear texture is filtered rather than dropped. To inspect HE at its native resolution, hide the MSI layers and view HE alone (the canvas is then built at the HE's own size).
 
 > **Note: the main-view "rotate one side"**: the main toolbar's **Rotation** has a target selector **(Both / HE only / MSI only)**. When HE and MSI were imported at different orientations and don't line up, rotate **just one of them** to match. The angle is stored in `section.meta.viewerTransform.rotHE / rotMSI` and is **shipped to viewers on publish**. This is a display-level overlay fix and is **separate from this Align modal's affine transform (μm/px, ROI coordinates, and other scientific alignment)** — keep using the Align modal for coordinate-accurate registration.

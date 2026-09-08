@@ -1965,6 +1965,266 @@ function testShareOverlayModuleVarsAreDeclared() {
   }
 }
 
+// ★ HE/IF ⇔ MSI の位置合わせは切片ごとに sections.meta の 4 か所へ散っている。
+//   共有先が合わせ直しても master の組へ戻せるように、開いた直後の meta を
+//   丸ごと控えて (captureSectionAlignment) 書き戻す (applySectionAlignment)。
+//   **項目を片方にだけ足すと「切り替えると一部だけ master のまま」** という、
+//   絵は出るのに気づけない壊れ方になるので、対象キーの一覧を実装から取って
+//   突き合わせる。
+function testSectionAlignmentRoundTrips() {
+  const ctx = vm.createContext({ JSON, Object });
+  vm.runInContext(
+    /const SECTION_ALIGN_WC_KEYS = \[[^\]]*\];/.exec(html)[0] + '\n'
+    + extractTopLevelFunction('captureSectionAlignment') + '\n'
+    + extractTopLevelFunction('applySectionAlignment')
+    + '\nthis.api = { captureSectionAlignment, applySectionAlignment, SECTION_ALIGN_WC_KEYS };',
+    ctx);
+  const { captureSectionAlignment, applySectionAlignment, SECTION_ALIGN_WC_KEYS } = ctx.api;
+
+  // ---- writeWorldCoords が書く world_coords のキーが全部入っているか ----
+  const wAt = html.indexOf('const writeWorldCoords = () => {');
+  assert.notEqual(wAt, -1, 'missing writeWorldCoords');
+  const wBody = html.slice(wAt, html.indexOf('const updatePreview = () => {', wAt));
+  const written = new Set([...wBody.matchAll(/sec\.meta\.world_coords\.([A-Za-z0-9_]+)\s*=/g)]
+    .map(m => m[1]));
+  assert.ok(written.size >= 3, 'writeWorldCoords の代入が読み取れない');
+  for (const k of written) {
+    assert.ok(SECTION_ALIGN_WC_KEYS.includes(k),
+      'world_coords.' + k + ' が SECTION_ALIGN_WC_KEYS に無い '
+      + '(master へ戻したときにこの項目だけ残る)');
+  }
+  // alignment 系の 3 つも控えていること。
+  assert.match(html, /out\.alignment = JSON\.parse/, 'alignment を控えていない');
+  assert.match(html, /out\.alignmentMsiKey = meta\.alignmentMsiKey/, 'alignmentMsiKey を控えていない');
+  assert.match(html, /out\.alignmentSourceMode = meta\.alignmentSourceMode/,
+    'alignmentSourceMode を控えていない');
+
+  // ---- 往復: master を控えて、合わせ直して、master へ戻す ----
+  const sec = { id: 's1', meta: {
+    world_coords: {
+      T_he_to_msi: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+      T_he_to_msi_by_source: { f1: [[1, 0, 5], [0, 1, 6], [0, 0, 1]] },
+      msi_um_per_px: { x: 50, y: 50 },
+      he_um_per_px: { x: 0.5, y: 0.5 },   // 位置合わせ以外の項目 (触らないこと)
+    },
+    alignment: { HE_Stain: { scale_pct: 100, offx: 0, landmarks: { he: [], msi: [] } } },
+    alignmentMsiKey: 'MSI_a',
+    alignmentSourceMode: '__all__',
+    __alignMaster: null,
+  } };
+  const master = captureSectionAlignment(sec);
+
+  // 共有先が合わせ直した状態にする
+  sec.meta.world_coords.T_he_to_msi = [[2, 0, 9], [0, 2, 9], [0, 0, 1]];
+  sec.meta.world_coords.T_he_to_msi_by_source = { f1: [[2, 0, 9], [0, 2, 9], [0, 0, 1]] };
+  sec.meta.world_coords.msi_um_per_px = { x: 20, y: 20 };
+  sec.meta.alignment = { HE_Stain: { scale_pct: 180, offx: 12, landmarks: { he: [[1, 2]], msi: [[3, 4]] } } };
+  sec.meta.alignmentSourceMode = 'f1';
+  const shared = captureSectionAlignment(sec);
+
+  applySectionAlignment(sec, master);
+  assert.deepEqual(sec.meta.world_coords.T_he_to_msi, master.world_coords.T_he_to_msi,
+    'master に戻していない');
+  assert.deepEqual(sec.meta.world_coords.msi_um_per_px, { x: 50, y: 50 });
+  assert.deepEqual(sec.meta.alignment, master.alignment, 'スライダー / ランドマークも戻すこと');
+  assert.equal(sec.meta.alignmentSourceMode, '__all__');
+  assert.deepEqual(sec.meta.world_coords.he_um_per_px, { x: 0.5, y: 0.5 },
+    '位置合わせ以外の world_coords を消さないこと');
+  assert.equal(sec.meta.__alignMaster, null, '控えそのものを壊さないこと');
+
+  applySectionAlignment(sec, shared);
+  assert.deepEqual(sec.meta.world_coords.T_he_to_msi, shared.world_coords.T_he_to_msi,
+    '共有の組へ戻せること');
+  assert.equal(sec.meta.alignment.HE_Stain.scale_pct, 180);
+
+  // 控えが無い切片 (master が一度も合わせていない) は 4 項目とも消える。
+  applySectionAlignment(sec, { world_coords: {}, alignment: null,
+                               alignmentMsiKey: null, alignmentSourceMode: null });
+  assert.equal(sec.meta.world_coords.T_he_to_msi, undefined);
+  // vm 内で作られたオブジェクトは realm が違うので deepEqual が使えない。中身で見る。
+  assert.equal(Object.keys(sec.meta.alignment).length, 0);
+  assert.equal(sec.meta.alignmentSourceMode, undefined);
+}
+
+// ★ 共有の位置合わせはサーバ (share_alignments) が正で、その共有 URL を開いた
+//   全員に届く。ここでは保存 (新規=version なし / 更新=version つき) と、
+//   他の人が先に直していたときに黙って上書きしないことを見る。
+async function testShareAlignmentsAreSharedWithEveryone() {
+  const calls = [];
+  const toasts = [];
+  let upsertThrows = null;
+  const App = { shareMode: { slug: 'proj_x', token: 'tok' }, project: null, alignChoice: 'master' };
+  const SupabaseClient = {
+    listShareAlignments(token) { calls.push(['list', token]); return Promise.resolve(rows); },
+    upsertShareAlignment(token, sectionId, payload, ver) {
+      calls.push(['upsert', sectionId, ver]);
+      if (upsertThrows) return Promise.reject(upsertThrows);
+      return Promise.resolve({ section_id: sectionId, payload, version: (ver || 0) + 1 });
+    },
+    deleteShareAlignment(token, sectionId) { calls.push(['delete', sectionId]); return Promise.resolve(); },
+  };
+  let rows = [];
+  const ctx = vm.createContext({
+    JSON, Object, Map, Array, Promise,
+    console: { warn() {}, log() {}, info() {} },
+    showToast: (m) => toasts.push(String(m)),
+    App, SupabaseClient,
+    _isExpiredTokenError: () => false,
+    _noteShareTokenExpired() {},
+    _shareAlignServerMissing: false,
+    _shareAlignWriteGen: 0,
+  });
+  vm.runInContext(
+    /const SECTION_ALIGN_WC_KEYS = \[[^\]]*\];/.exec(html)[0] + '\n'
+    + 'const _shareAlignBySection = new Map();\n'
+    + extractTopLevelFunction('captureSectionAlignment') + '\n'
+    + extractTopLevelFunction('_isMissingRpc') + '\n'
+    + extractTopLevelFunction('_isStaleVersionError') + '\n'
+    + extractTopLevelFunction('_noteShareAlignServerMissing') + '\n'
+    + extractTopLevelFunction('fetchShareAlignments') + '\n'
+    + extractTopLevelFunction('applyServerShareAlignments') + '\n'
+    + extractTopLevelFunction('pushShareAlignment') + '\n'
+    + extractTopLevelFunction('removeShareAlignment')
+    + '\nthis.api = { fetchShareAlignments, applyServerShareAlignments, pushShareAlignment,'
+    + ' removeShareAlignment, _shareAlignBySection };',
+    ctx);
+  const api = ctx.api;
+  const store = api._shareAlignBySection;
+
+  const sec = { id: 'sec-uuid-1', meta: {
+    world_coords: { T_he_to_msi: [[1, 0, 3], [0, 1, 4], [0, 0, 1]], msi_um_per_px: { x: 20, y: 20 } },
+    alignment: { HE_Stain: { scale_pct: 120 } },
+    alignmentSourceMode: '__all__',
+  } };
+
+  // 新規は version を渡さない (サーバ側は「既存行があれば 40001」で弾く)。
+  assert.equal(await api.pushShareAlignment(sec), true);
+  const j = (v) => JSON.stringify(v);   // vm 内で作られた配列は realm が違う
+  assert.equal(j(calls.find(c => c[0] === 'upsert')), j(['upsert', 'sec-uuid-1', null]));
+  assert.equal(store.get('sec-uuid-1').version, 1, '返ってきた version を持つこと');
+  assert.equal(store.get('sec-uuid-1').payload.alignment.HE_Stain.scale_pct, 120);
+
+  // 2 回目は持っている version を渡す (楽観ロック)。
+  sec.meta.alignment.HE_Stain.scale_pct = 130;
+  assert.equal(await api.pushShareAlignment(sec), true);
+  assert.equal(j(calls.filter(c => c[0] === 'upsert').pop()), j(['upsert', 'sec-uuid-1', 1]));
+  assert.equal(store.get('sec-uuid-1').version, 2);
+
+  // 他の人が先に直していた → 上書きしない。
+  const stale = new Error('stale_version'); stale.code = '40001';
+  upsertThrows = stale;
+  const refreshed = [];
+  App._refreshShareAlignments = () => { refreshed.push(true); return Promise.resolve(); };
+  assert.equal(await api.pushShareAlignment(sec), false, '衝突したら保存できていないと返すこと');
+  assert.ok(toasts.some(t => /他の人が先に更新/.test(t)), '衝突したことを知らせること');
+  assert.equal(refreshed.length, 1, '最新を読み直すこと');
+  assert.equal(store.get('sec-uuid-1').version, 2, '衝突したら控えの version を進めないこと');
+  upsertThrows = null;
+
+  // 一覧の取り込み: 変わったときだけ true。
+  rows = [{ section_id: 'sec-uuid-1', payload: { world_coords: {} }, version: 5 }];
+  const list = await api.fetchShareAlignments();
+  assert.equal(list.length, 1);
+  assert.equal(api.applyServerShareAlignments(list), true, '内容が変われば true');
+  assert.equal(store.get('sec-uuid-1').version, 5);
+  assert.equal(api.applyServerShareAlignments(list), false, '変化が無ければ描き直さない');
+
+  // 削除 = master へ戻す。控えからも落とすこと。
+  assert.equal(await api.removeShareAlignment(sec), true);
+  assert.equal(store.has('sec-uuid-1'), false);
+  assert.equal(j(calls.filter(c => c[0] === 'delete').pop()), j(['delete', 'sec-uuid-1']));
+
+  // RPC がまだ無いデータベースでは、共有側へは保存できないと素直に言う。
+  const missing = new Error('Could not find the function public.upsert_share_alignment');
+  missing.code = 'PGRST202';
+  upsertThrows = missing;
+  assert.equal(await api.pushShareAlignment(sec), false, 'テーブルが無ければ保存できない');
+  assert.ok(toasts.some(t => /share_locks\.sql/.test(t)), '未適用であることを知らせること');
+  assert.equal(await api.fetchShareAlignments(), null, '以後はサーバを見に行かないこと');
+}
+
+// ★ 共有先の Align は「ロックを取ってから開く」「閉じるとき必ず返す」。
+//   共有の位置合わせを消すときも ROI の削除と同じで、訊く前にロックを取る。
+function testShareAlignmentEditingIsLocked() {
+  const at = html.indexOf('    async openAlignmentModal(panel) {');
+  assert.notEqual(at, -1, 'missing openAlignmentModal');
+  const body = html.slice(at, html.indexOf('    async openHeIfWizard(panel) {', at));
+  const lockAt = body.indexOf('await App._tryAcquireRoiLock()');
+  assert.notEqual(lockAt, -1, '共有先でロックを取っていない');
+  assert.match(body, /if \(!gotLock\) return null;/, 'ロックが取れなければ開かないこと');
+  assert.match(body, /if \(shareAlign\) \{ try \{ App\._releaseRoiLock\(\); \} catch \(e\) \{\} \}/,
+    '閉じるときにロックを返していない (握ったままだと誰も編集できなくなる)');
+  // 保存は共有側へ回し、master の位置合わせ (sections.meta) は書き換えない。
+  assert.match(body, /ok = await pushShareAlignment\(sec\);/, '保存を共有側へ回していない');
+  assert.match(body, /if \(!ok\) return;/, '保存できていないのにモーダルを閉じないこと');
+  assert.match(body, /App\.alignChoice = 'shared';/, '保存後に「共有」へ切り替えていない');
+
+  // 削除は ROI と同じ作法 (訊く前にロック / キャンセルで返す / 影響範囲を出す)。
+  const dAt = html.indexOf('    async deleteShareAlignmentForActiveSection() {');
+  assert.notEqual(dAt, -1, 'missing deleteShareAlignmentForActiveSection');
+  const del = html.slice(dAt, html.indexOf('\n    },', dAt));
+  const dLock = del.indexOf('await this._tryAcquireRoiLock()');
+  const dConfirm = del.indexOf('if (!confirm(msg))');
+  assert.ok(dLock !== -1 && dConfirm !== -1 && dLock < dConfirm, '確認より先にロックを取ること');
+  assert.match(del, /書き込みロックを取得しました/, 'ロックを持っていることを知らせていない');
+  assert.match(del, /他の人からも見えなくなります/, '影響範囲を知らせていない');
+  assert.match(del, /if \(!confirm\(msg\)\) \{ this\._releaseRoiLock\(\); return; \}/,
+    'キャンセルしたらロックを返すこと');
+
+  // 共有先でも Align を出す。出さないと合わせ直しようがない。
+  assert.doesNotMatch(html, /body\.share-mode #tb-align-heif,/,
+    '共有先で Align を隠さないこと');
+  // master の控えは publish に載せない (共有先の控えであって共有物ではない)。
+  assert.match(html, /delete m\.__alignMaster;/, 'publish から __alignMaster を落としていない');
+}
+
+// ★ 書き込みロックは入れ子で取れること。位置合わせ (Align モーダル) を開いた
+//   まま ROI を描く、という重なりが起きるので、素朴に取り直すと heartbeat の
+//   setInterval が二重に走り、内側の解放だけで鍵が返って外側が無防備になる。
+async function testRoiLockIsReentrant() {
+  const ctx = vm.createContext({ console, Date, setInterval: () => 1, clearInterval: () => {} });
+  const calls = [];
+  const App = {
+    shareMode: { token: 'tok', label: null },
+    _roiLockHeartbeat: null,
+  };
+  const SupabaseClient = {
+    acquireRoiLock() { calls.push('acquire'); return Promise.resolve({ ok: true }); },
+    releaseRoiLock() { calls.push('release'); return Promise.resolve(); },
+    heartbeatRoiLock() { return Promise.resolve(); },
+  };
+  vm.runInContext(
+    'const SupabaseClient = this.SupabaseClient;\n'
+    + 'function showToast() {}\n'
+    + 'const App = this.App;\n'
+    + 'App._roiLockDepth = ' + (/_roiLockDepth: (\d+),/.exec(html) || [, '0'])[1] + ';\n'
+    + 'App._tryAcquireRoiLock = ' + extractMethod(html, '_tryAcquireRoiLock').replace(/^async _tryAcquireRoiLock/, 'async function') + ';\n'
+    + 'App._releaseRoiLock = ' + extractTopLevelMethodBody('_releaseRoiLock') + ';\n'
+    + 'this.api = { App };',
+    Object.assign(ctx, { App, SupabaseClient }));
+
+  assert.equal(await App._tryAcquireRoiLock(), true);
+  assert.equal(await App._tryAcquireRoiLock(), true, '入れ子でも取れること');
+  assert.equal(calls.filter(c => c === 'acquire').length, 1, 'サーバへは 1 回だけ');
+  App._releaseRoiLock();
+  assert.equal(calls.filter(c => c === 'release').length, 0, '内側を閉じただけでは返さないこと');
+  App._releaseRoiLock();
+  assert.equal(calls.filter(c => c === 'release').length, 1, '外側を閉じたら返すこと');
+  // 返したあとはまた取りに行く。
+  assert.equal(await App._tryAcquireRoiLock(), true);
+  assert.equal(calls.filter(c => c === 'acquire').length, 2);
+}
+
+// メソッド本体を `function (...) {...}` 形式で取り出す (オブジェクトリテラルの
+// `name() {}` をそのまま代入できないため)。
+function extractTopLevelMethodBody(name) {
+  const marker = `    ${name}() {`;
+  const at = html.indexOf(marker);
+  assert.notEqual(at, -1, `missing method ${name}`);
+  const openAt = html.indexOf('{', at + marker.length - 1);
+  return 'function () ' + html.slice(openAt, scanBalanced(html, openAt) + 1);
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -2009,6 +2269,10 @@ async function main() {
   testShareOverlaysPersistLocally();
   await testShareOverlaysAreSharedWithEveryone();
   testShareOverlayModuleVarsAreDeclared();
+  testSectionAlignmentRoundTrips();
+  await testShareAlignmentsAreSharedWithEveryone();
+  testShareAlignmentEditingIsLocked();
+  await testRoiLockIsReentrant();
   testShareRoiDeleteAsksUnderTheLock();
   console.log('viewer preview regression tests: PASS');
 }
