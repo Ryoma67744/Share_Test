@@ -721,6 +721,16 @@ let workspaceTree = null;
 // no server to load from). While false we must NOT persist the in-memory tree,
 // or a transient load failure would clobber the real server hierarchy.
 let _treeLoaded = false;
+// Set when the render-time reconciler (_reconcileTree) rewrote the tree and the
+// result is not on the server yet. Kept until a save succeeds so a heal is not
+// lost when the master pw happens to be missing on the first render.
+let _treeDirty = false;
+let _treeSaveInFlight = false;
+// True while persistTreeAndRender() is running. It renders (which can trigger a
+// self-heal) before saving, and rolls the tree back when its save fails — so the
+// quiet save must stay out of the way or it could persist a tree that the
+// explicit path is about to roll back.
+let _treePersisting = false;
 
 function _emptyTree() { return { version: 1, children: [] }; }
 
@@ -765,9 +775,14 @@ async function loadWorkspaceTree() {
         const t = await SupabaseClient.getWorkspaceTree(pw);
         workspaceTree = (t && Array.isArray(t.children)) ? t : _emptyTree();
         _treeLoaded = true;
+        _treeDirty = false;   // the tree this flag referred to is gone
     } catch (e) { console.warn('get_workspace_tree failed', e); _ensureTree(); _treeLoaded = false; }
 }
 async function persistTreeAndRender() {
+    _treePersisting = true;
+    try { await _persistTreeAndRender(); } finally { _treePersisting = false; }
+}
+async function _persistTreeAndRender() {
     await renderList();   // optimistic
     // Guard: never write a tree we never successfully loaded — a transient
     // get_workspace_tree failure would otherwise overwrite the real hierarchy
@@ -778,7 +793,7 @@ async function persistTreeAndRender() {
     }
     const pw = await _ensureMasterPwForTree();
     if (!pw) { alert('Master password が無いためフォルダ構成を保存できませんでした'); return; }
-    try { await SupabaseClient.setWorkspaceTree(pw, workspaceTree); }
+    try { await SupabaseClient.setWorkspaceTree(pw, workspaceTree); _treeDirty = false; }
     catch (e) {
         console.warn('set_workspace_tree failed', e);
         alert('フォルダ構成の保存に失敗しました: ' + ((e && (e.message || e.details)) || e));
@@ -786,6 +801,22 @@ async function persistTreeAndRender() {
         // server tree so a later successful op doesn't persist a diverged state.
         try { await loadWorkspaceTree(); await renderList(); } catch (e2) { console.warn('tree rollback failed', e2); }
     }
+}
+
+// Save the tree WITHOUT re-rendering, for the render-time self-heal.
+// persistTreeAndRender() renders first, so calling it from inside renderList()
+// would recurse forever. Silent by design: this runs on every list render, so
+// it never prompts for a password and never alerts — a heal that cannot be
+// saved now is simply retried on the next render (_treeDirty stays set).
+async function saveTreeQuiet() {
+    if (!_treeDirty || !_treeLoaded || _treeSaveInFlight || _treePersisting) return;
+    if (!SupabaseClient.configured()) { _treeDirty = false; return; }
+    const pw = readCachedMasterPw();
+    if (!pw) return;
+    _treeSaveInFlight = true;
+    try { await SupabaseClient.setWorkspaceTree(pw, workspaceTree); _treeDirty = false; }
+    catch (e) { console.warn('workspace tree self-heal save failed', e); }
+    finally { _treeSaveInFlight = false; }
 }
 
 // ---- tree mutation utilities (operate on workspaceTree) ----
@@ -933,15 +964,31 @@ async function treeMoveProject(slug, localId) {
     // ★ 一致するノードを**全部**外す。_treeRemove は 1 件外して返すだけなので、
     //   {localId} と {slug} の 2 ノードで載っているプロジェクト (renderNodes の
     //   コメント参照) を移動すると、片方が移動元に幽霊として残っていた。
+    // ★ 文字列一致だけでは足りない。この行が「Server only」だと localId を
+    //   持たない (rowHtml の data-local-id が空) ので、登録した PC が作った
+    //   {localId} だけのノードに手が届かず、やはり幽霊が残る。行そのものへ
+    //   解決できるかで判定し、形の違う同一プロジェクトのノードも回収する。
+    const idx = _indexRows(await buildRows());
+    const target = (slug && idx.bySlug.get(slug)) || (localId && idx.byLocal.get(localId)) || null;
+    const targetKey = target ? _rowKey(target) : '';
+    const isSameProject = (n) => {
+        if ((slug && n.slug === slug) || (localId && n.localId === localId)) return true;
+        if (!targetKey) return false;
+        const r = idx.rowForNode(n);
+        return !!r && _rowKey(r) === targetKey;
+    };
     const node = { type: 'project' };
     let removed;
-    while ((removed = _treeRemove(n => n.type === 'project'
-            && ((slug && n.slug === slug) || (localId && n.localId === localId))))) {
+    while ((removed = _treeRemove(n => n.type === 'project' && isSameProject(n)))) {
         if (removed.slug && !node.slug) node.slug = removed.slug;
         if (removed.localId && !node.localId) node.localId = removed.localId;
     }
     if (slug) node.slug = slug;
     if (localId) node.localId = localId;
+    // 公開済みなら slug を必ず載せる。localId しか無いノードは、それを作った
+    // PC 以外では二度と解決できない (これが今回のバグの本体)。
+    const targetSlug = target ? _rowSlug(target) : '';
+    if (targetSlug) node.slug = targetSlug;
     _treeChildrenOf(dest.id).push(node);
     await persistTreeAndRender();
 }
@@ -955,17 +1002,92 @@ async function treeMoveProject(slug, localId) {
 function _buildProjectResolver(rows) {
     const slugToName = new Map();
     const localToShare = new Map();
+    const knownLocalIds = new Set();
     for (const r of (rows || [])) {
-        const slug = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
+        const slug = _rowSlug(r);
         const name = (r.local && r.local.displayName) || (r.server && r.server.display_name) || slug;
         if (slug) slugToName.set(slug, name);
+        if (r.local && r.local.id) knownLocalIds.add(r.local.id);
         if (r.local && r.local.id && slug) localToShare.set(r.local.id, { slug, displayName: name });
     }
-    return (n) => {
+    const resolve = (n) => {
         if (n.slug && slugToName.has(n.slug)) return { slug: n.slug, displayName: slugToName.get(n.slug) };
         if (n.localId && localToShare.has(n.localId)) return localToShare.get(n.localId);
         return null;
     };
+    // ★ 解決できない理由は 2 通りあり、扱いが正反対なので呼び出し側に見分けさせる。
+    //   (a) この PC で作ってまだ publish していない → 一覧に載らなくて当然。
+    //   (b) 別 PC で作られ、この PC にローカル記録が無いだけ → **公開済み**。
+    //   (b) を (a) と同じに扱って黙って落とすと、フォルダ共有の一覧から
+    //   公開済みプロジェクトが消える (改名の自動再共有では警告すら出ない)。
+    resolve.isForeign = (n) => !resolve(n) && !(n.localId && knownLocalIds.has(n.localId));
+    return resolve;
+}
+
+// ---- row identity (shared by the list renderer, the tree reconciler and 移動) ----
+// A row's identity is its published slug; a never-published local project falls
+// back to its browser-local id.
+function _rowSlug(r) {
+    return (r && r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r && r.server && r.server.slug) || '';
+}
+function _rowKey(r) {
+    const s = _rowSlug(r);
+    return s ? ('s:' + s) : ('l:' + (r && r.local ? r.local.id : ''));
+}
+function _indexRows(rows) {
+    const bySlug = new Map(), byLocal = new Map();
+    for (const r of (rows || [])) {
+        const s = _rowSlug(r);
+        const lid = r.local ? r.local.id : '';
+        if (s) bySlug.set(s, r);
+        if (lid) byLocal.set(lid, r);
+    }
+    const rowForNode = (n) => {
+        if (n.slug && bySlug.has(n.slug)) return bySlug.get(n.slug);
+        if (n.localId && byLocal.has(n.localId)) return byLocal.get(n.localId);
+        return null;
+    };
+    return { bySlug, byLocal, rowForNode };
+}
+
+// ★ 別 PC でフォルダの中身が外へ出ていた原因の修理。
+//   フォルダの「＋プロジェクト」は publish 前のプロジェクトを {localId} だけの
+//   ノードで載せる (data-folder-add-project のハンドラ)。localId はその
+//   ブラウザの IndexedDB 内の鍵で、
+//   publish しても viewer 側にツリーのコードが無いので slug は書き戻らない。
+//   結果、登録した PC でしかノードを解決できず、別 PC ではフォルダが空になり、
+//   プロジェクトは未配置としてルート末尾に出ていた。
+//   ここで「解決できたその場で slug を焼き付ける」ことで、登録した PC が
+//   管理画面を開いた時点で共有ツリーが治り、以後どの PC でも slug で解決できる。
+//   ついでに、以前の版が残した {localId}+{slug} の 2 ノード重複を 1 つに畳む。
+//   畳む基準は**ツリー格納順**。描画順 (実験日ソート) で畳むと、ソート設定が
+//   違う PC 同士が別々の結果を保存して奪い合うため。
+//   戻り値: ツリーを書き換えたら true。
+function _reconcileTree(rowForNode) {
+    let dirty = false;
+    const firstByKey = new Map();
+    const walk = (nodes) => {
+        for (let i = 0; i < nodes.length; i++) {
+            const n = nodes[i];
+            if (n.type === 'folder') { n.children = n.children || []; walk(n.children); continue; }
+            if (n.type !== 'project') continue;
+            const r = rowForNode(n);
+            if (!r) continue;                     // この PC では解決できない → 触らない
+            const key = _rowKey(r);
+            const first = firstByKey.get(key);
+            if (first) {                          // 同じプロジェクトの 2 ノード目 → 畳む
+                if (n.slug && !first.slug) first.slug = n.slug;
+                if (n.localId && !first.localId) first.localId = n.localId;
+                nodes.splice(i, 1); i--; dirty = true;
+                continue;
+            }
+            const slug = _rowSlug(r);
+            if (slug && n.slug !== slug) { n.slug = slug; dirty = true; }
+            firstByKey.set(key, n);
+        }
+    };
+    walk((workspaceTree && workspaceTree.children) || []);
+    return dirty;
 }
 
 // ① Phase 2: build the recipient-facing index snapshot for a folder subtree.
@@ -973,7 +1095,12 @@ function _buildProjectResolver(rows) {
 // displayName } (or null if unpublished). When `includeSubfolders` is false,
 // nested sub-folders are skipped and only this folder's direct published
 // projects are listed; otherwise sub-folders are preserved as nesting.
-function _buildFolderIndexDoc(folderNode, resolveProject, includeSubfolders) {
+// `stats` (optional) receives what was left out: { unpublished, foreign }.
+// foreign = published, but this PC cannot resolve the node (it was created on
+// another PC and carries only that PC's localId). Publishing an index that
+// silently drops those removes live projects from the recipient's listing, so
+// callers must check it rather than trusting the doc.
+function _buildFolderIndexDoc(folderNode, resolveProject, includeSubfolders, stats) {
     const incSub = includeSubfolders !== false;   // default: include sub-folders
     const conv = (nodes) => {
         const out = [];
@@ -983,6 +1110,10 @@ function _buildFolderIndexDoc(folderNode, resolveProject, includeSubfolders) {
             } else if (n.type === 'project') {
                 const p = resolveProject(n);
                 if (p && p.slug) out.push({ type: 'project', slug: p.slug, displayName: p.displayName || p.slug });
+                else if (stats) {
+                    if (resolveProject.isForeign && resolveProject.isForeign(n)) stats.foreign = (stats.foreign || 0) + 1;
+                    else stats.unpublished = (stats.unpublished || 0) + 1;
+                }
             }
         }
         return out;
@@ -1000,20 +1131,29 @@ async function openFolderShareModal(folderId) {
     // Count this folder's direct + (optionally) nested published projects for
     // the summary line; recomputed live when the sub-folder toggle changes.
     const computeCounts = (incSub) => {
-        let total = 0, withSlug = 0;
+        let total = 0, withSlug = 0, foreign = 0;
         (function walk(nodes) {
             for (const n of (nodes || [])) {
                 if (n.type === 'folder') { if (incSub) walk(n.children || []); }
-                else if (n.type === 'project') { total++; if (resolveProject(n)) withSlug++; }
+                else if (n.type === 'project') {
+                    total++;
+                    if (resolveProject(n)) withSlug++;
+                    else if (resolveProject.isForeign && resolveProject.isForeign(n)) foreign++;
+                }
             }
         })(node.children || []);
-        return { total, withSlug };
+        return { total, withSlug, foreign };
     };
+    // ★ 「解決できない = 未公開」と決めつけない。別 PC で作られたプロジェクトは
+    //   公開済みでもこの PC では解決できず、以前はそれを「未公開なので Publish
+    //   してください」と案内していた (publish 済みなので直しようがない上に、
+    //   そのまま共有すると受け手の一覧から消える)。
     const countText = (incSub) => {
-        const { total, withSlug } = computeCounts(incSub);
-        const excluded = total - withSlug;
+        const { total, withSlug, foreign } = computeCounts(incSub);
+        const unpublished = total - withSlug - foreign;
         return '配下の<b>公開済み</b>プロジェクト ' + withSlug + ' 件を一覧にします。'
-            + (excluded ? '<br><span style="color:#b45309;">未公開の ' + excluded + ' 件は含まれません（先に各プロジェクトを Publish してください）。</span>' : '');
+            + (unpublished ? '<br><span style="color:#b45309;">未公開の ' + unpublished + ' 件は含まれません（先に各プロジェクトを Publish してください）。</span>' : '')
+            + (foreign ? '<br><span style="color:#b91c1c;">この PC では解決できない ' + foreign + ' 件があります（公開済みでも一覧から抜け落ちます）。そのプロジェクトを登録した PC で一度この管理画面を開くと直ります。</span>' : '');
     };
     const cur = node.shareSlug || '';
     const folderUrl = (s) => location.origin + location.pathname.replace(/[^/]+$/, '') + 'viewer/index.html#folder=' + encodeURIComponent(s);
@@ -1068,7 +1208,13 @@ async function openFolderShareModal(folderId) {
     if (!res) return;
     const pw = await _ensureMasterPwForTree();
     if (!pw) { alert('Master password が必要です'); return; }
-    const indexDoc = _buildFolderIndexDoc(node, resolveProject, res.includeSubfolders);
+    const stats = { unpublished: 0, foreign: 0 };
+    const indexDoc = _buildFolderIndexDoc(node, resolveProject, res.includeSubfolders, stats);
+    if (stats.foreign && !confirm(
+            'この PC では ' + stats.foreign + ' 件のプロジェクトを解決できません。\n'
+            + 'このまま共有すると、公開済みでもその ' + stats.foreign + ' 件は受け手の一覧から抜け落ちます。\n\n'
+            + 'それらを登録した PC で一度この管理画面を開くと解決できるようになります。\n\n'
+            + 'それでも共有しますか?')) return;
     try {
         await SupabaseClient.publishFolderShare(pw, res.slug, node.name, indexDoc, res.isPublic, res.isPublic ? null : res.password);
         node.shareSlug = res.slug; node.shareIsPublic = res.isPublic; node.shareIncludeSubfolders = res.includeSubfolders;
@@ -1493,25 +1639,15 @@ async function renderList() {
     }
     // ① Index rows for placement, then render the folder tree with projects
     // inside their folders and any unplaced project at the root.
-    const bySlug = new Map(), byLocal = new Map();
-    const rkey = (r) => {
-        const s = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
-        return s ? ('s:' + s) : ('l:' + (r.local ? r.local.id : ''));
-    };
-    for (const r of rows) {
-        const s = (r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r.server && r.server.slug) || '';
-        const lid = r.local ? r.local.id : '';
-        if (s) bySlug.set(s, r);
-        if (lid) byLocal.set(lid, r);
-    }
+    const rkey = _rowKey;
+    const rowForNode = _indexRows(rows).rowForNode;
     const placed = new Set();
-    // 同じ行に解決された最初のノード。2 つ目以降は重複なので畳む (renderNodes)。
-    const firstNodeByKey = new Map();
-    const rowForNode = (n) => {
-        if (n.slug && bySlug.has(n.slug)) return bySlug.get(n.slug);
-        if (n.localId && byLocal.has(n.localId)) return byLocal.get(n.localId);
-        return null;
-    };
+    // ★ 描画の前にツリーを整える。localId でしか載っていないノードに slug を
+    //   焼き付け (これで別 PC でもフォルダの中に出る)、古い 2 ノード重複を
+    //   ツリー格納順で 1 つに畳む。描画順ではなく格納順で畳むのは、実験日
+    //   ソートの設定が違う PC 同士が別々の結果を保存して奪い合わないため。
+    if (_reconcileTree(rowForNode)) _treeDirty = true;
+    if (_treeDirty) saveTreeQuiet();   // fire-and-forget: 失敗しても次の描画で再試行
     // ② Experiment-date ordering (display only; the saved tree/placement is
     // untouched). Within each level: newest 実験日 first; a folder sorts by the
     // newest experiment date it contains, so 日時 > サブフォルダー. Items with
@@ -1577,29 +1713,13 @@ async function renderList() {
                     +   (inner || '<div class="text-xs text-gray-400 px-1 py-1">（空のフォルダ）</div>')
                     + '</div>';
             } else if (n.type === 'project') {
+                // 解決できないノードは描かない。この PC にローカル記録が無い
+                // だけの公開済みプロジェクトは、_reconcileTree が slug を
+                // 焼き付けるまでここに落ちる (それまでは未配置として末尾に出る)。
+                // 1 プロジェクト = 1 ノードへの畳み込みも _reconcileTree 済み。
                 const r = rowForNode(n);
                 if (!r) continue;
-                const k = rkey(r);
-                // ★ 1 つのプロジェクトがツリーに 2 ノード載っていることがある。
-                //   フォルダ内の「＋プロジェクト」は {localId} だけのノードを作り
-                //   (:1595)、publish 後にローカル記録を持たない別 PC から「移動」
-                //   すると slug でしか照合できないので {slug} ノードが足される。
-                //   ツリーはサーバ共有なので、**両方を解決できる PC でだけ**同じ
-                //   行が 2 回描かれ、「プロジェクトが複製された」ように見えていた
-                //   (実体は 1 つで、どちらを押しても同じものが開く)。
-                //   ここで 1 つに畳み、身元 (slug / localId) は残す方へ寄せる。
-                //   別フォルダに散っている場合はツリー順で先に出た方を残す。
-                //   保存はユーザーが次にフォルダ操作をしたとき (persistTreeAndRender)。
-                const first = firstNodeByKey.get(k);
-                if (first) {
-                    if (n.slug && !first.slug) first.slug = n.slug;
-                    if (n.localId && !first.localId) first.localId = n.localId;
-                    const i = nodes.indexOf(n);   // sortNodes は複製を返すので splice して安全
-                    if (i >= 0) nodes.splice(i, 1);
-                    continue;
-                }
-                firstNodeByKey.set(k, n);
-                placed.add(k);
+                placed.add(rkey(r));
                 html += rowHtml(r);
             }
         }
@@ -1806,15 +1926,26 @@ async function renderList() {
                             const rows2 = await buildRows();
                             const resolveProject = _buildProjectResolver(rows2);
                             const failed = [];
+                            const skipped = [];
                             for (const folder of shared) {
+                                // ★ この PC で解決できないノードを含むフォルダは触らない。
+                                //   _buildFolderIndexDoc はそれを黙って落とすので、改名した
+                                //   だけで公開済みの兄弟プロジェクトが受け手の一覧から消えて
+                                //   いた (ユーザー操作も警告も無しに、同じ URL のまま)。
+                                const stats = { unpublished: 0, foreign: 0 };
+                                const indexDoc = _buildFolderIndexDoc(folder, resolveProject, folder.shareIncludeSubfolders !== false, stats);
+                                if (stats.foreign) { skipped.push(folder.name); continue; }
                                 try {
-                                    const indexDoc = _buildFolderIndexDoc(folder, resolveProject, folder.shareIncludeSubfolders !== false);
                                     await SupabaseClient.publishFolderShare(masterPw, folder.shareSlug, folder.name, indexDoc, folder.shareIsPublic, null);
                                 } catch (e) { console.warn('auto re-share folder failed', folder.name, e); failed.push(folder.name); }
                             }
-                            folderMsg = failed.length
-                                ? '\n\n共有フォルダ「' + failed.join('」「') + '」の一覧名は自動更新できませんでした（パスワード保護のため）。フォルダの「共有」ボタンから再共有してください。'
-                                : '\n\n共有フォルダの一覧名も更新しました。';
+                            folderMsg = (failed.length
+                                    ? '\n\n共有フォルダ「' + failed.join('」「') + '」の一覧名は自動更新できませんでした（パスワード保護のため）。フォルダの「共有」ボタンから再共有してください。'
+                                    : '')
+                                + (skipped.length
+                                    ? '\n\n共有フォルダ「' + skipped.join('」「') + '」の一覧は更新していません。この PC では中身の一部を解決できず、そのまま更新すると公開済みのプロジェクトが一覧から抜け落ちるためです。それらを登録した PC で一度この管理画面を開いてください。'
+                                    : '')
+                                + (!failed.length && !skipped.length ? '\n\n共有フォルダの一覧名も更新しました。' : '');
                         }
                     }
                 } catch (e) { console.warn('folder auto re-share skipped', e); }
