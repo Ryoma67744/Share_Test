@@ -101,8 +101,9 @@ function testRegisteringPcHealsTheTree() {
   const context = makeContext(tree);
   context.ROWS = rowsOnRegisteringPc;
 
-  const dirty = vm.runInContext('_reconcileTree(_indexRows(ROWS).rowForNode)', context);
-  assert.equal(dirty, true, '書き換えたら true を返して保存させる');
+  const fixed = vm.runInContext('_reconcileTree(_indexRows(ROWS).rowForNode)', context);
+  assert.equal(fixed.healed, 1, '焼き付けた件数を返して保存させる');
+  assert.equal(fixed.folded, 0);
 
   const node = tree.children[0].children[0];
   assert.equal(node.slug, 'medaka-test-a1b2', 'slug が焼き付いている');
@@ -115,8 +116,8 @@ function testRegisteringPcHealsTheTree() {
 
   // 2 回目は何も変わらないので保存しない (描画のたびに書きに行かせない)。
   context.ROWS = rowsOnRegisteringPc;
-  assert.equal(vm.runInContext('_reconcileTree(_indexRows(ROWS).rowForNode)', context), false,
-    '変化が無ければ false');
+  const again = vm.runInContext('_reconcileTree(_indexRows(ROWS).rowForNode)', context);
+  assert.deepEqual([again.healed, again.folded], [0, 0], '変化が無ければ 0 件');
 }
 
 // 別 PC が「移動」で足した {slug} ノードと、元 PC の {localId} ノードが
@@ -130,7 +131,7 @@ function testDuplicateNodesFoldByTreeOrder() {
   ] };
   const context = makeContext(tree);
   context.ROWS = rowsOnRegisteringPc;
-  assert.equal(vm.runInContext('_reconcileTree(_indexRows(ROWS).rowForNode)', context), true);
+  assert.equal(vm.runInContext('_reconcileTree(_indexRows(ROWS).rowForNode)', context).folded, 1);
 
   assert.equal(tree.children[0].children.length, 1, '先に格納されている A が残る');
   assert.equal(tree.children[1].children.length, 0, '後の B が畳まれる');
@@ -184,13 +185,82 @@ function testHealedNodeSurvivesFolderShare() {
     [{ type: 'project', slug: 'medaka-test-a1b2', displayName: '260908_Medaka_Test' }]);
 }
 
-function main() {
+// 自己修復の保存に失敗したとき、その修復が捨てられないこと。
+//
+// ツリーの取得は in-memory のツリーを丸ごと置き換え、_treeDirty も落とす。
+// 保存に失敗した直後に取得が走ると (ブートは 2 回取得し、「サーバから一覧取得」
+// でも取得する)、まだ届いていない修復がそこで消える。取得の前に保存を流し切る
+// ことで、あらゆる取得が再試行の機会になる。
+function testFailedHealIsRetriedOnTheNextFetch() {
+  const stale = () => ({ version: 1, children: [
+    { type: 'folder', id: 'f_hokudai', name: 'Hokudai_Medaka',
+      children: [{ type: 'project', localId: 'proj_k3f9x' }] }] });
+  let stored = stale();
+  let failNextSet = true;
+  const tick = async (n) => { for (let i = 0; i < n; i++) await null; };
+
+  const context = vm.createContext({
+    console, Map, Set, Math, JSON,
+    workspaceTree: null,
+    _treeLoaded: false, _treeDirty: false, _treePersisting: false,
+    _treeSavePromise: null, _treeHealed: 0,
+    readCachedMasterPw: () => 'master-pw',
+    showToast: () => {},
+    SupabaseClient: {
+      configured: () => true,
+      getWorkspaceTree: async () => { await tick(1); return JSON.parse(JSON.stringify(stored)); },
+      setWorkspaceTree: async (pw, tree) => {
+        await tick(1);
+        if (failNextSet) { failNextSet = false; throw new Error('transient network failure'); }
+        stored = JSON.parse(JSON.stringify(tree));
+      },
+    },
+    ROWS: rowsOnRegisteringPc,
+  });
+  for (const name of ['_emptyTree', '_ensureTree', '_rowSlug', '_rowKey', '_indexRows',
+                      '_reconcileTree', 'loadWorkspaceTree', 'saveTreeQuiet']) {
+    vm.runInContext(extractFunction(name), context);
+  }
+
+  // renderList の該当箇所と同じ手順。実装が変わったら気づけるよう、本物の
+  // 呼び出しが index.html に残っていることを確かめてから使う。
+  assert.match(source, /const fixed = _reconcileTree\(rowForNode\);/);
+  assert.match(source, /if \(fixed\.healed \|\| fixed\.folded\) \{ _treeDirty = true; _treeHealed \+= fixed\.healed; \}/);
+  assert.match(source, /if \(_treeDirty\) saveTreeQuiet\(\);/);
+  const render = () => vm.runInContext(`(function(){
+      const fixed = _reconcileTree(_indexRows(ROWS).rowForNode);
+      if (fixed.healed || fixed.folded) { _treeDirty = true; _treeHealed += fixed.healed; }
+      if (_treeDirty) saveTreeQuiet();
+    })()`, context);
+
+  return (async () => {
+    await vm.runInContext('loadWorkspaceTree()', context);
+    render();                     // 直す → 保存 → 失敗
+    await tick(20);
+    assert.equal(vm.runInContext('_treeDirty', context), true,
+      '保存に失敗したら、直した印を残して再試行できるようにする');
+    assert.equal(stored.children[0].children[0].slug, undefined, '前提: まだ届いていない');
+
+    // 次の取得 (ブート 2 回目 / 「サーバから一覧取得」)。ここで捨ててはいけない。
+    await vm.runInContext('loadWorkspaceTree()', context);
+    await tick(20);
+
+    assert.equal(stored.children[0].children[0].slug, 'medaka-test-a1b2',
+      '取得の前に保存を流し切るので、失敗した修復が次の取得で届く');
+    assert.equal(vm.runInContext('_treeDirty', context), false, '届いたら印を下ろす');
+    assert.equal(vm.runInContext('workspaceTree.children[0].children[0].slug', context),
+      'medaka-test-a1b2', '取得し直したツリーも直っている');
+  })();
+}
+
+async function main() {
   testLocalIdOnlyNodeIsUnresolvableElsewhere();
   testRegisteringPcHealsTheTree();
   testDuplicateNodesFoldByTreeOrder();
   testIndexDocReportsWhatItDropped();
   testHealedNodeSurvivesFolderShare();
+  await testFailedHealIsRetriedOnTheNextFetch();
   console.log('manage tree regression tests: PASS');
 }
 
-main();
+main().catch((error) => { console.error(error); process.exitCode = 1; });

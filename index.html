@@ -725,7 +725,14 @@ let _treeLoaded = false;
 // result is not on the server yet. Kept until a save succeeds so a heal is not
 // lost when the master pw happens to be missing on the first render.
 let _treeDirty = false;
-let _treeSaveInFlight = false;
+// The in-flight quiet save, so a second request can WAIT for it instead of
+// being dropped. Dropping one loses the heal for good: the boot ends on its
+// last render, so nothing would ever retry it.
+let _treeSavePromise = null;
+// How many folder placements the self-heal repaired but has not reported yet.
+// Surfaced as a toast on the save that lands, so the repair is observable
+// instead of something the user has to take on faith.
+let _treeHealed = 0;
 // True while persistTreeAndRender() is running. It renders (which can trigger a
 // self-heal) before saving, and rolls the tree back when its save fails — so the
 // quiet save must stay out of the way or it could persist a tree that the
@@ -769,6 +776,13 @@ async function _ensureMasterPwForTree() {
 
 async function loadWorkspaceTree() {
     if (!SupabaseClient.configured()) { _ensureTree(); _treeLoaded = true; return; }   // no server → nothing to clobber
+    // ★ 取得は in-memory のツリーを丸ごと置き換え、_treeDirty も落とす。まだ
+    //   サーバに届いていない自己修復があるなら、ここで先に流し切る。
+    //   ブートは「取得 → 描画 → (一覧取得) → **取得** → 描画」と 2 回取得する。
+    //   1 回目の描画で直した分をここで捨てると、2 回目の描画が直し直しても
+    //   その後に描画の機会が無く、永久に保存されないまま終わる。
+    //   ロールバック中 (_treePersisting) は捨てるのが正しいので流さない。
+    if (_treeDirty && !_treePersisting) { try { await saveTreeQuiet(); } catch (e) { console.warn('flush before reload failed', e); } }
     const pw = readCachedMasterPw();
     if (!pw) { _ensureTree(); _treeLoaded = false; return; }   // have server but not authed → don't allow saving
     try {
@@ -809,14 +823,25 @@ async function _persistTreeAndRender() {
 // it never prompts for a password and never alerts — a heal that cannot be
 // saved now is simply retried on the next render (_treeDirty stays set).
 async function saveTreeQuiet() {
-    if (!_treeDirty || !_treeLoaded || _treeSaveInFlight || _treePersisting) return;
+    // 先行する保存があるなら、捨てずに待ってから判断し直す。待った結果として
+    // 自分の分がもう保存済みなら _treeDirty が下りているので何もしない。
+    if (_treeSavePromise) { try { await _treeSavePromise; } catch (e) {} }
+    if (!_treeDirty || !_treeLoaded || _treePersisting) return;
     if (!SupabaseClient.configured()) { _treeDirty = false; return; }
     const pw = readCachedMasterPw();
     if (!pw) return;
-    _treeSaveInFlight = true;
-    try { await SupabaseClient.setWorkspaceTree(pw, workspaceTree); _treeDirty = false; }
+    const healed = _treeHealed;
+    _treeSavePromise = (async () => {
+        await SupabaseClient.setWorkspaceTree(pw, workspaceTree);
+        _treeDirty = false;
+        if (healed) {
+            _treeHealed = Math.max(0, _treeHealed - healed);
+            showToast('フォルダ位置 ' + healed + ' 件を共有ツリーに保存しました。\n他の PC でも同じフォルダの中に出ます（再読み込みが必要です）。', 6000);
+        }
+    })();
+    try { await _treeSavePromise; }
     catch (e) { console.warn('workspace tree self-heal save failed', e); }
-    finally { _treeSaveInFlight = false; }
+    finally { _treeSavePromise = null; }
 }
 
 // ---- tree mutation utilities (operate on workspaceTree) ----
@@ -1062,9 +1087,9 @@ function _indexRows(rows) {
 //   ついでに、以前の版が残した {localId}+{slug} の 2 ノード重複を 1 つに畳む。
 //   畳む基準は**ツリー格納順**。描画順 (実験日ソート) で畳むと、ソート設定が
 //   違う PC 同士が別々の結果を保存して奪い合うため。
-//   戻り値: ツリーを書き換えたら true。
+//   戻り値: { healed, folded } — 焼き付けた件数と畳んだ件数。
 function _reconcileTree(rowForNode) {
-    let dirty = false;
+    let healed = 0, folded = 0;
     const firstByKey = new Map();
     const walk = (nodes) => {
         for (let i = 0; i < nodes.length; i++) {
@@ -1078,16 +1103,16 @@ function _reconcileTree(rowForNode) {
             if (first) {                          // 同じプロジェクトの 2 ノード目 → 畳む
                 if (n.slug && !first.slug) first.slug = n.slug;
                 if (n.localId && !first.localId) first.localId = n.localId;
-                nodes.splice(i, 1); i--; dirty = true;
+                nodes.splice(i, 1); i--; folded++;
                 continue;
             }
             const slug = _rowSlug(r);
-            if (slug && n.slug !== slug) { n.slug = slug; dirty = true; }
+            if (slug && n.slug !== slug) { n.slug = slug; healed++; }
             firstByKey.set(key, n);
         }
     };
     walk((workspaceTree && workspaceTree.children) || []);
-    return dirty;
+    return { healed, folded };
 }
 
 // ① Phase 2: build the recipient-facing index snapshot for a folder subtree.
@@ -1646,8 +1671,9 @@ async function renderList() {
     //   焼き付け (これで別 PC でもフォルダの中に出る)、古い 2 ノード重複を
     //   ツリー格納順で 1 つに畳む。描画順ではなく格納順で畳むのは、実験日
     //   ソートの設定が違う PC 同士が別々の結果を保存して奪い合わないため。
-    if (_reconcileTree(rowForNode)) _treeDirty = true;
-    if (_treeDirty) saveTreeQuiet();   // fire-and-forget: 失敗しても次の描画で再試行
+    const fixed = _reconcileTree(rowForNode);
+    if (fixed.healed || fixed.folded) { _treeDirty = true; _treeHealed += fixed.healed; }
+    if (_treeDirty) saveTreeQuiet();   // fire-and-forget: 取得の前に流し切られる
     // ② Experiment-date ordering (display only; the saved tree/placement is
     // untouched). Within each level: newest 実験日 first; a folder sorts by the
     // newest experiment date it contains, so 日時 > サブフォルダー. Items with
