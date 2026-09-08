@@ -1068,3 +1068,147 @@ $$;
 grant execute on function public.publish_folder_share(text, text, text, jsonb, boolean, text) to anon, authenticated;
 grant execute on function public.get_folder_index(text, text)                                 to anon, authenticated;
 grant execute on function public.delete_folder_share(text, text)                              to anon, authenticated;
+
+-- ---- 9. share_overlays: 共有 URL を開いた全員で共有する重ね合わせ ----
+--
+-- master が登録した重ね合わせは sections.meta.overlays に載り、
+-- upsert_project_doc が publish のたびに丸ごと入れ替える。共有 URL を開いた
+-- 閲覧者が作った重ね合わせをそこに混ぜると、
+--   ・master が再 publish した瞬間に消える
+--   ・そもそも閲覧者は publish できない
+-- ので、rois と同じ考え方で専用テーブルに置く。認証も rois と同じ session
+-- token で、**その共有を開いている全員が読み書きできる** (誰の画面でも同じ
+-- セットが並ぶ)。master 側の定義はここには入らないので、読み取り専用のまま
+-- 一覧に並び続ける。
+create table if not exists public.share_overlays (
+    id               uuid primary key default gen_random_uuid(),
+    project_id       uuid not null references public.projects(id) on delete cascade,
+    name             text not null default '',
+    -- [{ key: 'MSI_...', color: '#rrggbb' }, ...] — viewer/index.html の
+    -- overlay.layers と同じ形。項目を増やすときは両方を合わせること。
+    layers           jsonb not null default '[]'::jsonb,
+    bg               text not null default 'black',
+    match_brightness boolean not null default false,
+    created_by       text not null default 'viewer',
+    created_at       timestamptz not null default now(),
+    updated_at       timestamptz not null default now(),
+    version          int not null default 1
+);
+
+create index if not exists share_overlays_project_idx
+    on public.share_overlays(project_id);
+
+alter table public.share_overlays enable row level security;
+-- 直接のテーブルアクセスは塞ぎ、下の SECURITY DEFINER RPC だけを通す (rois と同じ)。
+revoke all on public.share_overlays from anon, authenticated;
+
+-- 一覧。作成順に返すので、どの画面でも並びが同じになる。
+create or replace function public.list_share_overlays(p_token text)
+returns setof public.share_overlays
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    return query
+        select * from public.share_overlays
+         where project_id = v_pid
+         order by created_at;
+end
+$$;
+
+create or replace function public.create_share_overlay(
+    p_token text,
+    p_name text,
+    p_layers jsonb,
+    p_bg text default 'black',
+    p_match_brightness boolean default false,
+    p_created_by text default 'viewer'
+) returns public.share_overlays
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+    v public.share_overlays;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    -- 2 分子未満は画面側で作れないが、直接呼ばれても壊れた行を残さない。
+    if p_layers is null or jsonb_array_length(p_layers) < 2 then
+        raise exception 'overlay needs at least 2 layers' using errcode = '22023';
+    end if;
+    insert into public.share_overlays(project_id, name, layers, bg, match_brightness, created_by)
+         values (v_pid, coalesce(p_name, ''), p_layers,
+                 coalesce(p_bg, 'black'), coalesce(p_match_brightness, false),
+                 coalesce(p_created_by, 'viewer'))
+      returning * into v;
+    return v;
+end
+$$;
+
+-- 楽観ロック。update_roi と同じで、期待した version と食い違えば 40001。
+create or replace function public.update_share_overlay(
+    p_token text,
+    p_id uuid,
+    p_expected_version int,
+    p_name text default null,
+    p_layers jsonb default null,
+    p_bg text default null,
+    p_match_brightness boolean default null
+) returns public.share_overlays
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+    v public.share_overlays;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    if p_layers is not null and jsonb_array_length(p_layers) < 2 then
+        raise exception 'overlay needs at least 2 layers' using errcode = '22023';
+    end if;
+    update public.share_overlays
+       set name             = coalesce(p_name, name),
+           layers           = coalesce(p_layers, layers),
+           bg               = coalesce(p_bg, bg),
+           match_brightness = coalesce(p_match_brightness, match_brightness),
+           updated_at       = now(),
+           version          = version + 1
+     where id = p_id and project_id = v_pid and version = p_expected_version
+    returning * into v;
+    if v.id is null then
+        raise exception 'stale_version' using errcode = '40001';
+    end if;
+    return v;
+end
+$$;
+
+-- 削除。rois と同じ方針で、その共有を開いている人なら誰でも消せる
+-- (誰が作ったかで縛ると、作った人が居なくなった時点で片づけられなくなる)。
+create or replace function public.delete_share_overlay(p_token text, p_id uuid)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    delete from public.share_overlays where id = p_id and project_id = v_pid;
+end
+$$;
+
+grant execute on function public.list_share_overlays(text)                                     to anon, authenticated;
+grant execute on function public.create_share_overlay(text, text, jsonb, text, boolean, text)   to anon, authenticated;
+grant execute on function public.update_share_overlay(text, uuid, int, text, jsonb, text, boolean) to anon, authenticated;
+grant execute on function public.delete_share_overlay(text, uuid)                              to anon, authenticated;

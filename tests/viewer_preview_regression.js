@@ -93,8 +93,16 @@ function makePreviewContext(extra = {}) {
     Promise,
     Map,
     Set,
+    App: undefined,   // isShareOverlayMode が素の識別子で読むので、必ず定義しておく
     ...extra,
   });
+  // 重ね合わせ一覧の ✎/× の出し分けはアプリ本体の関数がそのまま決める。
+  // スタブに置き換えると「テストは通るのに画面では出ない」がすり抜ける。
+  vm.runInContext(
+    extractTopLevelFunction('isShareOverlayMode') + '\n'
+    + extractTopLevelFunction('isViewerOverlay') + '\n'
+    + extractTopLevelFunction('canEditOverlay'),
+    context);
   const objectSource = extractObject(html, 'const SharePreview =');
   return { context, preview: vm.runInContext(`(${objectSource})`, context) };
 }
@@ -435,12 +443,16 @@ function testForcedHeBackdropDoesNotPersist() {
 // それを existing として openOverlayModal に渡すと編集分岐に入り、その場限りの
 // オブジェクトを書き換えて登録しないまま終わる。
 function testOverlayForEditingIgnoresUnregistered() {
-  const context = vm.createContext({});
+  const context = vm.createContext({ App: {} });
   vm.runInContext(
-    extractTopLevelFunction('overlayForEditing') + '\nthis.api = { overlayForEditing };',
+    extractTopLevelFunction('isShareOverlayMode') + '\n'
+    + extractTopLevelFunction('isViewerOverlay') + '\n'
+    + extractTopLevelFunction('canEditOverlay') + '\n'
+    + extractTopLevelFunction('overlayForEditing')
+    + '\nthis.api = { overlayForEditing, canEditOverlay };',
     context,
   );
-  const { overlayForEditing } = context.api;
+  const { overlayForEditing, canEditOverlay } = context.api;
   const registered = { id: 'ov_1', layers: [] };
   const tmp = { id: 'kmd-tmp', layers: [] };
   const project = { overlays: [registered] };
@@ -452,6 +464,27 @@ function testOverlayForEditingIgnoresUnregistered() {
   assert.equal(overlayForEditing(registered, null), null);
   // id が同じでも別オブジェクトなら編集対象にしない (同一性で判定する)
   assert.equal(overlayForEditing({ id: 'ov_1', layers: [] }, project), null);
+
+  // ★ 共有先では master が公開した定義を書き換えさせない。共有先が作った分
+  //   (サーバ共有 _server / 端末保存 _local) だけが編集対象。
+  //   master 側は従来どおり全部編集できる。
+  const mine = { id: 'ov_2', layers: [], _local: true };
+  const theirs = { id: 'ov_3', layers: [], _server: true };   // 他の閲覧者が作った分
+  const shared = { overlays: [registered, mine, theirs] };
+  context.App.shareMode = { slug: 's', token: 't' };
+  context.App.project = shared;
+  shared.__share = true;
+  assert.equal(overlayForEditing(registered, shared), null, '共有先は master の定義を編集できない');
+  assert.equal(overlayForEditing(mine, shared), mine, '共有先は自分の定義を編集できる');
+  assert.equal(overlayForEditing(theirs, shared), theirs,
+    '共有の重ね合わせは誰でも編集できる (作った人が居なくなっても片づけられる)');
+  assert.equal(canEditOverlay(registered), false);
+  assert.equal(canEditOverlay(mine), true);
+  assert.equal(canEditOverlay(theirs), true);
+  // master (共有ではない) に戻せば master の定義も編集できる。
+  context.App.shareMode = null;
+  shared.__share = false;
+  assert.equal(overlayForEditing(registered, shared), registered, 'master は自分の定義を編集できる');
 }
 
 // プレビューの ＋重ね合わせ は必ず「新規登録」で開くこと。表示中の重ね合わせを
@@ -511,11 +544,11 @@ function testOverlayPanelRendersInRightColumn() {
   assert.match(list.innerHTML, /data-ov-edit-row="ov_1"/, '各セットに編集');
   assert.match(list.innerHTML, /data-ov-del-row="ov_1"/, '各セットに削除');
   assert.equal(single.hidden, true, '重ね合わせ表示中でなければ「単一表示へ戻る」は隠す');
-  assert.doesNotMatch(list.innerHTML, /class="cb-ov-item on"/, '表示中が無ければどれも on にしない');
+  assert.doesNotMatch(list.innerHTML, /class="cb-ov-item[^"]*\bon\b/, '表示中が無ければどれも on にしない');
 
   App.activeOverlay = b;
   preview._renderOverlayPanel(project);
-  assert.match(list.innerHTML, /cb-ov-item on" data-ov-id="ov_2"/, '表示中のセットに印を付ける');
+  assert.match(list.innerHTML, /class="cb-ov-item on[^"]*" data-ov-id="ov_2"/, '表示中のセットに印を付ける');
   assert.equal(single.hidden, false, '重ね合わせ表示中は「単一表示へ戻る」を出す');
 
   // 削除された分は消える
@@ -526,11 +559,30 @@ function testOverlayPanelRendersInRightColumn() {
 
   // Method 表には重ね合わせの行を残さない (化合物だけ)
   assert.doesNotMatch(html, /tr data-overlay-id=/, 'Method 表に重ね合わせの行を残さないこと');
+
+  // ★ 共有先: master が公開した定義は読み取り専用 (✎/× を出さない)、
+  //   共有先が作った分だけ編集・削除できる。CSS ではなく JS が決める。
+  const mine = { id: 'ov_3', name: '共有先のセット', _server: true,
+                 layers: [{ key: 'MSI_z', color: '#00ffff' }] };
+  project.overlays = [a, mine];
+  project.__share = true;
+  App.shareMode = { slug: 'proj_x', token: 't' };
+  preview._renderOverlayPanel(project);
+  assert.match(list.innerHTML, /セットA/, '共有先でも master の重ね合わせは一覧に残す');
+  assert.match(list.innerHTML, /共有先のセット/, '共有先で作った重ね合わせも並ぶ');
+  assert.doesNotMatch(list.innerHTML, /data-ov-del-row="ov_1"/,
+    '共有先は master の重ね合わせを削除できない');
+  assert.doesNotMatch(list.innerHTML, /data-ov-edit-row="ov_1"/,
+    '共有先は master の重ね合わせを編集できない');
+  assert.match(list.innerHTML, /data-ov-del-row="ov_3"/, '共有先の重ね合わせは削除できる');
+  assert.match(list.innerHTML, /data-ov-edit-row="ov_3"/, '共有先の重ね合わせは編集できる');
+  project.__share = false;
+  App.shareMode = null;
 }
 
 // 削除は主画面のチップとプレビューの一覧の両方から呼ぶので、確認・後始末を
 // 1 か所 (deleteOverlayById) に置く。片方だけ直して食い違うのを防ぐ。
-function testDeleteOverlayIsShared() {
+async function testDeleteOverlayIsShared() {
   const context = vm.createContext({});
   let confirmed = true;
   const cleared = [];
@@ -546,22 +598,58 @@ function testDeleteOverlayIsShared() {
   // プレビューが開いていて、消すセットを「開いた時点の重ね合わせ」として
   // 控えている状態を作る。控えを落とさないと close() で幽霊が復活する。
   const SharePreview = { _overlaySnapshot: a, isOpen: () => true, refresh() {} };
+  const toasts = [];
+  const store = new Map();
+  const localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
+  const serverDeletes = [];
+  let serverFails = null;      // 投げたい例外
+  const SupabaseClient = {
+    deleteShareOverlay(token, id) {
+      if (serverFails) return Promise.reject(serverFails);
+      serverDeletes.push([token, id]);
+      return Promise.resolve();
+    },
+  };
   vm.runInContext(
     'const App = this.App, confirm = this.confirm, SharePreview = this.SharePreview;\n'
+    + 'const localStorage = this.localStorage, SupabaseClient = this.SupabaseClient;\n'
     + 'function renderOverlayBar() {}\n'
+    + 'function showToast(m) { this.toasts.push(String(m)); }\n'
+    // 権限・永続化・サーバ削除はアプリ本体の関数をそのまま持ち込む
+    // (スタブにすると「共有先が master の重ね合わせを消せる」を見逃す)。
+    + extractTopLevelFunction('_shareOverlayKey') + '\n'
+    + extractTopLevelFunction('isShareOverlayMode') + '\n'
+    + extractTopLevelFunction('isViewerOverlay') + '\n'
+    + extractTopLevelFunction('canEditOverlay') + '\n'
+    + extractTopLevelFunction('saveShareOverlays') + '\n'
+    + extractTopLevelFunction('_isMissingRpc') + '\n'
+    + extractTopLevelFunction('_noteShareOverlayServerMissing') + '\n'
+    + extractTopLevelFunction('removeShareOverlay') + '\n'
     + extractTopLevelFunction('deleteOverlayById')
     + '\nthis.api = { deleteOverlayById };',
-    Object.assign(context, { App, SharePreview, confirm: () => confirmed, console }),
+    Object.assign(context, {
+      App, SharePreview, confirm: () => confirmed, localStorage, toasts,
+      // 失敗経路もテストするので、警告はここで受け取って出力を汚さない。
+      console: { warn() {}, log() {}, info() {} },
+      SupabaseClient,
+      SHARE_OVERLAY_LS_PREFIX: 'desi:shareOverlays:',
+      _shareOverlayServerMissing: false,
+      _shareOverlayWriteGen: 0,
+    }),
   );
   const { deleteOverlayById } = context.api;
 
   confirmed = false;
-  assert.equal(deleteOverlayById('ov_1'), false, '確認でキャンセルしたら消さない');
+  assert.equal(await deleteOverlayById('ov_1'), false, '確認でキャンセルしたら消さない');
   assert.equal(App.project.overlays.length, 2);
 
   confirmed = true;
-  assert.equal(deleteOverlayById('nope'), false, '知らない id は何もしない');
-  assert.equal(deleteOverlayById('ov_1'), true);
+  assert.equal(await deleteOverlayById('nope'), false, '知らない id は何もしない');
+  assert.equal(await deleteOverlayById('ov_1'), true);
   assert.deepEqual(App.project.overlays.map(o => o.id), ['ov_2'], '指定したセットだけ消す');
   assert.equal(saves.length, 1, '削除は保存すること');
   assert.equal(cleared.length, 0, '表示中でなければ単一表示へは戻さない');
@@ -571,9 +659,38 @@ function testDeleteOverlayIsShared() {
 
   App.activeOverlay = App.project.overlays[0];
   SharePreview._overlaySnapshot = b;   // 別のセットを控えている場合は残す
-  assert.equal(deleteOverlayById('ov_2'), true);
+  assert.equal(await deleteOverlayById('ov_2'), true);
   assert.equal(cleared.length, 1, '表示中のセットを消したら単一表示へ戻すこと');
   assert.equal(SharePreview._overlaySnapshot, null, '控えていたセットを消したら落とすこと');
+
+  // ★ 共有先: master が公開した重ね合わせは消させない。共有先が作った分は
+  //   サーバから消してから一覧を書き換える (先に消すと、失敗したときに
+  //   「自分の画面からだけ消えて他の人には残る」ことになる)。
+  const masterOv = { id: 'ov_m', name: 'master のセット' };
+  const sharedOv = { id: 'uuid-1', name: '共有のセット', _server: true, _serverVersion: 1,
+                     layers: [{ key: 'MSI_a' }, { key: 'MSI_b' }] };
+  App.project = { overlays: [masterOv, sharedOv], __share: true };
+  App.activeOverlay = null;
+  App.shareMode = { slug: 'proj_x', token: 'tok' };
+  const savesBefore = saves.length;
+  assert.equal(await deleteOverlayById('ov_m'), false, '共有先は master の重ね合わせを消せない');
+  assert.deepEqual(App.project.overlays.map(o => o.id), ['ov_m', 'uuid-1']);
+  assert.ok(toasts.some(t => /master/.test(t)), '消せない理由を知らせること');
+  assert.equal(saves.length, savesBefore, '共有先で IndexedDB へは書かないこと');
+
+  // サーバが失敗したら画面からも消さない。
+  serverFails = new Error('network down');
+  assert.equal(await deleteOverlayById('uuid-1'), false, 'サーバで消せなければ false');
+  assert.deepEqual(App.project.overlays.map(o => o.id), ['ov_m', 'uuid-1'],
+    'サーバから消せていないのに自分の画面からだけ消さないこと');
+  serverFails = null;
+
+  assert.equal(await deleteOverlayById('uuid-1'), true, '共有の重ね合わせは誰でも消せる');
+  assert.deepEqual(App.project.overlays.map(o => o.id), ['ov_m']);
+  assert.deepEqual(serverDeletes, [['tok', 'uuid-1']], 'サーバへ削除を送ること');
+  assert.equal(saves.length, savesBefore, '共有先で IndexedDB へは書かないこと');
+  assert.ok(toasts.some(t => /他の人の一覧からも消えます/.test(t)) === false,
+    '確認文は confirm で出す (toast ではない)');
 
   // 主画面のチップ側も同じ関数を通ること
   assert.match(html, /deleteOverlayById\(delEl\.getAttribute\('data-ov-del'\)\)/,
@@ -1444,7 +1561,10 @@ function testEditKeepsMatchBrightness() {
     'チェックを切り替えたときに注意を出し直していない');
 
   // 保存・公開・取り込みは素通しなので、明示的な whitelist が増えていないこと。
-  assert.match(html, /overlays: project\.overlays \|\| \[\]/, 'publish は overlays を verbatim で載せる');
+  // ★ 項目を選り分けないこと (o そのものを載せる) が要点。共有先が作った
+  //   重ね合わせ (_server / _local) だけは、行ごと落とす。
+  assert.match(html, /overlays: \(project\.overlays \|\| \[\]\)\.filter\(o => !isViewerOverlay\(o\)\)/,
+    'publish は overlays を (項目を選ばず) verbatim で載せ、共有先の分だけ落とす');
   assert.match(html, /return s \? s\.meta\.overlays : \[\];/, '取り込みも verbatim');
 }
 
@@ -1558,6 +1678,293 @@ function testDrawingRoiOpensTheRoiChart() {
   assert.match(html, /if \(App\.analysisMode === 'otsu'\) \{ try \{ renderOtsuAnalysis\(\);/);
 }
 
+// ★ HE を MSI の格子に載せるときのキャンバス倍率。「MSI 格子 x 8」で固定して
+//   いたので、100x100 の切片では canvas が 800px 止まりになり、スキャナで
+//   6000px 取った HE を 1/7 に潰してから重ねていた。HE 単独表示は HE の実寸で
+//   焼くので、「重ねた瞬間だけ粗くなる」という形で出る。
+//   ここでは実装の式をそのまま切り出して評価する (テスト側で書き直さない)。
+function testHeStaysSharpUnderMsiOverlay() {
+  const capM = /const HE_ON_MSI_CANVAS_LONG_EDGE_MAX = (\d+);/.exec(html);
+  assert.ok(capM, 'キャンバス長辺の上限が定数として無い');
+  const cap = Number(capM[1]);
+  assert.ok(cap >= 2048, 'キャンバス長辺の上限が 2048px を下回っている: ' + cap);
+
+  const at = html.indexOf('    setupCanvasSize() {');
+  assert.notEqual(at, -1, 'missing setupCanvasSize');
+  const body = html.slice(at, html.indexOf('    // ---- Composite renderer ----', at));
+  const snippet = /(const ratio = Math\.max\(heImg\.naturalWidth[\s\S]*?scale = Math\.max\(1,[^\n]*\);)/.exec(body);
+  assert.ok(snippet, 'HE 倍率の決め方が読み取れない (式を変えたらこのテストも直すこと)');
+
+  const scaleFor = (msi, heW, heH) => vm.runInNewContext(
+    `const refSize = { w: ${msi}, h: ${msi} };\n`
+    + `const heImg = { naturalWidth: ${heW}, naturalHeight: ${heH} };\n`
+    + 'let scale = 1;\n' + snippet[1] + '\nscale;',
+    { Math, HE_ON_MSI_CANVAS_LONG_EDGE_MAX: cap });
+
+  // 格子が細かいほど倍率が上がる。100 格子なら canvas は 2048px 近くまで伸びる
+  // (従来は 8 倍 = 800px 止まりだった)。
+  assert.ok(scaleFor(100, 6000, 5000) * 100 >= 2000,
+    '100 格子 + 6000px の HE で canvas が 2000px に届かない');
+  // 格子が粗い側は従来どおり 8 倍のまま (メモリの最悪値を増やさない)。
+  assert.equal(scaleFor(300, 6000, 5000), 8, '300 格子は従来どおり 8 倍');
+  // HE の実解像度は決して超えない (無駄に大きい canvas を作らない)。
+  assert.equal(scaleFor(100, 400, 400), 4, 'HE が小さければその倍率で止まる');
+  assert.ok(scaleFor(100, 6000, 5000) * 100 <= cap + 100, '長辺の上限を大きく超えない');
+
+  // 縮小して焼くときは面積平均で落とす。既定の imageSmoothingEnabled=false は
+  // MSI の離散値を守る設定で、HE にまで効かせると間引きになりモアレが出る。
+  const compAt = html.indexOf('    renderComposite() {');
+  assert.notEqual(compAt, -1);
+  const comp = html.slice(compAt, html.indexOf('    // ---- MSI scale bar', compAt));
+  assert.match(comp, /const eff = Math\.sqrt\(Math\.abs\(detT \* sxT \* syT\)\);/,
+    'HE の実効倍率を出していない');
+  assert.match(comp, /if \(Number\.isFinite\(eff\) && eff < 1\) \{/,
+    '縮小のときだけ補間する形になっていない');
+  assert.match(comp, /ctx\.imageSmoothingQuality = 'high'/, '高品質の縮小を指定していない');
+}
+
+// ★ share_overlays テーブルがまだ無いデータベース向けの控え経路。
+//   共有先が作った重ね合わせを localStorage に共有 slug 単位で残す
+//   (正はサーバ。ここは落ちたときだけ使う)。
+function testShareOverlaysPersistLocally() {
+  const store = new Map();
+  const warns = [];
+  const ctx = vm.createContext({
+    console: { warn: (...a) => warns.push(a.join(' ')), log() {}, info() {} },
+    JSON, Array, Object,
+    localStorage: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    },
+    showToast() {},
+    App: { shareMode: { slug: 'proj_x' }, project: null },
+  });
+  vm.runInContext(
+    "const SHARE_OVERLAY_LS_PREFIX = 'desi:shareOverlays:';\n"
+    + extractTopLevelFunction('_shareOverlayKey') + '\n'
+    + extractTopLevelFunction('loadShareOverlays') + '\n'
+    + extractTopLevelFunction('saveShareOverlays')
+    + '\nthis.api = { loadShareOverlays, saveShareOverlays };',
+    ctx);
+  const { loadShareOverlays, saveShareOverlays } = ctx.api;
+
+  const master = { id: 'ov_m', name: 'master', layers: [{ key: 'a' }, { key: 'b' }] };
+  const mine = { id: 'ov_me', name: '自分', _local: true, layers: [{ key: 'c' }, { key: 'd' }] };
+  const project = { overlays: [master, mine] };
+
+  saveShareOverlays(project);
+  const raw = store.get('desi:shareOverlays:proj_x');
+  assert.ok(raw, '端末保存の重ね合わせが書かれていない');
+  assert.deepEqual(JSON.parse(raw).map(o => o.id), ['ov_me'],
+    'master の重ね合わせまで端末に保存しないこと');
+
+  assert.deepEqual(loadShareOverlays(null).map(o => o.id), ['ov_me'], '読み戻せること');
+  assert.equal(loadShareOverlays(null)[0]._local, true, '読み戻したものにも _local が付くこと');
+
+  // 壊れた記録で一覧を壊さない (握りつぶさずに 1 行残す)。
+  store.set('desi:shareOverlays:proj_x', '{{not json');
+  assert.equal(loadShareOverlays(null).length, 0);
+  assert.ok(warns.some(w => /share overlay/.test(w)), '読めなかったことを残すこと');
+  store.set('desi:shareOverlays:proj_x', JSON.stringify([{ id: 'x', layers: [{ key: 'a' }] }]));
+  assert.equal(loadShareOverlays(null).length, 0, '2 分子未満の記録は捨てる');
+
+  // slug が無ければ何もしない (master モードで誤って書かない)。
+  ctx.App.shareMode = null;
+  saveShareOverlays({ overlays: [mine] });
+  assert.equal(store.size, 1, 'slug が無いときに新しい鍵を作らないこと');
+  assert.equal(loadShareOverlays(null).length, 0);
+
+  // 共有先の hydrate は master の分と自分の分をつないで並べる。
+  assert.match(html, /overlays: _overlaysFromSections\(doc\.sections\)\.concat\(loadShareOverlays\(null\)\)/,
+    '共有 hydrate が端末保存の重ね合わせを読み込んでいない');
+}
+
+// ★ 共有先の ROI 削除は「訊く前にロックを取る」。逆順だと、消してよいと答えた
+//   あとに「他の人が編集中です」で止まり、消えたのかどうかが分からない。
+//   確認文には、ロックを持っていることと「全員から見えなくなる」ことを出す。
+function testShareRoiDeleteAsksUnderTheLock() {
+  const fn = extractMethod(html, 'deleteRoi');
+  const lockAt = fn.indexOf('await this._tryAcquireRoiLock()');
+  const confirmAt = fn.indexOf('if (!confirm(msg))');
+  assert.notEqual(lockAt, -1, 'ロックを取っていない');
+  assert.notEqual(confirmAt, -1, '共有先向けの確認が無い');
+  assert.ok(lockAt < confirmAt, '確認より先にロックを取ること');
+  assert.match(fn, /書き込みロックを取得しました/, 'ロックを持っていることを知らせていない');
+  assert.match(fn, /他の人からも見えなくなります/, '影響範囲を知らせていない');
+  assert.match(fn, /if \(!confirm\(msg\)\) \{ this\._releaseRoiLock\(\); return; \}/,
+    'キャンセルしたらロックを返すこと (握ったままだと他の人が編集できなくなる)');
+  // master 側は従来どおり (ロックの話は出さない)。
+  assert.match(fn, /\} else if \(!confirm\('ROI 「' \+ label \+ '」 を削除しますか\?'\)\) \{/,
+    'master 側の確認が消えている');
+}
+
+// ★ 共有先の重ね合わせは **共有 URL を開いた全員**で共有する。
+//   正はサーバの share_overlays で、localStorage はテーブルがまだ無い
+//   データベース向けの控え。ここでは
+//     ・作ると id がサーバの uuid に差し替わること
+//     ・ポーリングで同じ id のオブジェクトを使い回すこと
+//       (App.activeOverlay / overlayForEditing が同一性で見ているため)
+//     ・RPC が無いデータベースでは端末保存へ落ちること
+//   を見る。
+async function testShareOverlaysAreSharedWithEveryone() {
+  const store = new Map();
+  const toasts = [];
+  const calls = [];
+  let createResult = { id: 'uuid-new', version: 1 };
+  let createThrows = null;
+  const App = { shareMode: { slug: 'proj_x', token: 'tok' }, project: null, activeOverlay: null,
+                clearActiveOverlay() { this.activeOverlay = null; } };
+  const SupabaseClient = {
+    listShareOverlays(token) { calls.push(['list', token]); return Promise.resolve(listRows); },
+    createShareOverlay(token, payload) {
+      calls.push(['create', token, payload]);
+      if (createThrows) return Promise.reject(createThrows);
+      return Promise.resolve(createResult);
+    },
+    updateShareOverlay(token, id, ver, payload) {
+      calls.push(['update', token, id, ver, payload]);
+      return Promise.resolve({ id, version: ver + 1 });
+    },
+  };
+  let listRows = [];
+  const ctx = vm.createContext({
+    JSON, Array, Object, Promise, Map, Number,
+    console: { warn() {}, log() {}, info() {} },
+    localStorage: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    },
+    showToast: (m) => toasts.push(String(m)),
+    App, SupabaseClient,
+    SHARE_OVERLAY_LS_PREFIX: 'desi:shareOverlays:',
+    _shareOverlayServerMissing: false,
+    _shareOverlayWriteGen: 0,
+    _isExpiredTokenError: () => false,
+    _noteShareTokenExpired() {},
+  });
+  vm.runInContext(
+    extractTopLevelFunction('_shareOverlayKey') + '\n'
+    + extractTopLevelFunction('isShareOverlayMode') + '\n'
+    + extractTopLevelFunction('isViewerOverlay') + '\n'
+    + extractTopLevelFunction('saveShareOverlays') + '\n'
+    + extractTopLevelFunction('_isMissingRpc') + '\n'
+    + extractTopLevelFunction('_noteShareOverlayServerMissing') + '\n'
+    + extractTopLevelFunction('_overlayFromRow') + '\n'
+    + extractTopLevelFunction('_overlayToRowPayload') + '\n'
+    + extractTopLevelFunction('fetchShareOverlays') + '\n'
+    + extractTopLevelFunction('applyServerShareOverlays') + '\n'
+    + extractTopLevelFunction('_fallbackShareOverlayToLocal') + '\n'
+    + extractTopLevelFunction('_isStaleVersionError') + '\n'
+    + extractTopLevelFunction('pushShareOverlay')
+    + '\nthis.api = { fetchShareOverlays, applyServerShareOverlays, pushShareOverlay };',
+    ctx);
+  const { fetchShareOverlays, applyServerShareOverlays, pushShareOverlay } = ctx.api;
+
+  // --- 作る: サーバへ送り、id が uuid に差し替わる ---
+  const master = { id: 'ov_master', name: 'master', layers: [{ key: 'a' }, { key: 'b' }] };
+  const fresh = { id: 'ov_tmp123', name: '新しいセット', bg: 'black', matchBrightness: true,
+                  layers: [{ key: 'MSI_a', color: '#f0f' }, { key: 'MSI_b', color: '#0f0' }] };
+  App.project = { __share: true, overlays: [master, fresh] };
+  assert.equal(await pushShareOverlay(fresh), true);
+  assert.equal(fresh.id, 'uuid-new', 'サーバの uuid を正にすること');
+  assert.equal(fresh._server, true);
+  assert.equal(fresh._local, undefined, 'サーバへ置けたら端末保存の印は落とすこと');
+  const createCall = calls.find(c => c[0] === 'create');
+  assert.equal(createCall[2].p_match_brightness, true, '「明るさを揃える」も送ること');
+  assert.equal(createCall[2].p_layers.length, 2);
+  assert.equal(store.size, 0, 'サーバへ置けたなら端末には書かないこと');
+
+  // --- 編集: version つきで update ---
+  fresh.name = '直した名前';
+  assert.equal(await pushShareOverlay(fresh), true);
+  const updateCall = calls.find(c => c[0] === 'update');
+  assert.equal(updateCall[2], 'uuid-new');
+  assert.equal(updateCall[3], 1, '楽観ロックの version を渡すこと');
+  assert.equal(fresh._serverVersion, 2, '返ってきた version を持ち直すこと');
+
+  // --- ポーリング: 同じ id はオブジェクトを使い回す ---
+  App.activeOverlay = fresh;
+  listRows = [
+    { id: 'uuid-new', name: '他の人が直した名前', layers: fresh.layers, bg: 'black',
+      match_brightness: true, version: 3 },
+    { id: 'uuid-2', name: '他の人のセット', layers: [{ key: 'MSI_c' }, { key: 'MSI_d' }],
+      bg: 'he', match_brightness: false, version: 1 },
+  ];
+  const rows = await fetchShareOverlays();
+  assert.equal(rows.length, 2);
+  assert.equal(applyServerShareOverlays(rows), true, '変化があったら true');
+  assert.ok(App.project.overlays.includes(master), 'master の定義は残す');
+  assert.ok(App.project.overlays.includes(fresh),
+    '同じ id のオブジェクトを使い回すこと (表示中の重ね合わせが編集できなくなる)');
+  assert.equal(fresh.name, '他の人が直した名前', '他の人の変更が入ること');
+  assert.equal(App.activeOverlay, fresh, '表示中の参照が切れないこと');
+  assert.equal(App.project.overlays.length, 3, '他の人のセットも並ぶこと');
+  assert.equal(applyServerShareOverlays(rows), false, '変化が無ければ描き直さない');
+
+  // ★ 件数が変わらない変更 (改名・色替え) も拾うこと。書き換えたあとで
+  //   比べていると、同じオブジェクトを見ているせいで「変化なし」に見え、
+  //   他の人の改名が画面に出ないまま止まる。
+  listRows = [
+    { id: 'uuid-new', name: 'さらに直した名前', layers: fresh.layers, bg: 'black',
+      match_brightness: true, version: 4 },
+    { id: 'uuid-2', name: '他の人のセット', layers: [{ key: 'MSI_c' }, { key: 'MSI_d' }],
+      bg: 'he', match_brightness: false, version: 1 },
+  ];
+  assert.equal(applyServerShareOverlays(await fetchShareOverlays()), true,
+    '件数が同じでも中身が変われば描き直すこと');
+  assert.equal(fresh.name, 'さらに直した名前');
+
+  // --- 表示中のものがサーバから消えたら単一表示へ戻す ---
+  listRows = [listRows[1]];
+  assert.equal(applyServerShareOverlays(await fetchShareOverlays()), true);
+  assert.equal(App.activeOverlay, null, '消えた重ね合わせを表示したままにしない');
+
+  // --- 他の人が先に直していた (楽観ロックの衝突) ---
+  //   黙って上書きすると、あとから開いた人の変更が理由なく消える。
+  const stale = new Error('stale_version');
+  stale.code = '40001';
+  const survivor = { id: 'uuid-2', name: '直したい', _server: true, _serverVersion: 1,
+                     layers: [{ key: 'MSI_c' }, { key: 'MSI_d' }] };
+  App.project.overlays.push(survivor);
+  const realUpdate = SupabaseClient.updateShareOverlay;
+  SupabaseClient.updateShareOverlay = () => Promise.reject(stale);
+  const refreshed = [];
+  App._refreshShareOverlays = () => { refreshed.push(true); return Promise.resolve(); };
+  assert.equal(await pushShareOverlay(survivor), false, '衝突したら保存できていないと返すこと');
+  assert.ok(toasts.some(t => /他の人が先に更新/.test(t)), '衝突したことを知らせること');
+  assert.deepEqual(refreshed, [true], '最新を読み直すこと');
+  SupabaseClient.updateShareOverlay = realUpdate;
+
+  // --- RPC がまだ無いデータベース: 端末保存へ落ちる ---
+  const missing = new Error('Could not find the function public.create_share_overlay');
+  missing.code = 'PGRST202';
+  createThrows = missing;
+  const solo = { id: 'ov_tmp999', name: '端末だけ', layers: [{ key: 'MSI_x' }, { key: 'MSI_y' }] };
+  App.project.overlays.push(solo);
+  assert.equal(await pushShareOverlay(solo), true, 'テーブルが無くても使えること');
+  assert.equal(solo._local, true, '端末保存へ落ちること');
+  assert.equal(solo._server, undefined);
+  assert.ok(store.get('desi:shareOverlays:proj_x'), '端末に書かれていること');
+  assert.ok(toasts.some(t => /share_locks\.sql/.test(t)), '未適用であることを知らせること');
+  // 以後は list もサーバを見に行かない (毎回 404 を投げない)。
+  assert.equal(await fetchShareOverlays(), null);
+}
+
+// ★ 共有の重ね合わせで使うモジュール変数が宣言されているか。
+//   構文ゲートは「未宣言の識別子を読む」を捕まえられない (実行時 ReferenceError)。
+//   実際、案内フラグの宣言を消したまま参照だけ残していたことがあり、
+//   共有先が最初の重ね合わせを作った瞬間に落ちる状態になっていた。
+function testShareOverlayModuleVarsAreDeclared() {
+  const used = new Set([...html.matchAll(/\b(_shareOverlay[A-Za-z0-9_]*)\b/g)].map(m => m[1]));
+  assert.ok(used.size >= 2, '見張る対象が見つからない (名前を変えたらこのテストも直すこと)');
+  for (const name of used) {
+    const declared = new RegExp('(?:let|const|var|function)\\s+' + name + '\\b').test(html);
+    assert.ok(declared, name + ' が宣言されていない (実行時に ReferenceError で落ちる)');
+  }
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -1592,12 +1999,17 @@ async function main() {
   testOverlayForEditingIgnoresUnregistered();
   testPreviewAddOverlayAlwaysAdds();
   testOverlayPanelRendersInRightColumn();
-  testDeleteOverlayIsShared();
+  await testDeleteOverlayIsShared();
   testMasterCanOpenPreview();
   testStoragePathRule();
   testImportSectionIdKeying();
   await testRoiStatsReadSharedParquet();
   testDrawingRoiOpensTheRoiChart();
+  testHeStaysSharpUnderMsiOverlay();
+  testShareOverlaysPersistLocally();
+  await testShareOverlaysAreSharedWithEveryone();
+  testShareOverlayModuleVarsAreDeclared();
+  testShareRoiDeleteAsksUnderTheLock();
   console.log('viewer preview regression tests: PASS');
 }
 

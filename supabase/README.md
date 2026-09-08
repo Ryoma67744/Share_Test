@@ -355,3 +355,37 @@ select indexname from pg_indexes
 | 4 | 以降の保存は auto-publish に乗って継続的にサーバ同期 |
 
 これにより 1 人の master が複数 PC を順番に使う運用 (Phase 1 = PC A で publish → Phase 2 = PC B で `?import=` → 続きの編集 → auto-publish → Phase 3 = PC C…) が standard flow になりました。
+
+---
+
+## v2026-09-08.5: 共有先の重ね合わせを全員で共有する (**再適用が必要**)
+
+共有 URL を開いた人が作った **重ね合わせ (複数分子のカラー合成)** を、その共有を
+開いている**全員**の一覧に出すためのテーブルと RPC です。
+
+**[`share_locks.sql`](./share_locks.sql) を SQL Editor で再実行してください (冪等)。**
+
+| 追加されるもの | 役割 |
+| --- | --- |
+| `public.share_overlays` テーブル | project 単位の重ね合わせ (`name` / `layers` / `bg` / `match_brightness` / `version`)。RLS ON + anon から直接触れないので、下の RPC 経由だけ |
+| `list_share_overlays(p_token)` | 一覧。ROI と同じ session token で読む |
+| `create_share_overlay(p_token, p_name, p_layers, p_bg, p_match_brightness, p_created_by)` | 追加。2 分子未満は `22023` で弾く |
+| `update_share_overlay(p_token, p_id, p_expected_version, ...)` | 更新。version が食い違えば `40001 stale_version` (同時編集で黙って上書きしない) |
+| `delete_share_overlay(p_token, p_id)` | 削除。ROI と同じで、その共有を開いている人なら誰でも消せる |
+
+master が登録した重ね合わせは従来どおり `sections.meta.overlays` に載って publish で
+入れ替わります。`share_overlays` はそこに混ぜないので、**master の再 publish で消えず、
+逆に共有先が作ったセットが master のプロジェクトへ混ざることもありません**。
+
+### 適用しなかった場合
+
+**壊れません。** フロントは RPC が無いこと (`PGRST202`) を検出して、共有先が作った
+重ね合わせを**その端末の localStorage** に保存する経路へ落ちます。画面には
+「重ね合わせの共有機能がサーバに未適用です」と 1 回だけ出ます。
+
+### 確認
+
+```sql
+select public.list_share_overlays('&lt;viewer token&gt;');   -- 0 行でも成功すれば OK
+select count(*) from public.share_overlays;
+```
