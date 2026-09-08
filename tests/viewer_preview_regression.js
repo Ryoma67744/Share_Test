@@ -93,8 +93,15 @@ function makePreviewContext(extra = {}) {
     Promise,
     Map,
     Set,
+    App: undefined,   // isShareOverlayMode が素の識別子で読むので、必ず定義しておく
     ...extra,
   });
+  // 重ね合わせ一覧の ✎/× の出し分けはアプリ本体の関数がそのまま決める。
+  // スタブに置き換えると「テストは通るのに画面では出ない」がすり抜ける。
+  vm.runInContext(
+    extractTopLevelFunction('isShareOverlayMode') + '\n'
+    + extractTopLevelFunction('canEditOverlay'),
+    context);
   const objectSource = extractObject(html, 'const SharePreview =');
   return { context, preview: vm.runInContext(`(${objectSource})`, context) };
 }
@@ -435,12 +442,15 @@ function testForcedHeBackdropDoesNotPersist() {
 // それを existing として openOverlayModal に渡すと編集分岐に入り、その場限りの
 // オブジェクトを書き換えて登録しないまま終わる。
 function testOverlayForEditingIgnoresUnregistered() {
-  const context = vm.createContext({});
+  const context = vm.createContext({ App: {} });
   vm.runInContext(
-    extractTopLevelFunction('overlayForEditing') + '\nthis.api = { overlayForEditing };',
+    extractTopLevelFunction('isShareOverlayMode') + '\n'
+    + extractTopLevelFunction('canEditOverlay') + '\n'
+    + extractTopLevelFunction('overlayForEditing')
+    + '\nthis.api = { overlayForEditing, canEditOverlay };',
     context,
   );
-  const { overlayForEditing } = context.api;
+  const { overlayForEditing, canEditOverlay } = context.api;
   const registered = { id: 'ov_1', layers: [] };
   const tmp = { id: 'kmd-tmp', layers: [] };
   const project = { overlays: [registered] };
@@ -452,6 +462,22 @@ function testOverlayForEditingIgnoresUnregistered() {
   assert.equal(overlayForEditing(registered, null), null);
   // id が同じでも別オブジェクトなら編集対象にしない (同一性で判定する)
   assert.equal(overlayForEditing({ id: 'ov_1', layers: [] }, project), null);
+
+  // ★ 共有先では master が公開した定義を書き換えさせない。自分で作った分
+  //   (_local) だけが編集対象。master 側は従来どおり全部編集できる。
+  const mine = { id: 'ov_2', layers: [], _local: true };
+  const shared = { overlays: [registered, mine] };
+  context.App.shareMode = { slug: 's', token: 't' };
+  context.App.project = shared;
+  shared.__share = true;
+  assert.equal(overlayForEditing(registered, shared), null, '共有先は master の定義を編集できない');
+  assert.equal(overlayForEditing(mine, shared), mine, '共有先は自分の定義を編集できる');
+  assert.equal(canEditOverlay(registered), false);
+  assert.equal(canEditOverlay(mine), true);
+  // master (共有ではない) に戻せば master の定義も編集できる。
+  context.App.shareMode = null;
+  shared.__share = false;
+  assert.equal(overlayForEditing(registered, shared), registered, 'master は自分の定義を編集できる');
 }
 
 // プレビューの ＋重ね合わせ は必ず「新規登録」で開くこと。表示中の重ね合わせを
@@ -511,11 +537,11 @@ function testOverlayPanelRendersInRightColumn() {
   assert.match(list.innerHTML, /data-ov-edit-row="ov_1"/, '各セットに編集');
   assert.match(list.innerHTML, /data-ov-del-row="ov_1"/, '各セットに削除');
   assert.equal(single.hidden, true, '重ね合わせ表示中でなければ「単一表示へ戻る」は隠す');
-  assert.doesNotMatch(list.innerHTML, /class="cb-ov-item on"/, '表示中が無ければどれも on にしない');
+  assert.doesNotMatch(list.innerHTML, /class="cb-ov-item[^"]*\bon\b/, '表示中が無ければどれも on にしない');
 
   App.activeOverlay = b;
   preview._renderOverlayPanel(project);
-  assert.match(list.innerHTML, /cb-ov-item on" data-ov-id="ov_2"/, '表示中のセットに印を付ける');
+  assert.match(list.innerHTML, /class="cb-ov-item on[^"]*" data-ov-id="ov_2"/, '表示中のセットに印を付ける');
   assert.equal(single.hidden, false, '重ね合わせ表示中は「単一表示へ戻る」を出す');
 
   // 削除された分は消える
@@ -526,6 +552,25 @@ function testOverlayPanelRendersInRightColumn() {
 
   // Method 表には重ね合わせの行を残さない (化合物だけ)
   assert.doesNotMatch(html, /tr data-overlay-id=/, 'Method 表に重ね合わせの行を残さないこと');
+
+  // ★ 共有先: master が公開した定義は読み取り専用 (✎/× を出さない)、
+  //   自分で作った分 (_local) だけ編集・削除できる。CSS ではなく JS が決める。
+  const mine = { id: 'ov_3', name: '自分のセット', _local: true,
+                 layers: [{ key: 'MSI_z', color: '#00ffff' }] };
+  project.overlays = [a, mine];
+  project.__share = true;
+  App.shareMode = { slug: 'proj_x', token: 't' };
+  preview._renderOverlayPanel(project);
+  assert.match(list.innerHTML, /セットA/, '共有先でも master の重ね合わせは一覧に残す');
+  assert.match(list.innerHTML, /自分のセット/, '自分で作った重ね合わせも並ぶ');
+  assert.doesNotMatch(list.innerHTML, /data-ov-del-row="ov_1"/,
+    '共有先は master の重ね合わせを削除できない');
+  assert.doesNotMatch(list.innerHTML, /data-ov-edit-row="ov_1"/,
+    '共有先は master の重ね合わせを編集できない');
+  assert.match(list.innerHTML, /data-ov-del-row="ov_3"/, '自分の重ね合わせは削除できる');
+  assert.match(list.innerHTML, /data-ov-edit-row="ov_3"/, '自分の重ね合わせは編集できる');
+  project.__share = false;
+  App.shareMode = null;
 }
 
 // 削除は主画面のチップとプレビューの一覧の両方から呼ぶので、確認・後始末を
@@ -546,12 +591,31 @@ function testDeleteOverlayIsShared() {
   // プレビューが開いていて、消すセットを「開いた時点の重ね合わせ」として
   // 控えている状態を作る。控えを落とさないと close() で幽霊が復活する。
   const SharePreview = { _overlaySnapshot: a, isOpen: () => true, refresh() {} };
+  const toasts = [];
+  const store = new Map();
+  const localStorage = {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+  };
   vm.runInContext(
     'const App = this.App, confirm = this.confirm, SharePreview = this.SharePreview;\n'
+    + 'const localStorage = this.localStorage;\n'
     + 'function renderOverlayBar() {}\n'
+    + 'function showToast(m) { this.toasts.push(String(m)); }\n'
+    // 権限と永続化はアプリ本体の関数をそのまま持ち込む (スタブにすると
+    // 「共有先が master の重ね合わせを消せる」を見逃す)。
+    + extractTopLevelFunction('_shareOverlayKey') + '\n'
+    + extractTopLevelFunction('isShareOverlayMode') + '\n'
+    + extractTopLevelFunction('canEditOverlay') + '\n'
+    + extractTopLevelFunction('saveShareOverlays') + '\n'
+    + extractTopLevelFunction('persistOverlays') + '\n'
     + extractTopLevelFunction('deleteOverlayById')
     + '\nthis.api = { deleteOverlayById };',
-    Object.assign(context, { App, SharePreview, confirm: () => confirmed, console }),
+    Object.assign(context, {
+      App, SharePreview, confirm: () => confirmed, console, localStorage, toasts,
+      SHARE_OVERLAY_LS_PREFIX: 'desi:shareOverlays:',
+    }),
   );
   const { deleteOverlayById } = context.api;
 
@@ -574,6 +638,26 @@ function testDeleteOverlayIsShared() {
   assert.equal(deleteOverlayById('ov_2'), true);
   assert.equal(cleared.length, 1, '表示中のセットを消したら単一表示へ戻すこと');
   assert.equal(SharePreview._overlaySnapshot, null, '控えていたセットを消したら落とすこと');
+
+  // ★ 共有先: master が公開した重ね合わせは消させない。自分の分だけ消せて、
+  //   結果はこの端末の localStorage に残る (共有ドキュメントは書き換えない)。
+  const masterOv = { id: 'ov_m', name: 'master のセット' };
+  const myOv = { id: 'ov_me', name: '自分のセット', _local: true,
+                 layers: [{ key: 'MSI_a' }, { key: 'MSI_b' }] };
+  App.project = { overlays: [masterOv, myOv], __share: true };
+  App.activeOverlay = null;
+  App.shareMode = { slug: 'proj_x', token: 't' };
+  const savesBefore = saves.length;
+  assert.equal(deleteOverlayById('ov_m'), false, '共有先は master の重ね合わせを消せない');
+  assert.deepEqual(App.project.overlays.map(o => o.id), ['ov_m', 'ov_me']);
+  assert.ok(toasts.some(t => /master/.test(t)), '消せない理由を知らせること');
+  assert.equal(saves.length, savesBefore, '共有先で IndexedDB へは書かないこと');
+
+  assert.equal(deleteOverlayById('ov_me'), true, '自分の重ね合わせは消せる');
+  assert.deepEqual(App.project.overlays.map(o => o.id), ['ov_m']);
+  assert.equal(saves.length, savesBefore, '共有先の保存は localStorage で、queueSave は通らない');
+  assert.equal(store.get('desi:shareOverlays:proj_x'), undefined,
+    '自分の分が 0 件になったら記録ごと消すこと');
 
   // 主画面のチップ側も同じ関数を通ること
   assert.match(html, /deleteOverlayById\(delEl\.getAttribute\('data-ov-del'\)\)/,
@@ -1444,7 +1528,10 @@ function testEditKeepsMatchBrightness() {
     'チェックを切り替えたときに注意を出し直していない');
 
   // 保存・公開・取り込みは素通しなので、明示的な whitelist が増えていないこと。
-  assert.match(html, /overlays: project\.overlays \|\| \[\]/, 'publish は overlays を verbatim で載せる');
+  // ★ 項目を選り分けないこと (o そのものを載せる) が要点。共有先がこの端末で
+  //   作った重ね合わせ (_local) だけは、行ごと落とす。
+  assert.match(html, /overlays: \(project\.overlays \|\| \[\]\)\.filter\(o => !\(o && o\._local\)\)/,
+    'publish は overlays を (項目を選ばず) verbatim で載せ、_local だけ落とす');
   assert.match(html, /return s \? s\.meta\.overlays : \[\];/, '取り込みも verbatim');
 }
 
@@ -1558,6 +1645,126 @@ function testDrawingRoiOpensTheRoiChart() {
   assert.match(html, /if \(App\.analysisMode === 'otsu'\) \{ try \{ renderOtsuAnalysis\(\);/);
 }
 
+// ★ HE を MSI の格子に載せるときのキャンバス倍率。「MSI 格子 x 8」で固定して
+//   いたので、100x100 の切片では canvas が 800px 止まりになり、スキャナで
+//   6000px 取った HE を 1/7 に潰してから重ねていた。HE 単独表示は HE の実寸で
+//   焼くので、「重ねた瞬間だけ粗くなる」という形で出る。
+//   ここでは実装の式をそのまま切り出して評価する (テスト側で書き直さない)。
+function testHeStaysSharpUnderMsiOverlay() {
+  const capM = /const HE_ON_MSI_CANVAS_LONG_EDGE_MAX = (\d+);/.exec(html);
+  assert.ok(capM, 'キャンバス長辺の上限が定数として無い');
+  const cap = Number(capM[1]);
+  assert.ok(cap >= 2048, 'キャンバス長辺の上限が 2048px を下回っている: ' + cap);
+
+  const at = html.indexOf('    setupCanvasSize() {');
+  assert.notEqual(at, -1, 'missing setupCanvasSize');
+  const body = html.slice(at, html.indexOf('    // ---- Composite renderer ----', at));
+  const snippet = /(const ratio = Math\.max\(heImg\.naturalWidth[\s\S]*?scale = Math\.max\(1,[^\n]*\);)/.exec(body);
+  assert.ok(snippet, 'HE 倍率の決め方が読み取れない (式を変えたらこのテストも直すこと)');
+
+  const scaleFor = (msi, heW, heH) => vm.runInNewContext(
+    `const refSize = { w: ${msi}, h: ${msi} };\n`
+    + `const heImg = { naturalWidth: ${heW}, naturalHeight: ${heH} };\n`
+    + 'let scale = 1;\n' + snippet[1] + '\nscale;',
+    { Math, HE_ON_MSI_CANVAS_LONG_EDGE_MAX: cap });
+
+  // 格子が細かいほど倍率が上がる。100 格子なら canvas は 2048px 近くまで伸びる
+  // (従来は 8 倍 = 800px 止まりだった)。
+  assert.ok(scaleFor(100, 6000, 5000) * 100 >= 2000,
+    '100 格子 + 6000px の HE で canvas が 2000px に届かない');
+  // 格子が粗い側は従来どおり 8 倍のまま (メモリの最悪値を増やさない)。
+  assert.equal(scaleFor(300, 6000, 5000), 8, '300 格子は従来どおり 8 倍');
+  // HE の実解像度は決して超えない (無駄に大きい canvas を作らない)。
+  assert.equal(scaleFor(100, 400, 400), 4, 'HE が小さければその倍率で止まる');
+  assert.ok(scaleFor(100, 6000, 5000) * 100 <= cap + 100, '長辺の上限を大きく超えない');
+
+  // 縮小して焼くときは面積平均で落とす。既定の imageSmoothingEnabled=false は
+  // MSI の離散値を守る設定で、HE にまで効かせると間引きになりモアレが出る。
+  const compAt = html.indexOf('    renderComposite() {');
+  assert.notEqual(compAt, -1);
+  const comp = html.slice(compAt, html.indexOf('    // ---- MSI scale bar', compAt));
+  assert.match(comp, /const eff = Math\.sqrt\(Math\.abs\(detT \* sxT \* syT\)\);/,
+    'HE の実効倍率を出していない');
+  assert.match(comp, /if \(Number\.isFinite\(eff\) && eff < 1\) \{/,
+    '縮小のときだけ補間する形になっていない');
+  assert.match(comp, /ctx\.imageSmoothingQuality = 'high'/, '高品質の縮小を指定していない');
+}
+
+// ★ 共有先が自分で作った重ね合わせは localStorage に共有 slug 単位で残す。
+//   サーバ (master の共有ドキュメント) には書かない。
+function testShareOverlaysPersistLocally() {
+  const store = new Map();
+  const warns = [];
+  const ctx = vm.createContext({
+    console: { warn: (...a) => warns.push(a.join(' ')), log() {}, info() {} },
+    JSON, Array, Object,
+    localStorage: {
+      getItem: (k) => (store.has(k) ? store.get(k) : null),
+      setItem: (k, v) => store.set(k, String(v)),
+      removeItem: (k) => store.delete(k),
+    },
+    showToast() {},
+    App: { shareMode: { slug: 'proj_x' }, project: null },
+  });
+  vm.runInContext(
+    "const SHARE_OVERLAY_LS_PREFIX = 'desi:shareOverlays:';\n"
+    + extractTopLevelFunction('_shareOverlayKey') + '\n'
+    + extractTopLevelFunction('loadShareOverlays') + '\n'
+    + extractTopLevelFunction('saveShareOverlays')
+    + '\nthis.api = { loadShareOverlays, saveShareOverlays };',
+    ctx);
+  const { loadShareOverlays, saveShareOverlays } = ctx.api;
+
+  const master = { id: 'ov_m', name: 'master', layers: [{ key: 'a' }, { key: 'b' }] };
+  const mine = { id: 'ov_me', name: '自分', _local: true, layers: [{ key: 'c' }, { key: 'd' }] };
+  const project = { overlays: [master, mine] };
+
+  saveShareOverlays(project);
+  const raw = store.get('desi:shareOverlays:proj_x');
+  assert.ok(raw, '自分の重ね合わせが保存されていない');
+  assert.deepEqual(JSON.parse(raw).map(o => o.id), ['ov_me'],
+    'master の重ね合わせまで端末に保存しないこと');
+
+  assert.deepEqual(loadShareOverlays(null).map(o => o.id), ['ov_me'], '読み戻せること');
+  assert.equal(loadShareOverlays(null)[0]._local, true, '読み戻したものにも _local が付くこと');
+
+  // 壊れた記録で一覧を壊さない (握りつぶさずに 1 行残す)。
+  store.set('desi:shareOverlays:proj_x', '{{not json');
+  assert.equal(loadShareOverlays(null).length, 0);
+  assert.ok(warns.some(w => /share overlay/.test(w)), '読めなかったことを残すこと');
+  store.set('desi:shareOverlays:proj_x', JSON.stringify([{ id: 'x', layers: [{ key: 'a' }] }]));
+  assert.equal(loadShareOverlays(null).length, 0, '2 分子未満の記録は捨てる');
+
+  // slug が無ければ何もしない (master モードで誤って書かない)。
+  ctx.App.shareMode = null;
+  saveShareOverlays({ overlays: [mine] });
+  assert.equal(store.size, 1, 'slug が無いときに新しい鍵を作らないこと');
+  assert.equal(loadShareOverlays(null).length, 0);
+
+  // 共有先の hydrate は master の分と自分の分をつないで並べる。
+  assert.match(html, /overlays: _overlaysFromSections\(doc\.sections\)\.concat\(loadShareOverlays\(null\)\)/,
+    '共有 hydrate が自分の重ね合わせを読み込んでいない');
+}
+
+// ★ 共有先の ROI 削除は「訊く前にロックを取る」。逆順だと、消してよいと答えた
+//   あとに「他の人が編集中です」で止まり、消えたのかどうかが分からない。
+//   確認文には、ロックを持っていることと「全員から見えなくなる」ことを出す。
+function testShareRoiDeleteAsksUnderTheLock() {
+  const fn = extractMethod(html, 'deleteRoi');
+  const lockAt = fn.indexOf('await this._tryAcquireRoiLock()');
+  const confirmAt = fn.indexOf('if (!confirm(msg))');
+  assert.notEqual(lockAt, -1, 'ロックを取っていない');
+  assert.notEqual(confirmAt, -1, '共有先向けの確認が無い');
+  assert.ok(lockAt < confirmAt, '確認より先にロックを取ること');
+  assert.match(fn, /書き込みロックを取得しました/, 'ロックを持っていることを知らせていない');
+  assert.match(fn, /他の人からも見えなくなります/, '影響範囲を知らせていない');
+  assert.match(fn, /if \(!confirm\(msg\)\) \{ this\._releaseRoiLock\(\); return; \}/,
+    'キャンセルしたらロックを返すこと (握ったままだと他の人が編集できなくなる)');
+  // master 側は従来どおり (ロックの話は出さない)。
+  assert.match(fn, /\} else if \(!confirm\('ROI 「' \+ label \+ '」 を削除しますか\?'\)\) \{/,
+    'master 側の確認が消えている');
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -1598,6 +1805,9 @@ async function main() {
   testImportSectionIdKeying();
   await testRoiStatsReadSharedParquet();
   testDrawingRoiOpensTheRoiChart();
+  testHeStaysSharpUnderMsiOverlay();
+  testShareOverlaysPersistLocally();
+  testShareRoiDeleteAsksUnderTheLock();
   console.log('viewer preview regression tests: PASS');
 }
 

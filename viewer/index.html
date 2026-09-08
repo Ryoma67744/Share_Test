@@ -370,12 +370,16 @@ body.share-mode .method-select-cell,
    消していたため、共有先では 1390 化合物から目的のものを探す手段が
    まったく無かった。書き換え系のボタンだけを隠す。 */
 body.share-mode #btn-mrm-register,
-body.share-mode #btn-add-overlay,
 body.share-mode #btn-build-tic { display:none !important; }
+/* ★ #btn-add-overlay は共有先でも出す。重ね合わせは「見え方」を作る操作で、
+   共有ドキュメントを書き換えない (自分の分は _local 印を付けてこの端末の
+   localStorage に置く)。master が登録したものはそのまま一覧に残り、
+   クリックで切り替えられる。 */
 /* 共有先でも残すもの: #method-filter (名前 / m/z / アダクト / 分子式) /
    #method-mz-range (m/z の範囲) / #method-filter-count (件数) /
    #method-keyset-clear (KMD 図で選んだ集合の解除。隠すと表が減ったまま戻せない) /
-   #overlay-list (master が登録した重ね合わせの表示。追加は上で隠す)。 */
+   #overlay-list + #btn-add-overlay (master の重ね合わせの表示・切替と、
+   自分の重ね合わせの追加。✎/× は自分の分にだけ JS 側で出す)。 */
 /* Molecule-overlay chips (master Method panel). */
 #overlay-list { display:flex; flex-wrap:wrap; gap:4px; margin-top:4px; }
 .ov-chip { display:inline-flex; align-items:center; gap:3px; padding:1px 4px 1px 5px; border:1px solid #cbd5e1; border-radius:9999px; background:#fff; font-size:10px; cursor:pointer; color:#334155; }
@@ -386,6 +390,10 @@ body.share-mode #btn-build-tic { display:none !important; }
 .ov-chip .ov-del { color:#dc2626; }
 .ov-chip.on .ov-del { color:#fca5a5; }
 .ov-reset { border:1px dashed #cbd5e1; background:#fff; border-radius:9999px; font-size:10px; padding:1px 7px; cursor:pointer; color:#475569; }
+/* 共有先では master が登録した重ね合わせは読み取り専用 (✎/× が出ない)。
+   自分で作った分 (.ov-own) は名前を太字にして、一覧の中で見分けられるようにする。 */
+body.share-mode .ov-chip.ov-own .ov-name,
+body.share-mode #share-preview-overlay .cb-ov-item.ov-own .cb-ov-name { font-weight:600; }
 /* In share mode, hide the per-file "delete" action regardless of admin
    role — share recipients shouldn't ever delete file groups. */
 body.share-mode .thumb-file-group .file-actions [data-action="delete-file"],
@@ -634,12 +642,12 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
     margin-right:1px; border:1px solid rgba(255,255,255,0.35);
 }
 #share-preview-overlay .cb-ov-name { flex:1 1 auto; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* ✎/× は「編集してよい定義」にだけ JS が出す (_renderOverlayPanel の
+   canEditOverlay)。master は全部、共有先は自分で作った分だけ。
+   CSS で役割を見ない — 出す/出さないの判断が 2 か所に散ると必ずずれる。 */
 #share-preview-overlay .cb-ov-edit, #share-preview-overlay .cb-ov-del {
-    flex:0 0 auto; display:none; cursor:pointer; padding:0 3px; border-radius:2px; color:#94a3b8;
+    flex:0 0 auto; display:inline-block; cursor:pointer; padding:0 3px; border-radius:2px; color:#94a3b8;
 }
-/* 登録が master だけなので、編集も削除も master だけ (主画面と同じ権限設計)。 */
-body:not(.share-mode) #share-preview-overlay .cb-ov-edit,
-body:not(.share-mode) #share-preview-overlay .cb-ov-del { display:inline-block; }
 #share-preview-overlay .cb-ov-edit:hover { color:#fff; background:#334155; }
 #share-preview-overlay .cb-ov-del:hover { color:#fff; background:#b91c1c; }
 #share-preview-overlay .cb-ov-single {
@@ -664,14 +672,14 @@ body:not(.share-mode) #share-preview-overlay .cb-ov-del { display:inline-block; 
 #share-preview-overlay .preview-colorbar .cb-legend .cb-note {
     font-size:10px; color:#94a3b8; margin-top:2px; line-height:1.4; white-space:normal;
 }
-/* 重ね合わせの登録は master だけ (主画面の #btn-add-overlay と同じ権限設計。
-   共有相手は master が登録した重ね合わせを見るだけ)。 */
-#share-preview-overlay [data-add-overlay] { display:none; }
-body:not(.share-mode) #share-preview-overlay [data-add-overlay] {
+/* 重ね合わせの登録は共有先でもできる (主画面の #btn-add-overlay と同じ設計)。
+   共有先が作った分は _local 印つきでこの端末にだけ残り、master が登録した
+   ものは読み取り専用のまま一覧に並ぶ。 */
+#share-preview-overlay [data-add-overlay] {
     display:inline-flex; align-items:center; padding:2px 8px; font-size:11px;
     border:1px solid #64748b; border-radius:3px; background:#1e293b; color:#e2e8f0; cursor:pointer;
 }
-body:not(.share-mode) #share-preview-overlay [data-add-overlay]:hover { background:#334155; }
+#share-preview-overlay [data-add-overlay]:hover { background:#334155; }
 
 /* share-mode バナーの隣に置いた Preview の開閉ボタン。
    共有相手だけでなく master でも出す。プレビューは「相手にどう見えるか」を
@@ -3598,6 +3606,11 @@ const MSI_LAYER_CACHE_MAX = 16;
 // 上限が効くことはまず無い。暴走時の最終防波堤として置いてある。
 // (キーはレイヤーキーのみなので、同じ層の配色違いを 2 枚持つことはできない。)
 const MSI_LUT_CACHE_MAX = 24;
+// HE/IF を MSI の格子に合わせて焼くときの、表示キャンバス長辺の上限 (px)。
+// setupCanvasSize の倍率はここで頭打ちにする。1 パネルは cdisp と croi の
+// 2 枚を持つので、2048 なら 2048^2 x 4 B x 2 = 約 34 MB/パネル — 従来の
+// 「MSI 格子 x 8」の最悪値 (300 格子 -> 2400px) より小さい。
+const HE_ON_MSI_CANVAS_LONG_EDGE_MAX = 2048;
 // 合成 TIC / 統計を作るときに 1 回の worker 往復でまとめて読む列数。
 // worker 側は直列に読むので parquet の I/O は減らないが、1390 回だった
 // postMessage の往復が 90 回ほどになる。大きくしすぎると転送する型付き配列が
@@ -7448,7 +7461,16 @@ class SectionPanel {
             const heImg = this.imageSources[heKey];
             if (heImg && heImg.naturalWidth > 0) {
                 const ratio = Math.max(heImg.naturalWidth / refSize.w, heImg.naturalHeight / refSize.h);
-                scale = Math.max(1, Math.min(8, Math.ceil(ratio)));
+                // ★ 倍率の上限を「MSI 格子の 8 倍」で固定しない。
+                //   MSI が 100x100 の切片では canvas が 800px 止まりになり、
+                //   スキャナで 6000px 取った HE を 1/7 に潰してから重ねていた
+                //   (HE 単独表示は HE の実寸で焼くので、重ねた瞬間だけ粗くなる)。
+                //   canvas の長辺で頭打ちにすれば、格子が細かい切片ほど倍率が
+                //   下がって、メモリは従来の最悪値 (8 倍) を超えない。
+                //   HE の実解像度 (ceil(ratio)) は決して超えない。
+                const longRef = Math.max(refSize.w, refSize.h);
+                const byBudget = longRef > 0 ? Math.floor(HE_ON_MSI_CANVAS_LONG_EDGE_MAX / longRef) : 0;
+                scale = Math.max(1, Math.min(Math.max(8, byBudget), Math.ceil(ratio)));
             }
         } else if (refIsMsi && App.msiSmoothing === 'linear') {
             // MSI-only + Linear smoothing: render the backing buffer near the
@@ -7816,9 +7838,24 @@ class SectionPanel {
 
             if (T && isHeLike && hasMsiRef && ref.w > 0 && ref.h > 0) {
                 ctx.save();
+                const sxT = this.dom.cdisp.height / ref.w;
+                const syT = this.dom.cdisp.width / ref.h;
+                // ★ 縮小して焼くときは面積平均で落とす。
+                //   既定の imageSmoothingEnabled=false は「MSI の離散値をぼかさない」
+                //   ための設定で、HE/IF は写真なので事情が違う。canvas は MSI の格子
+                //   基準なので HE はここでほぼ必ず縮小されるが、最近傍のままだと
+                //   数画素に 1 画素を拾うだけの間引きになり、核の粒が消えてモアレ混じり
+                //   の粗い絵になっていた (「HE をきれいに撮ったのに重ねると粗い」)。
+                //   拡大方向 (eff >= 1) のときは従来どおり補間しない。
+                const detT = Math.abs(T[0][0] * T[1][1] - T[0][1] * T[1][0]);
+                const eff = Math.sqrt(Math.abs(detT * sxT * syT));
+                if (Number.isFinite(eff) && eff < 1) {
+                    ctx.imageSmoothingEnabled = true;
+                    try { ctx.imageSmoothingQuality = 'high'; } catch (e) {}
+                }
                 ctx.translate(0, this.dom.cdisp.height);
                 ctx.rotate(-Math.PI / 2);
-                ctx.scale(this.dom.cdisp.height / ref.w, this.dom.cdisp.width / ref.h);
+                ctx.scale(sxT, syT);
                 ctx.transform(T[0][0], T[1][0], T[0][1], T[1][1], T[0][2], T[1][2]);
                 ctx.drawImage(drawSource, 0, 0);
                 ctx.restore();
@@ -11983,6 +12020,77 @@ function _overlaysFromSections(sections) {
     return s ? s.meta.overlays : [];
 }
 
+// ---- 共有先が自分で作った重ね合わせ -------------------------------------
+//
+// 共有ドキュメントは master のものなので、閲覧者が作った重ね合わせをそこへ
+// 書き戻すことはしない (publish 権限も無い)。かといってメモリだけに置くと
+// リロードで消えて使いものにならないので、この端末の localStorage に
+// 共有 slug 単位で残す。master が登録したものは触らずそのまま残るので、
+// 一覧では「master の分」と「自分の分」が並んで、クリックで切り替えられる。
+//
+// 印は _local。publish のペイロードからは必ず落とす (buildPublishPayload)。
+const SHARE_OVERLAY_LS_PREFIX = 'desi:shareOverlays:';
+
+function _shareOverlayKey(project) {
+    const slug = (App && App.shareMode && App.shareMode.slug)
+        || (project && project.shareInfo && project.shareInfo.slug) || '';
+    return slug ? (SHARE_OVERLAY_LS_PREFIX + slug) : '';
+}
+
+// 共有先か (= 自分の重ね合わせを localStorage に置く側か)。
+function isShareOverlayMode() {
+    return !!(App && App.shareMode && App.project && App.project.__share);
+}
+
+// この重ね合わせを今の利用者が編集・削除してよいか。
+// master は全部。共有先は自分で作ったもの (_local) だけ — master が公開した
+// 定義を勝手に書き換えると、一覧の見た目だけ変わって共有元とずれる。
+function canEditOverlay(ov) {
+    if (!ov) return false;
+    return isShareOverlayMode() ? !!ov._local : true;
+}
+
+function loadShareOverlays(project) {
+    const key = _shareOverlayKey(project);
+    if (!key) return [];
+    try {
+        const raw = localStorage.getItem(key);
+        if (!raw) return [];
+        const list = JSON.parse(raw);
+        if (!Array.isArray(list)) return [];
+        // 壊れた記録で一覧を壊さない。最低限の形だけ確かめる。
+        return list.filter(o => o && o.id && Array.isArray(o.layers) && o.layers.length >= 2)
+            .map(o => Object.assign({}, o, { _local: true }));
+    } catch (e) {
+        console.warn('[share overlay] 読み込みに失敗しました', e);
+        return [];
+    }
+}
+
+function saveShareOverlays(project) {
+    const key = _shareOverlayKey(project);
+    if (!key) return;
+    const mine = ((project && project.overlays) || []).filter(o => o && o._local);
+    try {
+        if (mine.length) localStorage.setItem(key, JSON.stringify(mine));
+        else localStorage.removeItem(key);
+    } catch (e) {
+        // 容量超過など。黙って捨てると「作ったのに次に開いたら無い」になるので出す。
+        console.warn('[share overlay] 保存に失敗しました', e);
+        showToast('重ね合わせをこの端末に保存できませんでした (今のセッションでは使えます)', 5000);
+    }
+}
+
+// 「この端末にだけ保存されます」の案内は 1 セッション 1 回だけ出す。
+let _shareOverlayNoticeShown = false;
+
+// 重ね合わせを変更したあとの永続化。master は IndexedDB (queueSave)、
+// 共有先は localStorage。呼び出し側がモードを気にしなくて済むよう 1 か所に置く。
+function persistOverlays() {
+    if (isShareOverlayMode()) saveShareOverlays(App.project);
+    else App.queueSave();
+}
+
 // Distinct MSI compound layers across the project, as [key, displayName].
 function _allMsiCompounds() {
     const map = new Map();
@@ -12009,13 +12117,22 @@ function renderOverlayBar() {
     //   重ね合わせが 1 つも無いノンターゲットの測定PJでは、まさにその状態になる。
     if (!overlays.length && !active) { host.innerHTML = ''; return; }
     const listed = overlays.some(ov => active && ov.id === active.id);
+    // 共有先では master の定義と自分の定義が並ぶ。✎/× は自分の分にだけ出す
+    //   (master の定義を触っても共有元には反映されず、見た目だけずれるため)。
+    const shareOv = isShareOverlayMode();
     let html = overlays.map(ov => {
         const dots = (ov.layers || []).map(l => '<span class="ov-dot" style="background:' + esc(l.color || '#fff') + '"></span>').join('');
         const on = !!(active && active.id === ov.id);
-        return '<span class="ov-chip' + (on ? ' on' : '') + '" data-ov-id="' + esc(ov.id) + '" title="クリックで重ね合わせ表示">'
+        const mine = canEditOverlay(ov);
+        const tip = shareOv
+            ? (mine ? 'あなたがこの端末で作った重ね合わせ' : '共有元 (master) が登録した重ね合わせ')
+            : 'クリックで重ね合わせ表示';
+        return '<span class="ov-chip' + (on ? ' on' : '') + (mine ? ' ov-own' : '') + '" data-ov-id="' + esc(ov.id) + '" title="' + esc(tip) + '">'
             + dots + '<span class="ov-name">' + esc(ov.name || 'overlay') + '</span>'
-            + '<button type="button" class="ov-edit" data-ov-edit="' + esc(ov.id) + '" title="編集">✎</button>'
-            + '<button type="button" class="ov-del" data-ov-del="' + esc(ov.id) + '" title="削除">×</button>'
+            + (mine
+                ? '<button type="button" class="ov-edit" data-ov-edit="' + esc(ov.id) + '" title="編集">✎</button>'
+                  + '<button type="button" class="ov-del" data-ov-del="' + esc(ov.id) + '" title="削除">×</button>'
+                : '')
             + '</span>';
     }).join('');
     // 登録されていない (一時的な) 重ね合わせは、名前を出さないと何が乗っているか
@@ -12036,7 +12153,9 @@ function renderOverlayBar() {
 function overlayForEditing(ov, project) {
     if (!ov) return null;
     const list = (project && project.overlays) || [];
-    return list.indexOf(ov) >= 0 ? ov : null;
+    if (list.indexOf(ov) < 0) return null;
+    // 共有先が master の定義を開いても書き換えさせない (canEditOverlay)。
+    return canEditOverlay(ov) ? ov : null;
 }
 
 function openOverlayModal(existing) {
@@ -12175,10 +12294,22 @@ function openOverlayModal(existing) {
             target = existing;
         } else {
             res.id = 'ov_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
+            // 共有先が作ったものは自分の分として印を付ける。master の定義と
+            // 混ざらないので、一覧では両方が並び、消せるのは自分の分だけになる。
+            if (isShareOverlayMode()) {
+                res._local = true;
+                // どこに残るのかを 1 回だけ知らせる。「共有元にも見えている」と
+                // 誤解したまま使われると、消したはずのものが相手に見えている /
+                // 別の端末で開いたら無い、という食い違いになる。
+                if (!_shareOverlayNoticeShown) {
+                    _shareOverlayNoticeShown = true;
+                    showToast('この重ね合わせはこの端末にだけ保存されます (共有元へは送りません)', 6000);
+                }
+            }
             App.project.overlays.push(res);
             target = res;
         }
-        App.queueSave();
+        persistOverlays();
         App.setActiveOverlay(target);   // re-renders the panels and refreshes the chip bar
     });
 }
@@ -12190,10 +12321,14 @@ function deleteOverlayById(id) {
     const overlays = (App.project && App.project.overlays) || [];
     const o = overlays.find(x => x.id === id);
     if (!o) return false;
+    if (!canEditOverlay(o)) {
+        showToast('これは共有元 (master) が登録した重ね合わせなので削除できません。表示の切り替えだけできます', 5000);
+        return false;
+    }
     if (!confirm('重ね合わせ "' + (o.name || '') + '" を削除しますか?')) return false;
     App.project.overlays = overlays.filter(x => x.id !== id);
     if (App.activeOverlay && App.activeOverlay.id === id) App.clearActiveOverlay();
-    App.queueSave();
+    persistOverlays();
     try { renderOverlayBar(); } catch (e) {}
     try {
         if (typeof SharePreview !== 'undefined' && SharePreview.isOpen()) {
@@ -16498,7 +16633,12 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
             // Project-wide molecule overlays ride along in section.meta because
             // upsert_project_doc only round-trips project.meta.memo, whereas
             // section.meta is persisted verbatim.
-            meta: Object.assign({}, sec.meta || {}, { overlays: project.overlays || [] }),
+            // ★ _local (共有先がこの端末で作った重ね合わせ) は載せない。
+            //   共有ドキュメントは master のもので、閲覧者の手元の見え方を
+            //   全員に押し付けない。
+            meta: Object.assign({}, sec.meta || {}, {
+                overlays: (project.overlays || []).filter(o => !(o && o._local)),
+            }),
             storagePaths: storage,
         });
     }
@@ -18566,16 +18706,22 @@ const SharePreview = {
 
         const esc = (t) => String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
         const activeId = App.activeOverlay && App.activeOverlay.id;
+        const shareOv = isShareOverlayMode();
         list.innerHTML = overlays.map(ov => {
             const dots = (ov.layers || []).map(l =>
                 `<i style="background:${esc(l.color || '#fff')};"></i>`).join('');
             const nm = ov.name || 'overlay';
-            return '<div class="cb-ov-item' + (ov.id === activeId ? ' on' : '') + '"'
-                + ' data-ov-id="' + esc(ov.id) + '" title="' + esc(nm) + '">'
+            // ✎/× は編集してよい定義にだけ出す (主画面のチップと同じ規則)。
+            const mine = canEditOverlay(ov);
+            const tip = shareOv ? (nm + (mine ? ' (自分)' : ' (master)')) : nm;
+            return '<div class="cb-ov-item' + (ov.id === activeId ? ' on' : '') + (mine ? ' ov-own' : '') + '"'
+                + ' data-ov-id="' + esc(ov.id) + '" title="' + esc(tip) + '">'
                 + '<span class="cb-ov-dots">' + dots + '</span>'
                 + '<span class="cb-ov-name">' + esc(nm) + '</span>'
-                + '<span class="cb-ov-edit" data-ov-edit-row="' + esc(ov.id) + '" title="編集">✎</span>'
-                + '<span class="cb-ov-del" data-ov-del-row="' + esc(ov.id) + '" title="削除">×</span>'
+                + (mine
+                    ? '<span class="cb-ov-edit" data-ov-edit-row="' + esc(ov.id) + '" title="編集">✎</span>'
+                      + '<span class="cb-ov-del" data-ov-del-row="' + esc(ov.id) + '" title="削除">×</span>'
+                    : '')
                 + '</div>';
         }).join('');
         if (single) single.hidden = !App.activeOverlay;
@@ -22180,7 +22326,10 @@ const App = {
             })),
             rois: [],
             roiHidden: {},
-            overlays: _overlaysFromSections(doc.sections),
+            // master が公開した定義 + この端末で自分が作った定義 (localStorage)。
+            // 前半は読み取り専用、後半は _local 印つきで編集・削除できる。
+            // 一覧では両方が並ぶので、クリックで行き来できる。
+            overlays: _overlaysFromSections(doc.sections).concat(loadShareOverlays(null)),
             // Carry master's project meta (colormap, etc.) intact so future
             // fields automatically round-trip without a hydrate-side patch.
             meta: projectMeta,
@@ -23698,11 +23847,22 @@ const App = {
     },
 
     async deleteRoi(id) {
-        if (!confirm('この ROI を削除しますか?')) return;
         const target = (this.project.rois || []).find(r => r.id === id);
+        const label = (target && (target.name || target.colorKey)) || 'ROI';
         if (this.shareMode) {
+            // ★ 共有先は「訊く前にロックを取る」。
+            //   逆順だと「消していいですか?」に答えたあとで「他の人が編集中です」
+            //   と止まることがあり、消えたのかどうかが分からない。
+            //   そして共有の削除はサーバ上の共有データから消す操作なので、
+            //   URL を開いた全員から見えなくなる。ロックを取った状態であることと
+            //   影響範囲を確認文に出す (取ったつもりのまま消してしまわないように)。
             const ok = await this._tryAcquireRoiLock();
             if (!ok) return;
+            const msg = '書き込みロックを取得しました (いまは自分だけが ROI を編集できます)。\n\n'
+                + 'ROI 「' + label + '」 を削除します。\n'
+                + 'サーバ上の共有データから消えるので、この URL を開いた他の人からも見えなくなります。\n'
+                + '元に戻せません。削除しますか?';
+            if (!confirm(msg)) { this._releaseRoiLock(); return; }
             try {
                 // The server stores one row per (section, colorKey) tuple,
                 // so deleting a cross-section ROI requires nuking every
@@ -23725,6 +23885,8 @@ const App = {
                 return;
             }
             this._releaseRoiLock();
+        } else if (!confirm('ROI 「' + label + '」 を削除しますか?')) {
+            return;
         }
         this.project.rois = (this.project.rois || []).filter(r => r.id !== id);
         if (this.activeRoiId === id) this.activeRoiId = null;

@@ -141,6 +141,8 @@ The `Method (MRM)` table then shows the measured Precursor / Fragment / CE / CV,
 
 Click **`Align`** on a section panel to open a modal that aligns HE/IF layers to the MSI coordinate system. Use this when no transform JSON was supplied at registration time, or whenever you want to re-align manually.
 
+> **HE resolution in a composite**: on sections that carry MSI, the display canvas is baked **to the MSI grid** (ROI coordinates and μm/px are derived from it). The upscale factor goes up to **8× the MSI grid or a 2048 px canvas long edge, whichever is larger**, and never beyond the HE's own resolution. A multi-thousand-pixel scanner HE is therefore downscaled to that range — but the downscale is **area-averaged**, so nuclear texture is filtered rather than dropped. To inspect HE at its native resolution, hide the MSI layers and view HE alone (the canvas is then built at the HE's own size).
+
 > **Note: the main-view "rotate one side"**: the main toolbar's **Rotation** has a target selector **(Both / HE only / MSI only)**. When HE and MSI were imported at different orientations and don't line up, rotate **just one of them** to match. The angle is stored in `section.meta.viewerTransform.rotHE / rotMSI` and is **shipped to viewers on publish**. This is a display-level overlay fix and is **separate from this Align modal's affine transform (μm/px, ROI coordinates, and other scientific alignment)** — keep using the Align modal for coordinate-accurate registration.
 
 <div style="border:1px solid #cbd5e1;border-radius:6px;padding:10px;background:#f8fafc;margin:10px 0;font-size:12px;">
@@ -520,8 +522,8 @@ Opened from master it runs with admin rights, so the Method table also shows **C
 | **Image grid (centre)** | Every section × the selected compound, each cell with a scalebar and Section name + pixel pitch. Drag to pan, wheel to zoom |
 | **Range (top)** | vmin / vmax shared by all sections. `Reset` returns to the automatic range |
 | **背景除去(Otsu) (top)** | The **same setting** as the main toolbar, reachable without closing the preview (see below) |
-| **`＋重ね合わせ` (top)** | Register a **new** multi-molecule colour overlay (master only, see §10-ter) |
-| **Overlay list (right edge)** | Every registered set, with its colour swatches, **grouped at the right edge**. Click to display; **`✎` edits, `×` deletes** (both master only). While an overlay is shown, a 「単一表示へ戻る」 button appears below it |
+| **`＋重ね合わせ` (top)** | Register a **new** multi-molecule colour overlay (see §10-ter) |
+| **Overlay list (right edge)** | Every registered set, with its colour swatches, **grouped at the right edge**. Click to display; **`✎` edits, `×` deletes**. While an overlay is shown, a 「単一表示へ戻る」 button appears below it |
 | **Stats / colourbar (right)** | Statistics for the selected compound. In overlay mode this becomes a molecule-to-colour legend |
 
 > **About background removal**: the preview checkbox drives the same single setting as the main toolbar's `背景除去(Otsu)`, and **it survives closing the preview** — unlike the Colormap, which is restored on close. The split is deliberate: colormap is a display preference, background removal is an analysis setting. **Adjusting the strength** needs the draggable histogram line, so close the preview and use the ANALYSIS panel.
@@ -532,7 +534,12 @@ Opened from master it runs with admin rights, so the Method table also shows **C
 
 ## 10-ter. Overlays (multi-molecule colour composites)
 
-**`＋重ね合わせ`** in the Method (MRM) panel — or the same button at the top of the preview — registers an image with **two or more molecules drawn in different colours on one picture**. Share recipients can **view** master-registered overlays but cannot create or edit them.
+**`＋重ね合わせ`** in the Method (MRM) panel — or the same button at the top of the preview — registers an image with **two or more molecules drawn in different colours on one picture**.
+
+> **Share recipients can build their own overlays too**, but they are stored **only on that person's device** (localStorage) and are never sent to the shared document. So:
+> - sets you registered are **read-only** for recipients (click to switch; no ✎ / ×)
+> - sets a recipient builds are **visible only to them**, and survive your re-publishes
+> - they never enter the publish payload, so a recipient's view can never leak into your project
 
 **Register as many sets as you like.** Keep one set per question — "Lactate + Citrate", "Glucose + HVA" — and click through the list to compare them. `＋重ね合わせ` always creates a **new** set.
 
