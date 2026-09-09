@@ -1335,3 +1335,198 @@ $$;
 grant execute on function public.list_share_alignments(text)                             to anon, authenticated;
 grant execute on function public.upsert_share_alignment(text, uuid, jsonb, int, text)    to anon, authenticated;
 grant execute on function public.delete_share_alignment(text, uuid)                      to anon, authenticated;
+
+-- ---- 11. share_images: 共有先が登録した HE/IF 画像 ----------------------
+--
+-- 共有 URL を開いた人が自分の HE/IF を持ち込んで MSI に重ねられるようにする。
+-- master が登録した画像 (sections.storage_paths.images) はそのまま残り、画面は
+-- 「位置合わせ: master / 共有」の切り替えで出し分ける。
+--
+-- ★ Storage の書き込み権限だけは別に開ける必要がある。既存の atlases の write
+--   ポリシーは publish token (master パスワード必須) を要求していて、共有先は
+--   持っていない。かといって全面開放すると master が上げた実データを上書き
+--   できてしまうので、**<slug>/shared/ の下だけ**共有トークンで書けるようにする。
+create or replace function public._share_session_valid_for_shared_path(p_token text, p_path text)
+returns boolean
+language sql security definer set search_path = public, extensions
+as $$
+    select exists (
+        select 1
+          from public.session_tokens st
+          join public.projects p on p.id = st.project_id
+         where st.token = p_token
+           and st.expires_at > now()
+           -- literal prefix (LIKE を使わない): slug に % や _ が入っていても
+           -- 他プロジェクトのパスに化けない。'/shared/' は 8 文字。
+           and left(p_path, length(p.slug) + 8) = p.slug || '/shared/'
+    );
+$$;
+revoke all on function public._share_session_valid_for_shared_path(text, text) from public;
+grant execute on function public._share_session_valid_for_shared_path(text, text) to anon, authenticated;
+
+-- publish token 用のポリシーはそのまま。permissive なポリシーは OR で足されるので、
+-- 共有トークン用を別に追加する (master 側の経路は一切変えない)。
+do $$
+begin
+    if exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='atlases share-token insert') then
+        drop policy "atlases share-token insert" on storage.objects;
+    end if;
+    if exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='atlases share-token update') then
+        drop policy "atlases share-token update" on storage.objects;
+    end if;
+    if exists (select 1 from pg_policies where schemaname='storage' and tablename='objects' and policyname='atlases share-token delete') then
+        drop policy "atlases share-token delete" on storage.objects;
+    end if;
+
+    create policy "atlases share-token insert" on storage.objects
+        for insert to anon, authenticated
+        with check (
+            bucket_id = 'atlases'
+            and public._share_session_valid_for_shared_path(
+                nullif(current_setting('request.headers', true), '')::jsonb->>'x-share-token',
+                storage.objects.name
+            )
+        );
+
+    create policy "atlases share-token update" on storage.objects
+        for update to anon, authenticated
+        using (
+            bucket_id = 'atlases'
+            and public._share_session_valid_for_shared_path(
+                nullif(current_setting('request.headers', true), '')::jsonb->>'x-share-token',
+                storage.objects.name
+            )
+        )
+        with check (
+            bucket_id = 'atlases'
+            and public._share_session_valid_for_shared_path(
+                nullif(current_setting('request.headers', true), '')::jsonb->>'x-share-token',
+                storage.objects.name
+            )
+        );
+
+    create policy "atlases share-token delete" on storage.objects
+        for delete to anon, authenticated
+        using (
+            bucket_id = 'atlases'
+            and public._share_session_valid_for_shared_path(
+                nullif(current_setting('request.headers', true), '')::jsonb->>'x-share-token',
+                storage.objects.name
+            )
+        );
+end
+$$;
+
+create table if not exists public.share_images (
+    id           uuid primary key default gen_random_uuid(),
+    project_id   uuid not null references public.projects(id) on delete cascade,
+    section_id   uuid not null references public.sections(id) on delete cascade,
+    -- 画面のレイヤーキー。master の既存キーとぶつからないよう、フロント側で
+    -- 一意になるまで '_shared' を足してから渡してくる。
+    layer_key    text not null,
+    filename     text,
+    mime         text,
+    -- '<slug>/shared/<uuid>.<ext>'。上のポリシーが書ける範囲と一致する。
+    storage_path text not null,
+    created_by   text not null default 'viewer',
+    created_at   timestamptz not null default now(),
+    updated_at   timestamptz not null default now(),
+    unique (project_id, section_id, layer_key)
+);
+
+create index if not exists share_images_project_idx on public.share_images(project_id);
+
+alter table public.share_images enable row level security;
+revoke all on public.share_images from anon, authenticated;
+
+create or replace function public.list_share_images(p_token text)
+returns setof public.share_images
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    return query
+        select * from public.share_images
+         where project_id = v_pid
+         order by created_at;
+end
+$$;
+
+-- 同じ切片・同じレイヤーキーへの登録は差し替え。前の Storage オブジェクトの
+-- 後始末はフロント側 (控えに持っている storage_path を消す)。
+create or replace function public.upsert_share_image(
+    p_token text,
+    p_section_id uuid,
+    p_layer_key text,
+    p_filename text,
+    p_mime text,
+    p_storage_path text,
+    p_created_by text default 'viewer'
+) returns public.share_images
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+    v_slug text;
+    v public.share_images;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    if not exists (select 1 from public.sections
+                    where id = p_section_id and project_id = v_pid) then
+        raise exception 'section not in this project' using errcode = '22023';
+    end if;
+    if p_layer_key is null or p_layer_key = '' then
+        raise exception 'layer_key required' using errcode = '22023';
+    end if;
+    -- 置ける場所を DB 側でも縛る。Storage のポリシーと二重にしておかないと、
+    -- 行だけ他プロジェクトのパスを指して作れてしまう。
+    select slug into v_slug from public.projects where id = v_pid;
+    if p_storage_path is null
+       or left(p_storage_path, length(v_slug) + 8) <> v_slug || '/shared/' then
+        raise exception 'storage_path must live under <slug>/shared/' using errcode = '22023';
+    end if;
+    insert into public.share_images(project_id, section_id, layer_key, filename, mime, storage_path, created_by)
+         values (v_pid, p_section_id, p_layer_key, p_filename, p_mime, p_storage_path,
+                 coalesce(p_created_by, 'viewer'))
+    on conflict (project_id, section_id, layer_key) do update
+         set filename = excluded.filename,
+             mime = excluded.mime,
+             storage_path = excluded.storage_path,
+             updated_at = now()
+      returning * into v;
+    return v;
+end
+$$;
+
+-- 削除。rois と同じで、その共有を開いている人なら誰でも消せる。
+-- 戻り値は消した行の storage_path (フロントが Storage の実体も消す)。
+create or replace function public.delete_share_image(p_token text, p_id uuid)
+returns text
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+    v_path text;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    delete from public.share_images
+     where id = p_id and project_id = v_pid
+    returning storage_path into v_path;
+    return v_path;
+end
+$$;
+
+grant execute on function public.list_share_images(text)                                        to anon, authenticated;
+grant execute on function public.upsert_share_image(text, uuid, text, text, text, text, text)   to anon, authenticated;
+grant execute on function public.delete_share_image(text, uuid)                                 to anon, authenticated;

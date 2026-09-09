@@ -2225,6 +2225,142 @@ function extractTopLevelMethodBody(name) {
   return 'function () ' + html.slice(openAt, scanBalanced(html, openAt) + 1);
 }
 
+// ★ 共有先が登録した HE/IF 画像。実体は Storage の <slug>/shared/ 配下 (共有
+//   トークンで書ける唯一の場所)、目録は share_images。master が登録した画像には
+//   触らないので、「位置合わせ: master」に戻すと共有先の画像はレイヤーごと降りる。
+async function testShareImagesAreSharedWithEveryone() {
+  const calls = [];
+  const toasts = [];
+  const idb = new Map();
+  let uploadThrows = null;
+  const App = { shareMode: { slug: 'proj_x', token: 'tok' }, project: null, alignChoice: 'shared' };
+  const SupabaseClient = {
+    listShareImages() { calls.push(['list']); return Promise.resolve(rows); },
+    uploadBlob(bucket, path, blob, ct, publishToken, opts) {
+      calls.push(['upload', bucket, path, publishToken, opts && opts.shareToken]);
+      if (uploadThrows) return Promise.reject(uploadThrows);
+      return Promise.resolve(path);
+    },
+    upsertShareImage(token, sectionId, layerKey, filename, mime, storagePath) {
+      calls.push(['upsert', sectionId, layerKey, storagePath]);
+      return Promise.resolve({ id: 'row-1', section_id: sectionId, layer_key: layerKey,
+                               storage_path: storagePath });
+    },
+    deleteShareImage(token, id) { calls.push(['delete', id]); return Promise.resolve('proj_x/shared/a.tif'); },
+    deleteStorageObjectAsShare(bucket, path) { calls.push(['obj-delete', path]); return Promise.resolve(); },
+  };
+  let rows = [];
+  const ctx = vm.createContext({
+    JSON, Object, Map, Set, Array, Promise,
+    console: { warn() {}, log() {}, info() {} },
+    showToast: (m) => toasts.push(String(m)),
+    App, SupabaseClient,
+    ProjectStorage: {
+      putBlob: (r) => { idb.set(r.id, r); return Promise.resolve(); },
+      getBlob: (id) => Promise.resolve(idb.get(id) || null),
+    },
+    uid: (p) => p + '_' + (idb.size + calls.length + 1),
+    storageExtOf: (n) => (/\.[a-z0-9]+$/i.exec(n) || [''])[0],
+    _isExpiredTokenError: () => false,
+    _noteShareTokenExpired() {},
+    _isMissingRpc: (e) => !!(e && e.code === 'PGRST202'),
+    _shareImageServerMissing: false,
+    _shareImageWriteGen: 0,
+  });
+  vm.runInContext(
+    'const _shareImages = new Map();\n'
+    + 'const _shareImageBlobIds = new Map();\n'
+    + extractTopLevelFunction('_noteShareImageServerMissing') + '\n'
+    + extractTopLevelFunction('uniqueShareLayerKey') + '\n'
+    + extractTopLevelFunction('fetchShareImages') + '\n'
+    + extractTopLevelFunction('applyServerShareImages') + '\n'
+    + extractTopLevelFunction('pushShareImage') + '\n'
+    + extractTopLevelFunction('removeShareImage')
+    + '\nthis.api = { uniqueShareLayerKey, fetchShareImages, applyServerShareImages,'
+    + ' pushShareImage, removeShareImage, _shareImages, _shareImageBlobIds };',
+    ctx);
+  const api = ctx.api;
+
+  // master の既存レイヤーとぶつからないキーにする。
+  const sec = { id: 'sec-1', images: { HE_Stain: { blobId: 'b1' } }, meta: {} };
+  assert.equal(api.uniqueShareLayerKey(sec, 'IF_Stain'), 'IF_Stain', '空いていればそのまま');
+  assert.equal(api.uniqueShareLayerKey(sec, 'HE_Stain'), 'HE_Stain_shared',
+    'master の HE_Stain を踏み潰さないこと');
+
+  // 登録: <slug>/shared/ の下へ、共有トークンで上げる。
+  const file = { name: 'mine.tif', type: 'image/tiff', size: 10 };
+  const rec = await api.pushShareImage(sec, 'HE_Stain_shared', file);
+  assert.ok(rec && rec.id === 'row-1', '登録できていない');
+  const up = calls.find(c => c[0] === 'upload');
+  assert.ok(up[2].startsWith('proj_x/shared/'), 'Storage のパスが <slug>/shared/ の下でない: ' + up[2]);
+  assert.equal(up[3], null, 'publish token は使わないこと (master 専用)');
+  assert.equal(up[4], 'tok', '共有トークンを x-share-token で送ること');
+  assert.ok(up[2].endsWith('.tif'), '拡張子を保つこと');
+  // 上げたばかりのファイルは手元に置く (直後に取り直さない)。
+  assert.equal(api._shareImageBlobIds.has('row-1'), true, 'ローカルに置いていない');
+
+  // 一覧の取り込み: 変わったときだけ true。
+  rows = [{ id: 'row-1', section_id: 'sec-1', layer_key: 'HE_Stain_shared',
+            filename: 'mine.tif', mime: 'image/tiff', storage_path: 'proj_x/shared/a.tif' }];
+  const list = await api.fetchShareImages();
+  assert.equal(list.length, 1);
+  assert.equal(api.applyServerShareImages(list), true);
+  assert.equal(api._shareImages.get('sec-1').length, 1);
+  assert.equal(api.applyServerShareImages(list), false, '変化が無ければ描き直さない');
+
+  // 削除: 目録と Storage の実体の両方。
+  assert.equal(await api.removeShareImage(sec, 'HE_Stain_shared'), true);
+  assert.ok(calls.some(c => c[0] === 'delete'), '目録から消していない');
+  assert.ok(calls.some(c => c[0] === 'obj-delete' && c[1] === 'proj_x/shared/a.tif'),
+    'Storage の実体を消していない (orphan が残る)');
+
+  // Storage のポリシーが未適用 (403) — 理由を出して静かに諦める。
+  uploadThrows = Object.assign(new Error('forbidden'), { status: 403 });
+  assert.equal(await api.pushShareImage(sec, 'IF_Stain', file), null);
+  assert.ok(toasts.some(t => /share_locks\.sql/.test(t)), '未適用であることを知らせること');
+}
+
+// ★ 共有先の登録・削除の作法。SQL 側と画面側の両方を縛る。
+function testShareImageRulesAreEnforced() {
+  // Storage は <slug>/shared/ の下だけ。master の <slug>/blobs/ は触らせない。
+  assert.match(html, /const path = slug \+ '\/shared\/'/, '置き場所が <slug>/shared/ でない');
+  const sqlPath = path.join(root, 'supabase', 'share_locks.sql');
+  const sql = fs.readFileSync(sqlPath, 'utf8');
+  assert.match(sql, /create table if not exists public\.share_images/, 'share_images が無い');
+  assert.match(sql, /_share_session_valid_for_shared_path/, '共有トークン用のヘルパーが無い');
+  assert.match(sql, /left\(p_path, length\(p\.slug\) \+ 8\) = p\.slug \|\| '\/shared\/'/,
+    '書ける範囲を <slug>/shared/ に literal prefix で縛っていない');
+  assert.match(sql, /atlases share-token insert/, 'Storage の insert ポリシーが無い');
+  // publish token 用のポリシーは触らない (master の経路を壊さない)。
+  assert.match(sql, /atlases publish-token insert/, 'master 用のポリシーを消さないこと');
+  // 行の側でも置き場所を縛る (Storage と二重の歯止め)。
+  assert.match(sql, /storage_path must live under <slug>\/shared\//,
+    'RPC 側でパスを検証していない');
+
+  // 画面: 共有先でも + HE/IF を出す。出さないと登録しようがない。
+  assert.doesNotMatch(html, /body\.share-mode #tb-add-heif,/, '共有先で + HE/IF を隠さないこと');
+  // レイヤーの × は、自分たちの画像だけサーバから消す。master の分は消させない。
+  const rmAt = html.indexOf('    removeLayer(key, skipConfirm, keepBlob) {');
+  assert.notEqual(rmAt, -1, 'removeLayer に keepBlob が無い');
+  const rm = html.slice(rmAt, html.indexOf('\n    }', rmAt));
+  assert.match(rm, /if \(!skipConfirm && isShareAlignMode\(\)\) \{/,
+    '共有先の × を素通しにしないこと');
+  assert.match(rm, /App\.deleteShareImageLayer\(this\.section, key\)/, '自分の画像をサーバから消していない');
+  assert.match(rm, /master\) が登録したレイヤーなので削除できません/, 'master のレイヤーを守っていない');
+  assert.match(rm, /if \(!keepBlob && ent && ent\.blobId/,
+    '切り替えで載せ降ろしするときに実体まで消さないこと');
+
+  // 削除は ROI / 位置合わせと同じ作法 (訊く前にロック / キャンセルで返す)。
+  const dAt = html.indexOf('    async deleteShareImageLayer(sec, layerKey) {');
+  assert.notEqual(dAt, -1, 'missing deleteShareImageLayer');
+  const del = html.slice(dAt, html.indexOf('\n    },', dAt));
+  const dLock = del.indexOf('await this._tryAcquireRoiLock()');
+  const dConfirm = del.indexOf('if (!confirm(msg))');
+  assert.ok(dLock !== -1 && dConfirm !== -1 && dLock < dConfirm, '確認より先にロックを取ること');
+  assert.match(del, /if \(!confirm\(msg\)\) \{ this\._releaseRoiLock\(\); return; \}/,
+    'キャンセルしたらロックを返すこと');
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
@@ -2273,6 +2409,8 @@ async function main() {
   await testShareAlignmentsAreSharedWithEveryone();
   testShareAlignmentEditingIsLocked();
   await testRoiLockIsReentrant();
+  await testShareImagesAreSharedWithEveryone();
+  testShareImageRulesAreEnforced();
   testShareRoiDeleteAsksUnderTheLock();
   console.log('viewer preview regression tests: PASS');
 }

@@ -422,3 +422,37 @@ master が切片を削除したときだけ、外部キーの cascade で一緒�
 select public.list_share_alignments('&lt;viewer token&gt;');   -- 0 行でも成功すれば OK
 select count(*) from public.share_alignments;
 ```
+
+---
+
+## v2026-09-09.1: 共有先が HE/IF 画像を登録できるようにする (**再適用が必要**)
+
+共有 URL を開いた人が**自分の HE/IF 画像を持ち込んで** MSI に重ねられるようにします。
+
+**[`share_locks.sql`](./share_locks.sql) を SQL Editor で再実行してください (冪等)。**
+
+| 追加されるもの | 役割 |
+| --- | --- |
+| `_share_session_valid_for_shared_path(p_token, p_path)` | 共有トークンで書いてよいパスかを判定。**`<slug>/shared/` の下だけ** (literal prefix。slug に `%` や `_` があっても他プロジェクトに化けない) |
+| `atlases share-token insert / update / delete` ポリシー | 上のヘルパーを使い、`x-share-token` ヘッダ付きの書き込みを `<slug>/shared/` に限って通す。**master 用の publish-token ポリシーはそのまま**で、permissive なポリシーは OR で足される |
+| `public.share_images` テーブル | 切片 × レイヤーキーで一意。`storage_path` と表示名を持つ |
+| `list_share_images` / `upsert_share_image` / `delete_share_image` | 一覧 / 登録 (同じキーは差し替え) / 削除 (消した `storage_path` を返すのでフロントが実体も消せる) |
+
+`upsert_share_image` は **RPC 側でも** `storage_path` が `<slug>/shared/` の下かを検証します。Storage
+のポリシーと二重にしておかないと、行だけ他プロジェクトのパスを指して作れてしまうためです。
+
+master が登録した画像は `<slug>/blobs/` のままで、この経路からは**触れません**。
+
+### 適用しなかった場合
+
+**壊れません。** 画像を登録しようとすると Storage が 403 を返し、フロントが
+「管理者が supabase/share_locks.sql を再実行すると使えるようになります」と出して諦めます。
+
+### 確認
+
+```sql
+select public.list_share_images('&lt;viewer token&gt;');   -- 0 行でも成功すれば OK
+select policyname from pg_policies
+ where schemaname='storage' and tablename='objects'
+   and policyname like 'atlases share-token%';           -- 3 行
+```
