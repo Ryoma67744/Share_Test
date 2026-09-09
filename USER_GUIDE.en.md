@@ -185,6 +185,12 @@ Recipients can re-align HE/IF onto MSI with **`Align`** too. **The master's alig
 - The **`×`** button deletes that section's shared alignment and returns it to the master's. It takes the lock first, then asks.
 - If the server side has not been migrated yet (re-run `supabase/share_locks.sql`), re-aligning does not reach anyone else and the page says so.
 
+**You can also bring your own HE/IF image.** Register a TIFF / PNG / JPEG with **`+ HE/IF`** in the toolbar: it becomes visible to **everyone on this share URL** and you can align it to the MSI straight away.
+
+- The master's images are never touched. Picking a layer name they already use auto-renames yours to e.g. `HE_Stain_shared`.
+- Registering switches the view to **共有** automatically. **Switching back to master drops recipient-added images entirely**, so master's view is exactly what they published.
+- Delete with the layer's **`×`**: it takes the lock, asks, and removes the image from the server (everyone loses it). Layers the master registered cannot be deleted by recipients.
+
 ### 4-5. ROI-only view (clip MSI to the ROI shape)
 
 Turning on the **"ROIのみ" (ROI only)** checkbox in the ROI LIST header clips **only the MSI layers** to the shape of the **currently selected ROI**. HE / background stay fully visible, so you can compare the signal inside the ROI against the surrounding histology.

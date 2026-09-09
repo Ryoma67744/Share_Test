@@ -69,14 +69,16 @@ body.share-mode #btn-publish-share,
 body.share-mode #btn-share-info,
 body.share-mode #project-picker,
 body.share-mode #project-name-input,
-body.share-mode #tb-add-heif,
 body.share-mode #tb-add-msi,
 body.share-mode #tb-add-raw,
 body.share-mode #tb-rot-share-default,
 body.share-mode #tb-msi-um-group,
 body.share-mode #tb-flip-group,
 body.share-mode #tb-del-section { display:none !important; }
-/* ★ #tb-align-heif は共有先でも出す。位置合わせは「見え方」を合わせ直す操作で、
+/* ★ #tb-add-heif と #tb-align-heif は共有先でも出す。共有先が自分の HE/IF を
+   持ち込んで MSI に重ねられるようにするため。登録した画像は Storage の
+   <slug>/shared/ 配下 + share_images に入り、master が登録した画像には触らない。
+   #tb-add-heif は共有先でも出す。位置合わせは「見え方」を合わせ直す操作で、
    master が登録した位置合わせは sections.meta に残ったまま (共有先の結果は
    share_alignments へ置く)。どちらを見るかは下の #tb-align-choice-group で
    切り替える。 */
@@ -8611,9 +8613,25 @@ class SectionPanel {
     refreshRangeEditor() { Toolbar.refreshRange(); Toolbar.refreshOpacity(); Toolbar.refreshRotation(); Toolbar.refreshSectionPicker(); }
     refreshOpacityEditor() { Toolbar.refreshOpacity(); }
 
-    removeLayer(key, skipConfirm) {
+    // keepBlob = IndexedDB の実体は残す。位置合わせの master/共有 切り替えで
+    // レイヤーを載せ降ろしするときに使う (毎回 Storage から取り直すのは無駄)。
+    removeLayer(key, skipConfirm, keepBlob) {
+        const ent0 = (this.section.images || {})[key] || (this.section.msiSeries || {})[key];
+        // ★ 共有先が画面から消そうとしたとき (skipConfirm 無し = レイヤーの × ):
+        //   自分たちが登録した画像はサーバからも消す。master が登録したものは
+        //   共有先からは消させない (共有ドキュメントは master のもの)。
+        //   内部呼び出し (skipConfirm) はここを通さない。
+        if (!skipConfirm && isShareAlignMode()) {
+            if (ent0 && ent0.__shareImage) {
+                App.deleteShareImageLayer(this.section, key)
+                    .catch(e => console.warn('share image delete failed', e));
+            } else {
+                showToast('これは共有元 (master) が登録したレイヤーなので削除できません', 5000);
+            }
+            return;
+        }
         if (!skipConfirm && !confirm('レイヤー "' + formatDisplayName(key) + '" を削除しますか?')) return;
-        const ent = (this.section.images || {})[key] || (this.section.msiSeries || {})[key];
+        const ent = ent0;
         // Avoid orphaning a shared blob: only drop the blob when no other layer
         // references it.
         // ★ 走査はプロジェクト全体。以前は**同じ切片の中しか見ていなかった**ので、
@@ -8632,7 +8650,7 @@ class SectionPanel {
             }
             return false;
         };
-        if (ent && ent.blobId && !blobStillUsed(ent.blobId)) ProjectStorage.deleteBlob(ent.blobId).catch(() => {});
+        if (!keepBlob && ent && ent.blobId && !blobStillUsed(ent.blobId)) ProjectStorage.deleteBlob(ent.blobId).catch(() => {});
         if (this.section.images) delete this.section.images[key];
         if (this.section.msiSeries) delete this.section.msiSeries[key];
         delete this.imageSources[key];
@@ -12391,6 +12409,11 @@ function applyAlignChoiceToSections(opts) {
         const rec = useShared ? _shareAlignBySection.get(sec.id) : null;
         applySectionAlignment(sec, (rec && rec.payload) || master);
     }
+    // 共有先が登録した HE/IF は「共有」のときだけ載せる。取り込みは Storage 往復が
+    // あるので非同期 — 待たずに進め、載ったら中で描き直す。
+    syncShareImageLayers()
+        .then(touched => { if (touched) App.panels.forEach(p => { try { p.setupCanvasSize(); } catch (e) {} }); })
+        .catch(e => console.warn('share image sync failed', e));
     if (!(opts && opts.quiet)) {
         App.panels.forEach(p => {
             // 位置合わせが変わると HE の載り方も MSI 基準のキャンバス寸法も変わる。
@@ -12486,6 +12509,227 @@ async function removeShareAlignment(sec) {
         showToast('位置合わせをサーバから削除できませんでした: ' + ((e && e.message) || e), 6000);
         return false;
     }
+}
+
+// ---- 共有先が登録した HE/IF 画像 ----------------------------------------
+//
+// 共有先が自分の HE/IF を持ち込んで MSI に重ねられるようにする。実体は Storage の
+// <slug>/shared/ 配下 (共有トークンで書ける唯一の場所)、目録はサーバの
+// share_images テーブル。master が登録した画像 (sections.storage_paths.images)
+// には一切触らないので、「位置合わせ: master」に戻せば master が公開したとおりの
+// 絵に戻る — そのとき共有先が足した画像はレイヤーごと画面から降りる。
+//
+// 表示経路は master の画像とまったく同じ (blobId を IndexedDB に置き、
+// storagePath を持たせて ensureLocalBlob で復旧できるようにする)。
+// loadImageLayer には手を入れない。
+const _shareImages = new Map();      // 切片 id -> [{ id, layerKey, filename, mime, storagePath }]
+let _shareImageServerMissing = false;
+let _shareImageWriteGen = 0;
+
+function _noteShareImageServerMissing() {
+    if (_shareImageServerMissing) return;
+    _shareImageServerMissing = true;
+    showToast('画像の共有機能がサーバに未適用です。共有先からの HE/IF 登録はできません '
+        + '(管理者は supabase/share_locks.sql を再実行してください)', 8000);
+}
+
+// master の既存レイヤーとぶつからないキーにする。'HE_Stain' が既にあるなら
+// 'HE_Stain_shared' → 'HE_Stain_shared2' …。HE/IF の判定は部分一致なので、
+// 接尾辞を足しても HE レイヤーとして扱われ続ける。
+function uniqueShareLayerKey(sec, want) {
+    const taken = new Set(Object.keys((sec && sec.images) || {})
+        .concat(((_shareImages.get(sec && sec.id) || []).map(r => r.layerKey))));
+    if (!taken.has(want)) return want;
+    let k = want + '_shared';
+    let n = 2;
+    while (taken.has(k)) { k = want + '_shared' + n; n++; }
+    return k;
+}
+
+async function fetchShareImages() {
+    const token = App.shareMode && App.shareMode.token;
+    if (!token || _shareImageServerMissing) return null;
+    try {
+        const rows = await SupabaseClient.listShareImages(token);
+        return (rows || []).map(r => ({
+            id: r.id, sectionId: r.section_id, layerKey: r.layer_key,
+            filename: r.filename || '', mime: r.mime || '', storagePath: r.storage_path,
+        }));
+    } catch (e) {
+        if (_isMissingRpc(e)) { _noteShareImageServerMissing(); return null; }
+        if (_isExpiredTokenError(e)) { _noteShareTokenExpired(); return null; }
+        console.warn('[share image] 一覧の取得に失敗しました', e);
+        return null;
+    }
+}
+
+// 控えへ反映。戻り値は「変わったか」。
+function applyServerShareImages(list) {
+    if (!Array.isArray(list)) return false;
+    const sig = (m) => JSON.stringify([...m.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)));
+    const before = sig(_shareImages);
+    const next = new Map();
+    for (const r of list) {
+        if (!r || !r.sectionId) continue;
+        if (!next.has(r.sectionId)) next.set(r.sectionId, []);
+        next.get(r.sectionId).push(r);
+    }
+    if (before === sig(next)) return false;
+    _shareImages.clear();
+    for (const [k, v] of next) _shareImages.set(k, v);
+    return true;
+}
+
+// 選ばれている組に合わせて、共有先の画像レイヤーを載せる / 降ろす。
+// 'master' のときは 1 枚も載せない (master が公開したとおりの絵に戻す)。
+async function syncShareImageLayers() {
+    const project = App && App.project;
+    if (!project) return false;
+    const useShared = (App.alignChoice === 'shared');
+    let touched = false;
+    for (const sec of (project.sections || [])) {
+        const panel = App.panels.get(sec.id);
+        const rows = useShared ? (_shareImages.get(sec.id) || []) : [];
+        const wantKeys = new Set(rows.map(r => r.layerKey));
+        // 降ろす: 印のあるレイヤーで、今回は要らないもの。
+        for (const [key, ent] of Object.entries(sec.images || {})) {
+            if (!ent || !ent.__shareImage || wantKeys.has(key)) continue;
+            // ★ blob は消さない (keepBlob)。切り替えのたびに Storage から
+            //   取り直すのは遅いだけで、得るものが何もない。
+            if (panel) panel.removeLayer(key, true, true);
+            else delete sec.images[key];
+            touched = true;
+        }
+        // 載せる: まだ入っていないもの。実体は Storage から取って IndexedDB へ。
+        for (const r of rows) {
+            const cur = (sec.images || {})[r.layerKey];
+            if (cur && cur.__shareImage === r.id) continue;
+            try {
+                const blobId = await _ensureShareImageBlob(r);
+                if (!blobId) continue;
+                sec.images = sec.images || {};
+                sec.images[r.layerKey] = {
+                    blobId, mime: r.mime, filename: r.filename,
+                    storagePath: r.storagePath, __shareImage: r.id,
+                };
+                if (panel) {
+                    await panel.loadImageLayer(r.layerKey, sec.images[r.layerKey]);
+                    await panel.analyzeAndInitSettings();
+                    panel.toggleLayer(r.layerKey, true);
+                    panel.populateThumbnails();
+                    panel.renderEmptyOverlay();
+                }
+                touched = true;
+            } catch (e) {
+                console.warn('[share image] 読み込みに失敗しました', r.layerKey, e);
+            }
+        }
+    }
+    return touched;
+}
+
+// Storage の実体を IndexedDB に置いて blobId を返す。既に同じ行の分があれば使い回す。
+const _shareImageBlobIds = new Map();   // share_images.id -> blobId
+async function _ensureShareImageBlob(row) {
+    const known = _shareImageBlobIds.get(row.id);
+    if (known) {
+        const rec = await ProjectStorage.getBlob(known).catch(() => null);
+        if (rec && rec.blob) return known;
+    }
+    const url = SupabaseClient.publicUrl('atlases', row.storagePath);
+    if (!url) return null;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ' for ' + row.storagePath);
+    const blob = await resp.blob();
+    const blobId = uid('blob');
+    await ProjectStorage.putBlob({
+        id: blobId, blob, mime: row.mime || blob.type,
+        filename: row.filename || row.storagePath.split('/').pop(),
+    });
+    _shareImageBlobIds.set(row.id, blobId);
+    return blobId;
+}
+
+// 共有先の HE/IF 画像を 1 枚登録する。Storage へ上げてから目録に足す。
+// 戻り値 = 画面に付いたレイヤーキー (失敗時 null)。
+async function pushShareImage(sec, layerKey, file) {
+    const token = App.shareMode && App.shareMode.token;
+    const slug = App.shareMode && App.shareMode.slug;
+    if (!token || !slug || !sec) return null;
+    if (_shareImageServerMissing) { _noteShareImageServerMissing(); return null; }
+    const name = file.name || (layerKey + '.tif');
+    const ext = storageExtOf(name) || '.bin';
+    const path = slug + '/shared/' + uid('img').replace(/[^A-Za-z0-9_-]/g, '') + ext;
+    try {
+        await SupabaseClient.uploadBlob('atlases', path, file,
+            file.type || 'application/octet-stream', null, { shareToken: token });
+    } catch (e) {
+        // 403 = Storage のポリシーが未適用。理由を出さないと「なぜか失敗する」で終わる。
+        if (e && (e.status === 403 || e.status === 401)) {
+            showToast('この共有では画像をアップロードできません '
+                + '(管理者が supabase/share_locks.sql を再実行すると使えるようになります)', 9000);
+            return null;
+        }
+        if (e && e.status === 413) {
+            showToast('画像が大きすぎてアップロードできませんでした', 6000);
+            return null;
+        }
+        console.warn('[share image] アップロードに失敗しました', e);
+        showToast('画像のアップロードに失敗しました: ' + ((e && e.message) || e), 6000);
+        return null;
+    }
+    let row = null;
+    try {
+        row = await SupabaseClient.upsertShareImage(
+            token, sec.id, layerKey, name, file.type || '', path);
+    } catch (e) {
+        if (_isMissingRpc(e)) { _noteShareImageServerMissing(); return null; }
+        console.warn('[share image] 登録に失敗しました', e);
+        showToast('画像の登録に失敗しました: ' + ((e && e.message) || e), 6000);
+        return null;
+    }
+    if (!row || !row.id) return null;
+    // 差し替えだったら、前の実体を片づける。
+    const prev = (_shareImages.get(sec.id) || []).find(r => r.layerKey === layerKey);
+    if (prev && prev.storagePath && prev.storagePath !== path) {
+        SupabaseClient.deleteStorageObjectAsShare('atlases', prev.storagePath, token).catch(() => {});
+    }
+    const rec = { id: row.id, sectionId: sec.id, layerKey, filename: name,
+                  mime: file.type || '', storagePath: path };
+    // ★ いま手元にあるファイルをそのまま IndexedDB へ置く。これをしないと、
+    //   直後の syncShareImageLayers が「上げたばかりの数十 MB」を Storage から
+    //   取り直すことになる。
+    try {
+        const blobId = uid('blob');
+        await ProjectStorage.putBlob({ id: blobId, blob: file, mime: file.type || '', filename: name });
+        _shareImageBlobIds.set(row.id, blobId);
+    } catch (e) { console.warn('[share image] ローカル保存に失敗 (Storage から取り直します)', e); }
+    const list = (_shareImages.get(sec.id) || []).filter(r => r.layerKey !== layerKey);
+    list.push(rec);
+    _shareImages.set(sec.id, list);
+    _shareImageWriteGen++;
+    return rec;
+}
+
+// 共有先の画像を 1 枚消す (目録 + Storage の実体)。
+async function removeShareImage(sec, layerKey) {
+    const token = App.shareMode && App.shareMode.token;
+    const rec = (_shareImages.get(sec.id) || []).find(r => r.layerKey === layerKey);
+    if (!token || !rec) return false;
+    try {
+        const path = await SupabaseClient.deleteShareImage(token, rec.id);
+        if (path) SupabaseClient.deleteStorageObjectAsShare('atlases', path, token).catch(() => {});
+    } catch (e) {
+        if (!_isMissingRpc(e)) {
+            console.warn('[share image] 削除に失敗しました', e);
+            showToast('画像をサーバから削除できませんでした: ' + ((e && e.message) || e), 6000);
+            return false;
+        }
+    }
+    _shareImages.set(sec.id, (_shareImages.get(sec.id) || []).filter(r => r.id !== rec.id));
+    _shareImageBlobIds.delete(rec.id);
+    _shareImageWriteGen++;
+    return true;
 }
 
 // Distinct MSI compound layers across the project, as [key, displayName].
@@ -15111,6 +15355,13 @@ const Wizards = {
         };
         const result = await p;
         if (!result) return;
+        // ★ 共有先はサーバ側 (Storage の <slug>/shared/ + share_images) へ置く。
+        //   master が登録した画像には触らないので、「位置合わせ: master」に
+        //   戻せば master が公開したとおりの絵に戻る。
+        if (isShareAlignMode()) {
+            await Wizards._registerSharedHeIf(panel, result);
+            return;
+        }
         try {
             let transform = null;
             if (result.jsonFile) {
@@ -15122,6 +15373,43 @@ const Wizards = {
         } catch (e) {
             console.error(e);
             alert('Registration failed: ' + (e.message || e));
+        }
+    },
+
+    // 共有先の HE/IF 登録。ROI / 位置合わせと同じくロックを取ってから書く。
+    async _registerSharedHeIf(panel, result) {
+        const sec = panel.section;
+        const gotLock = await App._tryAcquireRoiLock();
+        if (!gotLock) return;
+        try {
+            // master の既存レイヤーとぶつからないキーにする。
+            const key = uniqueShareLayerKey(sec, result.layer);
+            showToast('画像をアップロードしています…', 4000);
+            const rec = await pushShareImage(sec, key, result.imgFile);
+            if (!rec) return;                       // 理由は pushShareImage が出す
+            // 変換 JSON を渡されていたら、そのまま位置合わせに反映する
+            // (master の組は __alignMaster に控えたままなので戻せる)。
+            if (result.jsonFile) {
+                try {
+                    const text = await readFileAsText(result.jsonFile);
+                    const transform = JSON.parse(text);
+                    sec.meta = sec.meta || {};
+                    sec.meta.world_coords = Object.assign({}, sec.meta.world_coords || {}, transform);
+                } catch (e) { console.warn('transform json parse failed', e); }
+            }
+            // 登録した瞬間から見えるように「共有」へ切り替える。
+            App.alignChoice = 'shared';
+            saveShareAlignChoice('shared');
+            applyAlignChoiceToSections();
+            // 位置合わせも共有側へ置いておく (変換 JSON を渡された場合に効く)。
+            if (result.jsonFile) await pushShareAlignment(sec);
+            showToast('レイヤーを登録しました: ' + formatDisplayName(key)
+                + ' (この共有 URL を開いた全員に見えます)', 6000);
+        } catch (e) {
+            console.error(e);
+            alert('登録に失敗しました: ' + (e.message || e));
+        } finally {
+            App._releaseRoiLock();
         }
     },
 
@@ -20789,6 +21077,29 @@ const SupabaseClient = (() => {
         deleteShareAlignment(token, sectionId) {
             return rpc('delete_share_alignment', { p_token: token, p_section_id: sectionId });
         },
+        // 共有先が登録した HE/IF 画像 (share_locks.sql の 11.) -----------
+        listShareImages(token) { return rpc('list_share_images', { p_token: token }); },
+        upsertShareImage(token, sectionId, layerKey, filename, mime, storagePath) {
+            return rpc('upsert_share_image', {
+                p_token: token, p_section_id: sectionId, p_layer_key: layerKey,
+                p_filename: filename || null, p_mime: mime || null,
+                p_storage_path: storagePath, p_created_by: 'viewer',
+            });
+        },
+        deleteShareImage(token, id) { return rpc('delete_share_image', { p_token: token, p_id: id }); },
+        // Storage オブジェクトの削除 (共有先は x-share-token で <slug>/shared/ のみ)。
+        deleteStorageObjectAsShare(bucket, path, shareToken) {
+            const url = SUPABASE_URL.replace(/\/+$/, '') + '/storage/v1/object/'
+                      + encodeURIComponent(bucket) + '/' + path.split('/').map(encodeURIComponent).join('/');
+            return fetch(url, {
+                method: 'DELETE',
+                headers: {
+                    'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+                    'apikey': SUPABASE_ANON_KEY,
+                    'x-share-token': shareToken,
+                },
+            });
+        },
         // Lock -------------------------------------------------
         acquireRoiLock(token, label) { return rpc('acquire_roi_lock', { _token: token, _label: label || null }); },
         heartbeatRoiLock(token) { return rpc('heartbeat_roi_lock', { _token: token }); },
@@ -20829,6 +21140,8 @@ const SupabaseClient = (() => {
         //   xhr.abort() で中断もできる。
         //   opts は省略可能なので、5 引数の既存の呼び出しはそのまま動く。
         //   opts = { onProgress(loaded,total), onSent(), signal, stallMs }
+        // opts.shareToken を渡すと x-share-token で送る (共有先が <slug>/shared/ 配下へ
+        // 上げる経路。Storage 側は publish token とは別のポリシーで受ける)。
         uploadBlob(bucket, path, blob, contentType, publishToken, opts) {
             const o = opts || {};
             if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return Promise.reject(new Error('supabase_not_configured'));
@@ -20862,6 +21175,7 @@ const SupabaseClient = (() => {
                 xhr.setRequestHeader('Content-Type', contentType || (blob && blob.type) || 'application/octet-stream');
                 xhr.setRequestHeader('x-upsert', 'true');
                 if (publishToken) xhr.setRequestHeader('x-publish-token', publishToken);
+                if (o.shareToken) xhr.setRequestHeader('x-share-token', o.shareToken);
                 if (xhr.upload) {
                     xhr.upload.onprogress = (ev) => {
                         arm();
@@ -23186,7 +23500,9 @@ const App = {
         // 共有の位置合わせ (share_alignments)。読み終えてから、選ばれている組を当てる。
         // 先に __alignMaster を控えてあるので (hydrate 直後)、いつでも master へ戻せる。
         this.alignChoice = loadShareAlignChoice();
+        _shareImages.clear();
         this._refreshShareAlignments()
+            .then(() => this._refreshShareImages())
             .then(() => { if (this.alignChoice === 'shared') applyAlignChoiceToSections(); })
             .catch(e => console.warn('share align init failed', e));
         // Show the simplified compound-comparison preview on top of the
@@ -24135,7 +24451,42 @@ const App = {
             // おくと、止める条件 (描画中・期限切れ) を書き分けずに済む。
             this._refreshShareOverlays().catch(e => console.warn('share overlay poll failed', e));
             this._refreshShareAlignments().catch(e => console.warn('share align poll failed', e));
+            this._refreshShareImages().catch(e => console.warn('share image poll failed', e));
         }, 12000);
+    },
+
+    // 共有先が登録した HE/IF 画像をサーバから読み直す。
+    async _refreshShareImages() {
+        if (!this.shareMode || !this.shareMode.token || !this.project) return;
+        if (_shareTokenExpired) return;
+        const gen = _shareImageWriteGen;
+        const list = await fetchShareImages();
+        if (!list) return;
+        if (gen !== _shareImageWriteGen) return;   // 取得中に自分が書いた → 次の回へ
+        if (!applyServerShareImages(list)) return;
+        // 「共有」を見ている人にだけ反映する。master を見ている画面は動かさない。
+        if (this.alignChoice !== 'shared') return;
+        const touched = await syncShareImageLayers();
+        if (touched) this.panels.forEach(p => { try { p.setupCanvasSize(); } catch (e) {} });
+    },
+
+    // 共有先が登録した画像を 1 枚消す。ROI / 位置合わせと同じで、訊く前にロックを取る。
+    async deleteShareImageLayer(sec, layerKey) {
+        if (!this.shareMode || !sec) return;
+        const ok = await this._tryAcquireRoiLock();
+        if (!ok) return;
+        const msg = '書き込みロックを取得しました (いまは自分だけが編集できます)。\n\n'
+            + 'レイヤー 「' + formatDisplayName(layerKey) + '」 を削除します。\n'
+            + 'サーバ上の共有データから消えるので、この URL を開いた他の人からも見えなくなります。\n'
+            + '元に戻せません。削除しますか?';
+        if (!confirm(msg)) { this._releaseRoiLock(); return; }
+        const done = await removeShareImage(sec, layerKey);
+        this._releaseRoiLock();
+        if (!done) return;
+        const panel = this.panels.get(sec.id);
+        if (panel) panel.removeLayer(layerKey, true);   // ここは実体も片づける
+        else delete sec.images[layerKey];
+        showToast('レイヤー 「' + formatDisplayName(layerKey) + '」 を削除しました');
     },
 
     // 共有の位置合わせをサーバから読み直す。テーブルがまだ無いデータベースでは

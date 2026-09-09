@@ -147,7 +147,9 @@ Click **`Align`** on a section panel to open a modal that aligns HE/IF layers to
 > - **Your re-publishes never wipe a recipient's alignment**, and a recipient's alignment never enters your publish payload
 > - Simultaneous edits are guarded by an optimistic version: the later save is told "someone updated this first"
 > - A recipient can delete a section's shared alignment with `×`, which returns that section to yours
-> - **This needs a SQL migration**: re-run [`supabase/share_locks.sql`](../supabase/share_locks.sql) in the SQL Editor (idempotent). Until then, re-aligning does not reach anyone else and the page says so.
+> - **Recipients can bring their own HE/IF images** (`+ HE/IF`). The file lands under `<slug>/shared/` in Storage with a row in `share_images`, and **your own images (`<slug>/blobs/`) are never touched**. Switching back to `位置合わせ: master` drops recipient-added images entirely.
+> - Storage writes are opened for the share token **only under `<slug>/shared/`** (`x-share-token`); your publish-token policies are unchanged.
+> - **This needs a SQL migration**: re-run [`supabase/share_locks.sql`](../supabase/share_locks.sql) in the SQL Editor (idempotent). Until then, re-aligning does not reach anyone else and image registration is refused — the page says so.
 
 > **HE resolution in a composite**: on sections that carry MSI, the display canvas is baked **to the MSI grid** (ROI coordinates and μm/px are derived from it). The upscale factor goes up to **8× the MSI grid or a 2048 px canvas long edge, whichever is larger**, and never beyond the HE's own resolution. A multi-thousand-pixel scanner HE is therefore downscaled to that range — but the downscale is **area-averaged**, so nuclear texture is filtered rather than dropped. To inspect HE at its native resolution, hide the MSI layers and view HE alone (the canvas is then built at the HE's own size).
 
