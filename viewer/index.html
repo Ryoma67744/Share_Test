@@ -72,11 +72,16 @@ body.share-mode #project-name-input,
 body.share-mode #tb-add-heif,
 body.share-mode #tb-add-msi,
 body.share-mode #tb-add-raw,
-body.share-mode #tb-align-heif,
 body.share-mode #tb-rot-share-default,
 body.share-mode #tb-msi-um-group,
 body.share-mode #tb-flip-group,
 body.share-mode #tb-del-section { display:none !important; }
+/* ★ #tb-align-heif は共有先でも出す。位置合わせは「見え方」を合わせ直す操作で、
+   master が登録した位置合わせは sections.meta に残ったまま (共有先の結果は
+   share_alignments へ置く)。どちらを見るかは下の #tb-align-choice-group で
+   切り替える。 */
+#tb-align-choice-group { display:none; }
+body.share-mode #tb-align-choice-group { display:inline-flex; }
 /* Global HE/IF grayscale toggle: share-view only (master uses the per-layer gear). */
 #tb-he-mono-group { display:none; }
 body.share-mode #tb-he-mono-group { display:inline-flex; }
@@ -765,6 +770,9 @@ body:not(.share-mode) #btn-share-preview:hover { background:#f3f4f6; border-colo
   #btn-publish-share, #btn-share-info, #btn-add-section, #btn-add-parquet,
   #btn-replace-parquet, #btn-delete-project,
   #tb-add-heif, #tb-add-msi, #tb-add-raw, #tb-align-heif, #tb-del-section,
+  /* 位置合わせの切替そのものは残す (どちらを見ているか分からないと困る)。
+     消す操作だけ畳む。 */
+  #tb-align-share-del,
   #tb-flip-group, #tb-msi-um-group, #tb-rot-share-default,
   /* 狭い画面でも絞り込みは残す (共有先の唯一の探索手段なので)。
      書き換え系のボタンだけ畳む。 */
@@ -933,6 +941,16 @@ body:not(.share-mode) #btn-share-preview:hover { background:#f3f4f6; border-colo
                 <button class="tb-btn" id="tb-add-msi" title="Register MSI xlsx or txt as a layer">+ MSI</button>
                 <button class="tb-btn" id="tb-add-raw" title="Waters .raw (DESI-TQ-MSI) をフォルダごと登録">+ .raw</button>
                 <button class="tb-btn" id="tb-align-heif" title="HE/IF を MSI と重ね合わせる (manual / landmark)">Align</button>
+                <!-- 共有先だけに出す。master が登録した位置合わせと、共有先が合わせ直した
+                     位置合わせ (share_alignments) を切り替える。CSS の既定は none。 -->
+                <span class="tb-group" id="tb-align-choice-group" title="HE/IF ⇔ MSI の位置合わせをどちらで見るか。master が登録したものは常に残ります">
+                    <span class="tb-label">位置合わせ:</span>
+                    <select id="tb-align-choice" aria-label="位置合わせの切り替え">
+                        <option value="master">master</option>
+                        <option value="shared">共有 (合わせ直し)</option>
+                    </select>
+                    <button type="button" id="tb-align-share-del" class="tb-icon" title="この切片の共有位置合わせを削除して master に戻す" aria-label="共有位置合わせを削除">×</button>
+                </span>
                 <button class="tb-btn danger" id="tb-del-section" title="Delete the active section">×</button>
                 <span class="tb-divider"></span>
                 <span class="tb-group" title="MSI 表示ウィンドウ (生単位) — 同じ MRM の全切片に適用。下限以下は黒で表示">
@@ -12270,6 +12288,206 @@ function persistOverlays(ov) {
     return pushShareOverlay(ov);
 }
 
+// ---- 共有先が合わせ直した HE/IF ⇔ MSI の位置合わせ ----------------------
+//
+// 位置合わせは切片ごとに sections.meta の 4 か所に散っている
+// (world_coords.T_he_to_msi / T_he_to_msi_by_source / msi_um_per_px と
+//  alignment[HEレイヤー] / alignmentMsiKey / alignmentSourceMode)。
+// 描画側 (_resolveTHeToMsi) はこの meta しか見ないので、**画面に効いている
+// 1 組**は常に meta に入っている。切り替えは「どの組を meta へ書き込むか」で
+// 実現する — 描画経路には一切触らない。
+//
+//   master の組  : 共有ドキュメントを読み込んだ直後の meta (sec.meta.__alignMaster)
+//   共有の組     : 共有先が合わせ直してサーバへ置いた組 (share_alignments)
+//
+// master の組は publish のたびに sections.meta ごと入れ替わるので、共有先の
+// 組をそこへ混ぜると master の位置合わせが失われて戻せなくなる。だから別
+// テーブルに置き、切り替えられるようにしてある。
+const SHARE_ALIGN_CHOICE_LS_PREFIX = 'desi:shareAlignChoice:';
+
+// 切片 1 枚の位置合わせをまとめて取り出す / 書き戻す。
+// ★ 項目を足したら **両方** に足すこと。片方だけだと「切り替えると一部だけ
+//   master のまま」という、絵は出るのに気づけない壊れ方になる。
+const SECTION_ALIGN_WC_KEYS = ['T_he_to_msi', 'T_he_to_msi_by_source', 'msi_um_per_px'];
+
+function captureSectionAlignment(sec) {
+    const meta = (sec && sec.meta) || {};
+    const wc = meta.world_coords || {};
+    const out = { world_coords: {}, alignment: null, alignmentMsiKey: null, alignmentSourceMode: null };
+    for (const k of SECTION_ALIGN_WC_KEYS) {
+        if (wc[k] != null) out.world_coords[k] = JSON.parse(JSON.stringify(wc[k]));
+    }
+    if (meta.alignment) out.alignment = JSON.parse(JSON.stringify(meta.alignment));
+    if (meta.alignmentMsiKey != null) out.alignmentMsiKey = meta.alignmentMsiKey;
+    if (meta.alignmentSourceMode != null) out.alignmentSourceMode = meta.alignmentSourceMode;
+    return out;
+}
+
+function applySectionAlignment(sec, payload) {
+    if (!sec) return;
+    sec.meta = sec.meta || {};
+    sec.meta.world_coords = sec.meta.world_coords || {};
+    const wc = sec.meta.world_coords;
+    const src = (payload && payload.world_coords) || {};
+    for (const k of SECTION_ALIGN_WC_KEYS) {
+        if (src[k] != null) wc[k] = JSON.parse(JSON.stringify(src[k]));
+        else delete wc[k];
+    }
+    if (payload && payload.alignment) sec.meta.alignment = JSON.parse(JSON.stringify(payload.alignment));
+    else sec.meta.alignment = {};
+    if (payload && payload.alignmentMsiKey != null) sec.meta.alignmentMsiKey = payload.alignmentMsiKey;
+    else delete sec.meta.alignmentMsiKey;
+    if (payload && payload.alignmentSourceMode != null) sec.meta.alignmentSourceMode = payload.alignmentSourceMode;
+    else delete sec.meta.alignmentSourceMode;
+}
+
+// サーバから読んだ共有の位置合わせ。切片 id -> { payload, version }。
+const _shareAlignBySection = new Map();
+let _shareAlignServerMissing = false;
+
+function _noteShareAlignServerMissing() {
+    if (_shareAlignServerMissing) return;
+    _shareAlignServerMissing = true;
+    showToast('位置合わせの共有機能がサーバに未適用です。合わせ直しても他の人には届きません '
+        + '(管理者は supabase/share_locks.sql を再実行してください)', 8000);
+}
+
+function _shareAlignChoiceKey() {
+    const slug = (App && App.shareMode && App.shareMode.slug) || '';
+    return slug ? (SHARE_ALIGN_CHOICE_LS_PREFIX + slug) : '';
+}
+
+// どちらの組を見ているか。'master' / 'shared'。
+// **これは見る側の選択**なので、この端末にだけ覚える (位置合わせ自体は全員で共有)。
+function loadShareAlignChoice() {
+    const key = _shareAlignChoiceKey();
+    if (!key) return 'master';
+    try { return localStorage.getItem(key) === 'shared' ? 'shared' : 'master'; }
+    catch (e) { return 'master'; }
+}
+
+function saveShareAlignChoice(choice) {
+    const key = _shareAlignChoiceKey();
+    if (!key) return;
+    try {
+        if (choice === 'shared') localStorage.setItem(key, 'shared');
+        else localStorage.removeItem(key);
+    } catch (e) { /* 覚えられないだけ。今のセッションでは効く */ }
+}
+
+// 共有先で、位置合わせを切り替えられる状態か。
+function isShareAlignMode() {
+    return !!(App && App.shareMode && App.project && App.project.__share);
+}
+
+// いま選ばれている組を全切片の meta へ書き込み、描き直す。
+// 共有の組が無い切片は master の組のまま (合わせ直した切片だけ差し替わる)。
+function applyAlignChoiceToSections(opts) {
+    const project = App && App.project;
+    if (!project) return;
+    const useShared = (App.alignChoice === 'shared');
+    for (const sec of (project.sections || [])) {
+        const master = (sec.meta && sec.meta.__alignMaster) || null;
+        const rec = useShared ? _shareAlignBySection.get(sec.id) : null;
+        applySectionAlignment(sec, (rec && rec.payload) || master);
+    }
+    if (!(opts && opts.quiet)) {
+        App.panels.forEach(p => {
+            // 位置合わせが変わると HE の載り方も MSI 基準のキャンバス寸法も変わる。
+            // setupCanvasSize は最後に renderComposite まで通す。
+            try { if (!p.setupCanvasSize()) p.renderComposite(); } catch (e) { console.warn('align re-render failed', e); }
+            try { p.refreshSectionLabel && p.refreshSectionLabel(); } catch (e) {}
+        });
+    }
+    try { Toolbar.refreshAlignChoice(); } catch (e) {}
+}
+
+// サーバから共有の位置合わせを読む。テーブルが無ければ null。
+async function fetchShareAlignments() {
+    const token = App.shareMode && App.shareMode.token;
+    if (!token || _shareAlignServerMissing) return null;
+    try {
+        const rows = await SupabaseClient.listShareAlignments(token);
+        return (rows || []).map(r => ({
+            sectionId: r.section_id,
+            payload: r.payload || {},
+            version: r.version || 1,
+        }));
+    } catch (e) {
+        if (_isMissingRpc(e)) { _noteShareAlignServerMissing(); return null; }
+        if (_isExpiredTokenError(e)) { _noteShareTokenExpired(); return null; }
+        console.warn('[share align] 一覧の取得に失敗しました', e);
+        return null;
+    }
+}
+
+// 取り込んだ一覧を控えへ反映する。戻り値は「変わったか」。
+function applyServerShareAlignments(list) {
+    if (!Array.isArray(list)) return false;
+    const sig = (m) => JSON.stringify([...m.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+        .map(([k, v]) => [k, v.version, v.payload]));
+    const before = sig(_shareAlignBySection);
+    const next = new Map();
+    for (const r of list) if (r && r.sectionId) next.set(r.sectionId, { payload: r.payload, version: r.version });
+    if (before === sig(next)) return false;
+    _shareAlignBySection.clear();
+    for (const [k, v] of next) _shareAlignBySection.set(k, v);
+    return true;
+}
+
+// 自分が書いた回数。取得の往復中に自分が書いたら、その一覧は捨てる。
+let _shareAlignWriteGen = 0;
+
+// 切片 1 枚の位置合わせを共有側へ置く。戻り値 true = 置けた。
+async function pushShareAlignment(sec) {
+    const token = App.shareMode && App.shareMode.token;
+    if (!token || !sec) return false;
+    if (_shareAlignServerMissing) {
+        showToast('位置合わせの共有機能がサーバに未適用のため、この合わせ直しは保存できません', 6000);
+        return false;
+    }
+    const payload = captureSectionAlignment(sec);
+    const cur = _shareAlignBySection.get(sec.id);
+    try {
+        const rec = await SupabaseClient.upsertShareAlignment(
+            token, sec.id, payload, cur ? cur.version : null);
+        _shareAlignBySection.set(sec.id, {
+            payload,
+            version: (rec && rec.version) || ((cur && cur.version + 1) || 1),
+        });
+        _shareAlignWriteGen++;
+        return true;
+    } catch (e) {
+        if (_isMissingRpc(e)) { _noteShareAlignServerMissing(); return false; }
+        if (_isStaleVersionError(e)) {
+            showToast('この切片の位置合わせは他の人が先に更新しました。'
+                + '最新を読み込んでからやり直してください', 8000);
+            if (App && App._refreshShareAlignments) App._refreshShareAlignments().catch(() => {});
+            return false;
+        }
+        console.warn('[share align] 保存に失敗しました', e);
+        showToast('位置合わせをサーバへ保存できませんでした: ' + ((e && e.message) || e), 6000);
+        return false;
+    }
+}
+
+// 切片 1 枚の共有位置合わせを消す (= master の位置合わせへ戻す)。
+async function removeShareAlignment(sec) {
+    const token = App.shareMode && App.shareMode.token;
+    if (!token || !sec) return false;
+    try {
+        await SupabaseClient.deleteShareAlignment(token, sec.id);
+        _shareAlignBySection.delete(sec.id);
+        _shareAlignWriteGen++;
+        return true;
+    } catch (e) {
+        if (_isMissingRpc(e)) { _noteShareAlignServerMissing(); _shareAlignBySection.delete(sec.id); return true; }
+        console.warn('[share align] 削除に失敗しました', e);
+        showToast('位置合わせをサーバから削除できませんでした: ' + ((e && e.message) || e), 6000);
+        return false;
+    }
+}
+
 // Distinct MSI compound layers across the project, as [key, displayName].
 function _allMsiCompounds() {
     const map = new Map();
@@ -13270,6 +13488,15 @@ const Wizards = {
         if (!heKeys.length) {
             alert('HE / IF レイヤーが登録されていません。先に「+ HE/IF」で画像を追加してください。');
             return null;
+        }
+
+        // ★ 共有先は書き込みロックを取ってから開く。位置合わせは共有データ
+        //   (share_alignments) を書き換える操作なので、ROI の描画と同じく
+        //   同時に触れるのは 1 人だけにする。閉じるときに必ず返す。
+        const shareAlign = isShareAlignMode();
+        if (shareAlign) {
+            const gotLock = await App._tryAcquireRoiLock();
+            if (!gotLock) return null;
         }
 
         const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
@@ -14747,6 +14974,9 @@ const Wizards = {
         // to remove the backdrop; piggyback on the resolve to revert state.
         const origClose = card._close;
         card._close = (val) => {
+            // 保存でも中止でもロックは返す。握ったままだと、他の人が ROI も
+            // 位置合わせも触れなくなる。
+            if (shareAlign) { try { App._releaseRoiLock(); } catch (e) {} }
             if (val === 'saved') {
                 origClose && origClose(val);
                 return;
@@ -14755,7 +14985,7 @@ const Wizards = {
             origClose && origClose(null);
         };
 
-        saveBtn.addEventListener('click', () => {
+        saveBtn.addEventListener('click', async () => {
             // Persist alignment params alongside T for round-trip editing.
             // The legacy top-level fields stay in place so old viewers and
             // first-time per-source modal opens still find a sensible
@@ -14800,6 +15030,23 @@ const Wizards = {
             sec.meta.alignment[state.layerKey] = aRef;
             // T and msi_um_per_px are already up to date thanks to writeWorldCoords()
             writeWorldCoords();
+            if (shareAlign) {
+                // ★ 共有先は共有ドキュメント (master の位置合わせ) を書き換えない。
+                //   いま meta に入っている組をそのまま share_alignments へ置き、
+                //   表示を「共有」へ切り替える。master の組は __alignMaster に
+                //   控えたままなので、いつでも戻せる。
+                saveBtn.disabled = true;
+                let ok = false;
+                try { ok = await pushShareAlignment(sec); }
+                finally { saveBtn.disabled = false; }
+                if (!ok) return;   // 保存できていないのでモーダルは閉じない
+                App.alignChoice = 'shared';
+                saveShareAlignChoice('shared');
+                applyAlignChoiceToSections();
+                showToast('位置合わせを保存しました。この共有 URL を開いた全員に届きます', 6000);
+                if (card._close) card._close('saved');
+                return;
+            }
             try { App.queueSave(0); } catch (e) {}
             try { panel.renderComposite(); } catch (e) {}
             // Refresh the canvas-label so the new μm/px shows in the section
@@ -16837,9 +17084,15 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
             //   sections.meta.overlays は master の定義だけを持つ
             //   (混ぜると、master が再 publish するたびに共有先のセットが
             //    master の定義として焼き直されて増えていく)。
-            meta: Object.assign({}, sec.meta || {}, {
-                overlays: (project.overlays || []).filter(o => !isViewerOverlay(o)),
-            }),
+            //   同じ理由で __alignMaster (共有先が控えている master の位置合わせ)
+            //   も載せない。共有先の控えであって、共有ドキュメントの中身ではない。
+            meta: (() => {
+                const m = Object.assign({}, sec.meta || {}, {
+                    overlays: (project.overlays || []).filter(o => !isViewerOverlay(o)),
+                });
+                delete m.__alignMaster;
+                return m;
+            })(),
             storagePaths: storage,
         });
     }
@@ -19968,6 +20221,8 @@ const Toolbar = {
         this.addMsiBtn = document.getElementById('tb-add-msi');
         this.addRawBtn = document.getElementById('tb-add-raw');
         this.alignHeIfBtn = document.getElementById('tb-align-heif');
+        this.alignChoiceSel = document.getElementById('tb-align-choice');
+        this.alignShareDelBtn = document.getElementById('tb-align-share-del');
         this.delBtn = document.getElementById('tb-del-section');
         this.rotResetBtn = document.getElementById('tb-rot-reset');
         this.rotShareDefaultBtn = document.getElementById('tb-rot-share-default');
@@ -19991,6 +20246,22 @@ const Toolbar = {
         });
         if (this.alignHeIfBtn) this.alignHeIfBtn.addEventListener('click', () => {
             const p = this.activePanel(); if (p) Wizards.openAlignmentModal(p);
+        });
+        // 共有先: master が登録した位置合わせと、共有先が合わせ直した位置合わせを
+        // 行き来する。どちらを見るかは**この端末の選択**なので localStorage。
+        if (this.alignChoiceSel) this.alignChoiceSel.addEventListener('change', () => {
+            const v = this.alignChoiceSel.value === 'shared' ? 'shared' : 'master';
+            App.alignChoice = v;
+            saveShareAlignChoice(v);
+            applyAlignChoiceToSections();
+            if (v === 'shared' && _shareAlignBySection.size === 0) {
+                showToast('合わせ直した切片がまだありません。Align で合わせて保存すると、'
+                    + 'この共有 URL を開いた全員に届きます', 6000);
+            }
+        });
+        if (this.alignShareDelBtn) this.alignShareDelBtn.addEventListener('click', () => {
+            App.deleteShareAlignmentForActiveSection()
+                .catch(e => console.warn('share align delete failed', e));
         });
         this.delBtn.addEventListener('click', () => {
             const p = this.activePanel();
@@ -20357,12 +20628,33 @@ const Toolbar = {
         cb.indeterminate = (robust > 0 && full > 0);
         cb.checked = (full === 0);
     },
+    // 位置合わせの切替 UI。共有先でしか出ないので、master では何もしない。
+    refreshAlignChoice() {
+        if (!this.alignChoiceSel) return;
+        const on = isShareAlignMode();
+        const shared = _shareAlignBySection.size;
+        this.alignChoiceSel.value = (App.alignChoice === 'shared') ? 'shared' : 'master';
+        // 「共有」の選択肢に件数を出す。0 件なら、切り替えても何も変わらないことが
+        // 選ぶ前に分かる。
+        const opt = this.alignChoiceSel.querySelector('option[value="shared"]');
+        if (opt) opt.textContent = shared ? ('共有 (合わせ直し ' + shared + ' 切片)') : '共有 (合わせ直し)';
+        if (this.alignShareDelBtn) {
+            const p = on ? this.activePanel() : null;
+            const has = !!(p && _shareAlignBySection.has(p.section.id));
+            this.alignShareDelBtn.disabled = !has;
+            this.alignShareDelBtn.title = has
+                ? 'この切片の共有位置合わせを削除して master に戻す (全員に反映されます)'
+                : 'この切片には共有の位置合わせがありません';
+        }
+    },
+
     refreshAll() {
         this.refreshSectionPicker();
         this.refreshRange();
         this.refreshOpacity();
         this.refreshRotation();
         this.refreshOutlierClip();
+        this.refreshAlignChoice();
     },
 };
 
@@ -20484,6 +20776,19 @@ const SupabaseClient = (() => {
             return rpc('update_share_overlay', { p_token: token, p_id: id, p_expected_version: expectedVersion, ...payload });
         },
         deleteShareOverlay(token, id) { return rpc('delete_share_overlay', { p_token: token, p_id: id }); },
+        // 共有の位置合わせ (HE/IF ⇔ MSI。共有 URL を開いた全員で共有する) --
+        // これも share_locks.sql の 10. を適用していないと PGRST202。
+        listShareAlignments(token) { return rpc('list_share_alignments', { p_token: token }); },
+        upsertShareAlignment(token, sectionId, payload, expectedVersion) {
+            return rpc('upsert_share_alignment', {
+                p_token: token, p_section_id: sectionId, p_payload: payload,
+                p_expected_version: (expectedVersion == null ? null : expectedVersion),
+                p_created_by: 'viewer',
+            });
+        },
+        deleteShareAlignment(token, sectionId) {
+            return rpc('delete_share_alignment', { p_token: token, p_section_id: sectionId });
+        },
         // Lock -------------------------------------------------
         acquireRoiLock(token, label) { return rpc('acquire_roi_lock', { _token: token, _label: label || null }); },
         heartbeatRoiLock(token) { return rpc('heartbeat_roi_lock', { _token: token }); },
@@ -20793,6 +21098,11 @@ const App = {
                                // 正=強く除去(多く消す)、負=弱く(残す)。
     analysisMode: 'otsu',      // Analysis パネルの初期表示: 'otsu' 背景除去 / 'roi' 強度チャート
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
+    // 共有先で、HE/IF ⇔ MSI の位置合わせをどちらで見るか。
+    // 'master' = 共有元が登録したもの / 'shared' = 共有先が合わせ直したもの。
+    // 位置合わせ自体は全員で共有するが、**どちらを見るかは各自の選択**なので
+    // この端末にだけ覚える (loadShareAlignChoice)。
+    alignChoice: 'master',
     // --- 保存 / 自動公開の状態 ------------------------------------------------
     _publishDirty: false,      // 共有へ送るべき実編集があるか。queueSave で立ち、
                                // publish 成功で降りる。_scheduleAutoPublish の条件。
@@ -22552,6 +22862,18 @@ const App = {
             __share: true,
         };
 
+        // 前の共有セッションの控えを持ち越さない。
+        _shareAlignBySection.clear();
+
+        // ★ master が登録した位置合わせを、触られる前に切片ごとに控える。
+        //   共有先が Align で合わせ直しても、この控えがあれば「master に戻す」
+        //   がいつでもできる (共有先の結果は share_alignments 側に置く)。
+        //   sections.meta の中に置くのは、切片を跨いで持ち回らずに済むため。
+        for (const sec of project.sections) {
+            sec.meta = sec.meta || {};
+            sec.meta.__alignMaster = captureSectionAlignment(sec);
+        }
+
         // Pull blobs referenced in storage_paths, drop them into IndexedDB
         // (so the existing rendering pipeline can address them by blobId),
         // and rebuild section.images / msiSeries entries.
@@ -22861,6 +23183,12 @@ const App = {
         // 共有の重ね合わせ (share_overlays) をサーバから読む。ROI と同じ 12 秒の
         // ポーリングにも乗せてあるので、他の人が作ったセットも自然に並ぶ。
         this._refreshShareOverlays().catch(e => console.warn('share overlay init failed', e));
+        // 共有の位置合わせ (share_alignments)。読み終えてから、選ばれている組を当てる。
+        // 先に __alignMaster を控えてあるので (hydrate 直後)、いつでも master へ戻せる。
+        this.alignChoice = loadShareAlignChoice();
+        this._refreshShareAlignments()
+            .then(() => { if (this.alignChoice === 'shared') applyAlignChoiceToSections(); })
+            .catch(e => console.warn('share align init failed', e));
         // Show the simplified compound-comparison preview on top of the
         // freshly-hydrated detailed view. The overlay is only auto-shown for
         // share-mode visitors (recipients and admins); the master / local
@@ -23750,15 +24078,24 @@ const App = {
         if (this.shareMode) this._releaseRoiLock();
     },
 
+    // ★ 入れ子で取れるようにしてある。位置合わせ (Align モーダル) を開いたまま
+    //   ROI を描く、といった重なりが起きるので、素朴に取り直すと
+    //   ・heartbeat の setInterval が二重に走って前のが漏れる
+    //   ・内側の解放だけで鍵が返ってしまい、外側の編集が無防備になる
+    //   の 2 つを踏む。深さを数えて、外側が閉じるまで返さない。
+    _roiLockDepth: 0,
+
     async _tryAcquireRoiLock() {
         if (!this.shareMode || !this.shareMode.token) return true;
+        if (this._roiLockDepth > 0) { this._roiLockDepth++; return true; }   // 既に自分が持っている
         try {
             const res = await SupabaseClient.acquireRoiLock(this.shareMode.token, this.shareMode.label || null);
             if (!res || res.ok !== true) {
                 const seen = res && res.last_seen ? new Date(res.last_seen).toLocaleTimeString() : '?';
-                showToast('他のユーザーが ROI を編集中です (last seen ' + seen + ')', 3000);
+                showToast('他のユーザーが編集中です (last seen ' + seen + ')', 3000);
                 return false;
             }
+            this._roiLockDepth = 1;
             // Heartbeat every 5 s so the server keeps treating us as active.
             this._roiLockHeartbeat = setInterval(() => {
                 SupabaseClient.heartbeatRoiLock(this.shareMode.token).catch(() => {});
@@ -23766,12 +24103,14 @@ const App = {
             return true;
         } catch (e) {
             console.warn('ROI lock acquire failed', e);
-            showToast('ROI ロックの取得に失敗しました');
+            showToast('書き込みロックの取得に失敗しました');
             return false;
         }
     },
 
     _releaseRoiLock() {
+        if (this._roiLockDepth > 1) { this._roiLockDepth--; return; }   // 外側がまだ持っている
+        this._roiLockDepth = 0;
         if (this._roiLockHeartbeat) { clearInterval(this._roiLockHeartbeat); this._roiLockHeartbeat = null; }
         if (!this.shareMode || !this.shareMode.token) return;
         SupabaseClient.releaseRoiLock(this.shareMode.token).catch(() => {});
@@ -23795,7 +24134,52 @@ const App = {
             // 重ね合わせも同じ間隔で合わせる。ROI と同じ 1 本のタイマーに乗せて
             // おくと、止める条件 (描画中・期限切れ) を書き分けずに済む。
             this._refreshShareOverlays().catch(e => console.warn('share overlay poll failed', e));
+            this._refreshShareAlignments().catch(e => console.warn('share align poll failed', e));
         }, 12000);
+    },
+
+    // 共有の位置合わせをサーバから読み直す。テーブルがまだ無いデータベースでは
+    // fetchShareAlignments が null を返し、master の位置合わせのまま何もしない。
+    async _refreshShareAlignments() {
+        if (!this.shareMode || !this.shareMode.token || !this.project) return;
+        if (_shareTokenExpired) return;
+        const gen = _shareAlignWriteGen;
+        const list = await fetchShareAlignments();
+        if (!list) return;
+        if (gen !== _shareAlignWriteGen) return;   // 取得中に自分が書いた → 次の回へ
+        if (!applyServerShareAlignments(list)) return;
+        // 「共有」を見ているときだけ描き直す。master を見ている人の画面を、
+        // 他の人の合わせ直しで勝手に動かさない。
+        if (this.alignChoice === 'shared') applyAlignChoiceToSections();
+        else { try { Toolbar.refreshAlignChoice(); } catch (e) {} }
+    },
+
+    // ③ 共有の位置合わせを消す = その切片を master の位置合わせへ戻す。
+    // ROI の削除と同じで、**訊く前にロックを取る**。共有データを消す操作なので、
+    // ロックを持っていることと影響範囲を確認文に出す。
+    async deleteShareAlignmentForActiveSection() {
+        if (!this.shareMode) return;
+        const panel = Toolbar.activePanel();
+        if (!panel) { showToast('まず切片パネルをクリックしてアクティブにしてください'); return; }
+        const sec = panel.section;
+        if (!_shareAlignBySection.has(sec.id)) {
+            showToast('この切片には共有の位置合わせがありません');
+            return;
+        }
+        const ok = await this._tryAcquireRoiLock();
+        if (!ok) return;
+        const name = sec.displayName || ('Section ' + (sec.ordinal || ''));
+        const msg = '書き込みロックを取得しました (いまは自分だけが編集できます)。\n\n'
+            + '「' + name + '」 の共有の位置合わせを削除して、master が登録した位置合わせに戻します。\n'
+            + 'サーバ上の共有データから消えるので、この URL を開いた他の人からも見えなくなります。\n'
+            + '元に戻せません。削除しますか?';
+        if (!confirm(msg)) { this._releaseRoiLock(); return; }
+        const done = await removeShareAlignment(sec);
+        this._releaseRoiLock();
+        if (!done) return;
+        // 消えた切片は master へ戻す。他の切片の選択は動かさない。
+        applyAlignChoiceToSections();
+        showToast('「' + name + '」 を master の位置合わせに戻しました');
     },
 
     // 共有の重ね合わせをサーバから読み直す。テーブルがまだ無いデータベースでは

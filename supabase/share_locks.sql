@@ -1212,3 +1212,126 @@ grant execute on function public.list_share_overlays(text)                      
 grant execute on function public.create_share_overlay(text, text, jsonb, text, boolean, text)   to anon, authenticated;
 grant execute on function public.update_share_overlay(text, uuid, int, text, jsonb, text, boolean) to anon, authenticated;
 grant execute on function public.delete_share_overlay(text, uuid)                              to anon, authenticated;
+
+-- ---- 10. share_alignments: 共有 URL を開いた全員で共有する位置合わせ ----
+--
+-- HE/IF を MSI に重ねる位置合わせ (Align) は sections.meta に入っていて、
+-- master が publish するたび upsert_project_doc が meta ごと入れ替える。
+-- 共有 URL を開いた人が自分で合わせ直した結果をそこへ書くと
+--   ・master が再 publish した瞬間に消える
+--   ・そもそも閲覧者は publish できない
+--   ・master が登録した位置合わせが失われて戻せない
+-- ので、切片ごとに別テーブルへ置く。master の分は sections.meta に残った
+-- ままなので、画面はどちらを使うか切り替えられる。
+--
+-- payload は viewer/index.html の captureSectionAlignment が作る形:
+--   { world_coords: {...}, alignment: {...},
+--     alignmentMsiKey: text, alignmentSourceMode: text }
+-- 中身の解釈はすべてフロント側。ここでは触らない (項目が増えても SQL は不変)。
+create table if not exists public.share_alignments (
+    project_id uuid not null references public.projects(id) on delete cascade,
+    section_id uuid not null references public.sections(id) on delete cascade,
+    payload    jsonb not null default '{}'::jsonb,
+    created_by text not null default 'viewer',
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    version    int  not null default 1,
+    primary key (project_id, section_id)
+);
+
+create index if not exists share_alignments_project_idx
+    on public.share_alignments(project_id);
+
+alter table public.share_alignments enable row level security;
+revoke all on public.share_alignments from anon, authenticated;
+
+create or replace function public.list_share_alignments(p_token text)
+returns setof public.share_alignments
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    return query
+        select * from public.share_alignments
+         where project_id = v_pid
+         order by section_id;
+end
+$$;
+
+-- 切片 1 枚ぶんの位置合わせを置く (無ければ作る)。
+-- p_expected_version を渡すと楽観ロック: 食い違えば 40001 で弾き、
+-- 別の人が先に合わせ直した結果を黙って上書きしない。
+-- null を渡した場合は「新規のつもり」= 既存行があれば 40001。
+create or replace function public.upsert_share_alignment(
+    p_token text,
+    p_section_id uuid,
+    p_payload jsonb,
+    p_expected_version int default null,
+    p_created_by text default 'viewer'
+) returns public.share_alignments
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+    v public.share_alignments;
+    v_cur public.share_alignments;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    if not exists (select 1 from public.sections
+                    where id = p_section_id and project_id = v_pid) then
+        raise exception 'section not in this project' using errcode = '22023';
+    end if;
+    select * into v_cur from public.share_alignments
+     where project_id = v_pid and section_id = p_section_id;
+    if v_cur.section_id is null then
+        if p_expected_version is not null then
+            raise exception 'stale_version' using errcode = '40001';
+        end if;
+        insert into public.share_alignments(project_id, section_id, payload, created_by)
+             values (v_pid, p_section_id, coalesce(p_payload, '{}'::jsonb),
+                     coalesce(p_created_by, 'viewer'))
+          returning * into v;
+        return v;
+    end if;
+    if p_expected_version is null or v_cur.version <> p_expected_version then
+        raise exception 'stale_version' using errcode = '40001';
+    end if;
+    update public.share_alignments
+       set payload    = coalesce(p_payload, payload),
+           updated_at = now(),
+           version    = version + 1
+     where project_id = v_pid and section_id = p_section_id
+    returning * into v;
+    return v;
+end
+$$;
+
+-- 削除 = その切片を master の位置合わせへ戻す。rois と同じで、その共有を
+-- 開いている人なら誰でも消せる。
+create or replace function public.delete_share_alignment(p_token text, p_section_id uuid)
+returns void
+language plpgsql security definer set search_path = public, extensions
+as $$
+declare
+    v_pid uuid;
+begin
+    v_pid := public._project_from_token(p_token);
+    if v_pid is null then
+        raise exception 'invalid or expired token' using errcode = '28000';
+    end if;
+    delete from public.share_alignments
+     where project_id = v_pid and section_id = p_section_id;
+end
+$$;
+
+grant execute on function public.list_share_alignments(text)                             to anon, authenticated;
+grant execute on function public.upsert_share_alignment(text, uuid, jsonb, int, text)    to anon, authenticated;
+grant execute on function public.delete_share_alignment(text, uuid)                      to anon, authenticated;

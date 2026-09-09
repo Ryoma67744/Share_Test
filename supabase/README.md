@@ -389,3 +389,36 @@ master が登録した重ね合わせは従来どおり `sections.meta.overlays`
 select public.list_share_overlays('&lt;viewer token&gt;');   -- 0 行でも成功すれば OK
 select count(*) from public.share_overlays;
 ```
+
+---
+
+## v2026-09-08.6: 共有先の位置合わせ (HE/IF ⇔ MSI) を全員で共有する (**再適用が必要**)
+
+共有 URL を開いた人が `Align` で合わせ直した **HE/IF ⇔ MSI の位置合わせ**を、その共有を
+開いている**全員**へ届けるためのテーブルと RPC です。master が登録した位置合わせは
+`sections.meta` に残ったままなので、画面でどちらを見るか切り替えられます。
+
+**[`share_locks.sql`](./share_locks.sql) を SQL Editor で再実行してください (冪等)。**
+
+| 追加されるもの | 役割 |
+| --- | --- |
+| `public.share_alignments` テーブル | 切片ごと 1 行 (`project_id` + `section_id` が主キー)。`payload` に `world_coords` / `alignment` / `alignmentMsiKey` / `alignmentSourceMode` をそのまま入れる。中身の解釈はフロント側だけなので、項目が増えても SQL は不変 |
+| `list_share_alignments(p_token)` | 一覧。ROI と同じ session token で読む |
+| `upsert_share_alignment(p_token, p_section_id, p_payload, p_expected_version, p_created_by)` | 保存。`p_expected_version` が null = 新規 (既存行があれば `40001`)、値つき = 楽観ロック (食い違えば `40001`) |
+| `delete_share_alignment(p_token, p_section_id)` | 削除 = その切片を master の位置合わせへ戻す |
+
+`upsert_project_doc` は `sections` を client_id で突き合わせて更新するので section の uuid は
+変わりません。したがって **master が再 publish しても `share_alignments` の行は残ります**。
+master が切片を削除したときだけ、外部キーの cascade で一緒に消えます。
+
+### 適用しなかった場合
+
+**壊れません。** フロントは RPC が無いこと (`PGRST202`) を検出して、「位置合わせの共有機能が
+サーバに未適用です」と 1 回だけ出し、合わせ直しは保存されません (master の位置合わせのまま)。
+
+### 確認
+
+```sql
+select public.list_share_alignments('&lt;viewer token&gt;');   -- 0 行でも成功すれば OK
+select count(*) from public.share_alignments;
+```

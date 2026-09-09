@@ -169,6 +169,22 @@ In share mode, **acquiring the write lock is required** to add or modify ROIs (o
 
 > While drawing you cannot switch sections. Press **Escape** to cancel (in-flight vertices are dropped).
 
+### 4-4b. Aligning HE/IF onto MSI (Align)
+
+Recipients can re-align HE/IF onto MSI with **`Align`** too. **The master's alignment is never lost** — the toolbar's **`位置合わせ:`** selector switches between them.
+
+| Choice | What it is |
+| --- | --- |
+| **master** | the alignment the master published (always kept) |
+| **共有 (合わせ直し)** | alignments made by recipients — visible to **everyone on this share URL** (within ~12 s) |
+
+- `Align` takes the **write lock** (one person at a time). If someone else is editing, it says so and does not open. Closing releases the lock.
+- Saving switches the view to **共有** automatically. Sections you did not re-align keep the master's alignment.
+- **Which one you look at** is your own choice, remembered on this device only (the alignments themselves are shared).
+- If two people re-align the same section at once, the later save is told "someone updated this first" instead of silently overwriting.
+- The **`×`** button deletes that section's shared alignment and returns it to the master's. It takes the lock first, then asks.
+- If the server side has not been migrated yet (re-run `supabase/share_locks.sql`), re-aligning does not reach anyone else and the page says so.
+
 ### 4-5. ROI-only view (clip MSI to the ROI shape)
 
 Turning on the **"ROIのみ" (ROI only)** checkbox in the ROI LIST header clips **only the MSI layers** to the shape of the **currently selected ROI**. HE / background stay fully visible, so you can compare the signal inside the ROI against the surrounding histology.
