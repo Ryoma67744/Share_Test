@@ -72,6 +72,19 @@ Use the same point-in-polygon predicate in the viewer, connector and CSV members
 
 Shared `poly_msi` JSON stores the vertices and geometry in an envelope. Legacy polygon arrays remain readable. Updated viewer and connector code must be deployed together to consume new envelopes; no SQL schema migration is required for the JSON payload.
 
+### Alignment editing workspace
+
+`Align` uses a viewport-filling workspace with large side-by-side HE/IF and MSI panes, an internal composite/opacity view, and collapsible manual controls and point details. Pan, zoom, Fit and view synchronization are display state. Images and point overlays share the same display mapping; click inverses recover the existing saved point basis. HE points remain HE-image pixels and MSI points remain `legacy-msi-pixel-edges-v1` coordinates. No landmark-coordinate migration is implicit in enlarging a pane.
+
+- Keep an isolated draft for each section, HE/IF image identity and MSI measurement coordinate frame. A molecule/TIC switch within the same confirmed frame retains all point coordinates, pairing/order, registration parameters and view. Do not reload a saved override on a molecule-only switch or run the solver implicitly.
+- A frame identity includes measurement/revision, reader definitions and the confirmed legacy coordinate arrangement. Exclude molecule/intensity selection and display supersampling. Equal width/height or file ID alone is insufficient; different sheets/functions/coordinate selections stay distinct.
+- Keep a separate shared-coordinate draft. New sessions default to individual measurements; a valid saved common selection may be restored. Explicit apply-to-all copies only to confirmed matching coordinate bases. Matching coordinate layout alone is not proof of the same physical acquisition.
+- `MsiAlignmentSession` clones draft data and keeps it out of project metadata until Save. `byFrame` records retain frame and HE/IF identity; `sharedByCoordinate` retains the canonical common record. Save commits all changed drafts in edit order, so the last explicit edit wins when targets overlap. Explicit broadcasts remain saveable even without a parameter change.
+- Save preserves the original registration solver and updates only registration records and selection hints. Local persistence must succeed before applying settings to the live project. Shared Save checks the version captured at editing start. Conflicts or persistence failures keep the draft available rather than silently overwriting stored settings.
+- Cancel, Esc and Close discard every unsaved draft and release the editing lock. Closing or changing selection invalidates pending image/solver completions; they cannot reactivate an old frame or mutate a closed workspace.
+- Legacy points and unknown frame records remain stored. Reuse requires a confirmed source/frame and HE/IF association. Do not guess point conversion, silently erase a record, or attach one source's alignment to another source. Unconfirmed displayed frames block point addition and Save with an explanation.
+- Physical `msi_um_per_px` is read-only here. The existing calibration dialog remains separate. Neither display navigation nor Manual registration changes source bytes, MSI intensities/X/Y, missingness, row order, existing MSI-coordinate ROI membership/statistics or standard numerical export. Explicitly editing HE/IF registration changes the HE/IF-to-MSI transform, not MSI measurements.
+
 ## 4. Otsu and display diagnostics
 
 Otsu creates a background visibility mask from source-derived total signal. Its switch, threshold and strength can change the image, including image exports. They must not remove ROI measurement rows, alter Method/Preview statistics or drop/flag rows in standard numerical CSV output. Explicit image-alignment tools may use a silhouette mask to estimate an alignment; merely toggling background visibility does not rerun alignment.
@@ -136,5 +149,7 @@ npm run selftest
 ```
 
 Regression fixtures must cover the duplicate example; zero/negative/missing/invalid cells; DOUBLE and unsafe integers; irregular coordinates and raw jitter; Otsu/display invariance; ambiguous CSV joins; source-byte/ZIP restoration; ROI forward/inverse mapping across rotations/reflections; source-anchored and unresolved legacy ROIs; non-square pitch; and section-selection/Range/async state. Use strict equality for unchanged row membership and deterministic same-runtime calculations; justify any cross-runtime floating-point tolerance.
+
+Alignment regression coverage must additionally include A→B→A and TIC point retention, source/HE draft restoration, shared-versus-individual edit precedence, explicit unchanged broadcasts, Cancel/Esc/failed Save, stale asynchronous image loads, frame/image mismatches, resize/click mapping, and unchanged numerical/calibration data.
 
 Passing synthetic/model tests is not a substitute for visual inspection of a running browser or comparison with the user's original MSI image. Original orientation, anatomical intent of old rotated ROIs and real-project migration remain evidence-dependent checks. Report the actual tests performed and remaining limits with each release; this document itself is not a test-completion report.

@@ -1116,6 +1116,9 @@ body:not(.share-mode) #btn-share-preview:hover { background:#f3f4f6; border-colo
 <div id="toast-host" class="toast-host"></div>
 
 <script src="section-visibility.js"></script>
+<script src="alignment-session.js"></script>
+<script src="alignment-workspace.js"></script>
+<link rel="stylesheet" href="alignment-workspace.css">
 <script>
 "use strict";
 // =============================================================
@@ -3545,6 +3548,92 @@ function msiSourceReference(ent) {
     if(ent.sourceReference)return ent.sourceReference;
     return JSON.stringify([ent.sourceFileId||ent.blobId||ent.sourceUrl||'',ent.kind||'',
         ent.sheet||'',ent.func||1,ent.annotation||'',ent.sourceHash||ent.sourceRevision||'']);
+}
+// Alignment identity describes measurement coordinates, never a molecule or
+// its intensity column. Keep the complete canonical key (rather than a hash)
+// so distinct coordinates cannot collide and accidentally reuse landmarks.
+function alignmentFrameDescriptor(section, key, panel) {
+    const e=(section&&section.msiSeries&&section.msiSeries[key])||{};
+    let frozen=null;
+    try { const v=JSON.parse(e.sourceReference||'null'); if(Array.isArray(v)&&v.length>=6)frozen=v; } catch (_) {}
+    const sourceId=(frozen&&frozen[0])||e.sourceFileId||e.sourceReference||e.blobId||e.storagePath||e.sourceUrl||'';
+    const revision=e.sourceHash||e.sourceRevision||(frozen&&frozen[5])||'';
+    const measurementKey=JSON.stringify([sourceId,revision]);
+    // The frozen reference supplies stable file identity only. Reader options
+    // must follow today's definition, including its defaults after an option
+    // is removed, rather than resurrecting an older sheet or section selector.
+    const kind=e.kind||'xlsx';
+    const readerKey=JSON.stringify([kind,
+        e.sheet||'',e.func||1,
+        e.col_x||e.x||'',e.col_y||e.y||'',e.data_start_row||1,
+        e.dataStartLine==null?null:e.dataStartLine,
+        // Parquet annotation selects measurement rows (a section), while the
+        // feature/intensity selector is colIdx. It must remain in this frame.
+        kind==='parquet'?(e.annotation==null?'':e.annotation):null,
+        kind==='raw'?e.snap!==false:null,
+        kind==='txt'||kind==='txt-analyte'?(kind==='txt-analyte'||Number.isFinite(e.compound_index)||Number.isFinite(e.v_index)):null]);
+    const p=panel||(typeof App!=='undefined'&&App.panels&&App.panels.get(section&&section.id));
+    const raster=p&&p.msiValueRasters&&p.msiValueRasters.get(key);
+    const geometry=(raster&&raster.sourceGeometry)||e.sourceGeometry||null;
+    const legacy=geometry&&geometry.legacy;
+    const validAxis=a=>Array.isArray(a)&&a.length>0&&a.every(v=>Array.isArray(v)&&v.length===2&&v.every(Number.isFinite));
+    const confirmed=!!(sourceId&&legacy&&legacy.confirmed!==false&&validAxis(legacy.x)&&validAxis(legacy.y)
+        &&Number.isInteger(legacy.W)&&legacy.W>0&&Number.isInteger(legacy.H)&&legacy.H>0);
+    // Saved landmarks are pixel-edge positions in the legacy raster basis.
+    // A different display supersampling factor does not change that basis.
+    const coordinateKey=confirmed?JSON.stringify(['legacy-msi-pixel-edges-v1',legacy.W,legacy.H,legacy.x,legacy.y]):null;
+    const frameKey=JSON.stringify(['msi-alignment-frame-v1',measurementKey,readerKey,
+        coordinateKey||['unresolved',key||'']]);
+    return {version:'msi-alignment-frame-v1',key:frameKey,measurementKey,readerKey,
+        sourceFileId:e.sourceFileId||null,coordinateKey,confirmed,
+        reason:confirmed?null:((legacy&&legacy.reason)||'alignment-coordinate-unconfirmed'),
+        geometry:geometry?JSON.parse(JSON.stringify(geometry)):null};
+}
+function alignmentLegacySourceIsUnambiguous(section, frame, panel) {
+    if(!frame||!frame.confirmed)return false;
+    const entries=Object.entries((section&&section.msiSeries)||{}).filter(([k,e])=>/^MSI_/i.test(k)&&e);
+    const related=entries.map(([k])=>alignmentFrameDescriptor(section,k,panel)).filter(f=>
+        frame.sourceFileId?f.sourceFileId===frame.sourceFileId:f.measurementKey===frame.measurementKey);
+    return related.length>0&&related.every(f=>f.measurementKey===frame.measurementKey&&f.readerKey===frame.readerKey
+        &&(!f.geometry||(f.confirmed&&f.coordinateKey===frame.coordinateKey)));
+}
+function alignmentLegacySeedIsCompatible(section, frame, savedRecord, panel) {
+    if(!alignmentLegacySourceIsUnambiguous(section,frame,panel))return false;
+    const key=(savedRecord&&savedRecord.msiKey)||(section&&section.meta&&section.meta.alignmentMsiKey);
+    if(key&&section.msiSeries&&section.msiSeries[key]) {
+        const anchor=alignmentFrameDescriptor(section,key,panel);
+        if(anchor.measurementKey===frame.measurementKey) {
+            // A legacy record's saved molecular image establishes its actual
+            // historical raster basis. Reading only that image is sufficient;
+            // never substitute a different molecule's dimensions for it.
+            return anchor.confirmed&&anchor.readerKey===frame.readerKey&&anchor.coordinateKey===frame.coordinateKey;
+        }
+    }
+    const related=Object.entries((section&&section.msiSeries)||{}).filter(([k,e])=>/^MSI_/i.test(k)&&e)
+        .map(([k])=>alignmentFrameDescriptor(section,k,panel))
+        .filter(f=>frame.sourceFileId?f.sourceFileId===frame.sourceFileId:f.measurementKey===frame.measurementKey);
+    // Without a recorded anchor, accept only already-confirmed equal legacy
+    // bases. Unknown compounds stay unloaded and the original record is kept.
+    return related.length>0&&related.every(f=>f.confirmed&&f.coordinateKey===frame.coordinateKey);
+}
+function alignmentImageIdentity(rec) {
+    const e=rec||{};
+    if(e.alignmentImageReference)return e.alignmentImageReference;
+    return JSON.stringify(['alignment-image-v1',e.sourceHash||e.sourceReference||e.__shareImage||e.storagePath||e.blobId||'',
+        e.sourceRevision||'']);
+}
+function alignmentValidAffine(T) {
+    return Array.isArray(T)&&T.length===3&&T.every(row=>Array.isArray(row)&&row.length===3&&row.every(Number.isFinite))
+        &&T[2][0]===0&&T[2][1]===0&&T[2][2]===1;
+}
+function alignmentUnavailableReason(section, heKey, msiKey, panel) {
+    const frame=alignmentFrameDescriptor(section,msiKey,panel);
+    if(!frame.confirmed)return frame.geometry?'MSI の旧座標系を確認できません':'MSI の座標情報が未取得です';
+    const rec=section&&section.meta&&section.meta.alignment&&section.meta.alignment[heKey];
+    const saved=rec&&rec.byFrame&&rec.byFrame[frame.key];
+    if(saved&&saved.imageIdentity!==alignmentImageIdentity((section.images||{})[heKey]))return 'HE/IF 画像が保存時と異なります';
+    if(saved&&!alignmentValidAffine(saved.T_he_to_msi))return '保存済みの変換設定を確認できません';
+    return 'この MSI 座標系の位置合わせが未確認です';
 }
 function createMsiSourceGeometry(rows, ent, legacyColumns) {
     const grid=buildMsiGrid(rows), legacyRows=rows.map(r=>({x:Number.isFinite(r.legacyX)?r.legacyX:r.x,y:Number.isFinite(r.legacyY)?r.legacyY:r.y})), legacy=buildLegacyMsiGrid(legacyRows);
@@ -7911,10 +8000,43 @@ class SectionPanel {
     // with a stray scale while NEG was aligned with landmarks — so in that case
     // fall back to the legacy/shared T. Also falls back to legacy for existing
     // projects / sources never aligned.
-    _resolveTHeToMsi() {
+    _resolveTHeToMsi(heKey, msiKey) {
         const wc = (this.section.meta && this.section.meta.world_coords) || {};
-        const fid = this._refSourceFileId();
+        const meta=this.section.meta||{};
+        const refKey=msiKey||this._pickRefMsiKey();
+        const layerKey=heKey||meta.alignmentHeKey||Object.keys(this.section.images||{}).find(k=>/HE_STAIN|IF_STAIN/i.test(k));
+        const alignment=meta.alignment||{};
+        const record=alignment[layerKey]||null;
+        const frame=alignmentFrameDescriptor(this.section,refKey,this);
+        const frames=record&&record.byFrame;
+        const managed=Object.values(alignment).some(r=>r&&r.byFrame&&Object.keys(r.byFrame).length);
+        if(frames&&Object.keys(frames).length) {
+            const saved=frames[frame.key];
+            if(saved&&frame.confirmed&&saved.frame&&saved.frame.key===frame.key
+                &&saved.frame.version===frame.version&&saved.frame.confirmed
+                &&saved.frame.coordinateKey===frame.coordinateKey
+                &&saved.alignment_raster_basis==='legacy-msi-pixel-edges-v1'
+                &&saved.imageIdentity===alignmentImageIdentity((this.section.images||{})[layerKey])) {
+                return alignmentValidAffine(saved.T_he_to_msi)?saved.T_he_to_msi:null;
+            }
+            // A known frame mismatch is not permission to use another sheet,
+            // measurement, or replaced HE image's legacy/global transform.
+            if(!frame.confirmed||Object.values(frames).some(r=>r&&r.frame&&
+                (r.frame.measurementKey===frame.measurementKey||r.frame.sourceFileId===frame.sourceFileId)))return null;
+        }
+        const fid = frame.sourceFileId;
         const bySource = wc.T_he_to_msi_by_source || {};
+        if(managed) {
+            // Unedited legacy layers retain their own state, while the legacy
+            // global T may now belong to the HE layer most recently saved.
+            const old=record&&((record.bySource&&record.bySource[fid])||(!frames&&record));
+            if(old&&alignmentLegacySeedIsCompatible(this.section,frame,old,this)
+                &&typeof buildHeToMsiAffine==='function') {
+                const T=buildHeToMsiAffine(old);
+                return alignmentValidAffine(T)?T:null;
+            }
+            return null;
+        }
         // Per-measurement overlay option: when the section is flagged
         // perSourceAlign, each measurement (source) keeps its own HE↔MSI
         // transform and must NOT be shadowed by the shared legacy T (which is
@@ -7943,6 +8065,26 @@ class SectionPanel {
             if (bs.autoAligned) return true;
         }
         return false;
+    }
+
+    _showAlignmentUnavailable(items) {
+        if(!this.dom||!this.dom.host)return;
+        if(!items.length) {
+            if(this.dom.alignmentStatus)this.dom.alignmentStatus.hidden=true;
+            return;
+        }
+        let status=this.dom.alignmentStatus;
+        if(!status) {
+            status=document.createElement('div');
+            status.className='alignment-unavailable';
+            status.setAttribute('role','status');
+            status.setAttribute('aria-live','polite');
+            status.style.cssText='position:absolute;top:28px;left:4px;right:4px;z-index:5;padding:5px 7px;border-radius:4px;background:rgba(255,251,235,.96);color:#92400e;font-size:11px;line-height:1.4;pointer-events:none;overflow-wrap:anywhere;max-height:84px;overflow:hidden';
+            this.dom.host.appendChild(status);this.dom.alignmentStatus=status;
+        }
+        status.textContent='HE/IF を非表示: '+items.join(' / ')+'。Align で確認してください。';
+        status.title=status.textContent;
+        status.hidden=false;
     }
 
     // ---- Canvas sizing ----
@@ -8095,7 +8237,6 @@ class SectionPanel {
         const overlayBlack = !!(overlay && overlay.bg !== 'he');
         if (overlayBlack) { ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, this.dom.cdisp.width, this.dom.cdisp.height); }
 
-        const T = this._resolveTHeToMsi();
         // Mirrors setupCanvasSize's refIsMsi: any MSI layer registered means
         // cdisp is sized to (msi.natH, msi.natW) × upscale, so HE must be
         // routed through the rotate-into-MSI-frame T-branch regardless of HE
@@ -8105,6 +8246,9 @@ class SectionPanel {
         // キャンバスの向きが一瞬変わってしまう。
         const hasMsiRef = this.registeredMsiKeys().length > 0
             || Object.keys(this.imageSources).some(k => /^MSI_/i.test(k));
+        const alignmentManaged=Object.values((this.section.meta&&this.section.meta.alignment)||{})
+            .some(r=>r&&r.byFrame&&Object.keys(r.byFrame).length);
+        const alignmentUnavailable=[];
 
         // In Compound mode the focus compound is the only MSI layer drawn,
         // regardless of per-section visibility flags. HE/IF stays under
@@ -8185,6 +8329,14 @@ class SectionPanel {
             // it from isHeLike steers the drawing branch to the MSI-space
             // rotate-90 path below.
             const isHeLike = /HE_STAIN|IF_STAIN/i.test(key) && !isTicBackdrop;
+            const T = isHeLike ? this._resolveTHeToMsi(key) : null;
+            if(isHeLike&&hasMsiRef&&alignmentManaged&&!T) {
+                const name=(this.section.images&&this.section.images[key]&&this.section.images[key].filename)||key;
+                alignmentUnavailable.push(name+'（'+alignmentUnavailableReason(this.section,key,this._pickRefMsiKey(),this)+'）');
+                // A frame-managed image with no verified transform must never
+                // drop into the default unaligned draw and appear registered.
+                continue;
+            }
 
             // For MSI: build a windowed + LUT-applied temp canvas (each pixel
             // mapped into the per-section display window, then through the colormap;
@@ -8410,6 +8562,7 @@ class SectionPanel {
         }
         ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = 1.0;
+        if(this._showAlignmentUnavailable)this._showAlignmentUnavailable(alignmentUnavailable);
         // HDI Smoothing: bilinear (CSS image-rendering:auto) when 'linear', else
         // nearest. The CSS upscale (.viewer-rot transform) dominates when cdisp
         // is native-size (MSI-only), so this class is what smooths the on-screen
@@ -12892,6 +13045,7 @@ const SHARE_ALIGN_CHOICE_LS_PREFIX = 'desi:shareAlignChoice:';
 // ★ 項目を足したら **両方** に足すこと。片方だけだと「切り替えると一部だけ
 //   master のまま」という、絵は出るのに気づけない壊れ方になる。
 const SECTION_ALIGN_WC_KEYS = ['T_he_to_msi', 'T_he_to_msi_by_source', 'msi_um_per_px', 'alignment_raster_basis'];
+const SECTION_ALIGN_META_KEYS = ['alignmentMsiKey', 'alignmentSourceMode', 'perSourceAlign', 'alignmentFrameVersion', 'alignmentHeKey'];
 
 function captureSectionAlignment(sec) {
     const meta = (sec && sec.meta) || {};
@@ -12901,8 +13055,7 @@ function captureSectionAlignment(sec) {
         if (wc[k] != null) out.world_coords[k] = JSON.parse(JSON.stringify(wc[k]));
     }
     if (meta.alignment) out.alignment = JSON.parse(JSON.stringify(meta.alignment));
-    if (meta.alignmentMsiKey != null) out.alignmentMsiKey = meta.alignmentMsiKey;
-    if (meta.alignmentSourceMode != null) out.alignmentSourceMode = meta.alignmentSourceMode;
+    for(const k of SECTION_ALIGN_META_KEYS) if(meta[k]!=null)out[k]=JSON.parse(JSON.stringify(meta[k]));
     return out;
 }
 
@@ -12918,10 +13071,10 @@ function applySectionAlignment(sec, payload) {
     }
     if (payload && payload.alignment) sec.meta.alignment = JSON.parse(JSON.stringify(payload.alignment));
     else sec.meta.alignment = {};
-    if (payload && payload.alignmentMsiKey != null) sec.meta.alignmentMsiKey = payload.alignmentMsiKey;
-    else delete sec.meta.alignmentMsiKey;
-    if (payload && payload.alignmentSourceMode != null) sec.meta.alignmentSourceMode = payload.alignmentSourceMode;
-    else delete sec.meta.alignmentSourceMode;
+    for(const k of SECTION_ALIGN_META_KEYS) {
+        if(payload&&payload[k]!=null)sec.meta[k]=JSON.parse(JSON.stringify(payload[k]));
+        else delete sec.meta[k];
+    }
 }
 
 // サーバから読んだ共有の位置合わせ。切片 id -> { payload, version }。
@@ -13027,21 +13180,29 @@ function applyServerShareAlignments(list) {
 let _shareAlignWriteGen = 0;
 
 // 切片 1 枚の位置合わせを共有側へ置く。戻り値 true = 置けた。
-async function pushShareAlignment(sec) {
+function getShareAlignmentVersion(sec) {
+    const cur=sec&&_shareAlignBySection.get(sec.id);
+    return cur?cur.version:null;
+}
+async function pushShareAlignment(sec, options) {
+    options=options||{};
     const token = App.shareMode && App.shareMode.token;
     if (!token || !sec) return false;
     if (_shareAlignServerMissing) {
         showToast('位置合わせの共有機能がサーバに未適用のため、この合わせ直しは保存できません', 6000);
         return false;
     }
-    const payload = captureSectionAlignment(sec);
-    const cur = _shareAlignBySection.get(sec.id);
+    // A modal supplies its independent draft and the version captured on open.
+    // Polling must never upgrade that baseline while the user is editing.
+    const payload = options.payload?JSON.parse(JSON.stringify(options.payload)):captureSectionAlignment(sec);
+    const expectedVersion=Object.prototype.hasOwnProperty.call(options,'expectedVersion')
+        ?options.expectedVersion:getShareAlignmentVersion(sec);
     try {
         const rec = await SupabaseClient.upsertShareAlignment(
-            token, sec.id, payload, cur ? cur.version : null);
+            token, sec.id, payload, expectedVersion);
         _shareAlignBySection.set(sec.id, {
             payload,
-            version: (rec && rec.version) || ((cur && cur.version + 1) || 1),
+            version: (rec && rec.version) || ((expectedVersion!=null&&expectedVersion+1) || 1),
         });
         _shareAlignWriteGen++;
         return true;
@@ -13716,9 +13877,10 @@ function openModal(html) {
         card.innerHTML = html;
         back.appendChild(card);
         host.appendChild(back);
-        const close = (val) => { back.remove(); resolve(val); };
-        card.querySelectorAll('[data-modal-cancel]').forEach(b => b.addEventListener('click', () => close(null)));
-        back.addEventListener('click', (e) => { if (e.target === back) close(null); });
+        let settled = false;
+        const close = (val) => { if (settled) return; settled = true; back.remove(); resolve(val); };
+        card.querySelectorAll('[data-modal-cancel]').forEach(b => b.addEventListener('click', () => card._close(null)));
+        back.addEventListener('click', (e) => { if (e.target === back) card._close(null); });
         resolve._close = close;
         // expose close via element
         card._close = close;
@@ -14338,7 +14500,20 @@ const Wizards = {
     // ===========================================================================
     async openAlignmentModal(panel) {
         if (!panel || !panel.section) return null;
-        const sec = panel.section;
+        const realSec = panel.section;
+        const clone = MsiAlignmentSession.clone;
+        // All registration edits stay in this private metadata copy until Save.
+        const sec = Object.assign({}, realSec, { meta: clone(realSec.meta || {}), images: Object.assign({}, realSec.images || {}) });
+        const baseProject = App.project;
+        const baseShareVersion = typeof getShareAlignmentVersion === 'function' ? getShareAlignmentVersion(realSec) : null;
+        const baseAlignment = captureSectionAlignment(realSec);
+        const session = MsiAlignmentSession.create({ sectionId: sec.id, initialAlignment: baseAlignment });
+        let closed = false, saving = false, imagesReady = false;
+        let selectionGeneration = 0, thumbGeneration = 0, autoGeneration = 0;
+        let workspace = null, activeFrame = null, activeDraft = null;
+        const cleanups = [];
+        const lastMsiByMode = new Map();
+        const stillOpen = () => !closed && App.project === baseProject && !panel._destroyed;
         sec.images = sec.images || {};
         const heKeys = Object.keys(sec.images).filter(k => /HE_STAIN|IF_STAIN/i.test(k))
             .concat(Object.keys(sec.images).filter(k => !/HE_STAIN|IF_STAIN/i.test(k)
@@ -14364,34 +14539,11 @@ const Wizards = {
         // invertAffine) so the auto-solver and __alignSelfTest share exactly
         // the same matrix construction as this manual path.
 
-        // ---- Snapshot for Cancel --------------------------------------------
-        sec.meta = sec.meta || {};
         sec.meta.world_coords = sec.meta.world_coords || {};
         sec.meta.alignment = sec.meta.alignment || {};
-        const initial = {
-            T:        sec.meta.world_coords.T_he_to_msi
-                          ? JSON.parse(JSON.stringify(sec.meta.world_coords.T_he_to_msi))
-                          : null,
-            T_by_src: sec.meta.world_coords.T_he_to_msi_by_source
-                          ? JSON.parse(JSON.stringify(sec.meta.world_coords.T_he_to_msi_by_source))
-                          : null,
-            msi_um:   sec.meta.world_coords.msi_um_per_px
-                          ? JSON.parse(JSON.stringify(sec.meta.world_coords.msi_um_per_px))
-                          : null,
-            // Snapshot the entire per-HE-layer alignment record so per-source
-            // bySource entries survive a Cancel even when the user toggled
-            // between sources during the session.
-            alignment: JSON.parse(JSON.stringify(sec.meta.alignment || {})),
-            // Snapshot focus compound — the modal now drives focus changes
-            // when the user picks a different MSI source so the background
-            // preview paints the right raster, and Cancel needs to put the
-            // user back where they were.
-            focusKey: (App && App.focusCompoundKey) ? String(App.focusCompoundKey) : null,
-            sourceMode: (sec.meta && sec.meta.alignmentSourceMode) || null,
-        };
 
         // ---- State -----------------------------------------------------------
-        const layerKey = heKeys[0];
+        const layerKey = heKeys.includes(sec.meta.alignmentHeKey) ? sec.meta.alignmentHeKey : heKeys[0];
         // Helper: source file id of an MSI compound key, or null for
         // synthetic TIC / unknown. Per-source TIC keys (`__TIC_SRC|<fid>`)
         // resolve back to their fid so writeWorldCoords / overrideStateFromSource
@@ -14474,6 +14626,7 @@ const Wizards = {
         state.msiKey = (persistedMsi && (candidateMsiKeys.includes(persistedMsi) || isPersistedTicSrc))
                      ? persistedMsi
                      : (realTicKey
+                        || (allMsiKeys.includes(App.focusCompoundKey) ? App.focusCompoundKey : null)
                         || (offerSyntheticTic ? '__TIC__' : null)
                         || allMsiKeys[0]
                         || null);
@@ -14501,14 +14654,15 @@ const Wizards = {
         const hasSources = sourceFids.length > 0;
         const hasMultipleSources = sourceFids.length > 1;
         // Raster grid (WxH) of each source, read from its loaded MSI rasters.
-        // When every source shares one grid (e.g. POS/NEG of the same scan at
-        // the same pixel pitch) a single shared T is correct for all of them.
+        // Equal coordinate bases permit explicit shared alignment; they do not
+        // prove separate measurements are already anatomically registered.
         const gridOfFid = (fid) => {
             for (const k of allMsiKeys) {
                 const ent = sec.msiSeries[k];
                 if (ent && ent.sourceFileId === fid) {
                     const img = panel.imageSources && panel.imageSources[k];
-                    if (img && img.naturalWidth) return img.naturalWidth + 'x' + img.naturalHeight;
+                    const frame = alignmentFrameDescriptor(sec, k, panel);
+                    if (frame.confirmed) return frame.coordinateKey;
                 }
             }
             return null;
@@ -14532,9 +14686,8 @@ const Wizards = {
             if (!hasMultipleSources) return sourceFids[0];
             if (persistedSourceMode === '__all__' && !perSourceAlign) return '__all__';
             if (persistedSourceMode && sourceFids.includes(persistedSourceMode)) return persistedSourceMode;
-            if (allSourcesSameGrid && !perSourceAlign) return '__all__';
             if (initialFidFromMsi && sourceFids.includes(initialFidFromMsi)) return initialFidFromMsi;
-            return perSourceAlign ? sourceFids[0] : '__all__';
+            return sourceFids[0];
         })();
         // In shared-T (__all__) mode the canonical state is the top-level
         // (legacy) record, not any single source's per-source entry. The
@@ -14568,7 +14721,8 @@ const Wizards = {
         // exist in its options).
         const filteredInit = compoundsForMode(state.sourceMode);
         if (state.sourceMode && state.sourceMode !== '__all__'
-            && state.msiKey && state.msiKey !== '__TIC__'
+            && state.msiKey
+            && !String(state.msiKey).startsWith('__TIC_SRC|')
             && !filteredInit.includes(state.msiKey)) {
             state.msiKey = filteredInit[0] || null;
             overrideStateFromSource(state, state.layerKey, fidOf(state.msiKey));
@@ -14660,7 +14814,7 @@ const Wizards = {
                 return `<option value="${safe(fid)}"${sel}>${sourceAlignStatus(fid)} Source ${idx + 1}: ${safe(lbl)}</option>`;
               }).join('')
               + (hasMultipleSources
-                  ? `<option value="__all__"${state.sourceMode==='__all__'?' selected':''}>全ソース共通${allSourcesSameGrid ? ' (推奨)' : ''} — 共通の T</option>`
+                  ? `<option value="__all__"${state.sourceMode==='__all__'?' selected':''}>全ソース共通</option>`
                   : '')
             : '';
         const html = `
@@ -14682,8 +14836,8 @@ const Wizards = {
               </div>
             </div>
             <p style="font-size:11px;color:#475569;margin-top:0;">
-              スライダーまたは対応点クリックで HE/IF を MSI に重ねます。背後の Section パネルでリアルタイムにプレビューされます。<br>
-              <span style="color:#64748b;">※ 位置合わせは「Source」で選んだ範囲に保存されます。<b>全ソース共通</b>（同一グリッドのときは既定）を選ぶと 1 回の位置合わせが全ソース(POS/NEG など)に適用されます。特定の Source のみを選べばそのソースだけに保存されます。Source 一覧の記号 ✓=対応点で整列済 / △=スライダーのみ / −=未整列。<br>合わせ済みのソースを表示した状態で「全ソースへ反映」を押すと、その T を全ソースへコピーできます。</span>
+              スライダーまたは対応点クリックで HE/IF を MSI に重ねます。この画面内で比較・合成表示を確認できます。<br>
+              <span style="color:#64748b;">※ 位置合わせは「Source」で選んだ範囲に保存されます。<b>全ソース共通</b>を選ぶと 1 回の位置合わせが全ソース(POS/NEG など)に適用されます。特定の Source のみを選べばそのソースだけに保存されます。Source 一覧の記号 ✓=対応点で整列済 / △=スライダーのみ / −=未整列。<br>合わせ済みのソースを表示した状態で「全ソースへ反映」を押すと、現在の位置合わせを同じ座標配置の測定データへ適用できます。</span>
             </p>
 
             <fieldset style="margin-top:8px;border:1px solid #e2e8f0;border-radius:5px;padding:8px 10px;">
@@ -14767,7 +14921,7 @@ const Wizards = {
         `;
         const p = openModal(html);
         const card = openModal._card;
-        card.classList.add('help-card');
+        card.classList.add('alignment-card');
 
         // ---- Wire DOM refs ---------------------------------------------------
         const $ = (sel) => card.querySelector(sel);
@@ -14805,12 +14959,15 @@ const Wizards = {
         const saveBtn  = $('[data-save]');
         const applyAllBtn = $('[data-apply-all]');
         if (applyAllBtn) applyAllBtn.addEventListener('click', () => {
-            if (!allSourcesSameGrid) return;
-            // Broadcast the alignment currently shown in the modal to every
-            // source: switch to shared-T mode and reuse the Save path, which
-            // writes T + slider records to all sourceFids and persists.
-            state.sourceMode = '__all__';
-            if (sourceSel) sourceSel.value = '__all__';
+            if (!allSourcesSameGrid || !imagesReady || saving || !activeFrame || !activeFrame.confirmed) return;
+            captureCurrent();
+            const current = clone(state), view = workspace && workspace.getViewState();
+            const context = {layerKey:state.layerKey,imageIdentity:alignmentImageIdentity(sec.images[state.layerKey]),
+                scope:'shared',frame:activeFrame,sharedId:'shared:'+activeFrame.coordinateKey};
+            activeDraft = session.activate(context,seedForFrame(state.layerKey,activeFrame,'__all__'));
+            Object.assign(state,current,{sourceMode:'__all__'});
+            session.capture(state,view); session.forceCommit();
+            if(sourceSel)sourceSel.value='__all__';
             saveBtn.click();
         });
 
@@ -14845,20 +15002,24 @@ const Wizards = {
                 const fid = fidOf(state.msiKey);
                 if (fid) bySrc[fid] = T;
             }
-            sec.meta.world_coords.msi_um_per_px = { x: state.msi_um_x, y: state.msi_um_y };
+            // Physical pixel size is not changed by registration display controls.
             if (state.msiKey) sec.meta.alignmentMsiKey = state.msiKey;
             if (state.sourceMode) sec.meta.alignmentSourceMode = state.sourceMode;
         };
         const updatePreview = () => {
+            if (!stillOpen()) return;
+            if (activeDraft) session.capture(state, workspace && workspace.getViewState());
             writeWorldCoords();
             if (rafId) cancelAnimationFrame(rafId);
-            rafId = requestAnimationFrame(() => {
+            rafId = requestAnimationFrame(async () => {
                 rafId = 0;
-                try { panel.renderComposite(); } catch (e) { console.warn('preview render failed', e); }
+                if (!stillOpen()) return;
                 // Modal HE thumbnail tracks T live so the user sees the same
                 // alignment they're tweaking on the section panel below.
-                try { rebakeHeThumb(); } catch (e) { console.warn('HE thumb rebake failed', e); }
+                try { await rebakeHeThumb(); } catch (e) { console.warn('HE thumb rebake failed', e); }
+                if (!stillOpen()) return;
                 try { renderLandmarks(); } catch (e) {}
+                if (workspace) workspace.requestComposite();
             });
         };
 
@@ -14897,235 +15058,128 @@ const Wizards = {
             sec.meta = sec.meta || {};
             sec.meta.perSourceAlign = perSourceEl.checked;
             updatePreview();
-            try { App.queueSave(0); } catch (e) { console.warn('persist perSourceAlign failed', e); }
+            // This flag is a draft setting too; Cancel must never persist it.
         });
 
         // ---- MSI um/px ------------------------------------------------------
-        const onMsiUm = () => {
-            const x = parseFloat(msiUmXEl.value);
-            const y = parseFloat(msiUmYEl.value);
-            if (Number.isFinite(x) && x > 0) state.msi_um_x = x;
-            if (Number.isFinite(y) && y > 0) state.msi_um_y = y;
-            writeWorldCoords();
+        msiUmXEl.readOnly = true;
+        msiUmYEl.readOnly = true;
+        msiUmXEl.title = msiUmYEl.title = '登録済みの物理ピクセルサイズ（表示の拡大率とは独立）';
+
+        const captureCurrent = () => {
+            if (activeDraft) session.capture(state, workspace && workspace.getViewState());
         };
-        msiUmXEl.addEventListener('input', onMsiUm);
-        msiUmYEl.addEventListener('input', onMsiUm);
-
-        // ---- Layer dropdown -------------------------------------------------
-        layerSel.addEventListener('change', () => {
-            const next = layerSel.value;
-            if (!sec.images[next]) return;
-            // Persist current edits (in-memory only, until Save) for the previous layer.
-            // Merge into the existing record so we keep per-source bySource
-            // entries the user already populated for this HE layer.
-            const prev = sec.meta.alignment[state.layerKey] || {};
-            sec.meta.alignment[state.layerKey] = Object.assign(prev, {
-                flip_lr: state.flip_lr, flip_ud: state.flip_ud,
-                scale_pct: state.scale_pct, rotate_deg: state.rotate_deg,
-                offx: state.offx, offy: state.offy,
-                landmarks: { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() },
-            });
-            const savedMsiKey = state.msiKey;
-            const ns = loadStateFor(next);
-            Object.assign(state, ns);
-            // Keep the user's MSI selection across HE switches (MSI is independent).
-            state.msiKey = savedMsiKey;
-            // Re-apply any per-source override stored for the (new HE, current MSI)
-            // pair — without this the legacy top-level fields would shadow
-            // bySource[fid] until the user toggles the MSI dropdown.
-            overrideStateFromSource(state, state.layerKey, fidOf(state.msiKey));
-            syncUiFromState();
-            updatePreview();
-            populateThumbs();
-            renderLandmarks();
-        });
-
-        // ---- MSI dropdown ---------------------------------------------------
-        if (msiSel) msiSel.addEventListener('change', () => {
-            const next = msiSel.value;
-            // Accept either a real MSI series key, the global synthetic
-            // '__TIC__', or a per-source synthetic '__TIC_SRC|<fid>'.
-            const isValid = isTicKey(next)
-                ? offerSyntheticTic
-                : !!(sec.msiSeries && sec.msiSeries[next]);
-            if (!next || !isValid) return;
-            // Resolve a representative <img> for either real or synthetic keys
-            // so the dimension-mismatch warning still fires correctly.
-            const refForDims = (k) => {
-                if (isTicKey(k)) return computeSyntheticTicForKey(k);
-                return panel.imageSources && panel.imageSources[k];
-            };
-            const oldImg = refForDims(state.msiKey);
-            const newImg = refForDims(next);
-            const dimsDiffer = oldImg && newImg
-                && oldImg.naturalWidth && newImg.naturalWidth
-                && (oldImg.naturalWidth  !== newImg.naturalWidth
-                 || oldImg.naturalHeight !== newImg.naturalHeight);
-            if (state.landmarks.msi.length > 0 && dimsDiffer) {
-                const ok = confirm('MSI 画像の寸法が異なるため既存の MSI ランドマーク '
-                                 + state.landmarks.msi.length + ' 件は無効になります。'
-                                 + 'クリアして切り替えますか?');
-                if (!ok) { msiSel.value = state.msiKey; return; }
-                state.landmarks.msi = [];
+        const seedForFrame = (heKey, frame, mode) => {
+            const rec = sec.meta.alignment[heKey] || {};
+            const identity = alignmentImageIdentity(sec.images[heKey]);
+            const shared = mode === '__all__' && rec.sharedByCoordinate && rec.sharedByCoordinate[frame.coordinateKey];
+            const saved = mode === '__all__' ? shared : rec.byFrame && rec.byFrame[frame.key];
+            const matches = saved && saved.frame && (mode === '__all__'
+                ? saved.frame.coordinateKey === frame.coordinateKey : saved.frame.key === frame.key);
+            if (matches && saved.imageIdentity === identity && saved.alignment_raster_basis === 'legacy-msi-pixel-edges-v1') return clone(saved);
+            const unambiguous = frame.confirmed && alignmentLegacySourceIsUnambiguous(sec, frame);
+            const bySrc = unambiguous && rec.bySource && rec.bySource[frame.sourceFileId];
+            // Once a frame is explicitly recorded, a legacy fallback must not
+            // accidentally attach its points to another sheet or coordinate grid.
+            if (!rec.byFrame || !Object.keys(rec.byFrame).length) {
+                if (bySrc && alignmentLegacySeedIsCompatible(sec,frame,bySrc,panel)) return clone(bySrc);
+                if (unambiguous && sourceFids.length <= 1 && alignmentLegacySeedIsCompatible(sec,frame,rec,panel)) return loadStateFor(heKey);
+                if (unambiguous && mode === '__all__' && allSourcesSameGrid && alignmentLegacySeedIsCompatible(sec,frame,rec,panel)) return loadStateFor(heKey);
             }
-            state.msiKey = next;
-            // Swap slider / landmark state to match the per-source record
-            // for the new MSI's source. If the source has never been
-            // aligned the previous slider state is kept as a starting
-            // point (no-op inside overrideStateFromSource).
-            overrideStateFromSource(state, state.layerKey, fidOf(state.msiKey));
-            syncUiFromState();
-            // Sync the background panel's focus compound to the chosen MSI so
-            // updatePreview() actually paints *that* compound's raster — without
-            // this the user is calibrating HE against whichever compound was
-            // focused before the modal opened, and the per-source T ends up
-            // tagged for the dropdown's source but visually tuned to a
-            // different source. Compound mode only (Free draws every visible
-            // MSI), and skip the synthetic TIC since it isn't a real layerKey.
-            if (!isTicKey(next) && App && App.viewMode === 'compound') {
-                try { App.setFocusCompoundKey(next); } catch (er) { console.warn('setFocusCompoundKey from align modal failed', er); }
+            return { flip_lr:false, flip_ud:false, scale_pct:100, rotate_deg:0, offx:0, offy:0,
+                landmarks:{he:[],msi:[]}, autoAligned:null,
+                seedWarning: (rec.landmarks && (rec.landmarks.he.length || rec.landmarks.msi.length)) || (bySrc && bySrc.landmarks && (bySrc.landmarks.he.length || bySrc.landmarks.msi.length))
+                    ? '旧対応点は座標系未確認のため使用していません（保存値は保持）' : null };
+        };
+        const frameKeyForSelection = key => {
+            if (!isTicKey(key)) return key;
+            const members = ticKeysToCompounds.get(key) || [];
+            return members[0] || null;
+        };
+        const setLoading = (busy, message) => {
+            imagesReady = !busy;
+            pickHeBtn.disabled = pickMsiBtn.disabled = busy;
+            solveBtn.disabled = busy || state.landmarks.he.length < 2 || state.landmarks.he.length !== state.landmarks.msi.length;
+            if (autoBtn) autoBtn.disabled = busy;
+            saveBtn.disabled = busy || saving;
+            for(const el of [scaleEl,scaleNum,rotateEl,rotateNum,offxEl,offxNum,offyEl,offyNum,flipLrEl,flipUdEl,clearLmBtn,resetBtn,applyAllBtn])if(el)el.disabled=busy||saving;
+            if (message) pickStatus.textContent = message;
+        };
+        const ensureSelection = async (key, generation) => {
+            const keys = isTicKey(key) ? (ticKeysToCompounds.get(key) || []) : [key];
+            for (const k of keys) {
+                if (!stillOpen() || generation !== selectionGeneration) return false;
+                if (panel.ensureMsiLayerLoaded) await panel.ensureMsiLayerLoaded(k);
             }
-            writeWorldCoords();
-            populateThumbs();
-            renderLandmarks();
-            updatePreview();
-        });
-
-        // ---- Source dropdown ------------------------------------------------
-        // Switching the source rebuilds the MSI dropdown so it only lists
-        // compounds belonging to the chosen source, swaps slider state to
-        // that source's bySource entry, and (in __all__ mode) makes the
-        // next Save broadcast T to every source.
-        // Capture / apply helpers — used so each source dropdown change
-        // *preserves* the user's in-progress edits for the outgoing source
-        // (otherwise switching back would silently lose them) and *loads*
-        // the incoming source's saved record so HE / MSI landmarks reflect
-        // that source.
-        const captureSliderState = () => {
-            const snap = {
-                flip_lr: state.flip_lr, flip_ud: state.flip_ud,
-                scale_pct: state.scale_pct, rotate_deg: state.rotate_deg,
-                offx: state.offx, offy: state.offy,
-                landmarks: { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() },
-            };
-            // Only attach the marker when it exists, so records written before
-            // this feature keep exactly the same shape.
-            if (state.autoAligned) snap.autoAligned = state.autoAligned;
-            return snap;
+            return keys.length > 0;
         };
-        const applyToState = (src) => {
-            if (!src) return false;
-            state.flip_lr = !!src.flip_lr;
-            state.flip_ud = !!src.flip_ud;
-            if (Number.isFinite(src.scale_pct))  state.scale_pct  = src.scale_pct;
-            if (Number.isFinite(src.rotate_deg)) state.rotate_deg = src.rotate_deg;
-            if (Number.isFinite(src.offx))       state.offx       = src.offx;
-            if (Number.isFinite(src.offy))       state.offy       = src.offy;
-            if (src.landmarks) {
-                state.landmarks.he  = src.landmarks.he  ? src.landmarks.he.slice()  : [];
-                state.landmarks.msi = src.landmarks.msi ? src.landmarks.msi.slice() : [];
-            }
-            state.autoAligned = src.autoAligned || null;
-            return true;
-        };
-        const applyLegacyTopLevel = () => {
-            const legacy = loadStateFor(state.layerKey);
-            state.flip_lr = legacy.flip_lr; state.flip_ud = legacy.flip_ud;
-            state.scale_pct = legacy.scale_pct; state.rotate_deg = legacy.rotate_deg;
-            state.offx = legacy.offx; state.offy = legacy.offy;
-            state.landmarks = legacy.landmarks;
-        };
-        const persistSliderStateToSource = (mode) => {
-            if (!mode) return;
-            const aRef = sec.meta.alignment[state.layerKey] = sec.meta.alignment[state.layerKey] || {};
-            aRef.bySource = aRef.bySource || {};
-            const snap = captureSliderState();
-            if (mode === '__all__') {
-                for (const fid of sourceFids) aRef.bySource[fid] = snap;
-            } else {
-                aRef.bySource[mode] = snap;
-            }
-        };
-
-        if (sourceSel) sourceSel.addEventListener('change', () => {
-            const next = sourceSel.value;
-            if (!next || next === state.sourceMode) return;
-            const prevMode = state.sourceMode;
-            // 1. Persist the user's current edits (sliders + landmarks) to
-            //    the OUTGOING source's in-memory bySource entry. Without
-            //    this, switching to another source and then coming back
-            //    would silently discard whatever the user just adjusted.
-            persistSliderStateToSource(prevMode);
-
-            state.sourceMode = next;
-
-            // 2. Rebuild the MSI dropdown for the new source.
-            msiSel.innerHTML = buildMsiOpts(next);
-            const filtered = compoundsForMode(next);
-            // Decide whether the current MSI selection survives the source
-            // switch. Compound keys are valid only when in the new source's
-            // filtered list; synthetic TIC keys are valid only in their
-            // matching mode (global TIC ↔ '__all__', per-source TIC ↔ that
-            // specific source).
-            const canKeepCurrent = (() => {
-                if (state.msiKey === TIC_KEY_ALL) return next === '__all__';
-                if (typeof state.msiKey === 'string' && state.msiKey.startsWith('__TIC_SRC|')) {
-                    return state.msiKey === ticKeyForFid(next);
+        const changeSelection = async (nextLayer, nextKey, nextMode) => {
+            if (!stillOpen() || saving) return;
+            const generation = ++selectionGeneration;
+            ++autoGeneration; ++thumbGeneration;
+            captureCurrent();
+            setLoading(true, '画像を読み込み中…');
+            if (autoBox) { autoBox.style.display = 'none'; autoBox.innerHTML = ''; }
+            try {
+                await ensureSelection(nextKey,generation);
+                const anchor=sec.meta.alignmentMsiKey;
+                if (anchor && sec.msiSeries[anchor] && anchor !== nextKey && generation === selectionGeneration) {
+                    if (panel.ensureMsiLayerLoaded) await panel.ensureMsiLayerLoaded(anchor);
                 }
-                return filtered.includes(state.msiKey);
-            })();
-            if (!canKeepCurrent) {
-                if (next === '__all__') {
-                    state.msiKey = (offerSyntheticTic && ticKeysToCompounds.has(TIC_KEY_ALL))
-                        ? TIC_KEY_ALL
-                        : (filtered[0] || null);
-                } else {
-                    const tk = ticKeyForFid(next);
-                    if (offerSyntheticTic && ticKeysToCompounds.has(tk)) {
-                        // Prefer the per-source TIC as the default landmark
-                        // target — it's the cleanest visual for picking
-                        // anatomical landmarks against one scan.
-                        state.msiKey = tk;
-                    } else {
-                        state.msiKey = filtered[0] || null;
+                if (!stillOpen() || generation !== selectionGeneration) return;
+                const referenceKey = frameKeyForSelection(nextKey);
+                const frame = alignmentFrameDescriptor(sec, referenceKey, panel);
+                // Synthetic TIC is a display aid only. Every contributor must
+                // have the same confirmed coordinate basis before pooling points.
+                if (isTicKey(nextKey)) {
+                    const frames = (ticKeysToCompounds.get(nextKey) || []).map(k => alignmentFrameDescriptor(sec,k,panel));
+                    if (!frame.confirmed || frames.some(f => !f.confirmed || f.coordinateKey !== frame.coordinateKey)) {
+                        throw new Error('このTICには異なる座標系が含まれます。測定データまたは個別分子を選択してください。');
                     }
                 }
+                const context = { layerKey:nextLayer, imageIdentity:alignmentImageIdentity(sec.images[nextLayer]),
+                    scope:nextMode === '__all__' ? 'shared' : 'source', frame,
+                    sharedId:nextMode === '__all__' ? 'shared:' + frame.coordinateKey : null };
+                const seed = Object.assign(seedForFrame(nextLayer,frame,nextMode), {
+                    layerKey:nextLayer, msiKey:nextKey, sourceMode:nextMode, pickMode:'none',
+                    msi_um_x:msiUm.x, msi_um_y:msiUm.y });
+                const previous = activeDraft;
+                activeDraft = session.activate(context, seed);
+                activeFrame = frame;
+                Object.assign(state, activeDraft.state, { layerKey:nextLayer, msiKey:nextKey, sourceMode:nextMode });
+                if (!state.landmarks) state.landmarks = {he:[],msi:[]};
+                if (previous && previous.key !== activeDraft.key && workspace) workspace.setViewState(activeDraft.view || {});
+                lastMsiByMode.set(nextMode || '__legacy__', nextKey);
+                layerSel.value = nextLayer;
+                if (sourceSel) sourceSel.value = nextMode || '';
+                msiSel.innerHTML = buildMsiOpts(nextMode); msiSel.value = nextKey || '';
+                syncUiFromState();
+                pickHeBtn.style.background=state.pickMode==='he'?'#dbeafe':'';
+                pickMsiBtn.style.background=state.pickMode==='msi'?'#dbeafe':'';
+                await populateThumbs();
+                if (!stillOpen() || generation !== selectionGeneration) return;
+                const complete = !!(heImg.naturalWidth && msiImg.naturalWidth && heImg.dataset.ready==='true' && msiImg.dataset.ready==='true');
+                setLoading(!complete || !frame.confirmed, !frame.confirmed
+                    ? '座標系を確認できないため点の追加・保存を停止しています。元の対応点は保持されています。'
+                    : !complete ? '画像を読み込めませんでした。別の分子を選択して再試行してください。' : null);
+                renderLandmarks();
+                if (workspace) workspace.refresh();
+                updatePreview();
+            } catch (error) {
+                if (!stillOpen() || generation !== selectionGeneration) return;
+                setLoading(true, error.message || String(error));
+                // Keep selection controls usable and leave every draft intact.
+                if (activeDraft) { layerSel.value = state.layerKey; if(sourceSel)sourceSel.value=state.sourceMode||''; msiSel.value=state.msiKey||''; }
             }
-            msiSel.value = state.msiKey || '';
-
-            // 3. Load the INCOMING source's saved record. In __all__ mode
-            //    the legacy top-level fields are the canonical "shared T"
-            //    representation. In single-source mode prefer the matching
-            //    bySource entry, falling back to legacy when this source
-            //    has never been aligned (HE / MSI landmarks reset to the
-            //    last-saved baseline so the user starts fresh rather than
-            //    inheriting another source's points).
-            const aRef = sec.meta.alignment[state.layerKey] || {};
-            let loaded = false;
-            if (next === '__all__') {
-                applyLegacyTopLevel();
-                loaded = true;
-            } else {
-                loaded = applyToState(aRef.bySource && aRef.bySource[next]);
-                if (!loaded) applyLegacyTopLevel();
-            }
-
-            syncUiFromState();
-            // Sync background panel focus so the live preview paints the
-            // correct compound for the new source. Skip when the user
-            // picked a synthetic TIC (global or per-source) — TIC keys
-            // aren't real layerKeys, so leaving focus on whatever real
-            // compound was previously visible keeps the panel sensible.
-            if (state.msiKey && !isTicKey(state.msiKey)
-                && App && App.viewMode === 'compound') {
-                try { App.setFocusCompoundKey(state.msiKey); }
-                catch (er) { console.warn('setFocusCompoundKey from align modal (source change) failed', er); }
-            }
-            sec.meta.alignmentSourceMode = state.sourceMode;
-            writeWorldCoords();
-            populateThumbs();
-            renderLandmarks();
-            updatePreview();
+        };
+        layerSel.addEventListener('change', () => changeSelection(layerSel.value, state.msiKey, state.sourceMode));
+        msiSel.addEventListener('change', () => changeSelection(state.layerKey, msiSel.value, state.sourceMode));
+        if (sourceSel) sourceSel.addEventListener('change', () => {
+            const mode = sourceSel.value;
+            const filtered = compoundsForMode(mode);
+            const remembered = lastMsiByMode.get(mode || '__legacy__');
+            const next = filtered.includes(remembered) ? remembered : filtered.includes(state.msiKey) ? state.msiKey : filtered[0];
+            if (next) changeSelection(state.layerKey, next, mode);
         });
 
         // ---- MSI colour mapping (Plasma) + synthetic TIC --------------------
@@ -15198,13 +15252,21 @@ const Wizards = {
         // what makes modal HE align with modal MSI and the main canvas.
         // Stamp T (+ MSI raw dims) onto the IMG dataset so click/landmark
         // routines can invert or replay the same chain.
-        const rebakeHeThumb = () => {
+        let heBakeSignature = '';
+        let heBakeGeneration = 0;
+        const rebakeHeThumb = async () => {
+            if (!stillOpen()) return;
+            const bakeToken = ++heBakeGeneration;
+            const selectionToken = selectionGeneration;
             const heRaw = panel.imageSources && panel.imageSources[state.layerKey];
             if (!heRaw || !heRaw.complete || !heRaw.naturalWidth) return;
             const ref = panel.msiRasterSize(alignmentMsiKey()) || panel.getMsiRefSize();
             const msiW = (ref && ref.w) || heRaw.naturalWidth;
             const msiH = (ref && ref.h) || heRaw.naturalHeight;
             const T = buildHeToMsiAffine(state);
+            const signature = JSON.stringify([state.layerKey, alignmentImageIdentity(sec.images[state.layerKey]), heRaw.naturalWidth, heRaw.naturalHeight, state.msiKey, activeFrame && activeFrame.key, msiW, msiH, T, sectionTransform('he')]);
+            if (signature === heBakeSignature && heImg.complete && heImg.naturalWidth) { heImg.dataset.ready='true'; return; }
+            heImg.dataset.ready = 'false';
             // Step 1: HE → MSI raster frame via T. Supersample by `k` so the HE
             // keeps its detail instead of collapsing to the (low-res) MSI grid —
             // otherwise the panel shows HE at MSI resolution, which looks coarse.
@@ -15237,13 +15299,22 @@ const Wizards = {
             if (warped) { tctx.setTransform(1,0,0,1,0,0); tctx.clearRect(0,0,heInMsi.width,heInMsi.height); tctx.drawImage(warped,0,0,heInMsi.width,heInMsi.height); }
             const baked = bakeImageWithSectionTransform(heInMsi, t.matrix);
             if (!baked) return;
-            heImg.src = baked.toDataURL('image/png');
+            const nextHe = new Image();
+            nextHe.src = baked.toDataURL('image/png');
+            if (!await waitForImg(nextHe)) return;
+            if (!stillOpen() || bakeToken !== heBakeGeneration || selectionToken !== selectionGeneration) return;
+            heImg.src = nextHe.src;
             // dataset: rawW/rawH = the LOGICAL MSI frame (msiW×msiH), NOT the
             //          supersampled pixel dims. `ss` records the supersample so
             //          the click/landmark math can divide it back out. T is stored
             //          so click/landmark can invert it.
             stampThumbDataset(heImg, msiW, msiH, t, k);
             heImg.dataset.tMatrix = JSON.stringify(T);
+            await waitForImg(heImg);
+            if (!stillOpen() || bakeToken !== heBakeGeneration || selectionToken !== selectionGeneration) return;
+            heBakeSignature = signature;
+            heImg.dataset.ready = 'true';
+            if(workspace)workspace.refresh();
         };
 
         // Sum every MSI series' grayscale luminance into one image. Caller gets
@@ -15321,79 +15392,56 @@ const Wizards = {
 
         // ---- Thumbnails for landmark picking --------------------------------
         const populateThumbs = async () => {
-            const t = sectionTransform();
-            // HE goes through T_he_to_msi (rebuilt every paint from the
-            // current modal state) so modal HE matches main canvas HE — i.e.
-            // HE warped into MSI's raster frame, then the section view
-            // transform on top. rebakeHeThumb is also called on every
-            // manual-slider update so the HE thumb tracks T live.
-            const heCached = panel.imageSources && panel.imageSources[state.layerKey];
-            if (heCached && heCached.complete && heCached.naturalWidth) {
-                rebakeHeThumb();
-            } else if (heCached) {
-                heCached.addEventListener('load', rebakeHeThumb, { once: true });
-            } else {
-                const heRec = sec.images[state.layerKey];
-                if (heRec && heRec.blobId) {
-                    const b = await ProjectStorage.getBlob(heRec.blobId);
-                    if (b && b.blob) {
-                        const dataUrl = await decodeImageBlobToDataUrl(b.blob, b.mime || heRec.mime);
-                        if (dataUrl) {
-                            const tmp = new Image();
-                            tmp.onload = () => {
-                                // Cache the decoded HE so later rebakes don't re-decode.
-                                panel.imageSources[state.layerKey] = tmp;
-                                rebakeHeThumb();
-                            };
-                            tmp.src = dataUrl;
-                        }
-                    }
+            const token = ++thumbGeneration;
+            const layer = state.layerKey, key = state.msiKey;
+            const current = () => stillOpen() && token === thumbGeneration && layer === state.layerKey && key === state.msiKey;
+            heImg.dataset.ready = msiImg.dataset.ready = 'false';
+            let heRaw = panel.imageSources && panel.imageSources[layer];
+            if (!heRaw) {
+                const rec = sec.images[layer];
+                if (rec && !rec.blobId && typeof ensureLocalBlob === 'function') await ensureLocalBlob(rec);
+                const blob = rec && rec.blobId ? await ProjectStorage.getBlob(rec.blobId) : null;
+                if (!current()) return;
+                if (blob && blob.blob) {
+                    const url = await decodeImageBlobToDataUrl(blob.blob, blob.mime || rec.mime);
+                    if (!current()) return;
+                    if (url) { heRaw = new Image(); heRaw.src = url; }
                 }
             }
-            // MSI: render whichever compound the user (or persisted state)
-            // picked, painted with Plasma. Both the global '__TIC__' and
-            // per-source '__TIC_SRC|<fid>' options go through the same paint
-            // pipeline via computeSyntheticTicForKey. Cache key includes
-            // the section transform so a rotation change re-bakes once.
-            const msiKey = state.msiKey;
-            if (!msiKey) { msiImg.removeAttribute('src'); return; }
-            const cacheKey = msiKey + '|' + JSON.stringify(t.matrix);
-            if (coloredCache.has(cacheKey)) {
-                const cached = coloredCache.get(cacheKey);
-                msiImg.src = cached.url;
-                stampThumbDataset(msiImg, cached.rawW, cached.rawH, t);
-                return;
-            }
-            let srcImg = null, msiRawRange = null, msiWin = null, msiLayerKey = null;
-            if (isTicKey(msiKey)) {
-                srcImg = computeSyntheticTicForKey(msiKey);
-                // synthetic TIC is already self-normalised to [0,255]; paint it
-                // straight through the LUT (msiWindowEval falls back to lum/255).
-            } else if (sec.msiSeries[msiKey]) {
-                srcImg = panel.imageSources && panel.imageSources[msiKey];
-                // Per-MRM display window: invert the per-layer bake via rawRange
-                // and map into the molecule's window so the preview matches the
-                // main viewer's display.
-                msiLayerKey = msiKey;
-                msiRawRange = (sec.msiSeries[msiKey] || {}).rawRange || null;
-                msiWin = App.getMsiWindow(msiKey, msiRawRange, (sec.msiSeries[msiKey] || {}).rawDispMax);
-            }
-            if (!srcImg) { msiImg.removeAttribute('src'); return; }
-            const paintAndSet = () => {
-                const colored = paintMsiToColored(srcImg, msiRawRange, msiWin, msiLayerKey);
-                if (!colored) return;
-                const baked = bakeImageWithSectionTransform(colored, t.matrix);
+            if (!await waitForImg(heRaw) || !current()) return;
+            // The captured layer key prevents late HE loads from corrupting another layer.
+            panel.imageSources[layer] = heRaw;
+            const t = sectionTransform();
+            const ent = sec.msiSeries[key] || {};
+            const win = isTicKey(key) ? null : App.getMsiWindow(key, ent.rawRange || null, ent.rawDispMax);
+            const cacheKey = JSON.stringify([key, activeFrame && activeFrame.key, t.matrix, win,
+                typeof getActiveColormap === 'function' ? getActiveColormap() : null,
+                !!App.otsuBgRemove, ent.rawRange || null]);
+            let cached = coloredCache.get(cacheKey);
+            if (!cached) {
+                const srcImg = isTicKey(key) ? computeSyntheticTicForKey(key) : panel.imageSources[key];
+                if (!await waitForImg(srcImg) || !current()) return;
+                const colored = paintMsiToColored(srcImg, ent.rawRange || null, win, isTicKey(key) ? null : key);
+                const baked = colored && bakeImageWithSectionTransform(colored, t.matrix);
                 if (!baked) return;
-                const url = baked.toDataURL('image/png');
-                const rawW = colored.width, rawH = colored.height;
-                coloredCache.set(cacheKey, { url, rawW, rawH });
-                msiImg.src = url;
-                stampThumbDataset(msiImg, rawW, rawH, t);
-            };
-            if (srcImg.complete && srcImg.naturalWidth) paintAndSet();
-            else srcImg.addEventListener('load', paintAndSet, { once: true });
+                const ready = new Image(); ready.src = baked.toDataURL('image/png');
+                if (!await waitForImg(ready) || !current()) return;
+                cached = {url:ready.src,rawW:colored.width,rawH:colored.height};
+                coloredCache.set(cacheKey,cached);
+                // Bound session-local thumbnails; source grids retain their existing LRU.
+                if (coloredCache.size > 12) coloredCache.delete(coloredCache.keys().next().value);
+            }
+            if (!current()) return;
+            msiImg.src = cached.url;
+            stampThumbDataset(msiImg,cached.rawW,cached.rawH,t);
+            await waitForImg(msiImg);
+            if (!current()) return;
+            msiImg.dataset.ready = 'true';
+            await rebakeHeThumb();
+            if (!current()) return;
+            if (workspace) workspace.refresh();
         };
-        await populateThumbs();
+        // Initial image load runs after all handlers and cleanup are installed.
 
         // ---- Landmark click handling ----------------------------------------
         const setPickMode = (mode) => {
@@ -15407,14 +15455,14 @@ const Wizards = {
         const thumbClickToPixel = (ev, imgEl) => alignmentThumbClickPoint(ev, imgEl, sec, alignmentMsiKey());
 
         heImg.addEventListener('click', (ev) => {
-            if (state.pickMode !== 'he') return;
-            if (!heImg.naturalWidth) return;
+            if (!imagesReady || !stillOpen() || state.pickMode !== 'he' || (workspace && !workspace.acceptsPoint('he', ev))) return;
+            if (!heImg.naturalWidth || heImg.dataset.ready !== 'true') return;
             state.landmarks.he.push(thumbClickToPixel(ev, heImg));
             renderLandmarks();
         });
         msiImg.addEventListener('click', (ev) => {
-            if (state.pickMode !== 'msi') return;
-            if (!msiImg.naturalWidth) return;
+            if (!imagesReady || !stillOpen() || state.pickMode !== 'msi' || (workspace && !workspace.acceptsPoint('msi', ev))) return;
+            if (!msiImg.naturalWidth || msiImg.dataset.ready !== 'true') return;
             state.landmarks.msi.push(thumbClickToPixel(ev, msiImg));
             renderLandmarks();
         });
@@ -15497,8 +15545,8 @@ const Wizards = {
             drawDots(msiSvg, state.landmarks.msi, msiImg);
             const nHe = state.landmarks.he.length;
             const nMsi = state.landmarks.msi.length;
-            pickStatus.textContent = `点: HE ${nHe} / MSI ${nMsi}`;
-            const ready = nHe >= 2 && nHe === nMsi;
+            if (imagesReady) pickStatus.textContent = `点: HE ${nHe} / MSI ${nMsi}` + (state.seedWarning ? ' ／ '+state.seedWarning : '');
+            const ready = imagesReady && nHe >= 2 && nHe === nMsi;
             solveBtn.disabled = !ready;
 
             // ---- QC: residual of the CURRENT transform (read-only) ----------
@@ -15547,6 +15595,7 @@ const Wizards = {
         renderLandmarks();
         // Re-render dots if the modal is resized so they stay aligned to the img.
         window.addEventListener('resize', renderLandmarks);
+        cleanups.push(() => window.removeEventListener('resize', renderLandmarks));
 
         clearLmBtn.addEventListener('click', () => {
             state.landmarks.he = [];
@@ -15555,6 +15604,7 @@ const Wizards = {
         });
 
         solveBtn.addEventListener('click', () => {
+            if (!imagesReady || saving || !stillOpen()) return;
             try {
                 // solveSimilarity fits a PROPER similarity (rotation + uniform
                 // scale + translation, no reflection). HE landmarks are stored in
@@ -15612,11 +15662,19 @@ const Wizards = {
             syncUiFromState();
             updatePreview();
         };
-        const waitForImg = (img) => new Promise((resolve) => {
-            if (!img) { resolve(null); return; }
-            if (img.complete && img.naturalWidth) { resolve(img); return; }
-            img.addEventListener('load', () => resolve(img), { once: true });
-            img.addEventListener('error', () => resolve(null), { once: true });
+        const waitForImg = img => new Promise(resolve => {
+            if (!img || !stillOpen()) { resolve(null); return; }
+            if (img.complete) { resolve(img.naturalWidth ? img : null); return; }
+            let settled = false;
+            const finish = value => {
+                if (settled) return; settled = true;
+                img.removeEventListener('load', loaded); img.removeEventListener('error', failed);
+                const index=cleanups.indexOf(cancel); if(index>=0)cleanups.splice(index,1);
+                resolve(value);
+            };
+            const loaded=()=>finish(img.naturalWidth?img:null), failed=()=>finish(null), cancel=()=>finish(null);
+            img.addEventListener('load',loaded,{once:true}); img.addEventListener('error',failed,{once:true});
+            cleanups.push(cancel);
         });
         const umPerPxNow = () => ({ x: state.msi_um_x, y: state.msi_um_y });
         // px → µm using the mean pitch (a single scalar distance has no axis).
@@ -15632,13 +15690,17 @@ const Wizards = {
         };
 
         if (autoBtn) autoBtn.addEventListener('click', async () => {
-            if (!autoBox) return;
+            if (!autoBox || !imagesReady || saving || !stillOpen()) return;
+            const autoToken = ++autoGeneration;
+            const autoCurrent = () => stillOpen() && autoToken === autoGeneration;
             autoBtn.disabled = true;
             autoBox.style.display = '';
+            if(workspace && workspace.openDetails)workspace.openDetails();
             autoBox.innerHTML = '<span style="color:#64748b;">組織シルエットを抽出しています…</span>';
             // Let the message paint before the synchronous solve blocks the thread.
             await new Promise(r => requestAnimationFrame(() => r()));
             try {
+                if (!autoCurrent()) return;
                 const heRaw = panel.imageSources && panel.imageSources[state.layerKey];
                 if (!heRaw || !heRaw.complete || !heRaw.naturalWidth) {
                     throw new Error('HE/IF 画像がまだ読み込まれていません');
@@ -15649,6 +15711,7 @@ const Wizards = {
                     ? computeSyntheticTicForKey(state.msiKey)
                     : (panel.imageSources && panel.imageSources[state.msiKey]);
                 await waitForImg(ticImg);
+                if (!autoCurrent()) return;
                 const displayMask = msiTissueMaskForAlign(sec, panel, state.msiKey, ticImg);
                 const msiM = msiMaskInLegacyRaster(displayMask, sec, alignmentMsiKey(), ALIGN_DICE_MAX_EDGE);
                 if (!msiM) throw new Error('MSI から組織領域を抽出できませんでした (背景除去の閾値を確認してください)');
@@ -15740,6 +15803,7 @@ const Wizards = {
                 };
                 autoBox.querySelectorAll('[data-auto-apply]').forEach(btn => {
                     btn.addEventListener('click', () => {
+                        if (!autoCurrent()) return;
                         const which = btn.getAttribute('data-auto-apply');
                         if (which === 'hybrid' && hybrid) {
                             applyAlignState(hybrid, Object.assign({}, meta, { blended: true }));
@@ -15756,11 +15820,12 @@ const Wizards = {
                     autoBox.innerHTML = '';
                 });
             } catch (e) {
+                if (!autoCurrent()) return;
                 console.warn('auto align failed', e);
                 autoBox.innerHTML = `<div style="padding:5px 7px;border-radius:4px;background:#fee2e2;color:#991b1b;">`
                     + `自動整合できません: ${safe(e && e.message ? e.message : e)}</div>`;
             } finally {
-                autoBtn.disabled = false;
+                if (autoCurrent()) autoBtn.disabled = false;
             }
         });
 
@@ -15773,117 +15838,141 @@ const Wizards = {
             updatePreview();
         });
 
-        const restoreSnapshot = () => {
-            if (initial.T) sec.meta.world_coords.T_he_to_msi = initial.T;
-            else delete sec.meta.world_coords.T_he_to_msi;
-            if (initial.T_by_src) sec.meta.world_coords.T_he_to_msi_by_source = initial.T_by_src;
-            else delete sec.meta.world_coords.T_he_to_msi_by_source;
-            if (initial.msi_um) sec.meta.world_coords.msi_um_per_px = initial.msi_um;
-            else delete sec.meta.world_coords.msi_um_per_px;
-            // Restore the alignment record wholesale so per-source bySource
-            // entries the user touched mid-session are reverted alongside
-            // the top-level slider state.
-            sec.meta.alignment = initial.alignment ? JSON.parse(JSON.stringify(initial.alignment)) : {};
-            // Restore the focus compound the user had before opening the
-            // modal — without this the background preview stays on whatever
-            // compound was last picked from the MSI dropdown.
-            if (App && initial.focusKey != null && App.focusCompoundKey !== initial.focusKey) {
-                try { App.setFocusCompoundKey(initial.focusKey); } catch (e) {}
-            }
-            // Source-mode hint persists in section meta; revert it too so
-            // the next modal open lands on the user's previous selection.
-            if (initial.sourceMode != null) sec.meta.alignmentSourceMode = initial.sourceMode;
-            else delete sec.meta.alignmentSourceMode;
-            try { panel.renderComposite(); } catch (e) {}
-        };
-        // The default Cancel button (data-modal-cancel) is wired by openModal
-        // to remove the backdrop; piggyback on the resolve to revert state.
-        const origClose = card._close;
-        card._close = (val) => {
-            // 保存でも中止でもロックは返す。握ったままだと、他の人が ROI も
-            // 位置合わせも触れなくなる。
-            if (shareAlign) { try { App._releaseRoiLock(); } catch (e) {} }
-            if (val === 'saved') {
-                origClose && origClose(val);
-                return;
-            }
-            restoreSnapshot();
-            origClose && origClose(null);
-        };
-
-        saveBtn.addEventListener('click', async () => {
-            // Persist alignment params alongside T for round-trip editing.
-            // The legacy top-level fields stay in place so old viewers and
-            // first-time per-source modal opens still find a sensible
-            // starting point.
-            const aRef = sec.meta.alignment[state.layerKey] || {};
-            aRef.flip_lr = state.flip_lr; aRef.flip_ud = state.flip_ud;
-            aRef.scale_pct = state.scale_pct; aRef.rotate_deg = state.rotate_deg;
-            aRef.offx = state.offx; aRef.offy = state.offy;
-            aRef.landmarks = { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() };
-            if (state.autoAligned) aRef.autoAligned = state.autoAligned;
-            else delete aRef.autoAligned;
-            // New: also persist the per-source slider record so the next
-            // modal open repopulates correctly when the user re-picks the
-            // same MSI source. In '__all__' mode broadcast to every source
-            // so any of them re-opens with the saved state, matching the
-            // bySource T broadcast in writeWorldCoords.
-            const buildBySrcEntry = () => {
-                const e = {
-                    flip_lr: state.flip_lr, flip_ud: state.flip_ud,
-                    scale_pct: state.scale_pct, rotate_deg: state.rotate_deg,
-                    offx: state.offx, offy: state.offy,
-                    landmarks: { he: state.landmarks.he.slice(), msi: state.landmarks.msi.slice() },
-                };
-                // ★ これが無いと _sourceHasGenuineAlignment が自動整合を
-                //   △(暫定) と判定し、レガシー共有 T に覆い隠される。
-                if (state.autoAligned) e.autoAligned = state.autoAligned;
-                return e;
-            };
-            if (state.sourceMode === '__all__') {
-                aRef.bySource = aRef.bySource || {};
-                for (const fid of sourceFids) aRef.bySource[fid] = buildBySrcEntry();
-            } else if (state.sourceMode) {
-                aRef.bySource = aRef.bySource || {};
-                aRef.bySource[state.sourceMode] = buildBySrcEntry();
-            } else {
-                const fid = fidOf(state.msiKey);
-                if (fid) {
-                    aRef.bySource = aRef.bySource || {};
-                    aRef.bySource[fid] = buildBySrcEntry();
+        const buildSavePayload = () => {
+            captureCurrent();
+            const target = Object.assign({}, realSec, {meta:clone(realSec.meta || {})});
+            applySectionAlignment(target, baseAlignment);
+            target.meta.alignment = target.meta.alignment || {};
+            target.meta.world_coords = target.meta.world_coords || {};
+            const wc = target.meta.world_coords;
+            const serialized = session.serialize();
+            for (const entry of serialized.entries) {
+                const heKey = entry.context.layerKey;
+                const frame = entry.context.frame;
+                if (!frame || !frame.confirmed) throw new Error('対応点の座標系を確認できません');
+                const record = clone(entry.state);
+                record.T_he_to_msi = buildHeToMsiAffine(record);
+                if (!(record.scale_pct > 0) || !alignmentValidAffine(record.T_he_to_msi) || !invertAffine(record.T_he_to_msi)) throw new Error('位置合わせの倍率・座標に無効な値があります');
+                record.alignment_raster_basis = 'legacy-msi-pixel-edges-v1';
+                record.imageIdentity = entry.context.imageIdentity;
+                const aRef = target.meta.alignment[heKey] = target.meta.alignment[heKey] || {};
+                aRef.byFrame = aRef.byFrame || {};
+                let frames = [frame];
+                if (entry.context.scope === 'shared') {
+                    aRef.sharedByCoordinate = aRef.sharedByCoordinate || {};
+                    aRef.sharedByCoordinate[frame.coordinateKey] = Object.assign(clone(record),{frame:clone(frame)});
+                    frames = allMsiKeys.map(key=>alignmentFrameDescriptor(sec,key,panel))
+                        .filter(f=>f.confirmed && f.coordinateKey === frame.coordinateKey);
                 }
+                for (const f of frames) {
+                    aRef.byFrame[f.key] = Object.assign(clone(record),{frame:clone(f)});
+                    if (alignmentLegacySourceIsUnambiguous(sec,f) && f.sourceFileId) {
+                        aRef.bySource = aRef.bySource || {};
+                        aRef.bySource[f.sourceFileId] = clone(record);
+                        wc.T_he_to_msi_by_source = wc.T_he_to_msi_by_source || {};
+                        wc.T_he_to_msi_by_source[f.sourceFileId] = clone(record.T_he_to_msi);
+                    }
+                }
+                // Legacy fields continue to reflect an explicitly edited record.
+                Object.assign(aRef,clone(entry.state));
+                wc.T_he_to_msi = clone(record.T_he_to_msi);
+                wc.alignment_raster_basis = record.alignment_raster_basis;
+                target.meta.alignmentFrameVersion = 'msi-alignment-frame-v1';
             }
-            sec.meta.alignment[state.layerKey] = aRef;
-            // T and msi_um_per_px are already up to date thanks to writeWorldCoords()
-            writeWorldCoords();
-            if (shareAlign) {
-                // ★ 共有先は共有ドキュメント (master の位置合わせ) を書き換えない。
-                //   いま meta に入っている組をそのまま share_alignments へ置き、
-                //   表示を「共有」へ切り替える。master の組は __alignMaster に
-                //   控えたままなので、いつでも戻せる。
-                saveBtn.disabled = true;
-                let ok = false;
-                try { ok = await pushShareAlignment(sec); }
-                finally { saveBtn.disabled = false; }
-                if (!ok) return;   // 保存できていないのでモーダルは閉じない
-                App.alignChoice = 'shared';
-                saveShareAlignChoice('shared');
-                applyAlignChoiceToSections();
-                showToast('位置合わせを保存しました。この共有 URL を開いた全員に届きます', 6000);
-                if (card._close) card._close('saved');
-                return;
+            target.meta.alignmentMsiKey = state.msiKey;
+            target.meta.alignmentSourceMode = state.sourceMode;
+            target.meta.alignmentHeKey = state.layerKey;
+            if (sec.meta.perSourceAlign != null) target.meta.perSourceAlign = sec.meta.perSourceAlign;
+            return captureSectionAlignment(target);
+        };
+        const origClose = card._close;
+        card._close = val => {
+            if (closed || (saving && val !== 'saved')) return;
+            closed = true; ++selectionGeneration; ++thumbGeneration; ++autoGeneration; ++heBakeGeneration;
+            if (rafId) cancelAnimationFrame(rafId);
+            for (const cleanup of cleanups.splice(0)) { try { cleanup(); } catch (_) {} }
+            if (workspace) workspace.destroy();
+            coloredCache.clear(); syntheticTicCache.clear();
+            session.close();
+            if (shareAlign) { try { App._releaseRoiLock(); } catch (e) {} }
+            origClose(val === 'saved' ? 'saved' : null);
+        };
+        const onEscape = ev => {
+            if (ev.key === 'Escape') { ev.preventDefault(); ev.stopPropagation(); card._close(null); }
+        };
+        card.addEventListener('keydown',onEscape);
+        cleanups.push(()=>card.removeEventListener('keydown',onEscape));
+        saveBtn.addEventListener('click', async () => {
+            if (!imagesReady || !stillOpen() || saving) return;
+            saving = true; saveBtn.disabled = true;
+            try {
+                const payload = buildSavePayload();
+                if (shareAlign) {
+                    const ok = await pushShareAlignment(realSec,{payload,expectedVersion:baseShareVersion});
+                    if (!ok) return;
+                    if (!stillOpen()) return;
+                    applySectionAlignment(realSec,payload);
+                    App.alignChoice = 'shared'; saveShareAlignChoice('shared');
+                    applyAlignChoiceToSections();
+                    showToast('位置合わせを保存しました。この共有 URL を開いた全員に届きます',6000);
+                } else {
+                    // Finish prior writes, then persist a detached project snapshot.
+                    // A failed write never exposes draft settings to autosave/publish.
+                    if (App._flushSave) await App._flushSave();
+                    if (!stillOpen()) return;
+                    const savedSection = Object.assign({},realSec,{meta:clone(realSec.meta || {})});
+                    applySectionAlignment(savedSection,payload);
+                    const savedProject = Object.assign({},baseProject,{
+                        sections:(baseProject.sections || []).map(s=>s.id === realSec.id ? savedSection : s)
+                    });
+                    if (savedProject.shareInfo && savedProject.shareInfo.slug) savedProject.__publishPending = true;
+                    await ProjectStorage.putProject(savedProject);
+                    if (!stillOpen()) return;
+                    applySectionAlignment(realSec,payload);
+                    // Normal synchronization starts only after local Save succeeded.
+                    App.queueSave(0);
+                }
+                try { panel.renderComposite(); } catch (_) {}
+                try { panel.refreshSectionLabel && panel.refreshSectionLabel(); } catch (_) {}
+                card._close('saved');
+            } catch (error) {
+                if (stillOpen()) showToast('位置合わせを保存できませんでした。作業中の内容は保持されています: '+(error.message || error),8000);
+            } finally {
+                saving = false;
+                if (!closed) saveBtn.disabled = !imagesReady;
             }
-            try { App.queueSave(0); } catch (e) {}
-            try { panel.renderComposite(); } catch (e) {}
-            // Refresh the canvas-label so the new μm/px shows in the section
-            // header (and in the share-preview cell title via the next refresh).
-            try { panel.refreshSectionLabel && panel.refreshSectionLabel(); } catch (e) {}
-            if (card._close) card._close('saved');
         });
-
-        // First-time render uses the loaded state (might be the existing T or
-        // the identity if no alignment yet).
-        updatePreview();
+        // Compose only the selected HE/IF and MSI display images. Both are
+        // centered in the same logical MSI frame; HE supersampling changes
+        // detail, never the underlying registration or measurement coordinates.
+        const renderCompositePreview = ({canvas,width,height,opacity}) => {
+            const ctx = get2dContext(canvas);
+            ctx.clearRect(0,0,width,height);
+            if (!imagesReady || heImg.dataset.ready !== 'true' || msiImg.dataset.ready !== 'true') return;
+            const heSS = Number(heImg.dataset.ss) || 1;
+            const hw=heImg.naturalWidth/heSS, hh=heImg.naturalHeight/heSS;
+            const mw=msiImg.naturalWidth, mh=msiImg.naturalHeight;
+            const scale=Math.min(width/Math.max(hw,mw),height/Math.max(hh,mh));
+            ctx.imageSmoothingEnabled=true;
+            ctx.drawImage(heImg,(width-hw*scale)/2,(height-hh*scale)/2,hw*scale,hh*scale);
+            ctx.globalAlpha=opacity;
+            ctx.imageSmoothingEnabled=false;
+            ctx.drawImage(msiImg,(width-mw*scale)/2,(height-mh*scale)/2,mw*scale,mh*scale);
+            ctx.globalAlpha=1;
+        };
+        try {
+            workspace = MsiAlignmentWorkspace.mount(card,{
+                onComposite:renderCompositePreview,
+                canSync:()=>!!(activeFrame && activeFrame.confirmed)
+                    && JSON.stringify(sectionTransform('he').matrix)===JSON.stringify(sectionTransform('msi').matrix),
+                onViewChange:()=>{ if(stillOpen())renderLandmarks(); },
+                onClose:()=>card._close(null)
+            });
+            await changeSelection(state.layerKey,state.msiKey,state.sourceMode);
+        } catch (error) {
+            card._close(null);
+            showToast('位置合わせ画面を開けませんでした: '+(error.message || error),8000);
+        }
         return p;
     },
 
@@ -16911,7 +17000,7 @@ async function _ensureHeImage(panel, sec, layerKey) {
 // null when there is no alignment transform or no MSI reference frame.
 async function bakeAlignedHeToMsiPng(panel, sec, layerKey) {
     if (!panel) return null;
-    const T = panel._resolveTHeToMsi && panel._resolveTHeToMsi();
+    const T = panel._resolveTHeToMsi && panel._resolveTHeToMsi(layerKey);
     if (!T) return null;
     const ref = panel.getMsiRefSize && panel.getMsiRefSize();
     if (!ref || !(ref.w > 0) || !(ref.h > 0)) return null;
@@ -17236,7 +17325,8 @@ async function exportProjectAsZip() {
                     zip.file(fullPath, rec.blob);
                     if (sig) fullByHash.set(sig, fullPath);
                 }
-                const imgRec = { mime: ent.mime, filename: fname, fullPath };
+                const imgRec = { mime: ent.mime, filename: fname, fullPath,
+                    alignmentImageReference:alignmentImageIdentity(ent) };
                 tick(); await _yieldUi();
                 try {
                     const baked = await bakeAlignedHeToMsiPng(panel, sec, layerKey);
@@ -17904,7 +17994,8 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
                 delete out.sourceUrl;
                 delete out.storagePath;
                 t.storage[t.slot][t.key] = out;
-            } else t.storage[t.slot][t.key] = ref;
+            } else t.storage[t.slot][t.key] = Object.assign({},ref,{
+                alignmentImageReference:alignmentImageIdentity(t.ent)});
         }
     };
 
@@ -20803,7 +20894,8 @@ async function importZipFile(file) {
             for (const [layerKey, img] of Object.entries(sEnt.images || {})) {
                 const blobId = await ensureBlobRoot(img.fullPath, img.mime || 'image/tiff', img.filename || layerKey);
                 if (!blobId) continue;
-                newSec.images[layerKey] = { blobId, mime: img.mime, filename: img.filename || '' };
+                newSec.images[layerKey] = { blobId, mime: img.mime, filename: img.filename || '',
+                    alignmentImageReference:img.alignmentImageReference };
             }
             // Per-sample CSV → MSI layers: each compound becomes a generic-CSV
             // def sharing the one CSV blob, re-read by buildPngFromTxtArrayBuffer.
@@ -20935,7 +21027,8 @@ async function importZipFile(file) {
             for (const [layerKey, ent] of Object.entries(atlas.images || {})) {
                 const blobId = await ensureBlob(ent.path, ent.mime || 'image/tiff', ent.filename || layerKey);
                 if (!blobId) continue;
-                newSec.images[layerKey] = { blobId, mime: ent.mime, filename: ent.filename || '' };
+                newSec.images[layerKey] = { blobId, mime: ent.mime, filename: ent.filename || '',
+                    alignmentImageReference:ent.alignmentImageReference };
             }
 
             // MSI series — multiple compounds can point at the same path.
@@ -23562,7 +23655,8 @@ const App = {
                     const { id: blobId, mime } = await ensureImported(ref);
                     // storagePath を残す。これで blob が失われても Storage から
                     // 取り直せる (ensureLocalBlob)。以前は path を捨てていた。
-                    sec.images[key] = { blobId, mime, filename: ref.filename, storagePath: ref.path };
+                    sec.images[key] = { blobId, mime, filename: ref.filename, storagePath: ref.path,
+                        alignmentImageReference:ref.alignmentImageReference };
                 } catch (e) {
                     console.warn('import image fetch failed', key, e);
                     failed.push({ kind: 'image', key, path: ref.path, error: e });
@@ -23803,7 +23897,8 @@ const App = {
                 //   (_buildLocalProjectFromDoc) は既に path を残していて、共有側
                 //   だけ漏れていた。これで ensureLocalBlob が正しい場所を引ける。
                 if (kind === 'image') {
-                    sec.images[key] = { blobId: id, mime, filename: ref.filename, storagePath: ref.path };
+                    sec.images[key] = { blobId: id, mime, filename: ref.filename, storagePath: ref.path,
+                        alignmentImageReference:ref.alignmentImageReference };
                 } else {
                     sec.msiSeries[key] = Object.assign({}, ref, { blobId: id, storagePath: ref.path });
                     if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {

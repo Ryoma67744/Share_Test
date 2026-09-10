@@ -139,7 +139,7 @@ The `Method (MRM)` table then shows the measured Precursor / Fragment / CE / CV,
 
 ## 5. Align — overlaying HE/IF on MSI
 
-Click **`Align`** on a section panel to open a modal that aligns HE/IF layers to the MSI coordinate system. Use this when no transform JSON was supplied at registration time, or whenever you want to re-align manually.
+Click **`Align`** on a section panel to open a workspace that fills the browser viewport. The usual lists and analysis panels are inactive while the large HE/IF and MSI images are shown. Use this when no transform JSON was supplied at registration time, or whenever you want to re-align manually.
 
 > **Recipients can re-align too, and your alignment is never lost.** Anyone opening the share URL can use `Align`. The result goes to the server-side `share_alignments` table (one row per section) and reaches **everyone on that share URL**. Your published alignment stays in `sections.meta`, so recipients switch between **master / 共有** with the toolbar's `位置合わせ:` selector.
 >
@@ -153,36 +153,30 @@ Click **`Align`** on a section panel to open a modal that aligns HE/IF layers to
 
 > **HE resolution in a composite**: on sections that carry MSI, the display canvas is baked **to the MSI grid** (ROI coordinates and μm/px are derived from it). The upscale factor goes up to **8× the MSI grid or a 2048 px canvas long edge, whichever is larger**, and never beyond the HE's own resolution. A multi-thousand-pixel scanner HE is therefore downscaled to that range — but the downscale is **area-averaged**, so nuclear texture is filtered rather than dropped. To inspect HE at its native resolution, hide the MSI layers and view HE alone (the canvas is then built at the HE's own size).
 
-> **Note: the main-view "rotate one side"**: the main toolbar's **Rotation** has a target selector **(Both / HE only / MSI only)**. When HE and MSI were imported at different orientations and don't line up, rotate **just one of them** to match. The angle is stored in `section.meta.viewerTransform.rotHE / rotMSI` and is **shipped to viewers on publish**. This is a display-level overlay fix and is **separate from this Align modal's affine transform (μm/px, ROI coordinates, and other scientific alignment)** — keep using the Align modal for coordinate-accurate registration.
+> **Note: the main-view "rotate one side"**: the main toolbar's **Rotation** has a target selector **(Both / HE only / MSI only)**. When HE and MSI were imported at different orientations and don't line up, rotate **just one of them** to match. The angle is stored in `section.meta.viewerTransform.rotHE / rotMSI` and is **shipped to viewers on publish**. This is a display-level overlay fix and is **separate from Align's HE/IF-to-MSI registration transform** — keep using the Align modal for coordinate-accurate registration.
 
-<div style="border:1px solid #cbd5e1;border-radius:6px;padding:10px;background:#f8fafc;margin:10px 0;font-size:12px;">
-  <div style="font-weight:600;color:#0f172a;margin-bottom:6px;">Align modal layout</div>
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">
-    <div style="border:1px solid #94a3b8;border-radius:4px;padding:6px;background:#fff;">
-      <div style="font-weight:600;font-size:11px;">Left: HE/IF thumbnail</div>
-      <div style="color:#64748b;font-size:11px;">Layer dropdown to switch<br>Click to add a landmark</div>
-    </div>
-    <div style="border:1px solid #94a3b8;border-radius:4px;padding:6px;background:#fff;">
-      <div style="font-weight:600;font-size:11px;">Right: MSI thumbnail (Plasma)</div>
-      <div style="color:#64748b;font-size:11px;">Compound dropdown<br>“TIC (synthetic)” may appear at the top</div>
-    </div>
-  </div>
-  <div style="margin-top:6px;border:1px dashed #cbd5e1;border-radius:4px;padding:6px;background:#fafafa;">
-    <div style="font-weight:600;font-size:11px;">Bottom: MSI pixel size / Manual / Solve</div>
-    <div style="color:#64748b;font-size:11px;">μm/px · Flip · Scale · Rotate · Offset X/Y</div>
-  </div>
-</div>
+| Area or control | Purpose |
+| --- | --- |
+| Top bar | Select the HE/IF Layer, Source and MSI molecule |
+| 左右比較 (Side by side) | Large HE/IF image on the left and MSI image on the right; choose a point tool before clicking |
+| 重ね合わせ (Overlay) | Inspect the composite and adjust opacity inside the workspace |
+| Display navigation | Drag to pan, use the wheel or ± to zoom, and **全体表示 (Fit)** to fit the images in their panes |
+| 左右の表示を同期 (Sync views) | Link display position and zoom when the coordinate basis is confirmed |
+| 詳細設定・対応点一覧 (Details and points) | Manual registration, read-only physical pitch, point removal and residuals |
+| Bottom bar | **Save / Cancel** stay available |
+
+Display zoom and pan do not change landmarks or original MSI coordinates. To change the HE registration scale, use **Manual → Scale** in the details panel.
 
 ### 5-1. MSI selector
 
-- The compound dropdown switches the MSI thumbnail.
+- Select a molecule from the dropdown to change the MSI image. **Molecules from the same measurement coordinate frame retain the points, pairing and order, registration parameters, and display position/zoom.** Pick some points on molecule A, switch to B to add others, then use all points in `Solve`. Switching molecules does not rerun the solver.
 - **TIC (synthetic)** appears at the top whenever a section has many MRM transitions but no real `MSI_TIC` layer. It sums the luminance of every MSI series — handy as a high-contrast landmark target.
 - **Per-source TIC**: when the section has multiple sources, an extra `TIC_<filename>` row is inserted per source so you can pick the correct TIC for each acquisition (e.g. only the 1st-scan TIC).
-- All MSI thumbnails are tinted with the **Plasma colormap**, so signal regions are far easier to see than raw grayscale.
+- MSI uses the active colormap. A synthetic TIC can be used only when all contributing molecules have a confirmed matching coordinate basis.
 
 ### 5-1-bis. Source dropdown (per-source T_he_to_msi)
 
-The Align modal shows a **Source** dropdown at the top whenever a section has more than one MSI source. Each source name is prefixed with an **alignment-status icon**:
+The Align workspace shows a **Source** dropdown when the section has a registered MSI source. Each source name is prefixed with an **alignment-status icon**:
 
 - **✓** = aligned with landmarks
 - **⊙** = silhouette auto-aligned (no landmarks, but not provisional)
@@ -191,16 +185,19 @@ The Align modal shows a **Source** dropdown at the top whenever a section has mo
 
 | Value | Behaviour |
 | --- | --- |
-| **All sources** (`__all__`) | One T is broadcast to **every source** under the section. Use it when sources represent the same physical scan (e.g. POS / NEG). **Default when all sources share the same grid.** |
-| Specific fid (e.g. `Analyte 1.txt`) | T is stored per-source under `world_coords.T_he_to_msi_by_source[fid]`. Use it when sources have meaningfully different positions. |
+| **All sources** | Use a common registration for measurements whose coordinate bases are confirmed to match |
+| Individual Source | Edit points and transforms for that measurement coordinate frame |
 
-- **"全ソースへ反映" (Apply to all sources) button** (shown only when sources share a grid): copies the alignment T currently shown to **every same-grid source**. When only one source is aligned, this reflects it to the others in one click (show the aligned source, then press it).
-- **Auto-fallback for un-aligned sources**: a provisional entry (△, no landmarks) never **shadows** a genuine alignment (✓) on another source. At render time the legacy / genuine T is used, so HE never blows up or drifts even if one source is left un-aligned.
-- Save always also updates the legacy `T_he_to_msi`, so older viewers and the fallback path keep working. Compounds within the same source share the same T.
+New work defaults to individual measurement settings; a valid saved common selection is retained. A matching coordinate basis does not establish that measurements are the same physical scan, so applying a common registration is an explicit choice.
+
+Switching measurements or HE/IF images preserves a separate draft for each target. Returning restores the unsaved points and adjustments. Different sheets, acquisition functions or coordinate-column definitions within one file remain distinct. Equal image dimensions alone do not justify reusing points.
+
+- **全ソースへ反映 (Apply to all sources)** explicitly copies the current registration to all sources with a confirmed matching coordinate basis and saves it. If shared and individual drafts both affect one target, the last edited state takes precedence.
+- Old points with an unconfirmed coordinate frame or HE/IF association remain stored and are not automatically reused on another image. Point addition and Save are disabled, with an explanation, when the displayed coordinate frame cannot be confirmed.
 
 ### 5-2. MSI pixel size
 
-Enter `X / Y` in μm/px. This drives both the ROI physical scale and the **scale bar** drawn on the bottom-left of the main canvas. DESI typically has square pixels (X == Y), so a single value is enough.
+The registered `X / Y` pitch in μm/px is **read-only inside Align**. Use the separate **MSI pixel size** settings dialog to change calibration. Display zoom and the registration Manual Scale do not modify physical pixel pitch.
 
 ### 5-3. Manual section (live sliders)
 
@@ -211,7 +208,7 @@ Enter `X / Y` in μm/px. This drives both the ROI physical scale and the **scale
 | Rotate | -180°–180° | Rotate HE |
 | Offset X / Y | -2000–2000 px | Translate HE |
 
-Both the slider and the numeric input edit the same value. The Section panel behind the modal previews the result live, so you can fine-tune while watching the overlay.
+The slider and numeric input edit the same registration value. Inspect the HE/IF image and Overlay inside the workspace while adjusting it. The normal view keeps its saved settings until Save succeeds.
 
 ### 5-4. Landmark mode
 
@@ -265,10 +262,11 @@ The pipeline is: moment initialisation (centroid, principal axis, area — with 
 
 ### 5-5. Cancel / Save
 
-- **Cancel**: Restore the snapshot taken when the modal opened (preview rolls back).
-- **Save**: Write the current values into `sec.meta.world_coords.T_he_to_msi` (+ `T_he_to_msi_by_source[fid]`) and `msi_um_per_px`, persist to IndexedDB, and refresh the ROI physical scale.
+- **Cancel / Esc / Close** discard all unsaved edits made in this workspace and release the shared editing lock.
+- **Save** commits all changed measurement/HE/IF drafts, including targets visited earlier in the same session. In the master project, normal synchronization starts after local persistence succeeds. Shared editing checks the version captured at editing start and refuses conflicting overwrites. A failed save keeps the workspace open with the draft intact.
+- Original MSI intensities, coordinates, missingness, row order, statistics for existing MSI-coordinate ROIs, numerical exports and physical pixel pitch are unchanged. The edited records are landmarks and HE/IF→MSI registration settings.
 
-> **The modal's HE / MSI thumbnails render in the same orientation as the main canvas** — the section's Rotation, Flip H/V, and the implicit -90° MSI bake are all applied. Clicking a landmark stores the raw HE/MSI pixel coordinate (the orientation transform is reversed internally), so Solve and T computation behave identically regardless of the visible orientation.
+> **Images in Align follow the main view's rotation and reflection settings.** Image and point overlays use the same display transform; clicks use its inverse. HE landmarks remain in HE-image pixels and MSI landmarks in the existing MSI raster's pixel-edge coordinates. Display zoom and rotation do not migrate stored landmarks.
 
 > **Reflected in the main screen's bottom thumbnail list too**: changing Rotation / Flip H·V on the main screen re-renders the **MSI thumbnail list** in the layer bar (bottom-center) in the same orientation — not just the Align-modal thumbnails, but the main-screen list as well.
 
