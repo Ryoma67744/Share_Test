@@ -2055,29 +2055,24 @@ function testSectionAlignmentRoundTrips() {
   const ctx = vm.createContext({ JSON, Object });
   vm.runInContext(
     /const SECTION_ALIGN_WC_KEYS = \[[^\]]*\];/.exec(html)[0] + '\n'
+    + /const SECTION_ALIGN_META_KEYS = \[[^\]]*\];/.exec(html)[0] + '\n'
     + extractTopLevelFunction('captureSectionAlignment') + '\n'
     + extractTopLevelFunction('applySectionAlignment')
-    + '\nthis.api = { captureSectionAlignment, applySectionAlignment, SECTION_ALIGN_WC_KEYS };',
+    + '\nthis.api = { captureSectionAlignment, applySectionAlignment, SECTION_ALIGN_WC_KEYS, SECTION_ALIGN_META_KEYS };',
     ctx);
-  const { captureSectionAlignment, applySectionAlignment, SECTION_ALIGN_WC_KEYS } = ctx.api;
+  const { captureSectionAlignment, applySectionAlignment, SECTION_ALIGN_WC_KEYS, SECTION_ALIGN_META_KEYS } = ctx.api;
 
-  // ---- writeWorldCoords が書く world_coords のキーが全部入っているか ----
-  const wAt = html.indexOf('const writeWorldCoords = () => {');
-  assert.notEqual(wAt, -1, 'missing writeWorldCoords');
-  const wBody = html.slice(wAt, html.indexOf('const updatePreview = () => {', wAt));
-  const written = new Set([...wBody.matchAll(/sec\.meta\.world_coords\.([A-Za-z0-9_]+)\s*=/g)]
-    .map(m => m[1]));
-  assert.ok(written.size >= 3, 'writeWorldCoords の代入が読み取れない');
-  for (const k of written) {
+  // Saved registration has an explicit capture/apply contract. The editor
+  // now builds it from independent drafts instead of mutating world_coords
+  // during preview; see msi_alignment_regression.js for actual event paths.
+  for (const k of ['T_he_to_msi', 'T_he_to_msi_by_source', 'msi_um_per_px', 'alignment_raster_basis']) {
     assert.ok(SECTION_ALIGN_WC_KEYS.includes(k),
       'world_coords.' + k + ' が SECTION_ALIGN_WC_KEYS に無い '
       + '(master へ戻したときにこの項目だけ残る)');
   }
-  // alignment 系の 3 つも控えていること。
-  assert.match(html, /out\.alignment = JSON\.parse/, 'alignment を控えていない');
-  assert.match(html, /out\.alignmentMsiKey = meta\.alignmentMsiKey/, 'alignmentMsiKey を控えていない');
-  assert.match(html, /out\.alignmentSourceMode = meta\.alignmentSourceMode/,
-    'alignmentSourceMode を控えていない');
+  for (const k of ['alignmentMsiKey', 'alignmentSourceMode', 'alignmentHeKey', 'alignmentFrameVersion', 'perSourceAlign']) {
+    assert.ok(SECTION_ALIGN_META_KEYS.includes(k), k + ' must round-trip with alignment');
+  }
 
   // ---- 往復: master を控えて、合わせ直して、master へ戻す ----
   const sec = { id: 's1', meta: {
@@ -2156,6 +2151,7 @@ async function testShareAlignmentsAreSharedWithEveryone() {
   });
   vm.runInContext(
     /const SECTION_ALIGN_WC_KEYS = \[[^\]]*\];/.exec(html)[0] + '\n'
+    + /const SECTION_ALIGN_META_KEYS = \[[^\]]*\];/.exec(html)[0] + '\n'
     + 'const _shareAlignBySection = new Map();\n'
     + extractTopLevelFunction('captureSectionAlignment') + '\n'
     + extractTopLevelFunction('_isMissingRpc') + '\n'
@@ -2163,6 +2159,7 @@ async function testShareAlignmentsAreSharedWithEveryone() {
     + extractTopLevelFunction('_noteShareAlignServerMissing') + '\n'
     + extractTopLevelFunction('fetchShareAlignments') + '\n'
     + extractTopLevelFunction('applyServerShareAlignments') + '\n'
+    + extractTopLevelFunction('getShareAlignmentVersion') + '\n'
     + extractTopLevelFunction('pushShareAlignment') + '\n'
     + extractTopLevelFunction('removeShareAlignment')
     + '\nthis.api = { fetchShareAlignments, applyServerShareAlignments, pushShareAlignment,'
@@ -2235,7 +2232,8 @@ function testShareAlignmentEditingIsLocked() {
   assert.match(body, /if \(shareAlign\) \{ try \{ App\._releaseRoiLock\(\); \} catch \(e\) \{\} \}/,
     '閉じるときにロックを返していない (握ったままだと誰も編集できなくなる)');
   // 保存は共有側へ回し、master の位置合わせ (sections.meta) は書き換えない。
-  assert.match(body, /ok = await pushShareAlignment\(sec\);/, '保存を共有側へ回していない');
+  assert.match(body, /ok = await pushShareAlignment\(realSec,\{payload,expectedVersion:baseShareVersion\}\);/,
+    '作業中の設定と編集開始時の版を共有保存へ渡すこと');
   assert.match(body, /if \(!ok\) return;/, '保存できていないのにモーダルを閉じないこと');
   assert.match(body, /App\.alignChoice = 'shared';/, '保存後に「共有」へ切り替えていない');
 

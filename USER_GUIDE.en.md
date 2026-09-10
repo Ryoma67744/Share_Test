@@ -122,7 +122,7 @@ The session expires after **12 hours**. Closing the tab is fine — re-opening t
 > **finishing a ROI switches it to ROI強度 automatically**. Merely selecting a different ROI in
 > the list leaves the mode alone, so if the bar chart is missing, pick **ROI強度** in the dropdown.
 
-> Each section panel's top-left **section-name label** also shows the **Pixel pitch (μm/px)** when the publisher set it during Align (e.g. `Section 1 · 20×20 μm/px`). Both axes are always written out (`50×60 μm/px` for anisotropic, `20×20 μm/px` for isotropic) so the label is unambiguous.
+> Each section panel's top-left **section-name label** also shows the **Pixel pitch (μm/px)** when the publisher set MSI pixel size (e.g. `Section 1 · 20×20 μm/px`). Both axes are always written out (`50×60 μm/px` for anisotropic, `20×20 μm/px` for isotropic) so the label is unambiguous.
 
 > **Displayed sections**: click **"表示切片"** in the Sections header to open the floating list. Check individual sections across multiple organ groups. A group checkbox controls all sections in that organ and shows an intermediate state when only some are selected. Search filters the list only. **"すべて表示" (Show all)** restores every section; at least one section stays visible. The list also works with one organ and includes unclassified sections. Organ names inferred from section names are display groups, not confirmed biological annotations.
 >
@@ -183,6 +183,18 @@ Recipients can re-align HE/IF onto MSI with **`Align`** too. **The master's alig
 - If two people re-align the same section at once, the later save is told "someone updated this first" instead of silently overwriting.
 - The **`×`** button deletes that section's shared alignment and returns it to the master's. It takes the lock first, then asks.
 - If the server side has not been migrated yet (re-run `supabase/share_locks.sql`), re-aligning does not reach anyone else and the page says so.
+
+**Workflow**
+
+1. Open `Align` and choose the HE/IF layer, Source and MSI molecule. The dedicated workspace fills the viewport while the usual lists and analysis panels are inactive.
+2. Use **左右比較 (Side by side)** for the large images. Drag to pan, use the wheel or ± to zoom, and **全体表示 (Fit)** to fit them in their panes. **左右の表示を同期 (Sync views)** links the display controls when the coordinate basis is confirmed.
+3. Select a point tool and add corresponding landmarks. **Changing from molecule A to B in the same measurement coordinate frame retains the points, pairing, transform and view.** Add points on B and use them together in `Solve`. Returning to a measurement or HE/IF image restores its own draft.
+4. Use **重ね合わせ (Overlay)** to inspect the composite and opacity. Open **詳細設定・対応点一覧 (Details and points)** for Manual adjustments and point removal.
+5. **Save** commits all changed targets from this workspace. Shared saves check the version captured at editing start and refuse conflicting overwrites. A failed save retains the draft. **Cancel / Esc / Close** discard unsaved changes and release the editing lock.
+
+New work starts with individual measurement settings. Choose a common registration explicitly after confirming the coordinate basis. Equal image dimensions alone do not justify reusing old landmarks. Unconfirmed legacy records remain stored; point addition and Save are blocked when the displayed frame cannot be confirmed.
+
+Display zoom and pan do not change point coordinates. Original MSI intensities, coordinates, missingness, row order, existing MSI-coordinate ROI statistics and numerical exports are unchanged. **Physical pitch (μm/px) is read-only in Align**; calibration changes belong to the separate MSI pixel size dialog.
 
 **You can also bring your own HE/IF image.** Register a TIFF / PNG / JPEG with **`+ HE/IF`** in the toolbar: it becomes visible to **everyone on this share URL** and you can align it to the MSI straight away.
 
