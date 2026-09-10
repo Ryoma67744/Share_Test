@@ -7,7 +7,7 @@ import {
   listMrmLibrary, getExpTemplate, searchProjectsByCompound,
 } from './supabase.js';
 import {
-  buildMsiGrid, extractRoiValues, stats, pointInPolygon,
+  buildMsiGrid, createMsiSourceGeometry, msiSourceReference, roiContainsSourcePoint, extractRoiValues, stats, pointInPolygon,
 } from './msi.js';
 import { newRowCache, loadRowsForDef } from './rows.js';
 import { buildExp } from './exp.js';
@@ -36,14 +36,9 @@ const normName = (v) => String(v == null ? '' : v).toLowerCase().replace(/[^a-z0
 // a number in the app and "unknown" here. Mirrors msiMaxIntensity in
 // viewer/index.html — **do not change one without the other.**
 function msiMaxIntensity(def) {
-  if (def && Number.isFinite(def.rawTrueMax)) return { value: def.rawTrueMax, estimated: false };
-  // statMax = parquet (TIMS ノンターゲット) のフッタ統計から得た **ファイル全体** の
-  // 最大値。列を読まずに埋まるので未表示の化合物にも値があるが、切片ごとの値では
-  // ないので概算扱いにする。列を読むと rawTrueMax が入って上書きされる。
-  if (def && Number.isFinite(def.statMax)) return { value: def.statMax, estimated: true };
-  const rr = def && def.rawRange;
-  if (Array.isArray(rr) && Number.isFinite(rr[1])) return { value: rr[1], estimated: true };
-  return { value: null, estimated: false };
+  if(def&&def.quantVersion==='msi-source-rows-v1'&&Number.isFinite(def.rawTrueMax))
+    return {value:def.rawTrueMax,estimated:false};
+  return {value:null,estimated:false};
 }
 
 function compoundInfo(key, def) {
@@ -54,12 +49,12 @@ function compoundInfo(key, def) {
     name: meta.name || meta.base || String(key).replace(/^MSI_/, ''),
     precursor: meta.precursor != null ? meta.precursor : null,
     product: meta.product != null ? meta.product : null,
-    rawMean: (def && Number.isFinite(def.rawMean)) ? def.rawMean : null,
+    rawMean: (def && def.quantVersion==='msi-source-rows-v1' && Number.isFinite(def.rawMean)) ? def.rawMean : null,
     // rawTrueMax stays raw (null when genuinely absent) so callers that need the
     // measured value can still tell it apart from a derived one. maxIntensity is
     // the number the app's tables show; maxIsEstimated says whether it came from
     // the fallback.
-    rawTrueMax: (def && Number.isFinite(def.rawTrueMax)) ? def.rawTrueMax : null,
+    rawTrueMax: (def && def.quantVersion==='msi-source-rows-v1' && Number.isFinite(def.rawTrueMax)) ? def.rawTrueMax : null,
     rawRange: (def && Array.isArray(def.rawRange)) ? def.rawRange : null,
     maxIntensity: max.value,
     maxIsEstimated: max.estimated,
@@ -75,6 +70,14 @@ async function findCatalogEntry(slug) {
 
 // Load doc + ROIs for a project (read-only). Throws a clear error if a private
 // project has no local password configured.
+function decodeConnectorRoiPolygon(payload) {
+  if(Array.isArray(payload))return {poly:payload,geometry:null};
+  if(payload&&payload.version==='msi-roi-polygon-v1'&&Array.isArray(payload.vertices)
+      &&payload.geometry&&typeof payload.geometry==='object')
+    return {poly:payload.vertices,geometry:payload.geometry};
+  return {poly:payload&&Array.isArray(payload.vertices)?payload.vertices:[],
+    geometry:{version:'msi-unresolved-v1',reason:'unsupported-roi-envelope'},originalPayload:payload};
+}
 async function loadProject(slug) {
   const entry = await findCatalogEntry(slug);
   const tok = await getReadToken(slug, entry.is_public);
@@ -96,7 +99,7 @@ async function loadProject(slug) {
     let rois = [];
     try {
       const rows = await listRois(tok.token, s.id);
-      rois = (rows || []).map((r) => ({ name: r.name || r.color_key, colorKey: r.color_key, poly: r.poly_msi || [] }));
+      rois = (rows || []).map((r) => Object.assign({name:r.name||r.color_key,colorKey:r.color_key},decodeConnectorRoiPolygon(r.poly_msi)));
     } catch (e) { /* skip a section we can't read ROIs for */ }
     sections.push({
       id: s.id,
@@ -192,9 +195,15 @@ export async function getRoiStats(slug, opts = {}) {
     let rows;
     try { rows = await loadRowsForDef(def, cache); }
     catch (e) { results.push({ section: s.name, compound: compoundInfo(k, def).name, error: String(e.message || e) }); continue; }
-    const grid = buildMsiGrid(rows);
+    const grid = createMsiSourceGeometry(rows,def);
     for (const r of roiList) {
-      const vals = extractRoiValues(rows, r.poly, grid);
+      let vals;
+      try {
+        if(r.geometry&&r.geometry.version==='msi-unresolved-v1')throw new Error('ROI geometry is unresolved');
+        if(!r.geometry&&new Set(Object.values(s.msiSeries).map(msiSourceReference)).size>1)
+          throw new Error('Legacy ROI source is ambiguous; original polygon was preserved');
+        vals=extractRoiValues(rows,r.poly,grid,r.geometry,def);
+      } catch(e) {results.push({section:s.name,roi:r.name,compound_key:k,error:String(e.message||e)});continue;}
       results.push({
         section: s.name,
         roi: r.name,
@@ -278,10 +287,14 @@ export async function getMatrix(slug, opts = {}) {
     const r = s.rois.find((rr) => matchStr(roi, rr.name));
     if (!r) throw new Error("ROI '" + roi + "' not found in section '" + s.name + "'");
     roiName = r.name;
-    const grid = buildMsiGrid(rows);
-    rows = rows.filter((row) => {
-      const px = grid.xIndex.get(row.x), py = grid.yIndex.get(row.y);
-      return px != null && py != null && pointInPolygon(px, py, r.poly);
+    if(r.geometry&&r.geometry.version==='msi-unresolved-v1')throw new Error('ROI geometry is unresolved');
+    const geometry=createMsiSourceGeometry(rows,def);
+    if(!r.geometry&&new Set(Object.values(s.msiSeries).map(msiSourceReference)).size>1)
+      throw new Error('Legacy ROI source is ambiguous; original polygon was preserved');
+    rows=rows.filter(row=>{
+      const inside=roiContainsSourcePoint(r.poly,r.geometry,geometry,row.x,row.y);
+      if(inside===null)throw new Error('ROI source geometry cannot be resolved');
+      return inside;
     });
   }
 
@@ -292,11 +305,21 @@ export async function getMatrix(slug, opts = {}) {
     roi: roiName, total_rows: total, downsample: step,
   };
 
+  const cellText=(cell,value)=>{
+    const text=cell?(cell.token==null?'':String(cell.token)):(Number.isFinite(value)?String(value):'');
+    return /[",\r\n]/.test(text)?'"'+text.replace(/"/g,'""')+'"':text;
+  };
+  const csvRow=r=>[cellText(r.sourceCells&&r.sourceCells.x,r.x),cellText(r.sourceCells&&r.sourceCells.y,r.y),cellText(r.sourceCells&&r.sourceCells.v,r.v)].join(',');
+  const rowMetadata=items=>items.map((r,i)=>({rowId:r.rowId==null?i:r.rowId,
+    cells:r.sourceCells?Object.fromEntries(Object.entries(r.sourceCells).map(([key,cell])=>[key,{type:cell.type,sourceType:cell.sourceType,status:cell.status,token:cell.token,formula:cell.formula,errorCode:cell.errorCode}])):null}));
   if (toFile) {
     const fname = 'desi_' + safeFile(slug) + '_' + safeFile(meta.compound) + '_' + safeFile(s.name) + (roiName ? ('_' + safeFile(roiName)) : '') + '.csv';
     const fpath = join(tmpdir(), fname);
-    writeFileSync(fpath, 'x,y,value\n' + selected.map((r) => r.x + ',' + r.y + ',' + r.v).join('\n') + '\n');
+    writeFileSync(fpath, 'x,y,value\n' + selected.map(csvRow).join('\n') + '\n');
+    const metadataPath=fpath+'.metadata.json';
+    writeFileSync(metadataPath,JSON.stringify({version:'msi-source-cells-v1',rows:rowMetadata(selected)},null,2)+'\n');
     return Object.assign(meta, {
+      cell_metadata_path:metadataPath,
       written_rows: selected.length,
       file_path: fpath,
       note: 'Full CSV written to file_path (kept OUT of the conversation). Load it with your code/analysis tool.',
@@ -305,7 +328,7 @@ export async function getMatrix(slug, opts = {}) {
 
   const capped = selected.length > cap;
   const returned = selected.slice(0, cap);
-  const csv = 'x,y,value\n' + returned.map((r) => r.x + ',' + r.y + ',' + r.v).join('\n') + '\n';
+  const csv = 'x,y,value\n' + returned.map(csvRow).join('\n') + '\n';
   return Object.assign(meta, {
     returned_rows: returned.length,
     capped,
@@ -313,6 +336,7 @@ export async function getMatrix(slug, opts = {}) {
       ? ('Output capped at ' + cap + ' rows. Narrow with `roi`, raise `downsample`, increase `max_rows`, or pass `to_file:true` to write the full CSV to disk. Analyze the CSV with your code tool.')
       : 'Full data returned. Analyze the CSV with your code tool.',
     csv,
+    cell_metadata:{version:'msi-source-cells-v1',rows:rowMetadata(returned)},
   });
 }
 

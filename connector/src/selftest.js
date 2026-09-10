@@ -7,7 +7,7 @@ import vm from 'node:vm';
 import { deflateRawSync } from 'node:zlib';
 import * as XLSX from 'xlsx';
 import {
-  a1ColToIndex, pointInPolygon, buildMsiGrid,
+  a1ColToIndex, pointInPolygon, buildMsiGrid, buildLegacyMsiGrid, createMsiSourceGeometry,
   parseXlsxToRows, parseTxtToRows, extractRoiValues, stats,
 } from './msi.js';
 import { buildExp } from './exp.js';
@@ -20,6 +20,19 @@ function check(name, cond, detail) {
   else { failures++; console.log('  FAIL', name, detail != null ? ('-> ' + JSON.stringify(detail)) : ''); }
 }
 const approx = (a, b) => Math.abs(a - b) < 1e-9;
+
+// Extract one live top-level function without unrelated UI globals.
+function appFunction(source, name) {
+  const start = source.search(new RegExp('(?:async )?function ' + name + '\\('));
+  if (start < 0) throw new Error('Missing viewer function: ' + name);
+  const end = source.indexOf('\n}', start);
+  if (end < 0) throw new Error('Missing viewer function terminator: ' + name);
+  return source.slice(start, end + 2);
+}
+const sourceFunctionNames = ['msiSourceCell', 'msiSourceNumber', 'msiSourceRow'];
+const geometryFunctionNames = ['buildLegacyMsiGrid', 'buildMsiGrid', 'msiSourceReference',
+  'createMsiSourceGeometry', 'msiAxisInterpolate', 'msiValidRoiGeometry', 'msiRoiGeometryMeta',
+  'pointInPolygon', 'roiContainsSourcePoint'];
 
 console.log('a1ColToIndex / pointInPolygon');
 check('A->0', a1ColToIndex('A') === 0);
@@ -341,7 +354,7 @@ console.log('parquet (TIMS non-target) — connector vs app');
     const a = viewerSrc.indexOf(START);
     const b = a >= 0 ? viewerSrc.indexOf(END, a + START.length) : -1;
     check('locate the app parquet worker in viewer/index.html', a >= 0 && b > a, { a, b });
-    let appRows = null;
+    let appRows = null, appContext = null;
     if (a >= 0 && b > a) {
       const body = viewerSrc.slice(a, b) + '\n}';
       const ctx = vm.createContext({
@@ -349,9 +362,13 @@ console.log('parquet (TIMS non-target) — connector vs app');
         Float32Array, Float64Array, Int32Array, Uint8Array, isNaN, parseFloat, Infinity, NaN,
       });
       ctx.globalThis = ctx;
-      new vm.Script(body + '\nglobalThis.__body = _parquetWorkerBody;').runInContext(ctx);
+      const pureFunctions = [...sourceFunctionNames, ...geometryFunctionNames,
+        'parquetSourceRows', 'extractRoiRawFromSection', 'calcStats'];
+      new vm.Script(pureFunctions.map(name => appFunction(viewerSrc, name)).join('\n')
+        + '\n' + body + '\nglobalThis.__body = _parquetWorkerBody;').runInContext(ctx);
+      appContext = ctx;
       const posted = [];
-      const fakeSelf = { onmessage: null, postMessage: (m) => posted.push(m) };
+      const fakeSelf = { onmessage: null, postMessage: (m) => posted.push(structuredClone(m)) };
       const hy = await import('hyparquet');
       const { compressors } = await import('hyparquet-compressors');
       ctx.__body(fakeSelf, {
@@ -370,6 +387,10 @@ console.log('parquet (TIMS non-target) — connector vs app');
         await fakeSelf.onmessage({ data: Object.assign({ id }, msg) });
         const out = posted.slice(before).find((m) => m.id === id);
         if (!out.ok) throw new Error('app worker: ' + out.error);
+        if (out.sourceCellStates && out.result) {
+          if (msg.op === 'columns') out.result.forEach((col, i) => { col._sourceCellStates = out.sourceCellStates[i] || {}; });
+          else out.result._sourceCellStates = out.sourceCellStates;
+        }
         return out.result;
       };
       const opened = await callApp({ op: 'open', fileId: 'f1', blob: blobLike });
@@ -379,13 +400,16 @@ console.log('parquet (TIMS non-target) — connector vs app');
         op: 'columns', fileId: 'f1', blob: blobLike,
         colIdxs: [roles.xIdx, roles.yIdx, roles.annIdx, 3],
       });
-      appRows = [];
+      const sourceRows = [];
       for (let i = 0; i < ax.length; i++) {
-        if (String(aann[i]) !== '01') continue;
-        if (Number.isFinite(ax[i]) && Number.isFinite(ay[i]) && Number.isFinite(av[i])) {
-          appRows.push({ x: ax[i], y: ay[i], v: av[i] });
-        }
+        if (String(aann[i]) === '01') sourceRows.push({ x: ax[i], y: ay[i], rowId: i });
       }
+      appRows = Array.from(ctx.parquetSourceRows(av, { sourceRows }));
+      check('source rows retain missing measurements', appRows.length === PER_SEC && rowsA1.length === PER_SEC,
+        { app: appRows.length, connector: rowsA1.length });
+      check('missing cells retain source state through Worker clone',
+        appRows[0].sourceCells.v.status === 'missing' && appRows[0].sourceCells.v.type === 'null'
+        && rowsA1[0].sourceCells.v.status === 'missing' && rowsA1[0].sourceCells.v.type === 'null');
     }
     if (appRows) {
       check('★ row count matches the app', rowsA1.length === appRows.length,
@@ -393,17 +417,25 @@ console.log('parquet (TIMS non-target) — connector vs app');
       let firstBad = -1;
       for (let i = 0; i < Math.min(rowsA1.length, appRows.length); i++) {
         const c = rowsA1[i], d = appRows[i];
-        if (c.x !== d.x || c.y !== d.y || c.v !== d.v) { firstBad = i; break; }
+        if (!Object.is(c.x, d.x) || !Object.is(c.y, d.y) || !Object.is(c.v, d.v) || c.rowId !== d.rowId) { firstBad = i; break; }
       }
       check('★ every {x,y,v} matches the app bit for bit', firstBad < 0,
         firstBad >= 0 ? ('row ' + firstBad + ': ' + JSON.stringify([rowsA1[firstBad], appRows[firstBad]])) : '');
       // The statistics the AI actually receives must match too.
       const roiAll = [[-1, -1], [999, -1], [999, 999], [-1, 999]];
       const sc = stats(extractRoiValues(rowsA1, roiAll));
-      const sa = stats(extractRoiValues(appRows, roiAll));
-      check('★ ROI statistics match the app',
-        sc.n === sa.n && sc.mean === sa.mean && sc.min === sa.min && sc.max === sa.max && sc.sd === sa.sd,
+      const appGeometry = appContext.createMsiSourceGeometry(appRows, defFor(3, '01'));
+      appContext._ensureRoiRawGrid = async () => ({ rows: appRows, sourceGeometry: appGeometry });
+      const appRoi = await appContext.extractRoiRawFromSection({
+        section: { id: 's', meta: {}, msiSeries: { MSI_A: defFor(3, '01') } }, project: { rois: [] },
+      }, 'MSI_A', roiAll);
+      const sa = appContext.calcStats(appRoi.values);
+      check('ROI statistics match actual viewer extraction', !appRoi.unavailable
+        && sc.n === sa.n && sc.mean === sa.mean && sc.max === sa.max && sc.sd === sa.sd,
         JSON.stringify({ connector: sc, app: sa }));
+      check('ROI source row IDs match the app', JSON.stringify(sc.rowIds) === JSON.stringify(appRoi.rowIds));
+      check('missing rows are excluded only from valid quantitative n',
+        sc.n === columnData[3].data.slice(0, PER_SEC).filter(Number.isFinite).length && sc.n < rowsA1.length);
     }
 
     // --- section filtering ----------------------------------------------------
@@ -412,7 +444,7 @@ console.log('parquet (TIMS non-target) — connector vs app');
       rowsA2.length > 0 && stats(rowsA2.map((r) => r.v)).mean !== stats(rowsA1.map((r) => r.v)).mean,
       JSON.stringify({ n1: rowsA1.length, n2: rowsA2.length }));
     check('the two sections partition the file',
-      rowsA1.length + rowsA2.length <= N_ROWS, rowsA1.length + rowsA2.length);
+      rowsA1.length + rowsA2.length === N_ROWS, rowsA1.length + rowsA2.length);
 
     let badSection = null;
     try { await loadRowsForDef(defFor(3, 'no-such-section'), cache); } catch (e) { badSection = e; }
@@ -684,9 +716,13 @@ console.log('Waters .raw — connector vs app');
   check('rows returned', rows.length === N, rows.length);
   check('★ the requested channel is the one returned',
     rows.every((r, i) => r.v === valueAt(i, 2)), rows.slice(0, 3));
+  const sourceGeometry = createMsiSourceGeometry(rows, { kind: 'raw', func: 1 });
   const grid = buildMsiGrid(rows);
-  check('snapped coordinates land on the true raster (no ordinal fallback)',
-    grid.W === FX.W && grid.H === FX.H && !grid.gridFallback, [grid.W, grid.H, grid.gridFallback]);
+  check('legacy raw grid is retained separately from original coordinates',
+    sourceGeometry.legacy.W === FX.W && sourceGeometry.legacy.H === FX.H,
+    [sourceGeometry.legacy.W, sourceGeometry.legacy.H]);
+  check('original raw coordinates determine a bounded proportional display',
+    grid.W <= 4096 && grid.H <= 4096 && grid.W * grid.H <= 4194304 && grid.displayGeometry.version === 'msi-proportional-v1');
 
   // ---- live diff against the app's own copy -------------------------------
   const viewerSrc = readFileSync(fileURLToPath(new URL('../../viewer/index.html', import.meta.url)), 'utf8');
@@ -699,7 +735,7 @@ console.log('Waters .raw — connector vs app');
     const ctx = vm.createContext({
       TextDecoder, TextEncoder, Blob, Response, DecompressionStream, console,
     });
-    new vm.Script(viewerSrc.slice(S, E)
+    new vm.Script(sourceFunctionNames.map(name => appFunction(viewerSrc, name)).join('\n') + '\n' + viewerSrc.slice(S, E)
       + '\nglobalThis.__app = { rawBundleFromZip, parseRawArchiveMeta, parseRawToRows, parseWatersFunctions };').runInContext(ctx);
     const app = ctx.globalThis ? ctx.globalThis.__app : ctx.__app;
     const appMeta = await app.parseRawArchiveMeta(app.rawBundleFromZip(zip));
@@ -715,7 +751,8 @@ console.log('Waters .raw — connector vs app');
       const b = await parseRawToRows(zip, { func: 1, channel: ch });
       if (a.length !== b.length) { same = false; break; }
       for (let i = 0; i < a.length; i++) {
-        if (a[i].x !== b[i].x || a[i].y !== b[i].y || a[i].v !== b[i].v) { same = false; break; }
+        if (!Object.is(a[i].x, b[i].x) || !Object.is(a[i].y, b[i].y) || !Object.is(a[i].v, b[i].v)
+          || a[i].rowId !== b[i].rowId || a[i].legacyX !== b[i].legacyX || a[i].legacyY !== b[i].legacyY) { same = false; break; }
       }
       if (!same) break;
     }
@@ -764,16 +801,11 @@ console.log('Waters .raw — connector vs app');
 console.log('buildMsiGrid — connector vs app');
 {
   const viewerSrc = readFileSync(fileURLToPath(new URL('../../viewer/index.html', import.meta.url)), 'utf8');
-  const START = '\nfunction buildMsiGrid(rows) {';
-  const END = '// Pure numeric core (no DOM/canvas): build the MSI raster grid';
-  const s0 = viewerSrc.indexOf(START);
-  const e0 = viewerSrc.indexOf(END, s0);
-  check('locate the app buildMsiGrid in viewer/index.html', s0 >= 0 && e0 > s0, { s0, e0 });
-  if (s0 >= 0 && e0 > s0) {
-    const ctx = vm.createContext({});
-    new vm.Script(viewerSrc.slice(s0 + 1, e0) + '\nglobalThis.__appGrid = buildMsiGrid;').runInContext(ctx);
-    const appGrid = ctx.globalThis ? ctx.globalThis.__appGrid : ctx.__appGrid;
-
+  const ctx = vm.createContext({});
+  new vm.Script(appFunction(viewerSrc, 'buildMsiGrid') + '\n' + appFunction(viewerSrc, 'buildLegacyMsiGrid')
+    + '\nglobalThis.__appGrid = buildMsiGrid; globalThis.__appLegacyGrid = buildLegacyMsiGrid;').runInContext(ctx);
+  const appGrid = ctx.__appGrid;
+  {
     // Coordinates are the same on both axes so each case exercises x and y.
     const CASES = {
       'evenly spaced, complete': [0, 1, 2, 3, 4, 5],
@@ -803,11 +835,13 @@ console.log('buildMsiGrid — connector vs app');
       const b = dump(buildMsiGrid(rows));
       check('★ ' + name, a === b, a === b ? null : { app: a, connector: b });
     }
-    // Pin the behaviour the drift got wrong, so "both sides agree" cannot be
-    // satisfied by both regressing to min-only together.
     const jitter = asRows(CASES['float jitter (one short gap)']);
-    check('★ the jitter case uses the median pitch (W=6, not the min-gap W=10)',
-      buildMsiGrid(jitter).W === 6, buildMsiGrid(jitter).W);
+    check('legacy grid retains the previous median-pitch mapping',
+      buildLegacyMsiGrid(jitter).W === 6 && ctx.__appLegacyGrid(jitter).W === 6);
+    const proportional = buildMsiGrid(asRows([0, 0.1, 10])).displayGeometry;
+    const toPixel = x => (x - proportional.x.origin) / proportional.x.step;
+    check('irregular source distance ratio is retained', approx(toPixel(0.1) / toPixel(10), 0.01));
+    check('display allocation stays bounded', proportional.W * proportional.H <= 4194304);
   }
 }
 

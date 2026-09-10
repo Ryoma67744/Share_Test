@@ -44,6 +44,12 @@ jobs:
         working-directory: connector
         run: npm ci --no-audit --no-fund
 
+      - name: MSI source, geometry, persistence and visibility regressions
+        run: |
+          for test in tests/msi_*_regression.js; do
+            node "$test"
+          done
+
       # devDependency の hyparquet-writer が入るので parquet のパリティも走る
       # (入っていないと SKIP されて素通りする)。
       - name: connector selftest (app <-> connector parity)

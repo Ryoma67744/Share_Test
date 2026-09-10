@@ -31,7 +31,7 @@ Master-side operations (creating projects, registering layers, publishing, etc.)
 - Toggle existing ROIs on/off / **clip MSI to the selected ROI shape** (ROI-only)
 - Add new ROIs and delete existing ones — **only while holding the write lock** (one editor at a time)
 - Compare mean intensity across sections × compounds in the ANALYSIS bar chart
-- **Filter the view by organ** (auto-inferred from section names, when 2+ organs exist)
+- **Choose displayed sections freely** (organ groups, individual checkboxes and name search)
 - Make **temporary** display adjustments (Range / Opacity / Rotation / Pan / Zoom)
 - **Temporarily** edit the Memo
 - Download the entire project as a ZIP
@@ -113,21 +113,20 @@ The session expires after **12 hours**. Closing the tab is fine — re-opening t
 | ANALYSIS | Bar chart of the selected ROI across sections × compounds |
 | Memo | Sample / Machine / Matrix / Google Keep / +α … (temporary edits) |
 
-> **Where the ANALYSIS numbers come from**: the bar chart's Mean Intensity is computed
-> **directly from the source data file** (xlsx / txt / parquet), never from the 8-bit display image.
-> Changing the toolbar's **outlier clip** or **Range** therefore cannot move the numbers —
-> only the image brightness changes. The values match the Data CSV in an Export ZIP and the
-> MCP connector's `get_roi_stats`. When **background removal (Otsu)** is on, the background
-> pixels hidden from the image are also excluded from the mean.
+> **Where ANALYSIS numbers come from**: Mean Intensity uses valid original measurement rows inside the ROI. Every duplicate-coordinate row is retained; neither the display's representative pixel average nor the 8-bit image is used for quantification. **Range, colour, outlier clipping, Otsu, rotation, flips and section visibility do not change the numbers for the same ROI.** Rows hidden by Otsu still contribute when their original coordinates are inside the ROI.
+>
+> **n counts valid original measurement rows**, not unique coordinates or biological samples. SD uses denominator n. Missing values are not replaced by measured zero. With no valid values, n=0 and Mean/SD/Max are unavailable. Missing sources or unsupported numeric precision are reported as unavailable; values are not inferred from a PNG.
 
 > **Switching what ANALYSIS shows**: the dropdown at the top of the panel selects
-> **ROI強度 (ROI intensity) / 背景除去(Otsu) / KMD図**. It starts on **背景除去(Otsu)**, but
+> **ROI強度 (ROI intensity) / 背景を非表示（Otsu） / KMD図**. It starts on **背景を非表示（Otsu）**, but
 > **finishing a ROI switches it to ROI強度 automatically**. Merely selecting a different ROI in
 > the list leaves the mode alone, so if the bar chart is missing, pick **ROI強度** in the dropdown.
 
 > Each section panel's top-left **section-name label** also shows the **Pixel pitch (μm/px)** when the publisher set it during Align (e.g. `Section 1 · 20×20 μm/px`). Both axes are always written out (`50×60 μm/px` for anisotropic, `20×20 μm/px` for isotropic) so the label is unambiguous.
 
-> **Organ filter**: when **2 or more** organs are inferred from the first token of the section names, an **"臓器:" (Organ)** selector appears at the right of the Sections header. Picking one shows only that organ's sections in the center ("すべて"/All shows everything). This only filters the view — it never changes the data or server state.
+> **Displayed sections**: click **"表示切片"** in the Sections header to open the floating list. Check individual sections across multiple organ groups. A group checkbox controls all sections in that organ and shows an intermediate state when only some are selected. Search filters the list only. **"すべて表示" (Show all)** restores every section; at least one section stays visible. The list also works with one organ and includes unclassified sections. Organ names inferred from section names are display groups, not confirmed biological annotations.
+>
+> Main view and Preview share the selection, retained in this tab separately for each project/share URL. Checking a box keeps the panel open; click outside or press Esc to close it. Hiding sections does not change ROI analysis, numerical export or another viewer's selection. Hiding a section during ROI drawing is deferred until the drawing is finished or cancelled.
 
 ---
 
@@ -273,8 +272,8 @@ The **Method (MRM)** table at the bottom-left lists every MSI layer in the activ
 | Fragment | Fragment (product) m/z | **Admin only** |
 | CE | Collision Energy | **Admin only** |
 | CV | Collision Voltage / Compensation Voltage | **Admin only** |
-| Mean | Layer's mean intensity | Always |
-| Max | Layer's max intensity | Always |
+| Mean | Mean of valid original rows for this section and molecule | Always (`—` when unavailable) |
+| Max | Maximum of valid original rows for this section and molecule | Always (`—` when unavailable) |
 
 > Viewers opening with the regular viewer password do **not** see the Precursor / Fragment / CE / CV columns. Those are MS-instrument parameters and are revealed only when the URL is opened with the admin password.
 
@@ -304,17 +303,17 @@ Three groups in each section's toolbar:
 
 | Field | Input | Meaning |
 | --- | --- | --- |
-| **Range** | min — max | Intensity window of the active MSI layer (display floor / ceiling). **Shared across every section showing the same MRM (compound)** — see the note below |
+| **Range** | min — max | Display intensity window. Manual values are shared for the same MRM. Automatic Same uses a common range for displayed sections; Individual uses each section's own range |
 | **Opacity** | 0–100 % | Transparency of the active MSI layer |
 | **Rotation** | -180°–180° | Canvas rotation (combines with pan and zoom). The **target selector to its left (Both / HE only / MSI only)** chooses which layer is rotated |
 
-**About syncing**: **Range is always shared across every section showing the same MRM** (no toggle needed). **Opacity** and **Rotation (Both)** sync across sections only while their **🔗** icon is ON. The **`↻`** button resets translate / rotate / zoom for the panel (HE/MSI-only rotation is reset too).
+**About syncing**: manual Range values are shared for the same MRM. **Opacity** and **Rotation (Both)** sync across sections only while their **🔗** icon is ON. The **`↻`** button resets translate / rotate / zoom for the panel (HE/MSI-only rotation is reset too).
 
 > If the Opacity input is greyed out, the active MSI layer has **Apply opacity** disabled in its gear ⚙ popover. Re-enable the checkbox there and the toolbar input becomes editable again.
 
 > These tweaks are **temporary** — they revert to the server state on reload, and other viewers don't see them.
 
-> **Range defaults and blown-out highlights**: while you have not touched Range, the ceiling is set automatically to **the top 0.1% value of that molecule's intensity distribution**. Pixels above the ceiling collapse to the same colour, so **exactly 0.10% of pixels blow out**. The old ceiling was the top 1%, which blew out 1.00%. The trade-off is that **images look somewhat darker** (median 1.4x). **If it looks too dark, lower the Range ceiling by hand** — a typed value always wins, and `Reset` returns to the automatic one.
+> **Automatic Range and highlights**: with outlier clipping on, automatic Range uses **p99.9 (the 99.9th percentile)** as its upper reference. Values above the ceiling share the upper colour. The number of saturated positions depends on sample size and ties; it is not always exactly 0.1%. Lower the ceiling manually if the image is too dark. Manual values take priority; `Reset` restores automatic Range. **Changing displayed sections or opening/closing Preview does not delete manual Range.**
 
 > **Range initial values are inherited from the master**: the per-MSI Range slider (vmin/vmax) loads with the value the master set at publish time. Viewers can still adjust freely, but the change is local — reloading restores the master's value. If the master later re-tunes Range and re-publishes, the new value becomes the next-load initial.
 
@@ -322,7 +321,7 @@ Three groups in each section's toolbar:
 
 > Pan: drag without modifier. Zoom: mouse wheel. Rotation: the input field, optionally synced with 🔗.
 
-> **Rotation is reflected in the bottom thumbnail list too**: changing Rotation re-renders the **MSI thumbnail list** at the bottom-center in the same orientation as the main canvas.
+> **Image and ROI orientation**: whole-view and MSI-only rotation are reflected in the main view, thumbnails and ROI positions. Horizontal/vertical flips act on the screen axes at the time of the operation. A deliberately saved share-preview angle is retained. Existing initial orientation is not changed globally by 180° without comparison to a source image. An existing ROI with an unresolved source-coordinate mapping needs review before quantification.
 
 > **Rotate HE only / MSI only**: pick "HE only" or "MSI only" in the **target selector** left of Rotation to rotate **just one layer** on that section. Use it when HE and MSI were imported at different orientations and don't line up — rotate one of them to match. "Both" rotates the whole canvas as before. HE/MSI-only rotation is per-section and is not affected by the 🔗 sync.
 
@@ -406,14 +405,15 @@ The **Memo** form on the bottom-right lets you edit Sample / Machine / Google Ke
 
 ## 9. Preview overlay (image grid)
 
-The header **Preview** button opens a side-by-side overlay that shows every section for a single compound. It's optimised for slide-deck screenshots and quick cross-section comparison.
+The header **Preview** button opens a side-by-side overlay of the displayed sections for one compound. It is useful for slide-deck screenshots and quick cross-section comparison.
 
 | Region | Role |
 | --- | --- |
 | **Method panel (left)** | Compound list. Click or ↑↓ keys to change focus. The right-edge splitter is **draggable** — pull it horizontally to resize the panel; the chosen width is remembered on next open. |
-| **Image grid (center)** | One MSI cell per section. Each cell has a **dynamic scalebar** at the bottom and a **Section name + Pixel pitch** caption at the top. Drag to pan, wheel to zoom inside each cell. |
-| **Range (top)** | **Project-wide vmin / vmax** so every section uses the same colour scale. **Reset** returns the selected MRM to its automatic range. |
-| **背景除去(Otsu) (top)** | Detects background from each pixel's total signal and hides it. This is the **same setting** as the main toolbar, so it survives closing Preview (the Colormap does not). Adjusting the strength needs the ANALYSIS panel, so close Preview for that. |
+| **Image grid (center)** | One MSI cell per displayed section, with a dynamic scalebar and Section name + Pixel pitch. Drag to pan; wheel to zoom. |
+| **Displayed sections** | The floating list shared with the main view. Hidden cells leave the grid; use this list to restore them. Selection changes retain each section's viewpoint and rotation. |
+| **Range (top)** | Shared with the main view. Manual values persist; automatic Same uses the displayed sections. **Reset** returns the selected MRM to automatic Range. |
+| **背景を非表示（Otsu）(top)** | Builds a display mask from total signal. It is shared with the main view and persists when Preview closes. ROI statistics and CSV rows are unchanged. Adjust the threshold in the main view's Otsu histogram. |
 | **Stats / Colorbar (right)** | Statistics for the focus compound + the colour bar. **In overlay mode this becomes a molecule-to-colour legend.** |
 | **🔑 Admin (top-right)** | When opened with a viewer password, this **escalates** to admin without closing Preview — the admin password modal now appears on top of the overlay. |
 
@@ -430,25 +430,21 @@ The header **Preview** button opens a side-by-side overlay that shows every sect
 
 The header's **Export ZIP** packages the entire viewable project into a single zip on your machine:
 
-```
-<projectName>_<timestamp>.zip
-├─ <projectName>.json                ← project meta + all ROIs + memo
-└─ sections/
-   └─ <sectionId>/
-      ├─ atlas.json                  ← section meta + Align / display state
-      └─ data/
-         ├─ img_HE_Stain__<original>.tif         ← HE/IF: one file per layer
-         ├─ img_IF_Stain__<original>.tif (optional)
-         ├─ msi__Analyte_1.txt                    ← MSI: one file per source
-         └─ msi__Analyte_2.xlsx                   ← xlsx with ROI flag columns appended
-```
+| ZIP entry | Content |
+| --- | --- |
+| `<projectName>.json` | All sections, ROIs, memo, alignment and source references |
+| `HE_IF/` | HE/IF originals and aligned images |
+| `Data/` | Numerical CSVs aligned to original measurement rows; only verified column matches are combined |
+| `Source/` | Registered source files. Parquet is bundled in its original format without generating a huge all-compound CSV |
 
 ### Highlights
 
 - **Root JSON is named after the project** (non-ASCII / unsafe chars replaced with `_`)
-- **MSI numerical data is consolidated per source file**: registering many compounds from one Analyte / xlsx produces a single ZIP entry (acquisition-side Image_X / Image_Y are shared within a source, so consolidation is lossless)
-- **xlsx gets ROI columns appended**: every ROI drawn on the section becomes a **0/1 flag column** at the end (column header = ROI name; original layout preserved)
-- **txt is left untouched**: the raw bytes go straight into the ZIP (polygon coordinates remain available in the root JSON's `polysBySection`)
+- **Data is separate from display**: original X/Y, intensities, row order and duplicate rows are retained. Otsu, Range, colour, rotation and section visibility do not alter numerical CSVs. There is no Otsu row-removal/background-flag export choice. Image exports may reflect the current appearance.
+- **No guessed column joins**: combine only columns sharing original rows or a verified complete unique-coordinate match. Same section or same row count is insufficient; ambiguous sources are exported separately.
+- **Keep originals**: source files are not rewritten; ROI information belongs in project JSON/derived output. Keep the original and accompanying metadata for decimal text and blank/null/invalid states that a CSV alone cannot fully represent.
+
+Each CSV has a `.source-cells.json` sidecar recording source row IDs, coordinates, cell types/states/tokens and related metadata. Use the complete ZIP, including originals in `Source/`, for exact source restoration.
 
 ### What recipients can do
 
@@ -456,7 +452,7 @@ The header's **Export ZIP** packages the entire viewable project into a single z
 - Receiving viewer reloads it via **Import ZIP** — same machine or a different one
 - Recipients **cannot re-upload or publish** from share mode (those buttons are hidden)
 
-> Old-format ZIPs (fixed `project.json` + one file per compound) are **not importable** in the new viewer. If you only have an old ZIP, open it in the previous viewer build and re-export.
+> Current v2 and supported legacy v1 ZIPs can be imported. Still older per-compound `msi_<layerKey>__` ZIPs are unsupported. Without original sources, precision and missing-state information already lost in old exports cannot be recovered from PNGs or derived CSVs.
 
 ---
 

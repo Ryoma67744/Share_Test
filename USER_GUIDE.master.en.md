@@ -418,19 +418,26 @@ Values auto-save to IndexedDB (~400 ms debounce). On Publish they're also writte
 
 The toolbar's **Flip** group has `⇄` (mirror left-right) and `⇅` (mirror up-down) buttons for the active section. They're the answer to "I imported this slide upside-down / mirrored — fix it without re-importing."
 
-- Each click flips **both MSI and HE/IF in that section together** (no need to re-run Align for HE).
+- Each click flips **MSI and HE/IF together on the current screen's horizontal or vertical axis** (no need to re-run Align for HE).
 - ROI positions follow automatically, and new ROIs you draw afterwards land where you visually click.
 - The state lives in `sec.meta.flip = { lr, ud }` and travels via IDB + publish, so recipients see the flipped orientation.
 - Click again to undo (toggle).
 - Share recipients have the buttons hidden — the master's choice is the final orientation.
 
-### 9-4. Organ display filter
+MSI-only rotation also follows through to the main view, thumbnails and ROIs. Rotation and flips change the display, not original X/Y, intensity or the saved HE alignment. The historical initial orientation includes a 180° rotation; it is not changed globally without a matching source-software image. A saved share-preview angle is retained.
 
-When several organs (e.g. Brain / Heart / Placenta) are stored in one project, the **"臓器:" (Organ)** selector at the right of the Sections header filters the center grid by organ ("すべて"/All shows everything).
+Legacy raster-coordinate ROIs are migrated only when their source mapping can be established. Unresolved ROIs, including possible intent mismatches after MSI-only rotation in older versions, retain their saved representation and require image review. Original coordinates and quantitative values are not inferred from PNGs. See the [MSI display and numerical contract](docs/MSI_DISPLAY_CONTRACT.md) for technical conditions.
 
-- The organ is **auto-inferred from the first token of the section name** (e.g. `Brain_WT_POS` → `Brain`, `LN_WT` → `LN`) — the first letter token after splitting on delimiters (`_`, etc.). The selector appears only when **2 or more** organs are detected.
-- It only filters the view — no data is changed.
-- If the auto-inference is wrong, set **`section.meta.organ`** to override it. Names where the organ is at the end (e.g. `E15-2-1_Brain1`) are not picked up by first-token inference, so rename sections to put the organ first or use the override.
+### 9-4. Choose displayed sections
+
+Click **"表示切片" (Displayed sections)** in the Sections header to open the floating list. It works for one organ too and includes unclassified sections.
+
+- Check individual sections across organ groups. Group checkboxes affect every section in the organ regardless of search, and show an intermediate state when only some are selected.
+- Search filters the list only. "すべて表示" (Show all) restores every section; at least one stays visible. Click outside or press Esc to close.
+- Grouping prefers `section.meta.organ`, otherwise infers from the name. This is display grouping, not a confirmed biological annotation.
+- Main view and Preview share section IDs, so duplicate names, renaming or reordering cannot swap selection. New sections are shown; deleted IDs are removed.
+- Selection stays in this tab separately for each project/share URL. Selection alone does not save or auto-publish, change another viewer's selection, or change analysis scope. Hiding a section during ROI drawing is deferred until completion or cancellation.
+- Selection retains manual Range and each section's viewpoint/rotation. Automatic Same uses the displayed sections; Individual uses each section. ROI statistics and standard numerical exports keep their analysis scope.
 
 ---
 
@@ -440,57 +447,34 @@ The **Export ZIP** button packages the entire project (images, MSI numerical dat
 
 ### 9-1. File layout (new format)
 
-```
-<projectName>_<YYYY-MM-DDTHH-MM-SS>.zip
-├── <projectName>.json                    ← project + every section's meta + ROIs + memo
-├── HE_IF/
-│   ├── full__<original>.tif              ← HE/IF originals (deduped when byte-identical)
-│   └── <sample>__<layerKey>__aligned.png ← the baked, aligned overlay
-├── Data/
-│   └── <sample>.csv                      ← MSI values, one file per section, compounds as columns
-│                                           (__bg_removed / __bg_flagged when exported with Otsu)
-└── Source/
-    └── <blobId>__<original>              ← sources that cannot be a CSV, or whose original is kept
-                                             (parquet and Waters .raw.zip; deduped by blobId)
-```
+| ZIP entry | Content |
+| --- | --- |
+| `<projectName>.json` | Project, every section, ROIs, memo, coordinate-system and source references |
+| `HE_IF/` | HE/IF originals and aligned PNGs |
+| `Data/` | Numerical CSVs aligned to original measurement rows; verified matches only, with separate files when needed |
+| `Source/` | Registered original sources, deduplicated by blob |
 
-> Two kinds of file end up in `Source/`, for different reasons. **parquet** cannot
-> be written as a CSV (1390 columns × 100k rows), so without it the ZIP would carry
-> no MSI data at all. **`.raw`** does appear in the CSV, but that is a derivative —
-> the original is bundled so it can travel with the project (unzip it and MassLynx
-> opens it). On import the original wins when present; a ZIP without `Source/`
-> restores from the CSV instead.
+Original files are retained without rewriting. Parquet is bundled in its original format; this export does not create a huge all-compound CSV. `.raw.zip` is retained alongside its derived CSV. Import prefers the original source when available. Keep originals and accompanying metadata: a CSV alone cannot represent every original decimal spelling or blank/null/invalid state.
+
+Each CSV has a `.source-cells.json` sidecar recording original row IDs, coordinates, cell types/states/tokens and related metadata. Exact source restoration requires the complete ZIP with `Source/` and original source definitions. INT64/DECIMAL values whose computational precision cannot be guaranteed retain their original file/type and an explicit reason; silently rounded values are not reported as quantitative results.
 
 ### 9-2. Root JSON named after the project
 
-The root JSON is `<projectName>.json` (non-ASCII / unsafe chars replaced with `_`). On import the loader scans for any root-level `*.json` whose `format` field equals `desi_data_share_v1`, so renaming the file outside the viewer is fine.
+The root JSON is `<projectName>.json` (non-ASCII / unsafe chars replaced with `_`). Import finds a root-level JSON by its supported `format` field (`desi_data_share_v2` or legacy `v1`), so renaming the file outside the viewer is fine.
 
-### 9-3. MSI data is consolidated per section
+### 9-3. Verify row correspondence before CSV joining
 
-Old format wrote one ZIP entry per compound, so 17 compounds registered from the same `Analyte 1.txt` produced 17 identical-content files. **The new format writes one CSV per section**, with every compound of that section as a column.
+Compounds from one source are aligned by original measurement row. Different sources are combined only for verified identical measurement rows or a complete unique-coordinate match. **Same section or same row count is insufficient.** Ambiguous sources, including ambiguous duplicate-coordinate matches, are exported separately. Sorted row order is never used to guess a join.
 
-Example: 17 compounds from `Analyte 1.txt` → old format = 17 files, **new format = a single `Data/<sample>.csv` holding all 17 compounds as columns**.
+CSVs retain original X/Y, intensities, row order and duplicate rows. Display Range, clipping, rotation, hidden sections and Otsu do not change their rows or values. Otsu background-removal/flag export options are no longer part of this path.
 
-<div style="border:1px solid #cbd5e1;border-radius:6px;padding:8px;background:#f8fafc;margin:10px 0;font-size:12px;">
-  <div style="font-weight:600;color:#0f172a;margin-bottom:6px;">Why "same section ⇒ same XY" holds</div>
-  <div style="color:#475569;">DESI/MSI typically acquires every MRM transition in a single source file with synchronised raster, so all compounds from one source share Image_X / Image_Y exactly. The new format leverages this so consolidation is lossless.</div>
-</div>
+### 9-4. Keep originals and ROI information separate
 
-### 9-4. ROI columns appended to xlsx
-
-xlsx sources keep their original column layout, with **0/1 flag columns appended at the end** — one per ROI drawn on the section (column header = ROI name). Recipients can open the file in Excel / R / Python and immediately compute "compound × ROI" aggregates. txt sources are written as-is (their format is too free-form to safely augment); the polygon coordinates remain available in the root JSON's `polysBySection`.
-
-| Column | Meaning |
-|---|---|
-| Image_X / Image_Y | Acquisition position (MSI pixel) |
-| (original intensity columns) | Compound 1, Compound 2, …, Compound N |
-| (original trailing columns) | Preserves the source xlsx layout |
-| **Cortex (new)** | 1 if inside ROI Cortex, else 0 |
-| **Hippocampus (new)** | Same |
+Saved ROI shapes remain in root JSON `polysBySection` with coordinate-system information. ROI columns in derived CSVs do not replace original source cells or rows. Invalid coordinates and unverified legacy ROIs are distinguished from ordinary outside-ROI membership. Original XLSX files are not rewritten with added ROI columns.
 
 ### 9-5. Shared paths inside the ZIP
 
-Section definitions live inline in the root JSON's `sections[]` (the per-section `atlas.json` belongs to the old format and is no longer written). Each MSI compound points at the `Data/<sample>.csv` that holds its values, and **several compounds pointing at the same file is the normal case**. On import that path is the dedup key, so only one IndexedDB blob is created per file. Originals under `Source/` (parquet, `.raw.zip`) are deduped the same way, by blobId.
+Section definitions live in root JSON `sections[]` (per-section `atlas.json` belongs to the old format). Compounds with verified row correspondence can share a CSV; ambiguous sources get separate paths. Import deduplicates by path/blobId and uses an original source when one is referenced.
 
 ### 9-6. Import (= restore)
 
@@ -498,7 +482,7 @@ Use the header's **Import ZIP**:
 - The loader finds the root-level `*.json` and switches on its `format` field (`desi_data_share_v2`, or the older `v1`)
 - Sections are rebuilt from the root JSON's `sections[]` (for `v1` ZIPs, from `sections/<id>/atlas.json`)
 - Compounds sharing a path collapse to a single IDB blob
-- When `Source/` holds the original (parquet, `.raw.zip`) that wins; otherwise the layer is restored from the `Data/` CSV
+- When `Source/` holds the original source it wins; otherwise use the corresponding `Data/` CSV. Precision or missing-state information already lost in a legacy CSV cannot be recovered
 - Fresh ids are minted so the imported project never collides with the source
 
 > **Still older ZIPs** (per-layer `msi_<layerKey>__` files) are **not supported**. The importer raises a clear "old-format ZIP not supported" error. Re-export with the latest viewer.
@@ -522,21 +506,22 @@ Use the header's **Import ZIP**:
 
 ## 10-bis. Preview — see what the recipient sees, before publishing
 
-The header **`Preview`** button opens **exactly the screen a share recipient gets**, from the master side too. It is a grid of every section for one compound — useful for checking how figures will look and for a quick cross-section overview.
+The header **`Preview`** button opens the sharing preview from the master side too. It is a grid of the displayed sections for one compound, useful for checking figures and comparing sections. Each viewer’s section selection is independent.
 
 Opened from master it runs with admin rights, so the Method table also shows **CE / CV** (these stay hidden from share viewers).
 
 | Area | Role |
 | --- | --- |
 | **Method (MRM) panel (left)** | Compound table. ↑↓ / click switches the displayed compound. Drag the splitter to resize |
-| **Image grid (centre)** | Every section × the selected compound, each cell with a scalebar and Section name + pixel pitch. Drag to pan, wheel to zoom |
-| **Range (top)** | vmin / vmax shared by all sections. `Reset` returns to the automatic range |
-| **背景除去(Otsu) (top)** | The **same setting** as the main toolbar, reachable without closing the preview (see below) |
+| **Image grid (centre)** | Displayed sections × the selected compound, each cell with a scalebar and Section name + pixel pitch. Drag to pan, wheel to zoom |
+| **Displayed sections** | Floating selection list shared with the main view. Hidden images leave the grid; restore them from this list |
+| **Range (top)** | Shared with the main view. Manual values persist across selection and open/close. Automatic Same uses displayed sections; `Reset` restores automatic Range |
+| **背景を非表示（Otsu）(top)** | Display mask shared with the main view, adjustable without closing Preview |
 | **`＋重ね合わせ` (top)** | Register a **new** multi-molecule colour overlay (see §10-ter) |
 | **Overlay list (right edge)** | Every registered set, with its colour swatches, **grouped at the right edge**. Click to display; **`✎` edits, `×` deletes**. While an overlay is shown, a 「単一表示へ戻る」 button appears below it |
 | **Stats / colourbar (right)** | Statistics for the selected compound. In overlay mode this becomes a molecule-to-colour legend |
 
-> **About background removal**: the preview checkbox drives the same single setting as the main toolbar's `背景除去(Otsu)`, and **it survives closing the preview** — unlike the Colormap, which is restored on close. The split is deliberate: colormap is a display preference, background removal is an analysis setting. **Adjusting the strength** needs the draggable histogram line, so close the preview and use the ANALYSIS panel.
+> **Otsu is display-only**. Preview and the main view use the same setting, retained on close. Total signal determines a background display mask; the mask does not filter ROI extraction, Mean/SD/Max, measurement counts or CSV rows. Adjust the threshold in the main view's Otsu histogram.
 
 > With many sections the first switch-on spends a few seconds computing masks. The checkbox is disabled while that runs and progress appears as a toast.
 
@@ -608,19 +593,15 @@ Ticking **`明るさを揃える` (match brightness)** in the registration dialo
 
 ## 10-quater. Range defaults (about blown-out highlights)
 
-While you have not touched Range, the display ceiling is set automatically to **the top 0.1% value of that molecule's intensity distribution**. Every pixel above the ceiling collapses to the same colour, so **the fraction of blown-out pixels is exactly `1 - percentile`**.
-
-| | Blown-out pixels |
-| --- | --- |
-| Old (top 1%) | exactly 1.00% |
-| **Current (top 0.1%)** | **exactly 0.10%** |
-
-The true maximum is not used as the ceiling because **a single outlier pixel would then set the brightness of the whole image** (on real data that made molecules 1.7-4.9x darker). At the top 0.1% the darkening stays at a median of 1.40x.
+With outlier clipping on, automatic Range uses **p99.9 (the 99.9th percentile)** as its upper reference, limiting the influence of strong outliers on image brightness. Values above the ceiling share the upper colour. The number of saturated positions depends on ties, sample size and the current Range; it is not always exactly 0.1%.
 
 - **If it looks too dark, lower the Range ceiling by hand.** A typed value always wins over the automatic one
 - `Reset` discards that typed value and returns to the automatic ceiling above
 - Turning the toolbar's **outlier clip off** restores the **true maximum** as the ceiling, as before
-- The ceiling is recorded per layer at registration time and **the main view, the preview and share recipients all read the same value**. Already-published projects pick up the new look as soon as a viewer reloads the layer — no re-publish needed
+- Automatic Same uses a common range from displayed sections; Individual uses each section. Manual Range persists through section selection and Preview open/close
+- Clipping, colour, Range, smoothing and Otsu affect MSI appearance only. Routine display adjustments do not get a generic "加工" warning; duplicates or invalid coordinates have specific data information
+- Method/Preview whole-section statistics and ROI statistics use original measurement rows. Duplicate-coordinate rows all count. n is the valid measurement-row count, separate from unique-coordinate count. SD uses denominator n; all-missing data has n=0 and unavailable Mean/SD/Max
+- Fixes to legacy duplicate averaging, missing-to-zero conversion, Otsu exclusion or precision loss can change old results. Audit those corrections separately from the requirement that display operations leave the same input/ROI's numbers unchanged
 
 ## 11. Publish to share / Auto-publish / Sync indicator
 
