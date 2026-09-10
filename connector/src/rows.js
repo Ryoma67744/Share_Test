@@ -50,7 +50,7 @@ export function stableKey(v) {
 // The path is repeated up front only to keep the key readable when debugging —
 // stableKey(def) already contains it, JSON-quoted, so no separator can collide.
 export function parseCacheKey(def) {
-  return String((def && def.path) || '') + ' ' + stableKey(def);
+  return 'msi-source-rows-v1 ' + String((def && def.path) || '') + ' ' + stableKey(def);
 }
 
 // Both tiers are bounded. The old code cached parsed rows for every path it

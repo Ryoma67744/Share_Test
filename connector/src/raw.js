@@ -1,3 +1,4 @@
+import { msiSourceRow } from './source-cells.js';
 import { inflateRawSync } from 'node:zlib';
 
 // =============================================================================
@@ -604,12 +605,9 @@ export async function parseRawArchiveMeta(bundle) {
 // Split out from parseRawToRows so the parse worker can cache the decode per
 // (blob, function) and pay for it once however many channels were registered.
 //
-// Coordinates are snapped to the derived lattice: buildMsiGrid keys a Map on
-// the exact float, and float32 stage jitter would inflate the distinct-value
-// count past its guard, which falls back to ordinal indexing and SILENTLY
-// changes the image geometry by collapsing gaps.
-// The snapped coordinates, shared by the raster path and the export / ROI path
-// so both land on exactly the same lattice. Returns parallel arrays.
+// Legacy display coordinates are retained only to reconstruct pre-existing
+// raster ROI membership. Source/quantitative x/y always remain decoded.xs/ys.
+// This helper must never replace those original coordinates in numeric output.
 export function rawSnapCoords(decoded, def) {
     const off = (def && def.snap === false);
     const dx = off ? 0 : decoded.gridX.pitch;
@@ -632,12 +630,13 @@ export function rawRowsFromDecoded(decoded, def) {
     const channel = (def && def.channel) || 0;
     if (channel >= decoded.nCh) throw new Error('raw: channel ' + channel + ' out of range');
     const col = decoded.chans[channel];
-    const { xs, ys } = rawSnapCoords(decoded, def);
+    const { xs, ys } = decoded;
+    const legacy = rawSnapCoords(decoded, def);
     const rows = [];
     for (let i = 0; i < decoded.nScans; i++) {
-        const x = xs[i], y = ys[i], v = col[i];
-        if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(v)) continue;
-        rows.push({ x, y, v });
+        const row = msiSourceRow(xs[i], ys[i], col[i], i);
+        row.legacyX = legacy.xs[i]; row.legacyY = legacy.ys[i];
+        rows.push(row);
     }
     if (!rows.length) throw new Error('raw: no rows decoded');
     return rows;

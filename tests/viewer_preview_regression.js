@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { deflateRawSync } = require('node:zlib');
+const SectionVisibility = require('../viewer/section-visibility.js');
 
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'viewer', 'index.html'), 'utf8');
@@ -86,6 +87,24 @@ function compileInlineScripts(relPath, minScripts) {
 }
 
 function makePreviewContext(extra = {}) {
+  const app = extra.App;
+  if (app && !app.sectionVisibility) {
+    // Use the real selection model: asynchronous completion tests must inspect
+    // the current section ID set, not a stub that always claims all are visible.
+    const storage = new Map();
+    const visibility = SectionVisibility.createController({
+      document: { querySelectorAll: () => [] },
+      storage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) },
+      project: () => app.project,
+      share: () => app.shareMode,
+      organ: section => section.meta && section.meta.organ,
+      drawingId: () => app.drawing && app.drawing.mode ? app.drawing.sectionId : null,
+      scope: selected => { app.activeSectionScope = selected; },
+      changed() {},
+    });
+    app.sectionVisibility = () => visibility;
+    visibility.ensure();
+  }
   const context = vm.createContext({
     console,
     setTimeout,
@@ -93,6 +112,7 @@ function makePreviewContext(extra = {}) {
     Promise,
     Map,
     Set,
+    SectionVisibility,
     App: undefined,   // isShareOverlayMode が素の識別子で読むので、必ず定義しておく
     ...extra,
   });
@@ -104,7 +124,12 @@ function makePreviewContext(extra = {}) {
     + extractTopLevelFunction('canEditOverlay'),
     context);
   const objectSource = extractObject(html, 'const SharePreview =');
-  return { context, preview: vm.runInContext(`(${objectSource})`, context) };
+  const preview = vm.runInContext(`(${objectSource})`, context);
+  if (app) {
+    preview._cellTransforms = app.sectionVisibility().previewTransforms;
+    preview._sectionRotations = app.sectionVisibility().previewRotations;
+  }
+  return { context, preview };
 }
 
 function deferred() {
@@ -197,6 +222,51 @@ async function testFailedLoadStaysExplicit() {
   assert.equal(preview._focusLoadStatus.get('s1'), 'failed');
 }
 
+async function testSelectionAndProjectLoadRaceGuard() {
+  const waits = new Map();
+  const panels = new Map(['s1', 's2'].map(id => [id, {
+    imageSources: {},
+    ensureMsiLayerLoaded(key) {
+      const wait = deferred(); waits.set(id + ':' + key, wait);
+      return wait.promise.then(ok => { if (ok) this.imageSources[key] = { loaded: true }; return ok; });
+    },
+    setupCanvasSize() { return false; },
+    renderComposite() {},
+  }]));
+  const project = { id: 'first', sections: ['s1', 's2'].map(id => ({ id,
+    msiSeries: { MSI_A: { blobId: 'a' }, MSI_B: { blobId: 'b' } },
+  })) };
+  const App = { project, panels, focusCompoundKey: null, activeOverlay: null,
+    setFocusCompoundKey(key) { this.focusCompoundKey = key; } };
+  const { preview } = makePreviewContext({ App });
+  const painted = [], refreshed = [], prefetched = [];
+  preview.isOpen = () => true;
+  preview.refresh = projectArg => refreshed.push(projectArg.id);
+  preview._showLoadedPreviewCell = (projectArg, key, id) => painted.push([projectArg.id, key, id]);
+  preview._cancelAdjacentPrefetch = () => {};
+  preview._scheduleAdjacentPrefetch = key => prefetched.push(key);
+
+  const firstLoad = preview._selectCompound('MSI_A');
+  App.sectionVisibility().change(['s1'], false);
+  waits.get('s1:MSI_A').resolve(true);
+  waits.get('s2:MSI_A').resolve(true);
+  await firstLoad;
+  assert.ok(panels.get('s1').imageSources.MSI_A, 'hidden-section reads may populate the cache');
+  assert.deepEqual(painted, [['first', 'MSI_A', 's2']], 'late completion cannot repaint a hidden section');
+  assert.deepEqual([...App.activeSectionScope], ['s2']);
+  assert.deepEqual(Array.from(preview._sectionsForGrid(project), sec => sec.id), ['s2']);
+
+  const secondLoad = preview._selectCompound('MSI_B');
+  const refreshCount = refreshed.length;
+  App.project = { id: 'second', sections: project.sections.map(sec => ({ ...sec })) };
+  waits.get('s1:MSI_B').resolve(true);
+  waits.get('s2:MSI_B').resolve(true);
+  await secondLoad;
+  assert.equal(refreshed.length, refreshCount, 'a previous project completion cannot rebuild the current grid');
+  assert.deepEqual(painted, [['first', 'MSI_A', 's2']]);
+  assert.deepEqual(prefetched, ['MSI_A'], 'a previous project completion cannot start prefetch');
+}
+
 class FakeElement {
   constructor() { this.listeners = new Map(); this.value = ''; this.disabled = false; }
   addEventListener(type, fn) { this.listeners.set(type, fn); }
@@ -280,21 +350,22 @@ function testOverlayDefaultPalette() {
 // その切片へ focusKey の化合物が無いと黙って早期 return し、Otsu の切り替えも
 // Range の変更もセルへ反映されなかった。_renderImageGrid と同じ判定に揃える。
 function testRebakeCellImagesFollowsOverlay() {
-  const img = { src: 'OLD', decode() { return Promise.resolve(); } };
+  const img = { src: 'OLD', dataset: {}, decode() { return Promise.resolve(); } };
   const wrap = { querySelector: (sel) => (sel === '[data-cell-img]' ? img : null) };
   const grid = { querySelector: (sel) => (/cell-img-wrap/.test(sel) ? wrap : null) };
   const section = { id: 's1', msiSeries: { MSI_OVERLAY_MEMBER: {} } };   // focusKey の層は無い
   const panel = { dom: { cdisp: { width: 10, height: 10 } } };
   const App = {
     activeOverlay: { layers: [{ key: 'MSI_OVERLAY_MEMBER', color: '#ff00ff' }] },
+    focusCompoundKey: 'MSI_NOT_IN_THIS_SECTION',
     panels: new Map([['s1', panel]]),
     project: { sections: [section] },
   };
   const { preview } = makePreviewContext({ App });
   preview.overlay = { querySelector: (sel) => (sel === '[data-image-grid]' ? grid : null) };
-  preview._sectionsForGrid = () => [section];
-  preview._sectionRotations = [0];
-  preview._bakeRotatedCanvas = () => ({ toDataURL: () => 'NEW' });
+  preview._gridSectionIds = ['s1'];
+  preview._sectionRotations.s1 = 0;
+  preview._bakeRotatedCanvas = () => ({ width: 10, height: 10, toDataURL: () => 'NEW' });
 
   // 重ね合わせ中 + focusKey がこの切片に無い = 判定が食い違う条件
   preview._rebakeCellImages(App.project, 'MSI_NOT_IN_THIS_SECTION');
@@ -306,6 +377,7 @@ function testRebakeCellImagesFollowsOverlay() {
   App.activeOverlay = null;
   preview._rebakeCellImages(App.project, 'MSI_NOT_IN_THIS_SECTION');
   assert.equal(img.src, 'OLD', '単一表示では存在しない focusKey を焼かない');
+  App.focusCompoundKey = 'MSI_OVERLAY_MEMBER';
   preview._rebakeCellImages(App.project, 'MSI_OVERLAY_MEMBER');
   assert.equal(img.src, 'NEW', '単一表示でも存在する focusKey なら焼く');
 }
@@ -370,6 +442,7 @@ function testCloseRestoresOverlay() {
   const modeCalls = [];
   const App = {
     activeOverlay: before,
+    project: { id: 'close-test', sections: [{ id: 's1' }, { id: 's2' }] },
     setActiveOverlay(def) { setCalls.push(def); this.activeOverlay = def; },
     // open() は Compound へ倒すが setViewMode は localStorage にも書くので、
     // 戻さないと「相手の見え方を確かめただけ」で master の主画面が恒久的に
@@ -383,12 +456,15 @@ function testCloseRestoresOverlay() {
   // open() が撮る控えだけを再現し、DOM に触る復元は差し替える。
   preview._overlaySnapshot = before;
   preview._savedViewMode = 'free';    // 開く前は Free だった
-  preview.overlay = { remove() {} };
+  preview.overlay = { remove() {}, querySelector() { return null; } };
   for (const m of ['_restoreGrayscale', '_removeTicBackdrop', '_restoreOpacity',
                    '_restoreVisibility', '_cancelAdjacentPrefetch']) {
     preview[m] = () => {};
   }
 
+  App.sectionVisibility().change(['s2'], false);
+  preview._cellTransforms.s1 = { tx: 14, ty: -9, scale: 2 };
+  preview._sectionRotations.s1 = 90;
   App.activeOverlay = after;          // プレビューの中で別の重ね合わせに切り替えた
   preview.close();
   assert.deepEqual(setCalls, [before], 'close() は開いた時点の重ね合わせへ戻すこと');
@@ -396,12 +472,15 @@ function testCloseRestoresOverlay() {
   assert.equal(preview._overlaySnapshot, undefined, '控えは使い切って捨てること');
   assert.deepEqual(modeCalls, ['free'], 'close() は開いた時点の表示モードへ戻すこと');
   assert.equal(preview._savedViewMode, null, '表示モードの控えも使い切ること');
+  assert.deepEqual([...App.activeSectionScope], ['s1'], 'close() must retain the shared section selection');
+  assert.equal(preview._cellTransforms.s1.tx, 14, 'close() must retain section-ID pan/zoom');
+  assert.equal(preview._sectionRotations.s1, 90, 'close() must retain section-ID rotation');
 
   // 変わっていなければ余計な再描画を起こさない
   setCalls.length = 0;
   modeCalls.length = 0;
   preview._overlaySnapshot = before;
-  preview.overlay = { remove() {} };
+  preview.overlay = { remove() {}, querySelector() { return null; } };
   preview.close();
   assert.deepEqual(setCalls, [], '変化が無いときは setActiveOverlay を呼ばない');
   assert.deepEqual(modeCalls, [], '控えが無ければ setViewMode も呼ばない');
@@ -1637,6 +1716,7 @@ async function testRoiStatsReadSharedParquet() {
   vm.runInContext(
     'const ROI_RAW_GRID_CACHE_MAX = 24;\n'
     + 'const _roiRawGridCache = new Map();\n'
+    + `${extractFunction(html, 'msiSourceReference')}\n`
     + `${extractFunction(html, '_roiGridKey')}\n`
     + `${extractFunction(html, '_roiGridCacheGet')}\n`
     + `${extractFunction(html, '_roiGridCacheSet')}\n`
@@ -2372,6 +2452,7 @@ async function main() {
   assert.match(html, /parseXlsxSheet, rowsFromParsedXlsx, parseXlsxToRows/);
   await testFocusLoadAndRaceGuard();
   await testFailedLoadStaysExplicit();
+  await testSelectionAndProjectLoadRaceGuard();
   testRangeResetAndSingleRepaint();
   await testWorkerXlsxDecodeCache();
   testAnalyteHeaderShapes();

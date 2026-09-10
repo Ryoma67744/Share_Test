@@ -1,6 +1,7 @@
 import { parquetMetadataAsync, parquetRead } from 'hyparquet';
 import { compressors } from 'hyparquet-compressors';
 import { storageObjectUrl } from './supabase.js';
+import { msiSourceRow } from './source-cells.js';
 
 // =============================================================================
 // TIMS non-target (parquet) reading — READ-ONLY, column-at-a-time over HTTP Range.
@@ -27,7 +28,7 @@ import { storageObjectUrl } from './supabase.js';
 //      costs ~700k nodes to read a single column.
 // =============================================================================
 
-const INDEX_VERSION = 2;
+const INDEX_VERSION = 3;
 
 // How many parquet files to keep indexed in this process. The index is ~20 MB
 // for the real file, so this is a memory ceiling, not a hit-rate knob: a single
@@ -79,6 +80,8 @@ export async function asyncBufferFromUrl(url, knownLength, fetchImpl) {
 // Keeps only the numbers needed to rebuild one column's metadata on demand.
 // Field list verified against hyparquet 1.27.1 (plan.js, rowgroup.js, column.js).
 export function buildIndex(meta) {
+  const safeStatistic = value => typeof value === 'number' ? value
+    : typeof value === 'bigint' && value <= BigInt(Number.MAX_SAFE_INTEGER) && value >= BigInt(Number.MIN_SAFE_INTEGER) ? Number(value) : NaN;
   const colNames = meta.row_groups.length
     ? meta.row_groups[0].columns.map((c) => c.meta_data.path_in_schema.join('.'))
     : [];
@@ -152,8 +155,8 @@ export function buildIndex(meta) {
       }
       const s = md.statistics;
       if (s) {
-        const lo = Number(s.min_value !== undefined ? s.min_value : s.min);
-        const hi = Number(s.max_value !== undefined ? s.max_value : s.max);
+        const lo = safeStatistic(s.min_value !== undefined ? s.min_value : s.min);
+        const hi = safeStatistic(s.max_value !== undefined ? s.max_value : s.max);
         if (Number.isFinite(lo)) { if (lo < stMin[i]) stMin[i] = lo; stAny[i] = 1; }
         if (Number.isFinite(hi)) { if (hi > stMax[i]) stMax[i] = hi; stAny[i] = 1; }
         if (s.null_count !== undefined && s.null_count !== null) stNulls[i] += Number(s.null_count);
@@ -162,7 +165,9 @@ export function buildIndex(meta) {
   }
   const stats = new Array(nCol);
   for (let c = 0; c < nCol; c++) {
-    stats[c] = stAny[c] ? { min: stMin[c], max: stMax[c], nulls: stNulls[c] } : null;
+    const schema = (meta.schema || []).find(el => el && el.name === (colPaths[c] || [colNames[c]]).slice(-1)[0] && el.type);
+    const decimal = schema && (schema.converted_type === 'DECIMAL' || schema.logical_type && schema.logical_type.type === 'DECIMAL');
+    stats[c] = stAny[c] && !decimal ? { min: stMin[c], max: stMax[c], nulls: stNulls[c] } : null;
   }
   // Physical type per column. The spec says m/z columns default to float32 "but
   // DOUBLE depending on settings", so never hard-code the width — read it here.
@@ -180,11 +185,10 @@ export function buildIndex(meta) {
   };
 }
 
-// FLOAT stays 32-bit (exact round-trip), everything numeric else goes to 64-bit
-// so nothing is rounded, and BYTE_ARRAY (annotation) stays as-is — coercing
-// strings to numbers would turn the whole column into NaN.
+// FLOAT/DOUBLE retain their native precision. INT64 stays BigInt until an
+// explicit safe conversion; strings and other nonnumeric values stay as-is.
 function modeForType(t) {
-  if (t === 'BYTE_ARRAY' || t === 'FIXED_LEN_BYTE_ARRAY') return 'raw';
+  if (t === 'BYTE_ARRAY' || t === 'FIXED_LEN_BYTE_ARRAY' || t === 'INT64' || t === 'INT96') return 'raw';
   if (t === 'FLOAT') return 'f32';
   return 'f64';
 }
@@ -252,33 +256,50 @@ function minimalMeta(idx, colIdx) {
 // single-element array per row), which for one column of 100k rows is 200k
 // throwaway objects and a transpose. onChunk hands over the column chunk itself.
 export async function readColumn(file, idx, colIdx, mode) {
-  if (!mode) mode = modeForType(idx.colTypes && idx.colTypes[colIdx]);
-  const name = idx.colNames[colIdx];
-  const n = Number(idx.numRows) || 0;
-  let out = (mode === 'raw') ? new Array(n)
-    : (mode === 'f64') ? new Float64Array(n) : new Float32Array(n);
-  if (mode !== 'raw') out.fill(NaN);
-  let seen = 0;
-  await parquetRead({
-    file, metadata: minimalMeta(idx, colIdx), columns: [name], compressors,
-    onChunk: ({ columnData, rowStart }) => {
-      const len = columnData.length;
-      if (rowStart + len > seen) seen = rowStart + len;
-      if (mode === 'raw') {
-        for (let i = 0; i < len; i++) out[rowStart + i] = columnData[i];
-        return;
-      }
-      for (let i = 0; i < len; i++) {
-        const v = columnData[i];
-        out[rowStart + i] = (v === null || v === undefined) ? NaN : Number(v);
-      }
-    },
-  });
-  // Files whose num_rows disagrees with the chunks still return the length that
-  // was actually filled — callers use it as the row count.
-  if (seen !== n) out = (mode === 'raw') ? out.slice(0, seen) : out.subarray(0, seen);
-  return out;
-}
+        const name = idx.colNames[colIdx];
+        const path = idx.colPaths[colIdx] || [name];
+        const schema = (idx.schema || []).find(el => el && el.name === path[path.length - 1] && el.type);
+        if (schema && (schema.converted_type === 'DECIMAL' || schema.logical_type && schema.logical_type.type === 'DECIMAL')) {
+            throw new Error('Parquet DECIMAL column "' + name + '": exact decimal arithmetic is unsupported; original file and type are preserved, calculation was not performed');
+        }
+        mode = mode === 'raw' ? 'raw' : modeForType(idx.colTypes && idx.colTypes[colIdx]);
+        // ★ onComplete ではなく onChunk で受ける。
+        //
+        //   onComplete は hyparquet に「行の配列」を作らせる (read.js:90-123)。
+        //   1 列しか要求していなくても 10 万行ぶんの **1 要素の配列** が作られ、
+        //   こちらは rows[i][0] で 1 個ずつ取り出し直していた。転置と約 20 万個の
+        //   一時オブジェクトが丸ごと無駄。
+        //   onChunk (read.js:70-87) は列チャンクをそのまま
+        //   { columnData, rowStart } で渡すので、出力用の配列へ直接書き写せる。
+        const n = Number(idx.numRows) || 0;
+        let out = (mode === 'raw') ? new Array(n)
+                : (mode === 'f64') ? new Float64Array(n) : new Float32Array(n);
+        if (mode !== 'raw') out.fill(NaN);
+        let seen = 0;
+        const sourceCellStates = {};
+        await parquetRead({
+            file, metadata: minimalMeta(idx, colIdx), columns: [name], compressors,
+            onChunk: ({ columnData, rowStart }) => {
+                const len = columnData.length;
+                if (rowStart + len > seen) seen = rowStart + len;
+                if (mode === 'raw') {
+                    for (let i = 0; i < len; i++) out[rowStart + i] = columnData[i];
+                    return;
+                }
+                for (let i = 0; i < len; i++) {
+                    const v = columnData[i];
+                    if (v === null || v === undefined) sourceCellStates[rowStart + i] = { type: v === null ? 'null' : 'undefined', status: 'missing', token: null };
+                    else if (typeof v !== 'number') sourceCellStates[rowStart + i] = { type: typeof v, status: 'unsupported-type', token: String(v) };
+                    out[rowStart + i] = typeof v === 'number' ? v : NaN;
+                }
+            },
+        });
+        // numRows とチャンクの合計がずれるファイルでも、実際に埋まった長さで返す
+        // (呼び出し側は length を行数として使う)。
+        if (seen !== n) out = (mode === 'raw') ? out.slice(0, seen) : out.subarray(0, seen);
+        out._sourceCellStates = sourceCellStates;
+        return out;
+    }
 
 // Column roles. The spec fixes the order as id, x, y, <m/z...>, annotation, but
 // the m/z set is taken as the complement rather than by position so a file with
@@ -376,12 +397,14 @@ export async function parquetRowsForDef(def, cache) {
   const rows = [];
   for (let k = 0; k < rowIdx.length; k++) {
     const i = rowIdx[k];
-    const x = geom.xs[i], y = geom.ys[i], v = col[i];
-    // Same finite-only filter the xlsx/txt parsers apply, so NaN cells (outside
-    // the scan) drop out instead of poisoning the statistics.
-    if (Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(v)) rows.push({ x, y, v });
+    const row = msiSourceRow(geom.xs[i], geom.ys[i], col[i], i);
+    for (const [key, source] of [['x', geom.xs], ['y', geom.ys], ['v', col]]) {
+      const cell = source._sourceCellStates && source._sourceCellStates[i];
+      if (cell) row.sourceCells[key] = Object.assign({}, cell, { value: NaN });
+    }
+    rows.push(row);
   }
-  if (!rows.length) throw new Error('parquet: no numeric rows for this compound/section');
+  if (!rows.length) throw new Error('parquet: no measurement rows for this compound/section');
   return rows;
 }
 
