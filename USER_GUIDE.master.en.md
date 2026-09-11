@@ -422,7 +422,9 @@ The toolbar's **Flip** group has `⇄` (mirror left-right) and `⇅` (mirror up-
 - Click again to undo (toggle).
 - Share recipients have the buttons hidden — the master's choice is the final orientation.
 
-MSI-only rotation also follows through to the main view, thumbnails and ROIs. Rotation and flips change the display, not original X/Y, intensity or the saved HE alignment. The historical initial orientation includes a 180° rotation; it is not changed globally without a matching source-software image. A saved share-preview angle is retained.
+New and unadjusted MSI images use the native raster orientation (X right, raster Y down). The main view, thumbnails, Align and Preview use the same display transform, and ROIs follow it. Rotation and flips do not change original X/Y, intensity, saved ROIs or HE alignment. Resetting rotation returns to this MSI baseline while retaining flip settings.
+
+Historical all-zero rotation settings without an explicit flip, reflection or share-preview angle also receive the correction that removes the extra initial 180° rotation. An intentionally saved all-zero state cannot be distinguished from these automatic saves. Saved nonzero rotations, flips, reflections and share-preview angles (including zero) retain their legacy appearance. New display adjustments made from the corrected baseline save that baseline for consistent reloading. Agreement with the source software's image requires a separate comparison.
 
 Legacy raster-coordinate ROIs are migrated only when their source mapping can be established. Unresolved ROIs, including possible intent mismatches after MSI-only rotation in older versions, retain their saved representation and require image review. Original coordinates and quantitative values are not inferred from PNGs. See the [MSI display and numerical contract](docs/MSI_DISPLAY_CONTRACT.md) for technical conditions.
 
