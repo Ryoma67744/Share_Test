@@ -44,7 +44,11 @@ Original measurement X/Y, MSI raster coordinates, HE image pixels and screen coo
 
 The image and its ROI overlay use the same forward transform; clicks use its inverse. Whole-view rotation, MSI-only rotation, reflections and fitting must agree across the main canvas, thumbnails, Align and Preview. HE-only rotation belongs to the HE path. Horizontal and vertical flip buttons operate on the current screen axes. Display operations do not re-estimate HE alignment or rewrite landmarks.
 
-The historical default includes a 180° rotation. Internal transform inconsistencies can be fixed without declaring that default to be the source software's correct orientation. A global default change requires a matching asymmetric source image. Preserve an intentionally saved `shareDefaultRotation`; do not apply it twice. Non-square pixel scale bars use the screen direction mapped back into MSI physical coordinates, not an average of X/Y pitch.
+New and unadjusted MSI displays use the native raster orientation: X right and raster Y down. The fixed +90° canvas compensation cancels the existing −90° CSS rotation, removing the historical extra 180° rotation. The same baseline applies to the main view, thumbnails, Align and Preview. This is a display correction; it does not modify source arrays or coordinates, ROI geometry, landmarks or the saved HE-to-MSI transform.
+
+Historical auto-saved all-zero rotations without an explicit flip, mirror or share-preview angle use the corrected baseline too. Intentional all-zero settings are indistinguishable from these automatic saves. Explicit saved nonzero rotation, flip or mirror settings retain their legacy appearance, as does a saved `shareDefaultRotation` (including zero); never apply the shared angle twice. An intentional display edit pins the current baseline for consistent reloading, so edits to a native view remain native. Resetting rotations selects the native baseline while retaining the flip settings, as before.
+
+The correction establishes consistency with the internal raster; it does not establish agreement with source software or an anatomical image that has not been supplied. Non-square pixel scale bars use the screen direction mapped back into MSI physical coordinates, not an average of X/Y pitch.
 
 New ROIs retain numeric raster-space polygon vertices with a frozen source-anchored frame:
 

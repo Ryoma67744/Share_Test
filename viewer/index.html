@@ -1593,9 +1593,10 @@ function _advanceMethodSort(curSort, k) {
 }
 
 // ---- Shared display transforms ------------------------------------------
-// Native MSI raster → fixed historical -90° → layer rotation → section
-// mirror → CSS whole-view rotation (rot - 90°). The initial 180° orientation
-// stays unchanged until a matching source image establishes another default.
+// Native MSI raster → +90° canvas basis → layer rotation → section mirror
+// → CSS whole-view rotation (rot - 90°). With no display edits the two fixed
+// turns cancel, so X increases rightwards and raster Y increases downwards.
+// Explicitly saved legacy views retain their historical -90° canvas basis.
 // All matrices below are row-major affine matrices and operate on continuous
 // raster coordinates. Source coordinates and saved HE landmarks never change.
 function displayAffineMultiply(A, B) {
@@ -1611,6 +1612,37 @@ function displayRotation(deg) {
 function sectionViewerTransform(section) {
     return (section && section._viewerLocalTransform)
         || (section && section.meta && section.meta.viewerTransform) || {};
+}
+function sectionDisplayBaseOrientation(section) {
+    const meta = (section && section.meta) || {};
+    const d = meta.displayTransform;
+    if (d && d.version === 2) {
+        if (d.baseOrientation === 'native-raster') return 'native-raster';
+        if (d.baseOrientation === 'legacy-180' || Array.isArray(d.mirror)) return 'legacy-180';
+    }
+    // Older releases auto-saved an all-zero viewerTransform merely by opening
+    // a section. That tuple is an initial view, not evidence of a chosen angle.
+    // Pan/zoom, physical calibration and HE registration are not orientation.
+    const t = meta.viewerTransform || {}, f = meta.flip || {};
+    if (['rot', 'rotHE', 'rotMSI'].some(k => Number.isFinite(t[k]) && t[k] !== 0)
+        || f.lr || f.ud || Number.isFinite(meta.shareDefaultRotation)) return 'legacy-180';
+    return 'native-raster';
+}
+function sectionDisplayRasterRotation(section) {
+    return sectionDisplayBaseOrientation(section) === 'native-raster' ? 90 : -90;
+}
+function pinSectionDisplayOrientation(section) {
+    // Pin BEFORE changing saved angles/flips, including an explicit zero.
+    // Future reloads must not reinterpret those edits as legacy metadata.
+    const baseOrientation = sectionDisplayBaseOrientation(section);
+    const mirror = sectionCanvasMirror(section);
+    const meta = section.meta || (section.meta = {});
+    if (!meta.displayTransform || meta.displayTransform.version !== 2) {
+        meta.displayTransform = { version: 2, baseOrientation,
+            mirror: [mirror[0][0], mirror[0][1], mirror[1][0], mirror[1][1]],
+            legacy: { flip: { ...(meta.flip || {}) }, viewerTransform: { ...(meta.viewerTransform || {}) },
+                shareDefaultRotation: meta.shareDefaultRotation == null ? null : meta.shareDefaultRotation } };
+    } else meta.displayTransform.baseOrientation = baseOrientation;
 }
 function sectionCanvasMirror(section) {
     const meta = (section && section.meta) || {};
@@ -1634,9 +1666,10 @@ function sectionLayerViewLinear(section, kind, viewRotation) {
     const t = sectionViewerTransform(section);
     const rot = viewRotation == null ? Number(t.rot) || 0 : Number(viewRotation) || 0;
     return displayAffineMultiply(displayRotation(rot - 90),
-        displayAffineMultiply(sectionLayerCanvasLinear(section, kind), displayRotation(-90)));
+        displayAffineMultiply(sectionLayerCanvasLinear(section, kind), displayRotation(sectionDisplayRasterRotation(section))));
 }
 function toggleSectionScreenFlip(section, axis) {
+    pinSectionDisplayOrientation(section);
     const meta = section.meta || (section.meta = {});
     const old = sectionCanvasMirror(section);
     const t = sectionViewerTransform(section);
@@ -1645,11 +1678,6 @@ function toggleSectionScreenFlip(section, axis) {
     // Reflect in the CURRENT screen axes, then conjugate into canvas space.
     const next = displayAffineMultiply(displayRotation(-angle),
         displayAffineMultiply(F, displayAffineMultiply(displayRotation(angle), old)));
-    if (!meta.displayTransform || meta.displayTransform.version !== 2) {
-        meta.displayTransform = { version: 2, baseOrientation: 'legacy-180',
-            legacy: { flip: { ...(meta.flip || {}) }, viewerTransform: { ...t },
-                shareDefaultRotation: meta.shareDefaultRotation == null ? null : meta.shareDefaultRotation } };
-    }
     meta.displayTransform.mirror = [next[0][0], next[0][1], next[1][0], next[1][1]];
     // Keep legacy flip fields unchanged; version 2 mirror is authoritative.
 }
@@ -1698,7 +1726,10 @@ function sectionCanvasFrame(section, baseW, baseH, includeHe, referenceKind) {
 function sectionMsiCanvasMatrix(section, refW, refH, frame, kind) {
     const L = sectionLayerCanvasLinear(section, kind || 'msi');
     const sx = frame.baseH / refW, sy = frame.baseW / refH;
-    const fixed = [[0, sy, -frame.baseW/2], [-sx, 0, frame.baseH/2], [0,0,1]];
+    const native = sectionDisplayBaseOrientation(section) === 'native-raster';
+    const fixed = native
+        ? [[0, -sy, frame.baseW/2], [sx, 0, -frame.baseH/2], [0,0,1]]
+        : [[0, sy, -frame.baseW/2], [-sx, 0, frame.baseH/2], [0,0,1]];
     const T = displayAffineMultiply(L, fixed);
     T[0][2] += frame.width/2; T[1][2] += frame.height/2;
     return T;
@@ -9246,6 +9277,8 @@ class SectionPanel {
 
     resetTransform() {
         const t = this._ensureViewerTransform();
+        pinSectionDisplayOrientation(this.section);
+        this.section.meta.displayTransform.baseOrientation = 'native-raster';
         t.tx = 0; t.ty = 0; t.rot = 0; t.scale = 1;
         t.rotHE = 0; t.rotMSI = 0;   // ① clear per-side rotations too
         this._persistViewerRotation();
@@ -9367,6 +9400,7 @@ class SectionPanel {
     _persistViewerRotation() {
         // Explicit orientation edits retain the existing save/share contract.
         // Temporary pan/zoom and layout compensation stay in this tab only.
+        pinSectionDisplayOrientation(this.section);
         const meta = this.section.meta || (this.section.meta = {});
         const saved = meta.viewerTransform || (meta.viewerTransform = {});
         const t = this._ensureViewerTransform();
@@ -15226,7 +15260,7 @@ const Wizards = {
 
         // Section view-transform applied to thumbnails so the modal matches
         // what the user sees on the main canvas. Combines renderComposite's
-        // hardcoded -90° MSI bake + the .viewer-rot CSS rotate(vt.rot - 90°),
+        // versioned MSI canvas basis + .viewer-rot CSS rotate(vt.rot - 90°),
         // including each layer's own rotation and the current section mirror.
         const sectionTransform = (kind) => ({ matrix:sectionLayerViewLinear(sec, kind || 'msi') });
         // Stamp dataset attrs the click handler / landmark renderer use to
@@ -21186,7 +21220,7 @@ const Toolbar = {
                 const p = this.activePanel();
                 if (!p || !p.section) return;
                 const sec = p.section;
-                sec.meta = sec.meta || {};
+                pinSectionDisplayOrientation(sec);
                 const liveRot = Number(p.getRotation('both'));   // whole-view rotation, not HE/MSI-only
                 sec.meta.shareDefaultRotation = Number.isFinite(liveRot) ? liveRot : 0;
                 App.queueSave();

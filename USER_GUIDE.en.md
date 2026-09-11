@@ -333,7 +333,7 @@ Three groups in each section's toolbar:
 
 > Pan: drag without modifier. Zoom: mouse wheel. Rotation: the input field, optionally synced with 🔗.
 
-> **Image and ROI orientation**: whole-view and MSI-only rotation are reflected in the main view, thumbnails and ROI positions. Horizontal/vertical flips act on the screen axes at the time of the operation. A deliberately saved share-preview angle is retained. Existing initial orientation is not changed globally by 180° without comparison to a source image. An existing ROI with an unresolved source-coordinate mapping needs review before quantification.
+> **Image and ROI orientation**: new and unadjusted MSI images use the native raster orientation (X right, raster Y down). The main view, thumbnails, Align and Preview use the same display transform, and ROIs follow it. Explicitly saved rotations, flips and share-preview angles are retained. Resetting rotation returns to this MSI baseline while retaining flip settings. Original coordinates, intensities, saved ROIs and HE alignment remain unchanged. An existing ROI with an unresolved source-coordinate mapping needs review before quantification.
 
 > **Rotate HE only / MSI only**: pick "HE only" or "MSI only" in the **target selector** left of Rotation to rotate **just one layer** on that section. Use it when HE and MSI were imported at different orientations and don't line up — rotate one of them to match. "Both" rotates the whole canvas as before. HE/MSI-only rotation is per-section and is not affected by the 🔗 sync.
 

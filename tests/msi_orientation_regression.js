@@ -37,7 +37,8 @@ const context=vm.createContext({console,Math,Number,Map,Set,JSON,Uint8ClampedArr
 vm.runInContext(helpers+'\n'+html.slice(classStart,classEnd)+'\nglobalThis.Panel=SectionPanel;',context);
 const {sectionCanvasFrame,sectionMsiCanvasMatrix,sectionLayerViewLinear,displayBakeGeometry,
   bakeSectionTransformPoint,unbakeSectionTransformPoint,toggleSectionScreenFlip,sectionCanvasMirror,
-  displayHorizontalUmPerPixel,displayAffineMultiply,displayRotation,previewMsiUmPerCanvasPixel}=context;
+  displayHorizontalUmPerPixel,displayAffineMultiply,displayRotation,previewMsiUmPerCanvasPixel,
+  sectionDisplayBaseOrientation,sectionDisplayRasterRotation,pinSectionDisplayOrientation}=context;
 function panelFor(sec,W=7,H=3,includeHe=false){
   const panel=Object.create(context.Panel.prototype);
   const frame=sectionCanvasFrame(sec,H*2,W*2,includeHe);
@@ -53,17 +54,18 @@ function panelFor(sec,W=7,H=3,includeHe=false){
 }
 const landmarks=[[0,0],[7,0],[0,3],[7,3],[.4,.8],[6.1,2.6],[2.2,1.1]];
 let cases=0;
+for(const baseline of ['legacy-180','native-raster'])
 for(const rot of [0,90,180,270,37])for(const msi of [0,90,180,270,-23])for(const lr of [false,true])for(const ud of [false,true]){
-  const sec={id:'s',meta:{viewerTransform:{rot,rotMSI:msi,rotHE:-41,scale:1},flip:{lr,ud}},msiSeries:{MSI_a:{}}};
+  const sec={id:'s',meta:{displayTransform:{version:2,baseOrientation:baseline},viewerTransform:{rot,rotMSI:msi,rotHE:-41,scale:1},flip:{lr,ud}},msiSeries:{MSI_a:{}}};
   const p=panelFor(sec); p.renderComposite();
   const actual=p.displayCtx.draws.at(-1).matrix;
   const expectedCanvas=sectionMsiCanvasMatrix(sec,7,3,p._displayCanvasFrame,'msi');
   for(const raw of landmarks){
     close(point(actual,raw),point(expectedCanvas,raw),'renderer shared matrix');
     close(p.canvasToMsi(...point(actual,[raw[0]+0.5,raw[1]+0.5])),raw,'ROI sample-centre inverse');
-    let expected=turn([raw[0]-3.5,raw[1]-1.5],-90);
+    let expected=turn([raw[0]-3.5,raw[1]-1.5],baseline==='native-raster'?90:-90);
     expected=turn(expected,msi);expected=[lr?-expected[0]:expected[0],ud?-expected[1]:expected[1]];expected=turn(expected,rot-90);
-    const L=sectionLayerViewLinear(sec,'msi');close(point(L,[raw[0]-3.5,raw[1]-1.5]),expected,'legacy chain retained');
+    const L=sectionLayerViewLinear(sec,'msi');close(point(L,[raw[0]-3.5,raw[1]-1.5]),expected,baseline+' transform chain');
     const baked=bakeSectionTransformPoint(...raw,7,3,L);
     close(unbakeSectionTransformPoint(...baked,7,3,L),raw,'thumbnail/Align inverse');
     const thumb=displayBakeGeometry(7,3,L);close([baked[0]-thumb.width/2,baked[1]-thumb.height/2],expected,'thumbnail landmarks');
@@ -76,6 +78,113 @@ for(const rot of [0,90,180,270,37])for(const msi of [0,90,180,270,-23])for(const
   context.App.roiOnlyMode=true;p.renderComposite();context.App.roiOnlyMode=false;
   p.displayCtx.clipped.points.forEach((pt,i)=>close(pt,point(actual,landmarks[i+4].map(v=>v+0.5)),'ROI-only clip follows actual image'));
   cases++;
+}
+// Source-native initial orientation is an observable result, not just agreement
+// among helpers. All four labelled corners of this non-square image must stay
+// on the same screen corners through the actual renderer and the unchanged CSS.
+for(const meta of [{},{viewerTransform:{tx:0,ty:0,rot:0,scale:1,rotHE:0,rotMSI:0}},
+  {viewerTransform:{tx:19,ty:-7,rot:0,scale:2,rotHE:0,rotMSI:0},flip:{lr:false,ud:false}}]){
+  const sec={id:'initial',meta,msiSeries:{MSI_a:{rawX:[0,3,6],rawY:[0,1,2],rawValues:[5,null,19]}},rois:[{vertices:[[0,0],[2,0],[2,1]]}]};
+  const before=JSON.stringify(sec),p=panelFor(sec);p.renderComposite();
+  assert.equal(sectionDisplayBaseOrientation(sec),'native-raster');
+  assert.equal(sectionDisplayRasterRotation(sec),90);
+  const actual=p.displayCtx.draws.at(-1).matrix;
+  const labels=[['top-left',[0,0]],['top-right',[7,0]],['bottom-left',[0,3]],['bottom-right',[7,3]],['off-centre',[.4,.8]]];
+  for(const [label,raw] of labels){
+    const main=point(actual,raw);
+    const css=turn([(main[0]-p.dom.cdisp.width/2)/2,(main[1]-p.dom.cdisp.height/2)/2],-90);
+    close([css[0]+3.5,css[1]+1.5],raw,'initial '+label+' keeps source side');
+    close(bakeSectionTransformPoint(...raw,7,3,sectionLayerViewLinear(sec,'msi')),raw,'initial thumbnail '+label);
+    close(p.canvasToMsi(...point(actual,raw.map(v=>v+.5))),raw,'initial ROI inverse '+label);
+  }
+  close(sectionLayerViewLinear(sec,'msi').flat(),identity().flat(),'initial Align/thumbnail matrix is identity');
+  // cdisp is un-CSS-transformed; unsaved Preview applies its own outer -90°.
+  const preview=context.bakeImageWithSectionTransform(p.dom.cdisp,-90);
+  const composed=mul(preview.ctx.draws[0].matrix,actual);
+  for(const [,raw] of labels)close(point(composed,raw),raw.map(v=>v*2),'initial Preview native corners');
+  assert.equal(JSON.stringify(sec),before,'opening does not rewrite source data, ROI, or metadata');
+}
+// Old automatic all-zero viewport records are defaults; real saved angles,
+// active mirrors and explicit Preview defaults retain the previous basis.
+for(const [meta,expected] of [
+  [{viewerTransform:{rot:0,rotHE:0,rotMSI:0}},'native-raster'],
+  [{viewerTransform:{rot:37}},'legacy-180'],
+  [{viewerTransform:{rotMSI:90}},'legacy-180'],
+  [{viewerTransform:{rotHE:-23}},'legacy-180'],
+  [{flip:{lr:true}},'legacy-180'],
+  [{flip:{ud:true}},'legacy-180'],
+  [{shareDefaultRotation:0},'legacy-180'],
+  [{shareDefaultRotation:125},'legacy-180'],
+  [{displayTransform:{version:2,mirror:[1,0,0,1]}},'legacy-180'],
+  [{displayTransform:{version:2,baseOrientation:'legacy-180'}},'legacy-180'],
+  [{displayTransform:{version:2,baseOrientation:'native-raster'},viewerTransform:{rot:37},flip:{lr:true},shareDefaultRotation:0},'native-raster'],
+]){
+  const sec={meta},before=JSON.stringify(sec);
+  assert.equal(sectionDisplayBaseOrientation(sec),expected,'saved orientation inference '+before);
+  assert.equal(sectionDisplayRasterRotation(sec),expected==='native-raster'?90:-90);
+  assert.equal(JSON.stringify(sec),before,'orientation inference is read-only');
+}
+// Cache creation before first MSI registration must not freeze the old basis.
+{
+  const sec={id:'empty',meta:{},msiSeries:{}},p=panelFor(sec);
+  p._ensureViewerTransform();sec.msiSeries.MSI_a={};
+  close(sectionLayerViewLinear(sec,'msi').flat(),identity().flat(),'first MSI on an existing empty panel');
+}
+// Intentional edits pin the basis before local state is serialized. Otherwise
+// a new nonzero rotation or mirror would be mistaken for old legacy data and
+// introduce another 180-degree turn on the next draw/reload.
+{
+  context.App.queueSave=()=>{};context.App.broadcastSync=()=>{};context.Toolbar={refreshRotation(){}};
+  const values=new Float64Array([NaN,-0,5,19]);
+  const T=[[1.2,.1,2],[-.3,.9,1],[0,0,1]];
+  const sec={id:'edits',meta:{world_coords:{T_he_to_msi:T},alignment:{HE_STAIN:{landmarks:[{he:[2,1],msi:[3,2]}]}}},
+    msiSeries:{MSI_a:{values,rawX:[0,3,6],rawY:[0,1,2]}},rois:[{vertices:[[0,0],[2,0],[2,1]]}]};
+  const scientific=()=>({values:Buffer.from(values.buffer).toString('hex'),rawX:sec.msiSeries.MSI_a.rawX.slice(),rawY:sec.msiSeries.MSI_a.rawY.slice(),
+    world:JSON.stringify(sec.meta.world_coords),alignment:JSON.stringify(sec.meta.alignment),rois:JSON.stringify(sec.rois)});
+  const before=scientific(),p=panelFor(sec);
+  p.setupCanvasSize=()=>{};p.applyViewerTransform=()=>{};p._scheduleThumbRebake=()=>{};
+  p.applyRotation(37,'both');
+  assert.equal(sec.meta.displayTransform.baseOrientation,'native-raster','rotation pins pre-edit baseline');
+  close(sectionLayerViewLinear(sec,'msi').flat(),displayRotation(37).flat(),'native rotation changes only requested angle');
+  let restored=JSON.parse(JSON.stringify(sec));
+  close(sectionLayerViewLinear(restored,'msi').flat(),displayRotation(37).flat(),'rotated native reload');
+  const rotated=sectionLayerViewLinear(sec,'msi');toggleSectionScreenFlip(sec,'lr');
+  for(const raw of [[1,2],[-3,.5]]){const old=point(rotated,raw);close(point(sectionLayerViewLinear(sec,'msi'),raw),[-old[0],old[1]],'native screen flip');}
+  restored=JSON.parse(JSON.stringify(sec));close(sectionLayerViewLinear(restored,'msi').flat(),sectionLayerViewLinear(sec,'msi').flat(),'flipped native reload');
+  toggleSectionScreenFlip(sec,'lr');p.resetTransform();
+  close(sectionLayerViewLinear(sec,'msi').flat(),identity().flat(),'reset restores source-native orientation');
+  assert.deepEqual(scientific(),before,'orientation edits preserve every scientific field and raw value byte');
+}
+// Reset is the explicit route from an intentionally preserved old orientation
+// to the corrected default. The choice survives JSON export/import or reload.
+{
+  const sec={id:'legacy-reset',meta:{viewerTransform:{rot:37,rotHE:0,rotMSI:0},shareDefaultRotation:125},msiSeries:{MSI_a:{}}};
+  const p=panelFor(sec);p.setupCanvasSize=()=>{};p.applyViewerTransform=()=>{};p._scheduleThumbRebake=()=>{};
+  assert.equal(sectionDisplayBaseOrientation(sec),'legacy-180');p.resetTransform();
+  assert.equal(sectionDisplayBaseOrientation(sec),'native-raster');
+  assert.equal(sec.meta.shareDefaultRotation,125,'Reset retains explicit Preview angle');
+  for(const restored of [sec,JSON.parse(JSON.stringify(sec))]){
+    const q=panelFor(restored);q.renderComposite();const actual=q.displayCtx.draws.at(-1).matrix;
+    for(const raw of [[0,0],[7,0],[0,3],[7,3],[.4,.8]]){
+      const drawn=point(actual,raw),screen=turn([(drawn[0]-q.dom.cdisp.width/2)/2,(drawn[1]-q.dom.cdisp.height/2)/2],-90);
+      close([screen[0]+3.5,screen[1]+1.5],raw,'Reset and reload preserve native source corners');
+    }
+  }
+}
+// Pinning an explicit Preview edit or the first flip must precede metadata
+// writes, and must retain an already-saved legacy mirror exactly.
+{
+  const sec={meta:{}};pinSectionDisplayOrientation(sec);sec.meta.shareDefaultRotation=0;
+  assert.equal(sectionDisplayBaseOrientation(sec),'native-raster');
+  close(sectionLayerViewLinear(JSON.parse(JSON.stringify(sec)),'msi',0).flat(),identity().flat(),'saved native zero Preview angle');
+  const flipped={meta:{}};toggleSectionScreenFlip(flipped,'ud');
+  assert.equal(sectionDisplayBaseOrientation(flipped),'native-raster','first flip pins native basis');
+  close(point(sectionLayerViewLinear(flipped,'msi'),[1,2]),[1,-2],'first flip does not add a half-turn');
+  const mirror={version:2,mirror:[0,1,1,0],legacy:{flip:{lr:true}}},legacy={meta:{displayTransform:mirror}};
+  pinSectionDisplayOrientation(legacy);
+  assert.equal(sectionDisplayBaseOrientation(legacy),'legacy-180');
+  assert.deepEqual(legacy.meta.displayTransform.mirror,[0,1,1,0]);
+  assert.deepEqual(legacy.meta.displayTransform.legacy,{flip:{lr:true}});
 }
 // Buttons are screen-axis actions even after mixed arbitrary rotations. A
 // serialized/reloaded v2 transform is idempotent; old ROI/T/flip remain intact.
@@ -93,13 +202,19 @@ for(const rot of [0,90,180,270,37])for(const axis of ['lr','ud']){
   assert.equal(sec.meta.shareDefaultRotation,72);
 }
 // Full-view and HE-only rotations never mutate saved registration or MSI.
-{
+for(const baseline of ['legacy-180','native-raster']){
   const T=[[1.2,.1,2],[-.3,.9,1],[0,0,1]];
-  const sec={id:'s',meta:{viewerTransform:{rot:37,rotMSI:90,rotHE:-23},flip:{lr:true}},msiSeries:{MSI_a:{}}};
+  const sec={id:'s',meta:{displayTransform:{version:2,baseOrientation:baseline},viewerTransform:{rot:37,rotMSI:90,rotHE:-23},flip:{lr:true}},msiSeries:{MSI_a:{}}};
   const p=panelFor(sec,7,3,true);p.imageSources.HE_STAIN={complete:true,naturalWidth:9,naturalHeight:4};p.imageSettings.HE_STAIN={opacity:1};p.visibleLayers.add('HE_STAIN');p._resolveTHeToMsi=()=>T;
   p.renderComposite();const he=p.displayCtx.draws[0].matrix;
   const expected=mul(sectionMsiCanvasMatrix(sec,7,3,p._displayCanvasFrame,'he'),T);
   close(he.flat(),expected.flat(),'HE registration then its own rotation');
+  for(const raw of [[0,0],[9,0],[0,4],[9,4],[2.3,.8]]){
+    const msi=point(T,raw);let expectedScreen=turn([msi[0]-3.5,msi[1]-1.5],baseline==='native-raster'?90:-90);
+    expectedScreen=turn(expectedScreen,-23);expectedScreen=[-expectedScreen[0],expectedScreen[1]];expectedScreen=turn(expectedScreen,37-90);
+    const rendered=point(he,raw);
+    close(turn([(rendered[0]-p.dom.cdisp.width/2)/2,(rendered[1]-p.dom.cdisp.height/2)/2],37-90),expectedScreen,'aligned HE follows '+baseline+' without modifying T');
+  }
   const msiBefore=sectionLayerViewLinear(sec,'msi');sec.meta.viewerTransform.rotHE=17;close(msiBefore.flat(),sectionLayerViewLinear(sec,'msi').flat(),'HE-only leaves MSI');
   assert.deepEqual(T,[[1.2,.1,2],[-.3,.9,1],[0,0,1]]);
 }
@@ -150,6 +265,21 @@ for(const rot of [0,90,180,270,37]){
 {
   const sec={meta:{viewerTransform:{rotHE:90}}};
   const f=context.sectionCanvasFrame(sec,7,3,false,'he');assert.equal(f.width,3);assert.equal(f.height,7);
+}
+// The correction is in the MSI coordinate path. An independent HE/IF image
+// without any registered MSI retains its old canvas and outer CSS transforms.
+for(const baseline of ['legacy-180','native-raster']){
+  const sec={meta:{displayTransform:{version:2,baseOrientation:baseline}},msiSeries:{}};
+  const p=panelFor(sec);p.registeredMsiKeys=()=>[];p._pickRefMsiKey=()=>null;
+  p.imageSources={HE_STAIN:{complete:true,naturalWidth:7,naturalHeight:3}};
+  p.imageSettings={HE_STAIN:{opacity:1}};p.visibleLayers=new Set(['HE_STAIN']);
+  p._displayCanvasFrame=sectionCanvasFrame(sec,7,3,false,'he');
+  p.dom.cdisp.width=7;p.dom.cdisp.height=3;p.renderComposite();
+  close(p.displayCtx.draws.at(-1).matrix.flat(),identity().flat(),'standalone HE canvas unchanged for '+baseline);
+  for(const raw of [[0,0],[7,0],[0,3],[7,3]]){
+    const drawn=point(p.displayCtx.draws.at(-1).matrix,raw);
+    close(turn([drawn[0]-3.5,drawn[1]-1.5],-90),turn([raw[0]-3.5,raw[1]-1.5],-90),'standalone HE screen unchanged');
+  }
 }
 // Pending ROI vertices are tied to their initial source geometry. A molecule
 // switch in that source is safe; another source/grid cannot append or paint.

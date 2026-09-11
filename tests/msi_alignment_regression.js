@@ -316,15 +316,15 @@ test('Solve uses the combined landmarks collected across molecules', async () =>
     expectPoints(h, 3, 3); assert.equal(h.$('[data-solve]').disabled, false);
     await h.click('[data-solve]');
     // Fixture canvas: 8 × 6 logical pixels in 640 × 440 CSS pixels, with
-    // the preserved initial 180° view. CSS (+80, +44) = raw (−1, −0.6).
+    // native initial view. CSS (+80, +44) = raw (+1, +0.6).
     assert.ok(Math.abs(+h.$('[data-scale-num]').value - 100) < 1e-9);
     assert.ok(Math.abs(+h.$('[data-rotate-num]').value) < 1e-9);
-    assert.ok(Math.abs(+h.$('[data-offx-num]').value + 1) < 1e-9);
-    assert.ok(Math.abs(+h.$('[data-offy-num]').value + 0.6) < 1e-9);
+    assert.ok(Math.abs(+h.$('[data-offx-num]').value - 1) < 1e-9);
+    assert.ok(Math.abs(+h.$('[data-offy-num]').value - 0.6) < 1e-9);
     await h.click('[data-save]'); assert.equal(h.closed, true);
     const saved = Object.values(h.section.meta.alignment.HE_STAIN.byFrame)[0];
     assert.equal(saved.landmarks.he.length, 3); assert.equal(saved.landmarks.msi.length, 3);
-    assert.ok(Math.abs(saved.T_he_to_msi[0][2] + 1) < 1e-9); h.assertNumericUnchanged();
+    assert.ok(Math.abs(saved.T_he_to_msi[0][2] - 1) < 1e-9); h.assertNumericUnchanged();
 });
 
 test('Cancel discards all drafts and per-source toggle without any save', async () => {
