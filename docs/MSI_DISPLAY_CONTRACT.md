@@ -44,6 +44,8 @@ Original measurement X/Y, MSI raster coordinates, HE image pixels and screen coo
 
 The image and its ROI overlay use the same forward transform; clicks use its inverse. Whole-view rotation, MSI-only rotation, reflections and fitting must agree across the main canvas, thumbnails, Align and Preview. HE-only rotation belongs to the HE path. Horizontal and vertical flip buttons operate on the current screen axes. Display operations do not re-estimate HE alignment or rewrite landmarks.
 
+Registered HE resampling across irregular MSI geometry uses one continuous output raster. Map output pixel centres back through proportional display geometry and the inverse saved HE transform, then sample the photograph with premultiplied-alpha interpolation. Prefilter large photographs before downsampling. Do not assemble separately rounded horizontal/vertical strips: their internal edges can introduce transparent grid lines in an otherwise opaque photograph. Bound the output allocation and cache completed warps; neither rendering nor cache eviction changes source coordinates or the registration.
+
 New and unadjusted MSI displays use the native raster orientation: X right and raster Y down. The fixed +90° canvas compensation cancels the existing −90° CSS rotation, removing the historical extra 180° rotation. The same baseline applies to the main view, thumbnails, Align and Preview. This is a display correction; it does not modify source arrays or coordinates, ROI geometry, landmarks or the saved HE-to-MSI transform.
 
 Historical auto-saved all-zero rotations without an explicit flip, mirror or share-preview angle use the corrected baseline too. Intentional all-zero settings are indistinguishable from these automatic saves. Explicit saved nonzero rotation, flip or mirror settings retain their legacy appearance, as does a saved `shareDefaultRotation` (including zero); never apply the shared angle twice. An intentional display edit pins the current baseline for consistent reloading, so edits to a native view remain native. Resetting rotations selects the native baseline while retaining the flip settings, as before.
@@ -120,6 +122,14 @@ Pan/zoom/rotation belong to section IDs. Resizing after selection changes preser
 
 Late asynchronous loads may populate caches but must not resurrect hidden cells, change another compound's window or render into a different project's UI.
 
+### Image readiness and opacity
+
+- An MSI image is drawable only after successful decoding with nonzero dimensions, display-setting initialization and a matching source/reader revision. An allocated `Image` or a thumbnail request is not readiness. Main view and thumbnail requests for the same revision share the in-flight promise. A successful load repaints the currently requested view and refreshes its geometry without another click; late results cannot change the selected molecule.
+- Source replacement, reader-column changes, cache release and panel destruction invalidate older parse/decode completions. A direct outlier re-bake registers its completed revision too. Failed decodes do not enter the drawable cache or trigger a repaint/retry loop. Show loading, decode/source failure and absent-molecule states separately; an explicit retry or reselection may retry a failed source.
+- Store the section-wide MSI opacity as `section.meta.msiOpacity` in the range 0–1. Newly loaded, reinitialized and LRU-reloaded MSI layers inherit it, including zero and changes synchronized before loading. Toolbar and layer-popover changes persist this default. A loaded layer's prior value is the compatibility fallback when the section has no default.
+- Preview opacity is a runtime override. It applies to images loaded after Preview opens and restores prior/default values on close, including those late images. Never save the temporary override into project metadata. HE `applyOpacity` behavior and multi-molecule overlay alpha retain their existing semantics.
+- `Same` remains a shared intensity window across displayed sections; weaker signals may consequently look dark. Do not silently select `Individual`, change measurement values or normalize a low-signal image to mask a loading issue.
+
 ## 7. Legacy migration and audit
 
 1. Retain original bytes, legacy polygons, transforms, share angles and HE alignment. Do not destructively normalize them.
@@ -149,13 +159,16 @@ Run the viewer and management regression suites and connector selftest, with Par
 ```sh
 node tests/viewer_preview_regression.js
 node tests/manage_tree_regression.js
-cd connector
-npm ci --no-audit --no-fund
-npm run selftest
+npm ci --prefix tests --no-audit --no-fund
+npm ci --prefix connector --no-audit --no-fund
+for test in tests/msi_*_regression.js; do node "$test" || exit 1; done
+npm run selftest --prefix connector
 ```
 
 Regression fixtures must cover the duplicate example; zero/negative/missing/invalid cells; DOUBLE and unsafe integers; irregular coordinates and raw jitter; Otsu/display invariance; ambiguous CSV joins; source-byte/ZIP restoration; ROI forward/inverse mapping across rotations/reflections; source-anchored and unresolved legacy ROIs; non-square pitch; and section-selection/Range/async state. Use strict equality for unchanged row membership and deterministic same-runtime calculations; justify any cross-runtime floating-point tolerance.
 
 Alignment regression coverage must additionally include A→B→A and TIC point retention, source/HE draft restoration, shared-versus-individual edit precedence, explicit unchanged broadcasts, Cancel/Esc/failed Save, stale asynchronous image loads, frame/image mismatches, resize/click mapping, and unchanged numerical/calibration data.
+
+Rendering regressions use actual Canvas pixels: opaque HE remains opaque across near-uniform jitter and irregular coordinate gaps at multiple scales, and a registered colour ramp follows the inverse mapping without changing geometry or transforms. Load-lifecycle regressions exercise thumbnail/main request joining, decode failure and retry, reversed A/B/C completion, source/reader replacement, destruction/cache release, direct re-bakes, opacity 0/40 percent, real LRU eviction and Preview late-load restoration.
 
 Passing synthetic/model tests is not a substitute for visual inspection of a running browser or comparison with the user's original MSI image. Original orientation, anatomical intent of old rotated ROIs and real-project migration remain evidence-dependent checks. Report the actual tests performed and remaining limits with each release; this document itself is not a test-completion report.

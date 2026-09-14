@@ -32,7 +32,9 @@ jobs:
         with:
           node-version: '22'
           cache: npm
-          cache-dependency-path: connector/package-lock.json
+          cache-dependency-path: |
+            connector/package-lock.json
+            tests/package-lock.json
 
       - name: viewer regression tests
         run: node tests/viewer_preview_regression.js
@@ -44,7 +46,11 @@ jobs:
         working-directory: connector
         run: npm ci --no-audit --no-fund
 
-      - name: MSI source, geometry, persistence and visibility regressions
+      - name: Canvas pixel regression dependencies
+        working-directory: tests
+        run: npm ci --no-audit --no-fund
+
+      - name: MSI source, geometry, rendering, loading and persistence regressions
         run: |
           for test in tests/msi_*_regression.js; do
             node "$test"

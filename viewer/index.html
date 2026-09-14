@@ -1832,45 +1832,73 @@ function msiMaskInLegacyRaster(input, section, key, maxEdge) {
 // Saved HE alignments target the historical raster. A changed irregular
 // display grid is separable in X/Y, so apply its piecewise mapping after T
 // instead of changing T or fitting another affine to the old landmarks.
+// The inverse axis maps are display-only and do not retain evicted geometries.
+const heDisplayAxisCache = new WeakMap();
 function heMsiDisplayWarp(source, T, section, key, pixelScale) {
-    if (typeof msiLegacyRasterSize !== 'function' || typeof msiLegacyRasterPointToDisplay !== 'function') return null;
-    const legacy = msiLegacyRasterSize(section, key);
     const geometry = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section, key) : null;
-    const grid = geometry && geometry.displayGeometry;
-    if (!legacy || !grid || !(legacy.w > 0 && legacy.h > 0 && grid.W > 0 && grid.H > 0)) return null;
-    // Piecewise axis knots live at pixel centres. Include edge endpoints
-    // separately so a changed grid does not move saved HE landmarks by 0.5 px.
-    const axisKnots = n => [0,...Array.from({length:n},(_,i)=>i+0.5),n];
-    const xKnots=axisKnots(legacy.w), yKnots=axisKnots(legacy.h), xs=[], ys=[];
-    let changed = legacy.w !== grid.W || legacy.h !== grid.H;
-    for (const x of xKnots) {
-        const p = msiLegacyEdgePointToDisplay(section, key, [x, 0.5]);
-        if (!p || !Number.isFinite(p[0])) return null;
-        xs.push(p[0]); if (Math.abs(p[0]-x) > 1e-8) changed = true;
+    const legacy = geometry && geometry.legacy, grid = geometry && geometry.displayGeometry;
+    if (!legacy || legacy.confirmed === false || !grid || !(legacy.W > 0 && legacy.H > 0 && grid.W > 0 && grid.H > 0)) return null;
+    if (!msiDisplayGeometryChanged(section, key)) return null;
+    const inv = invertAffine(T);
+    if (!inv) return null;
+    const sw = source.naturalWidth || source.width, sh = source.naturalHeight || source.height;
+    if (!(sw > 0 && sh > 0)) return null;
+    const k = Math.max(1e-3, Math.min(Number(pixelScale) || 1, 6144 / Math.max(grid.W, grid.H),
+        Math.sqrt(16000000 / (grid.W * grid.H))));
+    const out = document.createElement('canvas');
+    out.width = Math.max(1, Math.ceil(grid.W * k)); out.height = Math.max(1, Math.ceil(grid.H * k));
+    let axes = heDisplayAxisCache.get(geometry);
+    if (!axes || axes.w !== out.width || axes.h !== out.height) {
+        const x = new Float64Array(out.width), y = new Float64Array(out.height);
+        // Pixel centres are converted through the existing edge-based bridge.
+        // Use actual canvas dimensions: ceil(width*k) need not equal width*k.
+        for (let i = 0; i < x.length; i++) x[i] = msiDisplayEdgePointToLegacy(section, key, [(i + 0.5) * grid.W / out.width, 0.5])[0];
+        for (let j = 0; j < y.length; j++) y[j] = msiDisplayEdgePointToLegacy(section, key, [0.5, (j + 0.5) * grid.H / out.height])[1];
+        axes = { w:out.width, h:out.height, x, y };
+        heDisplayAxisCache.set(geometry, axes);
     }
-    for (const y of yKnots) {
-        const p = msiLegacyEdgePointToDisplay(section, key, [0.5, y]);
-        if (!p || !Number.isFinite(p[1])) return null;
-        ys.push(p[1]); if (Math.abs(p[1]-y) > 1e-8) changed = true;
+    // Bound the photograph readback as well as the output. Canvas performs the
+    // antialiased downsample before the final inverse, premultiplied-alpha sample.
+    const stretch = (pairs, step) => {
+        let max = 0;
+        for (let i = 1; i < pairs.length; i++) {
+            const span = pairs[i][1] - pairs[i-1][1];
+            if (span > 0) max = Math.max(max, (pairs[i][0] - pairs[i-1][0]) / (span * step));
+        }
+        return max || 1;
+    };
+    const gx = stretch(legacy.x, grid.x.step), gy = stretch(legacy.y, grid.y.step);
+    const pw = Math.max(1, Math.ceil(sw * Math.min(1, k * Math.hypot(T[0][0] * gx, T[1][0] * gy))));
+    const ph = Math.max(1, Math.ceil(sh * Math.min(1, k * Math.hypot(T[0][1] * gx, T[1][1] * gy))));
+    const sk = Math.min(1, 6144 / Math.max(pw, ph), Math.sqrt(16000000 / (pw * ph)));
+    const photo = document.createElement('canvas');
+    photo.width = Math.max(1, Math.ceil(pw * sk)); photo.height = Math.max(1, Math.ceil(ph * sk));
+    const pc = get2dContext(photo, { willReadFrequently:true });
+    pc.imageSmoothingEnabled = true; pc.imageSmoothingQuality = 'high';
+    pc.drawImage(source, 0, 0, photo.width, photo.height);
+    const src = pc.getImageData(0, 0, photo.width, photo.height).data;
+    const oc = get2dContext(out), pixels = oc.getImageData(0, 0, out.width, out.height), dst = pixels.data;
+    const w = photo.width, h = photo.height, sx = w / sw, sy = h / sh;
+    const a = inv[0][0] * sx, b = inv[0][1] * sx, tx = inv[0][2] * sx - 0.5;
+    const c = inv[1][0] * sy, d = inv[1][1] * sy, ty = inv[1][2] * sy - 0.5;
+    for (let j = 0; j < out.height; j++) {
+        const bx = b * axes.y[j] + tx, by = d * axes.y[j] + ty;
+        for (let i = 0; i < out.width; i++) {
+            const x = a * axes.x[i] + bx, y = c * axes.x[i] + by;
+            if (!Number.isFinite(x) || !Number.isFinite(y) || x < -0.5 || y < -0.5 || x >= w - 0.5 || y >= h - 0.5) continue;
+            const ix = Math.floor(x), iy = Math.floor(y), fx = x - ix, fy = y - iy;
+            const x0 = Math.max(0, ix), x1 = Math.min(w - 1, ix + 1), y0 = Math.max(0, iy), y1 = Math.min(h - 1, iy + 1);
+            const p00 = 4 * (y0 * w + x0), p10 = 4 * (y0 * w + x1), p01 = 4 * (y1 * w + x0), p11 = 4 * (y1 * w + x1);
+            const q00 = (1 - fx) * (1 - fy) * src[p00 + 3], q10 = fx * (1 - fy) * src[p10 + 3];
+            const q01 = (1 - fx) * fy * src[p01 + 3], q11 = fx * fy * src[p11 + 3];
+            const alpha = q00 + q10 + q01 + q11, dest = 4 * (j * out.width + i);
+            if (!(alpha > 0)) continue;
+            for (let channel = 0; channel < 3; channel++) dst[dest + channel] =
+                (src[p00 + channel] * q00 + src[p10 + channel] * q10 + src[p01 + channel] * q01 + src[p11 + channel] * q11) / alpha;
+            dst[dest + 3] = alpha;
+        }
     }
-    if (!changed) return null;
-    const maxEdge = Math.max(legacy.w, legacy.h, grid.W, grid.H);
-    const k = Math.max(1e-3, Math.min(Number(pixelScale)||1, 6144/maxEdge,
-        Math.sqrt(16000000/Math.max(legacy.w*legacy.h,grid.W*legacy.h,grid.W*grid.H))));
-    const create = (w, h) => { const c = document.createElement('canvas'); c.width=Math.max(1,Math.ceil(w*k)); c.height=Math.max(1,Math.ceil(h*k)); return c; };
-    const raw = create(legacy.w, legacy.h), xpass = create(grid.W, legacy.h), out = create(grid.W, grid.H);
-    const r = get2dContext(raw); r.imageSmoothingEnabled=true;
-    r.scale(k,k); r.transform(T[0][0],T[1][0],T[0][1],T[1][1],T[0][2],T[1][2]); r.drawImage(source,0,0);
-    const xc=get2dContext(xpass); xc.imageSmoothingEnabled=true;
-    for (let i=0;i<xKnots.length-1;i++) {
-        const width=xs[i+1]-xs[i]; if (!(width>0)) continue;
-        xc.drawImage(raw,xKnots[i]*k,0,(xKnots[i+1]-xKnots[i])*k,raw.height,xs[i]*k,0,width*k,xpass.height);
-    }
-    const yc=get2dContext(out); yc.imageSmoothingEnabled=true;
-    for (let i=0;i<yKnots.length-1;i++) {
-        const height=ys[i+1]-ys[i]; if (!(height>0)) continue;
-        yc.drawImage(xpass,0,yKnots[i]*k,xpass.width,(yKnots[i+1]-yKnots[i])*k,0,ys[i]*k,out.width,height*k);
-    }
+    oc.putImageData(pixels, 0, 0);
     return out;
 }
 
@@ -7232,11 +7260,12 @@ class SectionPanel {
         // _thumbDirty は「焼き直しが必要だが、まだ画面に出ていないサムネイル」。
         this._msiLru = new Set();
         this._msiLoadInFlight = new Map();
+        this._msiLoadErrors = new Map();
+        this._msiDrawWaiters = new Map();
+        this._loadEpoch = 0;
         this._thumbDirty = new Set();
         this._thumbObserver = null;
         this._thumbPaint = new Map();
-        this._pendingDrawLoad = null;
-        this._nextDrawLoad = null;   // 読み込み中に来た要求を 1 件だけ覚えておく
         // destroy() で立てる。走り出していた読み込みが「もう無いパネル」へ
         // 書き戻すのを防ぐ (destroy のコメント参照)。
         this._destroyed = false;
@@ -7500,37 +7529,66 @@ class SectionPanel {
 
     // 表示に必要になった MSI レイヤーだけを読み込む。同じキーへの同時要求は 1 本の
     // Promise にまとめる (サムネイルの可視化と本描画が同時に要求しうるため)。
-    ensureMsiLayerLoaded(key) {
-        if (this._destroyed) return Promise.resolve(false);
-        if (!key || !/^MSI_/i.test(key)) return Promise.resolve(false);
-        if (this.imageSources[key]) { this._touchMsiLru(key); return Promise.resolve(true); }
-        const ent = (this.section.msiSeries || {})[key];
-        // 共有先の parquet は blobId ではなく sourceUrl だけを持つ。
-        if (!ent || (!ent.blobId && !ent.sourceUrl)) return Promise.resolve(false);
+    _msiLoadIdentity(key) {
+        const e = (this.section.msiSeries || {})[key] || {};
+        return JSON.stringify([this._loadEpoch || 0, e.blobId, e.sourceUrl, e.sourceFileId,
+            e.sourceRevision, e.sourceHash, e.kind, e.sheet, e.func, e.col_x, e.col_y,
+            e.x, e.y, e.col_v, e.v, e.colIdx, e.channel, e.compound_index, e.v_index,
+            e.annotation, e.data_start_row, e.dataStartLine, e.range, e.bakeMode]);
+    }
+
+    isMsiLayerReady(key) {
+        const img = this.imageSources[key];
+        return !!(img && img.complete && img.naturalWidth > 0 && img.naturalHeight > 0
+            && this.imageSettings[key] && !(this._msiLoadInFlight && this._msiLoadInFlight.has(key))
+            && (!this._msiImageIdentity || !this._msiImageIdentity.has(key)
+                || this._msiImageIdentity.get(key) === this._msiLoadIdentity(key)));
+    }
+
+    ensureMsiLayerLoaded(key, options = {}) {
+        if (this._destroyed || !key || !/^MSI_/i.test(key)) return Promise.resolve(false);
+        const identity = this._msiLoadIdentity(key);
         const inflight = this._msiLoadInFlight.get(key);
-        if (inflight) return inflight;
-        const p = (async () => {
+        if (inflight && inflight.identity === identity) return inflight;
+        if (this.isMsiLayerReady(key)) { this._touchMsiLru(key); return Promise.resolve(true); }
+        const ent = (this.section.msiSeries || {})[key];
+        if (!ent || (!ent.blobId && !ent.sourceUrl)) return Promise.resolve(false);
+        const errors = this._msiLoadErrors || (this._msiLoadErrors = new Map());
+        if (options.retry === false && errors.get(key)?.identity === identity) return Promise.resolve(false);
+        errors.delete(key);
+        // Defer entry so the in-flight promise exists even if the parser throws
+        // synchronously. Only this source revision may commit or clear its state.
+        const current = () => !this._destroyed && this.section.msiSeries[key] === ent
+            && identity === this._msiLoadIdentity(key);
+        const p = Promise.resolve().then(async () => {
             try {
+                if (!current()) return false;
                 await this.loadMsiLayer(key, ent);
-                // 読んでいる間にパネルが消えていたら書き戻さない。
-                if (this._destroyed) return false;
-                if (!this.imageSources[key]) return false;
-                // renderComposite は imageSettings の無いレイヤーを描画対象から
-                // 外すので、読み込んだ直後にここで作らないとイオン像が出ない。
+                if (!current()) return false;
+                const img = this.imageSources[key];
+                if (!img || !img.complete || !(img.naturalWidth > 0 && img.naturalHeight > 0)) {
+                    throw new Error('MSI 画像をデコードできませんでした (' + key + ')');
+                }
                 this._initLayerSettings(key);
+                (this._msiImageIdentity || (this._msiImageIdentity = new Map())).set(key, identity);
                 this._touchMsiLru(key);
                 return true;
             } catch (e) {
-                // ★ 握り潰さない。以前はここで console.warn だけして false を
-                //   返していたので、parquet worker が落ちていると化合物を
-                //   クリックしても**何も起きず、何も表示されない**状態になった。
-                console.warn('MSI レイヤーの遅延読み込みに失敗', key, e);
-                _notifyMsiLoadFailed(e);
+                if (current()) {
+                    delete this.imageSources[key];
+                    delete this.imageDataUrls[key];
+                    this.msiValueRasters.delete(key);
+                    if (this._msiLutCache) this._msiLutCache.delete(key);
+                    errors.set(key, { identity, error:e });
+                    console.warn('MSI レイヤーの遅延読み込みに失敗', key, e);
+                    _notifyMsiLoadFailed(e);
+                }
                 return false;
             } finally {
-                this._msiLoadInFlight.delete(key);
+                if (this._msiLoadInFlight.get(key) === p) this._msiLoadInFlight.delete(key);
             }
-        })();
+        });
+        p.identity = identity;
         this._msiLoadInFlight.set(key, p);
         return p;
     }
@@ -7541,7 +7599,7 @@ class SectionPanel {
         const paint = () => {
             if (!this._thumbDirty.has(key)) return;
             this._thumbDirty.delete(key);
-            this.ensureMsiLayerLoaded(key).then((ok) => {
+            this.ensureMsiLayerLoaded(key, { retry:false }).then((ok) => {
                 if (this._destroyed) return;
                 if (!ok) { this._thumbDirty.add(key); return; }
                 try { this.renderMsiThumbnail(key); } catch (e) {}
@@ -7573,6 +7631,12 @@ class SectionPanel {
     // パネルを捨てるときに焼き済みキャンバスも明示的に手放す。GC 任せでも
     // 回収はされるが、退避を確定的にしておく。
     releaseCaches() {
+        this._loadEpoch = (this._loadEpoch || 0) + 1;
+        if (this._msiLoadInFlight) this._msiLoadInFlight.clear();
+        if (this._msiLoadErrors) this._msiLoadErrors.clear();
+        if (this._msiDrawWaiters) this._msiDrawWaiters.clear();
+        if (this._msiImageIdentity) this._msiImageIdentity.clear();
+        if (this._heGeometryWarpCache) this._heGeometryWarpCache.clear();
         if (this._msiLutCache) this._msiLutCache.clear();
         this.msiValueRasters.clear();
         this.imageSources = {};
@@ -7581,7 +7645,7 @@ class SectionPanel {
 
     markAllThumbsDirty() {
         for (const key of this.msiThumbRefs.keys()) {
-            if (this.imageSources[key]) { try { this.renderMsiThumbnail(key); } catch (e) {} }
+            if (this.isMsiLayerReady(key)) { try { this.renderMsiThumbnail(key); } catch (e) {} }
             else {
                 // 未読込 / LRU で退避済み。印を付けるだけでは足りない —
                 // _thumbDirty を消化するのは _observeThumb が仕込む paint だけで、
@@ -7601,36 +7665,69 @@ class SectionPanel {
     // 引っかからない。同じ描画サイクルで何度呼ばれても再描画は 1 回にまとめる。
     _ensureDrawableLoaded(keys) {
         if (this._destroyed) return;
-        const missing = [];
-        for (const k of (keys || [])) {
-            if (!/^MSI_/i.test(k) || this.imageSources[k]) continue;
-            const ent = (this.section.msiSeries || {})[k];
-            if (ent && (ent.blobId || ent.sourceUrl)) missing.push(k);
-        }
-        if (!missing.length) return;
-        // ★ 進行中でも要求を捨てない。
-        //   以前はここで return していたので、先行の列読み (数秒) が終わるまでの
-        //   クリックが**全部黙って消え**、「化合物を押しても画像が切り替わらない」
-        //   ように見えていた。最後の要求を覚えておいて、終わり次第それを処理する。
-        if (this._pendingDrawLoad) { this._nextDrawLoad = missing; return; }
-        const run = (want) => {
-            this._pendingDrawLoad = Promise.all(want.map(k => this.ensureMsiLayerLoaded(k)))
-                .then((results) => {
-                    this._pendingDrawLoad = null;
-                    if (this._destroyed) { this._nextDrawLoad = null; return; }
-                    // 1 枚も増えていないなら描き直さない (無限ループ防止)
-                    if (results.some(Boolean)) { try { this.renderComposite(); } catch (e) {} }
-                    const next = this._nextDrawLoad;
-                    this._nextDrawLoad = null;
-                    // 待たせていた要求のうち、まだ読めていないものだけを処理する。
-                    if (next) {
-                        const still = next.filter(k => !this.imageSources[k]);
-                        if (still.length) run(still);
+        this._drawableMsiKeys = new Set((keys || []).filter(k => /^MSI_/i.test(k)));
+        const waiters = this._msiDrawWaiters || (this._msiDrawWaiters = new Map());
+        for (const key of this._drawableMsiKeys) {
+            if (this.isMsiLayerReady(key)) continue;
+            const identity = this._msiLoadIdentity(key);
+            const ent = (this.section.msiSeries || {})[key];
+            if (!ent || (!ent.blobId && !ent.sourceUrl)) continue;
+            if (this._msiLoadErrors?.get(key)?.identity === identity) continue;
+            if (waiters.get(key)?.identity === identity) continue;
+            const promise = this.ensureMsiLayerLoaded(key, { retry:false });
+            const waiter = { identity, promise }; waiters.set(key, waiter);
+            promise.then(ok => {
+                if (waiters.get(key) !== waiter) return;
+                waiters.delete(key);
+                if (this._destroyed || identity !== this._msiLoadIdentity(key)
+                    || !this._drawableMsiKeys.has(key)) return;
+                if (ok) {
+                    // Recompute the current reference, never the old request's
+                    // focus. ResizeObserver need not fire when geometry arrives.
+                    if (!this.setupCanvasSize()) this.renderComposite();
+                    if (typeof Toolbar !== 'undefined' && App.activeSectionId === this.section.id) {
+                        Toolbar.refreshOpacity(); Toolbar.refreshRange();
                     }
-                })
-                .catch(() => { this._pendingDrawLoad = null; this._nextDrawLoad = null; });
-        };
-        run(missing);
+                } else this._showMsiLoadStatus();
+            }).catch(e => console.warn('MSI repaint failed', key, e));
+        }
+    }
+
+    _showMsiLoadStatus() {
+        const host = this.dom && this.dom.canvasCell;
+        if (!host) return;
+        const keys = [...(this._drawableMsiKeys || [])];
+        if (App.viewMode === 'compound' && App.focusCompoundKey && !App.activeOverlay
+            && !keys.includes(App.focusCompoundKey)) keys.push(App.focusCompoundKey);
+        const failed = [], loading = [], missing = [], unavailable = [];
+        for (const key of keys) {
+            if (this.isMsiLayerReady(key)) continue;
+            const ent = (this.section.msiSeries || {})[key];
+            if (!ent) missing.push(key);
+            else if (!ent.blobId && !ent.sourceUrl) unavailable.push(key);
+            else if (this._msiLoadErrors?.has(key)) failed.push(key);
+            else loading.push(key);
+        }
+        const text = failed.length ? 'MSI 画像を読み込めませんでした。' : unavailable.length ? 'MSI の元データの参照がありません。' : loading.length ? 'MSI 読込中…'
+            : missing.length ? 'この切片に対象分子はありません。' : '';
+        if (!text) { if (this._msiStatusEl) this._msiStatusEl.hidden = true; return; }
+        if (!this._msiStatusEl) {
+            const el = document.createElement('div');
+            el.className = 'msi-load-status'; el.setAttribute('role', 'status');
+            el.style.cssText = 'position:absolute;left:8px;bottom:8px;z-index:6;padding:5px 8px;border-radius:4px;background:#f8fafce8;color:#334155;font-size:12px;';
+            host.appendChild(el); this._msiStatusEl = el;
+        }
+        const el = this._msiStatusEl; el.hidden = false; el.replaceChildren(document.createTextNode(text));
+        if (failed.length) {
+            const button = document.createElement('button'); button.type = 'button';
+            button.className = 'btn'; button.textContent = '再試行'; button.style.marginLeft = '8px';
+            button.addEventListener('click', ev => {
+                ev.stopPropagation();
+                for (const key of failed) this._msiLoadErrors?.delete(key);
+                this.renderComposite();
+            });
+            el.appendChild(button);
+        }
     }
 
     // 読み込み済み MSI ラスタの LRU。ROI 値グリッドの _roiRawGridCache と同じ考え方で、
@@ -7665,6 +7762,7 @@ class SectionPanel {
             this._msiLru.delete(key);
             delete this.imageSources[key];
             delete this.imageDataUrls[key];
+            if (this._msiImageIdentity) this._msiImageIdentity.delete(key);
             this.msiValueRasters.delete(key);
             if (this._msiLutCache) this._msiLutCache.delete(key);   // 焼き済みキャンバスも一緒に返す
             // imageSettings は残す: 捨てると再読込までの間 renderComposite が
@@ -7685,6 +7783,9 @@ class SectionPanel {
     }
 
     async loadMsiLayer(key, ent) {
+        const identity = this._msiLoadIdentity(key);
+        const current = () => !this._destroyed && (this.section.msiSeries || {})[key] === ent
+            && identity === this._msiLoadIdentity(key);
         // ★ ここは無言で return してはいけない。
         //   以前は「登録は在るのに元データが無い」ときに黙って返していたので、
         //   共有側で 836 MB の blob が容量超過でロールバックされていたとき、
@@ -7742,6 +7843,7 @@ class SectionPanel {
                 else result = await buildPngFromXlsxArrayBuffer(buf, ent);
             }
         }
+        if (!current()) return;
         const dataUrl = (result && typeof result === 'object') ? result.dataUrl : result;
         const rawRange = (result && typeof result === 'object' && Array.isArray(result.rawRange)) ? result.rawRange : null;
         const rawMean = (result && typeof result === 'object' && Number.isFinite(result.rawMean)) ? result.rawMean : null;
@@ -7806,16 +7908,33 @@ class SectionPanel {
             // 並べ替えキーでもある。値が変わったときはメモを捨てる。
             if (_msiCellSig(entRef) !== beforeCell) _bumpMethodSeries();
         }
-        await this.attachImage(key, dataUrl);
+        const attached = await this.attachImage(key, dataUrl, current);
+        if (attached && current()) {
+            // Import and outlier re-baking also call this method directly.
+            // Their decoded image belongs to this revision just like a lazy load.
+            (this._msiImageIdentity || (this._msiImageIdentity = new Map())).set(key, identity);
+            if (this._msiLoadErrors) this._msiLoadErrors.delete(key);
+        }
     }
 
-    attachImage(key, src) {
-        return new Promise((resolve) => {
-            const img = new Image();
-            img.crossOrigin = 'Anonymous';
-            this.imageSources[key] = img;
-            img.onload = () => resolve();
-            img.onerror = () => resolve();
+    attachImage(key, src, current = () => !this._destroyed) {
+        const epoch = this._loadEpoch || 0;
+        const tokens = this._imageDecodeTokens || (this._imageDecodeTokens = new Map());
+        const token = {}; tokens.set(key, token);
+        return new Promise((resolve, reject) => {
+            const img = new Image(); img.crossOrigin = 'Anonymous';
+            const finish = ok => {
+                img.onload = null; img.onerror = null;
+                const valid = tokens.get(key) === token && epoch === (this._loadEpoch || 0) && current();
+                if (tokens.get(key) === token) tokens.delete(key);
+                if (!valid) { resolve(false); return; }
+                if (!ok || !(img.naturalWidth > 0 && img.naturalHeight > 0)) {
+                    reject(new Error('画像をデコードできませんでした (' + key + ')')); return;
+                }
+                // A pending or failed Image never enters the drawable cache.
+                this.imageSources[key] = img; resolve(true);
+            };
+            img.onload = () => finish(true); img.onerror = () => finish(false);
             img.src = src;
         });
     }
@@ -7826,19 +7945,22 @@ class SectionPanel {
     //  読み込んだ直後にこれを呼ばないとイオン像が出ない。)
     _initLayerSettings(key) {
         const img = this.imageSources[key];
+        const previous = this.imageSettings[key] || {};
+        const isMsi = /^MSI_/i.test(key);
+        const opacity = isMsi ? this._msiOpacityValue(key) : (Number.isFinite(previous.opacity) ? previous.opacity : 1);
         const persistedDisp = (this.section.meta && this.section.meta.layerDisplay && this.section.meta.layerDisplay[key]) || null;
-        const persistedGray = !!(persistedDisp && persistedDisp.grayscale);
+        const persistedGray = persistedDisp && typeof persistedDisp.grayscale === 'boolean'
+            ? persistedDisp.grayscale : !!previous.grayscale;
         // applyOpacity defaults: HE/IF off (always opaque), everything else on.
         // Persisted boolean wins regardless of layer type.
         const isHeLikeKey = /HE_STAIN|IF_STAIN/i.test(key);
         const persistedApply = (persistedDisp && typeof persistedDisp.applyOpacity === 'boolean')
             ? persistedDisp.applyOpacity
-            : !isHeLikeKey;
+            : (typeof previous.applyOpacity === 'boolean' ? previous.applyOpacity : !isHeLikeKey);
         if (!img || !img.complete || img.naturalWidth === 0) {
-            this.imageSettings[key] = { opacity: 1.0, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255, grayscale: persistedGray, applyOpacity: persistedApply };
+            this.imageSettings[key] = { opacity, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255, grayscale: persistedGray, applyOpacity: persistedApply };
             return;
         }
-        const isMsi = /^MSI_/i.test(key);
         // ★ MSI では輝度スキャンをまるごと省く。
         //
         //   下の dispVmin/dispVmax は MSI では 0/255 固定で、mn/mx は使わない
@@ -7850,7 +7972,7 @@ class SectionPanel {
         //   HE/IF は mn/mx を実際に vmin/vmax として使うので従来どおり測る。
         if (isMsi) {
             this.imageSettings[key] = {
-                opacity: 1.0, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255,
+                opacity, vmin: 0, vmax: 255, actualMin: 0, actualMax: 255,
                 grayscale: persistedGray, applyOpacity: persistedApply,
             };
             return;
@@ -7869,7 +7991,7 @@ class SectionPanel {
         // actualMin/actualMax capture the observed raster luminance range.
         // Guard against degenerate cases (decode failure leaving mn=255/mx=0).
         if (!Number.isFinite(mn) || !Number.isFinite(mx) || mn > mx) { mn = 0; mx = 255; }
-        this.imageSettings[key] = { opacity: 1.0, vmin: mn, vmax: mx, actualMin: mn, actualMax: mx, grayscale: persistedGray, applyOpacity: persistedApply };
+        this.imageSettings[key] = { opacity, vmin: mn, vmax: mx, actualMin: mn, actualMax: mx, grayscale: persistedGray, applyOpacity: persistedApply };
     }
 
     async analyzeAndInitSettings() {
@@ -8423,6 +8545,7 @@ class SectionPanel {
             const img = this.imageSources[key];
             const settings = this.imageSettings[key];
             if (!img || !img.complete || img.naturalWidth === 0 || !settings) continue;
+            if (/^MSI_/i.test(key) && !this.isMsiLayerReady(key)) continue;
 
             const isTicBackdrop = (key === 'HE_STAIN_TIC');
             const isMsiLayer = /^MSI_/i.test(key);
@@ -8665,6 +8788,7 @@ class SectionPanel {
         ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = 1.0;
         if(this._showAlignmentUnavailable)this._showAlignmentUnavailable(alignmentUnavailable);
+        this._showMsiLoadStatus();
         // HDI Smoothing: bilinear (CSS image-rendering:auto) when 'linear', else
         // nearest. The CSS upscale (.viewer-rot transform) dominates when cdisp
         // is native-size (MSI-only), so this class is what smooths the on-screen
@@ -9188,7 +9312,7 @@ class SectionPanel {
     effectiveActiveMsiKey() {
         if (App.viewMode === 'compound' && App.focusCompoundKey) {
             const k = App.focusCompoundKey;
-            if (this.imageSources[k]) return k;
+            if ((this.section.msiSeries || {})[k] || this.imageSources[k]) return k;
         }
         return this.activeMsiKey;
     }
@@ -9271,34 +9395,43 @@ class SectionPanel {
         if (typeof vmax === 'number') this.section.meta.layerDisplay[key].vmax = vmax;
     }
 
-    getOpacity() {
-        const key = this.effectiveActiveMsiKey();
-        const settings = key ? this.imageSettings[key] : null;
-        if (!settings) return { available: false };
-        return { available: true, value: Math.round((settings.opacity != null ? settings.opacity : 1) * 100) };
+    _msiOpacityValue(key) {
+        const saved = this.section.meta && this.section.meta.msiOpacity;
+        const previous = key && this.imageSettings[key] && this.imageSettings[key].opacity;
+        const value = Number.isFinite(this._previewMsiOpacity) ? this._previewMsiOpacity
+            : Number.isFinite(saved) ? saved : Number.isFinite(previous) ? previous : 1;
+        return Math.max(0, Math.min(1, value));
     }
 
-    // Section-wide MSI opacity helper. Each MSI layer keeps its own
-    // imageSettings entry, so without propagation the toolbar's Opacity
-    // value snaps back to whatever default the new active layer was
-    // initialised with whenever the user switches compounds. Propagating
-    // a change to every MSI key in this section keeps the slider value
-    // sticky across compound switches.
+    getOpacity() {
+        const key = this.effectiveActiveMsiKey();
+        if (key && /^MSI_/i.test(key)) return { available:true, value:Math.round(this._msiOpacityValue(key) * 100) };
+        const settings = key ? this.imageSettings[key] : null;
+        if (!settings) return { available:false };
+        return { available:true, value:Math.round((settings.opacity ?? 1) * 100) };
+    }
+
+    // The section default outlives all MSI raster caches. Preview applies an
+    // independent runtime override and never writes its slider into metadata.
     _propagateMsiOpacity(value) {
+        if (!Number.isFinite(value)) return;
+        this.section.meta = this.section.meta || {};
+        this.section.meta.msiOpacity = Math.max(0, Math.min(1, value));
         for (const k of Object.keys(this.imageSettings)) {
-            if (/^MSI_/i.test(k)) this.imageSettings[k].opacity = value;
+            if (/^MSI_/i.test(k)) this.imageSettings[k].opacity = this._msiOpacityValue(k);
         }
     }
 
     applyOpacity(percent) {
         const key = this.effectiveActiveMsiKey();
         const settings = key ? this.imageSettings[key] : null;
-        if (!settings) return;
+        const isMsi = key && /^MSI_/i.test(key);
+        if (!isMsi && !settings) return;
         let v = parseFloat(percent);
         if (!Number.isFinite(v)) v = 100;
         v = Math.max(0, Math.min(100, Math.round(v)));
-        settings.opacity = v / 100;
-        if (/^MSI_/i.test(key)) this._propagateMsiOpacity(settings.opacity);
+        if (isMsi) this._propagateMsiOpacity(v / 100);
+        else settings.opacity = v / 100;
         this.renderComposite();
         App.queueSave();
         App.broadcastSync('opacity', v, this);
@@ -9415,6 +9548,10 @@ class SectionPanel {
         this._msiLru.delete(key);
         this._thumbDirty.delete(key);
         this._msiLoadInFlight.delete(key);
+        this._msiLoadErrors?.delete(key);
+        this._msiDrawWaiters?.delete(key);
+        this._msiImageIdentity?.delete(key);
+        this._imageDecodeTokens?.delete(key);
         this._thumbPaint.delete(key);
         this.msiValueRasters.delete(key);
         if (this._msiLutCache) this._msiLutCache.delete(key);
@@ -9634,15 +9771,11 @@ class SectionPanel {
             App.queueSave();
             return;
         }
-        const key = this.effectiveActiveMsiKey();
-        const settings = key ? this.imageSettings[key] : null;
-        if (!settings) return;
         if (field === 'opacity') {
             let v = Number(value);
             if (!Number.isFinite(v)) v = 100;
             v = Math.max(0, Math.min(100, Math.round(v)));
-            settings.opacity = v / 100;
-            if (/^MSI_/i.test(key)) this._propagateMsiOpacity(settings.opacity);
+            this._propagateMsiOpacity(v / 100);
             this.renderComposite();
             App.queueSave();
             if (App.activeSectionId === this.section.id) Toolbar.refreshOpacity();
@@ -9758,6 +9891,9 @@ class SectionPanel {
             this.renderComposite();
             if (App.activeSectionId === this.section.id) Toolbar.refreshOpacity();
         });
+        opc.addEventListener('change', () => {
+            if (/^MSI_/i.test(key)) App.queueSave();
+        });
         apo.addEventListener('change', () => {
             settings.applyOpacity = apo.checked;
             this.section.meta = this.section.meta || {};
@@ -9860,6 +9996,7 @@ class SectionPanel {
             if (/^MSI_/i.test(key)) this._propagateMsiOpacity(settings.opacity);
             this.renderComposite();
             if (App.activeSectionId === this.section.id) Toolbar.refreshOpacity();
+            if (/^MSI_/i.test(key)) App.queueSave();
         });
         apo.addEventListener('change', () => {
             settings.applyOpacity = apo.checked;
@@ -10035,7 +10172,7 @@ class SectionPanel {
             cell.appendChild(cap);
             if (isMsi) {
                 this.msiThumbRefs.set(key, im);
-                if (this.imageSources[key]) {
+                if (this.isMsiLayerReady(key)) {
                     // 読み込み済み: 従来どおり即座に焼く。
                     const onLoad = () => { im.removeEventListener('load', onLoad); this.renderMsiThumbnail(key); };
                     if (im.complete && im.naturalWidth) this.renderMsiThumbnail(key);
@@ -19048,7 +19185,8 @@ const SharePreview = {
                     byKey[key] = settings[key].opacity;
                 }
             }
-            snap.push({ pid, byKey });
+            snap.push({ pid, byKey, defaultOpacity:panel._msiOpacityValue(panel.effectiveActiveMsiKey()),
+                override:panel._previewMsiOpacity });
         }
         this._opacitySnapshot = snap;
     },
@@ -19060,8 +19198,12 @@ const SharePreview = {
         for (const entry of this._opacitySnapshot) {
             const panel = App.panels.get(entry.pid);
             if (!panel || !panel.imageSettings) continue;
-            for (const [key, opacity] of Object.entries(entry.byKey)) {
-                if (panel.imageSettings[key]) panel.imageSettings[key].opacity = opacity;
+            if (Number.isFinite(entry.override)) panel._previewMsiOpacity = entry.override;
+            else delete panel._previewMsiOpacity;
+            for (const key of Object.keys(panel.imageSettings)) {
+                if (!/^MSI_/i.test(key)) continue;
+                panel.imageSettings[key].opacity = Number.isFinite(entry.byKey[key]) ? entry.byKey[key]
+                    : Number.isFinite(entry.defaultOpacity) ? entry.defaultOpacity : panel._msiOpacityValue(key);
             }
             try { panel.renderComposite(); } catch (e) {}
         }
@@ -19347,6 +19489,7 @@ const SharePreview = {
             for (const panel of App.panels.values()) {
                 const settings = panel && panel.imageSettings;
                 if (!settings) continue;
+                panel._previewMsiOpacity = v;
                 for (const key of Object.keys(settings)) {
                     if (!/^MSI_/i.test(key)) continue;
                     settings[key].opacity = v;
@@ -19771,7 +19914,7 @@ const SharePreview = {
                 if (!this.isOpen() || project !== App.project || loadSeq !== this._focusLoadSeq || App.activeOverlay) return;
                 const panel = App.panels && App.panels.get(sec.id);
                 const ent = (sec.msiSeries || {})[nextKey];
-                if (!panel || !ent || panel.imageSources[nextKey]) continue;
+                if (!panel || !ent || panel.isMsiLayerReady(nextKey)) continue;
                 if (!ent.blobId && !ent.sourceUrl) continue;
                 try { await panel.ensureMsiLayerLoaded(nextKey); } catch (e) {}
             }
@@ -19829,7 +19972,7 @@ const SharePreview = {
             const panel = App.panels.get(sec.id);
             const ent = (sec.msiSeries || {})[key];
             if (!ent || !panel) continue;
-            if (panel.imageSources[key]) status.set(sid, 'ready');
+            if (panel.isMsiLayerReady(key)) status.set(sid, 'ready');
             else if (ent.blobId || ent.sourceUrl) {
                 status.set(sid, 'loading');
                 pending.push({ sid, panel });
@@ -22263,6 +22406,7 @@ const App = {
         try { localStorage.setItem('desi:focusCompoundKey', this.focusCompoundKey || ''); } catch (e) {}
         for (const p of this.panels.values()) {
             try {
+                p._msiLoadErrors?.delete(key);
                 // Re-pick ref MSI / cdisp size because the new focus may
                 // live in a different source file with a different raster
                 // grid (per-source T_he_to_msi). Without this the canvas

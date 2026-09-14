@@ -308,9 +308,7 @@ for(const baseline of ['legacy-180','native-raster']){
   close(context.msiLegacyEdgePointToDisplay({},'a',[2.5,.5]),[8.5,.5]);
   const warped=context.heMsiDisplayWarp(canvas(3,2),identity(),{},'a',1);
   assert.equal(warped.width,9);assert.equal(warped.height,2);
-  const xPass=warped.ctx.draws[0].src;
-  close(xPass.ctx.draws.map(d=>d.args[4]),[0,.5,1.5,8.5],'warp destination knots');
-  close(xPass.ctx.draws.map(d=>d.args[6]),[.5,1,7,3.5],'warp segment widths');
+  // Real-pixel coverage is checked by msi_he_render_regression.js.
   assert.equal(context.msiDisplayPhysicalPitch({meta:{world_coords:{msi_um_per_px:{x:10,y:30}}}},'a'),null,'ambiguous old ordinal pitch is not a physical scale');
   const img={naturalWidth:9,naturalHeight:2,dataset:{ss:'1',rawW:'9',rawH:'2',displayMatrix:JSON.stringify(identity())},getBoundingClientRect:()=>({left:100,top:200,width:90,height:20})};
   close(context.alignmentThumbClickPoint({clientX:185,clientY:215},img,{},'a'),[2.5,1.5],'last sample-centre click is not clamped to index');
