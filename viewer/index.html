@@ -3677,7 +3677,7 @@ function alignmentNextEditOrder(layer) {
 }
 function alignmentSharedIncludes(record, frame) {
     // Older common records have no target inventory. Their explicit common
-    // intent is retained, subject to known-frame mismatch checks below.
+    // intent is retained, subject to known source/reader changes below.
     return record&&(!Object.prototype.hasOwnProperty.call(record,'targetKeys')
         ||(Array.isArray(record.targetKeys)&&record.targetKeys.includes(alignmentTargetKey(frame))));
 }
@@ -3689,15 +3689,37 @@ function alignmentKnownFrameMismatch(layer, frame) {
             ||(frame.sourceFileId&&saved.sourceFileId===frame.sourceFileId));
     });
 }
+function alignmentCommonRecord(layer, frame) {
+    if(!frame.confirmed)return null;
+    // Common transforms use logical MSI pixel edges, not acquisition X/Y.
+    // Keep the historical container readable, but resolve across its coordinate
+    // groups. Old records without an inventory still reject known replacements
+    // and reader changes; numeric coordinate differences alone are allowed.
+    const knownTargetMismatch=[...Object.values(layer.byFrame||{}),...Object.values(layer.sharedByCoordinate||{})]
+        .some(record=>{
+            const saved=record&&record.frame;
+            return saved&&(saved.measurementKey===frame.measurementKey
+                ||(frame.sourceFileId&&saved.sourceFileId===frame.sourceFileId))
+                &&alignmentTargetKey(saved)!==alignmentTargetKey(frame);
+        });
+    const records=Object.values(layer.sharedByCoordinate||{})
+        .filter(record=>alignmentSharedIncludes(record,frame)
+            &&(Array.isArray(record.targetKeys)||!knownTargetMismatch));
+    records.sort((a,b)=>alignmentEditOrder(b)-alignmentEditOrder(a)
+        ||Number(!!b.frame&&b.frame.coordinateKey===frame.coordinateKey)-Number(!!a.frame&&a.frame.coordinateKey===frame.coordinateKey));
+    return records[0]||null;
+}
 function alignmentRecordProblem(record, frame, imageIdentity, shared) {
     if(!record||!record.frame||!record.frame.confirmed||record.frame.version!==frame.version)return 'invalid-record';
     if(record.imageIdentity!==imageIdentity)return 'image-changed';
     if(record.alignment_raster_basis!=='legacy-msi-pixel-edges-v1')return 'unsupported-basis';
     if(!alignmentValidAffine(record.T_he_to_msi))return 'invalid-transform';
-    if(record.frame.coordinateKey!==frame.coordinateKey)return 'coordinate-mismatch';
     if(shared) {
         if(!alignmentSharedIncludes(record,frame))return 'source-mismatch';
-    } else if(record.frame.key!==frame.key)return 'source-mismatch';
+    } else {
+        if(record.frame.coordinateKey!==frame.coordinateKey)return 'coordinate-mismatch';
+        if(record.frame.key!==frame.key)return 'source-mismatch';
+    }
     return null;
 }
 // One read-only resolver for the main image, individual Align drafts and PNG
@@ -3721,12 +3743,10 @@ function resolveHeMsiAlignment(section, heKey, msiKey, panel, knownFrame) {
     if(!frame.confirmed)return result(null,null,null,frame.geometry?'coordinate-unconfirmed':'loading');
     const exact=(layer.byFrame||{})[frame.key];
     const knownMismatch=alignmentKnownFrameMismatch(layer,frame);
-    const common=(layer.sharedByCoordinate||{})[frame.coordinateKey];
+    const common=alignmentCommonRecord(layer,frame);
     const candidates=[];
     if(exact)candidates.push({record:exact,origin:'frame',shared:false,priority:0});
-    if(common&&alignmentSharedIncludes(common,frame)
-        &&(Array.isArray(common.targetKeys)||exact||!knownMismatch))
-        candidates.push({record:common,origin:'shared',shared:true,priority:2});
+    if(common)candidates.push({record:common,origin:'shared',shared:true,priority:2});
     // Unversioned, valid individual records keep their existing precedence.
     // A newly saved common record can supersede them with an explicit order.
     const old=(layer.bySource||{})[frame.sourceFileId]||(!layer.byFrame&&!layer.sharedByCoordinate?layer:null);
@@ -3750,7 +3770,7 @@ function resolveHeMsiAlignment(section, heKey, msiKey, panel, knownFrame) {
         r.frame.measurementKey===frame.measurementKey||(frame.sourceFileId&&r.frame.sourceFileId===frame.sourceFileId))),
         ...Object.values(layer.sharedByCoordinate||{}).filter(r=>r&&r.frame&&alignmentSharedIncludes(r,frame))];
     const reason=related.length&&related.every(r=>r.imageIdentity!==identity)?'image-changed'
-        : common&&!alignmentSharedIncludes(common,frame)?'source-mismatch'
+        : Object.keys(layer.sharedByCoordinate||{}).length&&!common?'source-mismatch'
         : related.some(r=>r.frame.coordinateKey!==frame.coordinateKey)?'coordinate-mismatch'
         : knownMismatch?'source-mismatch':'no-alignment';
     return result(null,null,null,reason);
@@ -14738,35 +14758,11 @@ const Wizards = {
         }
         const hasSources = sourceFids.length > 0;
         const hasMultipleSources = sourceFids.length > 1;
-        // Raster grid (WxH) of each source, read from its loaded MSI rasters.
-        // Equal coordinate bases permit explicit shared alignment; they do not
-        // prove separate measurements are already anatomically registered.
-        const gridOfFid = (fid) => {
-            for (const k of allMsiKeys) {
-                const ent = sec.msiSeries[k];
-                if (ent && ent.sourceFileId === fid) {
-                    const img = panel.imageSources && panel.imageSources[k];
-                    const frame = alignmentFrameDescriptor(sec, k, panel);
-                    if (frame.confirmed) return frame.coordinateKey;
-                }
-            }
-            return null;
-        };
-        const allSourcesSameGrid = () => {
-            const grids=sourceFids.map(gridOfFid);
-            return hasMultipleSources&&grids.every(g=>g&&g===grids[0]);
-        };
-        // Default mode: when only one source exists, lock to it. Otherwise
-        // prefer the saved alignmentSourceMode hint; then, when all sources
-        // share one grid, default to a shared T so a single align calibrates
-        // every source (prevents one source keeping a stale/provisional entry
-        // that shadows the good one); otherwise the source of the currently
-        // picked MSI, then "両方".
+        // Restore an explicitly saved common selection; new sessions use the
+        // saved/current individual source without comparing acquisition grids.
         const persistedSourceMode = sec.meta && sec.meta.alignmentSourceMode;
         const initialFidFromMsi = fidOf(state.msiKey);
-        // When per-measurement overlay is enabled, don't collapse same-grid
-        // re-measurements to the shared "__all__" mode — default to the current
-        // measurement's own source so each run is aligned independently.
+        // Respect the saved individual-editing preference when reopening.
         const perSourceAlign = !!(sec.meta && sec.meta.perSourceAlign);
         state.sourceMode = (() => {
             if (!hasSources) return null;
@@ -14924,7 +14920,7 @@ const Wizards = {
             </div>
             <p style="font-size:11px;color:#475569;margin-top:0;">
               スライダーまたは対応点クリックで HE/IF を MSI に重ねます。この画面内で比較・合成表示を確認できます。<br>
-              <span style="color:#64748b;">※ 位置合わせは「Source」で選んだ範囲に保存されます。<b>全ソース共通</b>は登録済みの全ソース(POS/NEG など)を対象とし、未読込の画像にも読み込み後、座標配置が一致すれば適用します。特定の Source を選ぶとそのソースだけを調整できます。後から明示的に編集・適用した設定を優先します。Source 一覧の記号 ✓=対応点で整列済 / ⊙=自動整合済 / △=スライダーのみ / −=未整列。<br>「全ソースへ反映」は、現在の位置合わせを共通設定として再適用して保存します。</span>
+              <span style="color:#64748b;">※ 位置合わせは「Source」で選んだ範囲に保存されます。<b>全ソース共通</b>は登録済みの全ソース(POS/NEG など)に、同じ回転・倍率・移動を画像の画素座標で適用します。測定座標の原点・間隔の違いによる非表示は行いません。未読込の画像にも読み込み後に適用します。特定の Source を選ぶとそのソースだけを調整できます。後から明示的に編集・適用した設定を優先します。Source 一覧の記号 ✓=対応点で整列済 / ⊙=自動整合済 / △=スライダーのみ / −=未整列。<br>「全ソースへ反映」は、現在の位置合わせを共通設定として再適用して保存します。</span>
             </p>
 
             <fieldset style="margin-top:8px;border:1px solid #e2e8f0;border-radius:5px;padding:8px 10px;">
@@ -15000,7 +14996,7 @@ const Wizards = {
             <div style="display:flex;gap:6px;margin-top:10px;justify-content:space-between;flex-wrap:wrap;">
               <button type="button" class="btn" data-reset>Reset to identity</button>
               <div style="display:flex;gap:6px;">
-                ${hasMultipleSources ? `<button type="button" class="btn" data-apply-all title="現在の位置合わせを全ソースの共通設定として保存します。未読込の画像は読み込み後に座標配置を確認して適用します。">全ソースへ反映</button>` : ''}
+                ${hasMultipleSources ? `<button type="button" class="btn" data-apply-all title="現在の位置合わせを登録済みの全ソースへ保存します。測定座標の完全一致は不要です。未読込の画像にも読み込み後に適用します。">全ソースへ反映</button>` : ''}
                 <button type="button" class="btn" data-modal-cancel>Cancel</button>
                 <button type="button" class="btn primary" data-save>Save</button>
               </div>
@@ -15054,10 +15050,12 @@ const Wizards = {
             }
             const current = clone(state), view = workspace && workspace.getViewState();
             const context = {layerKey:state.layerKey,imageIdentity:alignmentImageIdentity(sec.images[state.layerKey]),
-                scope:'shared',frame:activeFrame,sharedId:'shared:'+activeFrame.coordinateKey};
+                scope:'shared',frame:activeFrame,sharedId:'__all__'};
             activeDraft = session.activate(context,seedForFrame(state.layerKey,activeFrame,'__all__'));
             Object.assign(state,current,{sourceMode:'__all__'});
             session.capture(state,view); session.forceCommit();
+            activeDraft.context.frame=clone(activeFrame);
+            activeDraft.frameKey=MsiAlignmentSession.frameKey(activeFrame);
             if(sourceSel)sourceSel.value='__all__';
             sec.meta.perSourceAlign=false;
             if(perSourceEl)perSourceEl.checked=false;
@@ -15101,7 +15099,7 @@ const Wizards = {
         };
         const updatePreview = () => {
             if (!stillOpen()) return;
-            if (activeDraft) session.capture(state, workspace && workspace.getViewState());
+            captureCurrent();
             writeWorldCoords();
             if (rafId) cancelAnimationFrame(rafId);
             rafId = requestAnimationFrame(async () => {
@@ -15158,12 +15156,18 @@ const Wizards = {
         msiUmXEl.title = msiUmYEl.title = '登録済みの物理ピクセルサイズ（表示の拡大率とは独立）';
 
         const captureCurrent = () => {
-            if (activeDraft) session.capture(state, workspace && workspace.getViewState());
+            if (!activeDraft) return;
+            const revision=activeDraft.editRevision;
+            session.capture(state, workspace && workspace.getViewState());
+            if(activeDraft.context.scope==='shared'&&activeFrame&&activeFrame.confirmed&&activeDraft.editRevision!==revision) {
+                activeDraft.context.frame=clone(activeFrame);
+                activeDraft.frameKey=MsiAlignmentSession.frameKey(activeFrame);
+            }
         };
         const seedForFrame = (heKey, frame, mode) => {
             const rec = sec.meta.alignment[heKey] || {};
             const identity = alignmentImageIdentity(sec.images[heKey]);
-            const shared = mode === '__all__' && rec.sharedByCoordinate && rec.sharedByCoordinate[frame.coordinateKey];
+            const shared = mode === '__all__' && alignmentCommonRecord(rec,frame);
             if(shared&&!alignmentRecordProblem(shared,frame,identity,true))return Object.assign(clone(shared),{seedVerified:true});
             if(mode!=='__all__') {
                 const resolved=resolveHeMsiAlignment(sec,heKey,null,panel,frame);
@@ -15174,9 +15178,17 @@ const Wizards = {
             // Once a frame is explicitly recorded, a legacy fallback must not
             // accidentally attach its points to another sheet or coordinate grid.
             if (!Object.keys(rec.byFrame||{}).length&&!Object.keys(rec.sharedByCoordinate||{}).length) {
+                // Pre-frame common settings also expressed an all-source
+                // intent. Restore their own parameters, not a source override,
+                // without requiring equal acquisition coordinates.
+                if(mode==='__all__'&&baseAlignment.alignmentSourceMode==='__all__'&&frame.confirmed
+                    &&Number.isFinite(rec.scale_pct)&&rec.scale_pct>0
+                    &&(!rec.imageIdentity||rec.imageIdentity===identity)
+                    &&(!rec.alignment_raster_basis||rec.alignment_raster_basis==='legacy-msi-pixel-edges-v1')
+                    &&alignmentValidAffine(buildHeToMsiAffine(loadStateFor(heKey))))
+                    return Object.assign(loadStateFor(heKey),{seedVerified:true});
                 if (bySrc && alignmentLegacySeedIsCompatible(sec,frame,bySrc,panel)) return Object.assign(clone(bySrc),{seedVerified:true});
                 if (unambiguous && sourceFids.length <= 1 && alignmentLegacySeedIsCompatible(sec,frame,rec,panel)) return Object.assign(loadStateFor(heKey),{seedVerified:!!Object.keys(rec).length});
-                if (unambiguous && mode === '__all__' && allSourcesSameGrid() && alignmentLegacySeedIsCompatible(sec,frame,rec,panel)) return Object.assign(loadStateFor(heKey),{seedVerified:!!Object.keys(rec).length});
             }
             return { flip_lr:false, flip_ud:false, scale_pct:100, rotate_deg:0, offx:0, offy:0,
                 landmarks:{he:[],msi:[]}, autoAligned:null, seedVerified:false,
@@ -15232,15 +15244,15 @@ const Wizards = {
                 }
                 const context = { layerKey:nextLayer, imageIdentity:alignmentImageIdentity(sec.images[nextLayer]),
                     scope:nextMode === '__all__' ? 'shared' : 'source', frame,
-                    sharedId:nextMode === '__all__' ? 'shared:' + frame.coordinateKey : null };
-                const seed = Object.assign(seedForFrame(nextLayer,frame,nextMode), {
+                    sharedId:nextMode === '__all__' ? '__all__' : null };
+                const seed = Object.assign({flip_lr:false,flip_ud:false,scale_pct:100,rotate_deg:0,offx:0,offy:0,
+                    landmarks:{he:[],msi:[]},autoAligned:null},seedForFrame(nextLayer,frame,nextMode), {
                     layerKey:nextLayer, msiKey:nextKey, sourceMode:nextMode, pickMode:'none',
                     msi_um_x:msiUm.x, msi_um_y:msiUm.y });
-                const common=(sec.meta.alignment[nextLayer]||{}).sharedByCoordinate;
-                const existingCommon=common&&common[frame.coordinateKey];
+                const existingCommon=alignmentCommonRecord(sec.meta.alignment[nextLayer]||{},frame);
                 const createCommon=options&&options.createCommon&&nextMode==='__all__'
                     &&previousDraft&&previousDraft.context.scope==='source'&&nextLayer===previousState.layerKey
-                    &&frame.confirmed&&previousFrame&&previousFrame.coordinateKey===frame.coordinateKey
+                    &&frame.confirmed&&previousFrame&&previousFrame.confirmed
                     &&(!existingCommon||alignmentRecordProblem(existingCommon,frame,context.imageIdentity,true))
                     &&(previousState.seedVerified||session.isDirty(previousDraft.key))
                     &&alignmentValidAffine(buildHeToMsiAffine(previousState));
@@ -15249,9 +15261,17 @@ const Wizards = {
                 const keepSharedDraft=existingDraft&&session.isDirty(existingDraft.key);
                 const previous = activeDraft;
                 activeDraft = session.activate(context, seed);
-                if(createCommon&&!keepSharedDraft)Object.assign(activeDraft.state,seed);
+                if(createCommon&&!keepSharedDraft) {
+                    Object.assign(activeDraft.state,seed);
+                    activeDraft.context.frame=clone(previousFrame);
+                    activeDraft.frameKey=MsiAlignmentSession.frameKey(previousFrame);
+                }
                 activeFrame = frame;
-                Object.assign(state, activeDraft.state, { layerKey:nextLayer, msiKey:nextKey, sourceMode:nextMode });
+                // A restored draft replaces every field. Optional fields such
+                // as basis/T must not leak from the previous image and mark an
+                // untouched default alignment as a new edit on Save.
+                for(const key of Object.keys(state))delete state[key];
+                Object.assign(state, clone(activeDraft.state), { layerKey:nextLayer, msiKey:nextKey, sourceMode:nextMode });
                 if(createCommon)session.forceCommit({once:true});
                 if(options&&options.createCommon) {
                     sec.meta.perSourceAlign=false;
@@ -15976,8 +15996,7 @@ const Wizards = {
                     record.targetKeys = [...new Set(registeredFrames.map(alignmentTargetKey))];
                     aRef.sharedByCoordinate = aRef.sharedByCoordinate || {};
                     aRef.sharedByCoordinate[frame.coordinateKey] = Object.assign(clone(record),{frame:clone(frame)});
-                    frames = registeredFrames
-                        .filter(f=>f.confirmed && f.coordinateKey === frame.coordinateKey);
+                    frames = registeredFrames.filter(f=>f.confirmed);
                 }
                 for (const f of frames) {
                     aRef.byFrame[f.key] = Object.assign(clone(record),{frame:clone(f)});

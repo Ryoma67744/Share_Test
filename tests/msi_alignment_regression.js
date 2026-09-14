@@ -424,8 +424,11 @@ test('local save failure keeps private drafts and retry persists every edited fr
     h.assertNumericUnchanged();
 });
 
-test('explicit Apply all commits an unchanged source alignment to every compatible source', async () => {
-    const h = await harness({ prepare: compatibleSources });
+test('explicit Apply all commits an unchanged source alignment across different coordinates and dimensions', async () => {
+    const h = await harness({ prepare(section) {
+        section.msiSeries.MSI_C.sourceGeometry.legacy.x = Array.from({length:12},(_,i)=>[20+i*0.3,i]);
+        section.msiSeries.MSI_C.sourceGeometry.legacy.y = Array.from({length:7},(_,i)=>[-10+i*0.2,i]);
+    } });
     assert.equal(+h.$('[data-scale-num]').value, 100);
     await h.click('[data-apply-all]');
     assert.equal(h.closed, true); assert.equal(h.outcome, 'saved');
@@ -433,6 +436,65 @@ test('explicit Apply all commits an unchanged source alignment to every compatib
     assert.equal(savedFrame(h.section, 'file-2').scale_pct, 100, 'explicit apply replaces the second source baseline of 125');
     const shared = Object.values(h.section.meta.alignment.HE_STAIN.sharedByCoordinate)[0];
     assert.equal(shared.scale_pct, 100); assert.equal(h.section.meta.alignmentSourceMode, '__all__');
+    assert.deepEqual(plain(h.panel._resolveTHeToMsi('HE_STAIN','MSI_C')),plain(h.panel._resolveTHeToMsi('HE_STAIN','MSI_A')));
+    h.assertNumericUnchanged();
+});
+
+test('common edits and points survive switches across different coordinate layouts', async () => {
+    const h=await harness();
+    await h.input('[data-scale-num]',142);await h.addPair();
+    await h.change('[data-align-source]','__all__');
+    await h.change('[data-align-msi]','MSI_C');
+    assert.equal(+h.$('[data-scale-num]').value,142);expectPoints(h,1,1);
+    await h.input('[data-scale-num]',162);await h.addPair(270,210);
+    await h.change('[data-align-msi]','MSI_A');
+    assert.equal(+h.$('[data-scale-num]').value,162);expectPoints(h,2,2);
+    await h.click('[data-save]');
+    const common=Object.values(h.section.meta.alignment.HE_STAIN.sharedByCoordinate);
+    assert.equal(common.length,1,'one common draft is committed');
+    assert.equal(common[0].frame.sourceFileId,'file-2','anchor tracks the last edit, not the last image visit');
+    assert.equal(h.panel._resolveTHeToMsi('HE_STAIN','MSI_A')[0][0],1.62);
+    assert.equal(h.panel._resolveTHeToMsi('HE_STAIN','MSI_C')[0][0],1.62);
+    h.assertNumericUnchanged();
+});
+
+test('switching a saved common image then saving cannot create or promote an identity alignment', async () => {
+    const first=await harness({prepare(s){delete s.meta.alignment.HE_STAIN.bySource['file-2'];}});
+    await first.input('[data-scale-num]',142);await first.click('[data-apply-all]');
+    const h=await harness({section:first.section});
+    const before=plain(h.section.meta.alignment);
+    await h.change('[data-align-msi]','MSI_C');
+    assert.equal(+h.$('[data-scale-num]').value,142);
+    await h.click('[data-save]');
+    assert.deepEqual(plain(h.section.meta.alignment),before,'navigation-only Save preserves every record and edit order');
+    const reopened=await harness({section:h.section});
+    assert.equal(reopened.$('[data-align-msi]').value,'MSI_C');
+    assert.equal(+reopened.$('[data-scale-num]').value,142);
+    await reopened.click('[data-modal-cancel]');h.assertNumericUnchanged();
+});
+
+test('optional fields from a saved HE cannot dirty an unaligned IF draft on selection', async () => {
+    const first=await harness({prepare(s){delete s.meta.alignment.IF_STAIN;}});
+    await first.input('[data-scale-num]',142);await first.click('[data-apply-all]');
+    const h=await harness({section:first.section});
+    const before=plain(h.section.meta.alignment);
+    await h.change('[data-align-layer]','IF_STAIN');
+    assert.equal(+h.$('[data-scale-num]').value,100);
+    await h.click('[data-save]');
+    assert.deepEqual(plain(h.section.meta.alignment),before,'basis and transform fields cannot leak across drafts');
+    h.assertNumericUnchanged();
+});
+
+test('pre-frame common settings reopen on a different source without importing its individual override', async () => {
+    const h=await harness({prepare(s){
+        s.meta.alignmentSourceMode='__all__';s.meta.perSourceAlign=false;s.meta.alignmentMsiKey='MSI_C';
+        s.meta.alignment.HE_STAIN.scale_pct=142;
+    }});
+    assert.equal(+h.$('[data-scale-num]').value,142,'legacy common scale wins over the source override of 125');
+    await h.change('[data-align-msi]','MSI_A');
+    assert.equal(+h.$('[data-scale-num]').value,142);
+    const before=plain(h.section.meta.alignment);
+    await h.click('[data-save]');assert.deepEqual(plain(h.section.meta.alignment),before);
     h.assertNumericUnchanged();
 });
 
@@ -489,10 +551,9 @@ test('saved HE selection reopens and a source remembers its selected molecule du
     await reopened.click('[data-modal-cancel]'); reopened.assertNumericUnchanged();
 });
 
-test('common Save also aligns a compatible source first loaded after saving', async () => {
+test('common Save also aligns a different coordinate layout first loaded after saving', async () => {
     let laterGeometry;
     const h = await harness({ prepare(section) {
-        compatibleSources(section);
         laterGeometry = plain(section.msiSeries.MSI_C.sourceGeometry);
         delete section.msiSeries.MSI_C.sourceGeometry;
         delete section.meta.alignment.HE_STAIN.bySource;
@@ -549,7 +610,7 @@ test('Apply all includes an unloaded source without preloading every molecule', 
 });
 
 test('later common saves supersede older individual records even when that source is unloaded', async () => {
-    const first=await harness({prepare:compatibleSources});
+    const first=await harness();
     await first.change('[data-align-source]','file-2');await first.input('[data-scale-num]',175);await first.click('[data-save]');
     let geometry;
     const second=await harness({section:first.section,prepare(s){

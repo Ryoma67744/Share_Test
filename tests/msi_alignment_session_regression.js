@@ -72,7 +72,8 @@ const stamp = input => Session.stableKey(input);
     assert.equal(Session.sharedFrameKey(a),Session.sharedFrameKey(b));
     assert.notEqual(Session.sharedFrameKey(Object.assign({},a,{confirmed:false})),
         Session.sharedFrameKey(Object.assign({},b,{confirmed:false})));
-    assert.notEqual(Session.sharedFrameKey(a),Session.sharedFrameKey(Object.assign({},b,{coordinateKey:'different-xy-layout'})));
+    assert.equal(Session.sharedFrameKey(a),Session.sharedFrameKey(Object.assign({},b,{coordinateKey:'different-xy-layout'})),
+        'explicit common scope shares logical-pixel alignment despite different acquisition coordinates');
 }
 
 // Source and HE image switches retain independent deep copies, including an
@@ -101,7 +102,8 @@ const stamp = input => Session.stableKey(input);
 }
 
 // Shared work is distinct from each source draft; switching the shown source
-// inside a confirmed shared coordinate scope never imports its saved override.
+// inside an explicit common scope never imports its saved override, even when
+// its original coordinates and raster dimensions differ.
 {
     const store = Session.create({sectionId:'s'});
     const individual = store.activate(context(),rawState());
@@ -110,7 +112,8 @@ const stamp = input => Session.stableKey(input);
     shared.state.offx=43;
     shared.state.landmarks.msi.push([12.5,13.5]);
     const secondSource = context({scope:'shared',sharedId:'all-measurements',
-        frame:frame({sourceRef:JSON.stringify(['file-2','xlsx','scan',1,'B','rev-1'])})});
+        frame:frame({sourceRef:JSON.stringify(['file-2','xlsx','scan',1,'B','rev-1']),
+            coordinateSignature:{W:33,H:55,x:[[20,0],[40,1]],y:[[-10,0],[-5,1]]}})});
     assert.equal(store.activate(secondSource,Object.assign(rawState(),{offx:99})),shared);
     assert.equal(store.current().state.offx,43);
     assert.equal(store.current().state.landmarks.msi.length,2);
