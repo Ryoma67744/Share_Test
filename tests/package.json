@@ -1,0 +1,7 @@
+{
+  "name": "share-test-viewer-regressions",
+  "private": true,
+  "devDependencies": {
+    "@napi-rs/canvas": "0.1.100"
+  }
+}

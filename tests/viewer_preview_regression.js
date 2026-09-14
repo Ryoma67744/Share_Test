@@ -142,6 +142,7 @@ async function testFocusLoadAndRaceGuard() {
   const waits = { MSI_A: deferred(), MSI_B: deferred() };
   const panel = {
     imageSources: {},
+    isMsiLayerReady(key) { return !!this.imageSources[key]?.loaded; },
     ensureMsiLayerLoaded(key) {
       return waits[key].promise.then((ok) => {
         if (ok) this.imageSources[key] = { loaded: true };
@@ -199,6 +200,7 @@ async function testFocusLoadAndRaceGuard() {
 async function testFailedLoadStaysExplicit() {
   const panel = {
     imageSources: {},
+    isMsiLayerReady(key) { return !!this.imageSources[key]?.loaded; },
     async ensureMsiLayerLoaded() { return false; },
     setupCanvasSize() { return false; },
     renderComposite() {},
@@ -226,6 +228,7 @@ async function testSelectionAndProjectLoadRaceGuard() {
   const waits = new Map();
   const panels = new Map(['s1', 's2'].map(id => [id, {
     imageSources: {},
+    isMsiLayerReady(key) { return !!this.imageSources[key]?.loaded; },
     ensureMsiLayerLoaded(key) {
       const wait = deferred(); waits.set(id + ':' + key, wait);
       return wait.promise.then(ok => { if (ok) this.imageSources[key] = { loaded: true }; return ok; });

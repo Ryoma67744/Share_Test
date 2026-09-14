@@ -119,7 +119,7 @@ const drawPanel={...panel,section:swapped,
   displayCtx:{clearRect(){},save(){},restore(){},transform(){},translate(){},drawImage(img){draws.push(img);}},
   imageSources:{HE_STAIN:{complete:true,naturalWidth:20,naturalHeight:20}},
   imageSettings:{HE_STAIN:{opacity:1}},visibleLayers:new Set(['HE_STAIN']),
-  _maybeWarnRasterDimMismatch(){},_ensureViewerTransform(){},_ensureDrawableLoaded(){},
+  _maybeWarnRasterDimMismatch(){},_ensureViewerTransform(){},_ensureDrawableLoaded(){},_showMsiLoadStatus(){},
   registeredMsiKeys:()=>['MSI_A'],getMsiRefSize:()=>({w:2,h:2}),_msiCanvasMatrix:()=>I,
   updateScaleBar(){},_resolveTHeToMsi:ctx.resolve,_showAlignmentUnavailable:ctx.status};
 ctx.render.call(drawPanel);
