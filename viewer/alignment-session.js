@@ -216,10 +216,14 @@
             this._recordEdit(draft);
             return draft;
         }
-        forceCommit() {
+        forceCommit(options) {
             this._assertOpen();
             const draft = this.current();
             if (!draft) throw new Error('Activate an alignment draft before committing.');
+            // Selecting a newly created common scope is one explicit action.
+            // Revisiting it must not outrank a later individual edit. The
+            // Apply-all button omits `once` and always records a new action.
+            if (options && options.once && this._forced.has(draft.key)) return draft;
             this._recordEdit(draft, true);
             return draft;
         }

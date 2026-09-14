@@ -208,6 +208,8 @@ const stamp = input => Session.stableKey(input);
     store.forceCommit();
     assert.equal(store.isDirty(),true);
     const revision=shared.editRevision;
+    store.forceCommit({once:true});
+    assert.equal(shared.editRevision,revision,'revisiting a requested scope change does not promote its order');
     store.capture(Object.assign({},shared.state,{msiKey:'MSI_B'}));
     assert.equal(shared.editRevision,revision);
     const serialized=store.serialize().entries;
