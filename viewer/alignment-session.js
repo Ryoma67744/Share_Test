@@ -111,16 +111,11 @@
     }
 
     function sharedFrameKey(frame) {
-        if (frame && frame.version === 'msi-alignment-frame-v1' && frame.confirmed === true
-            && typeof frame.coordinateKey === 'string' && frame.coordinateKey) {
-            return 'msi-align-shared-frame-v1:' + stableKey({
-                basis: frame.basis || 'legacy-msi-pixel-edges-v1', coordinates: frame.coordinateKey});
-        }
-        const descriptor = frameDescriptor(frame);
-        // A shared scope must still have a proved coordinate layout. Without
-        // it, keep source identities separate even when widths/heights match.
-        if (!frame || frame.confirmed !== true || !own(descriptor, 'coordinates')) return frameKey(frame);
-        return 'msi-align-shared-frame-v1:' + stableKey({basis: descriptor.basis, coordinates: descriptor.coordinates});
+        // Explicit common scope uses the same logical-pixel transform and
+        // points across sources, regardless of their acquisition X/Y layout.
+        // Unloaded/unconfirmed frames still cannot borrow an editable draft.
+        if (!frame || frame.confirmed !== true) return frameKey(frame);
+        return 'msi-align-common-pixel-frame-v1:' + stableKey({basis: frameDescriptor(frame).basis});
     }
 
     function contextKey(context, sectionId) {

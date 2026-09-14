@@ -177,8 +177,29 @@ for(const patch of [{sourceFileId:'new-file',blobId:'new-blob'},{sourceRevision:
   assert.match(ctx.alignmentUnavailableReason(changed,'HE_STAIN','MSI_C',commonPanel),/対象外/);
 }
 const shifted=plain(modernCommon);shifted.msiSeries.MSI_C.sourceGeometry.legacy.x=[[20,0],[24,1]];
-assert.equal(resolveCommon(shifted),null);
-assert.match(ctx.alignmentUnavailableReason(shifted,'HE_STAIN','MSI_C',commonPanel),/座標配置が異なります/);
+assert.deepEqual(plain(resolveCommon(shifted)),The,'explicit common alignment ignores acquisition-coordinate origin differences');
+assert.equal(ctx.alignmentUnavailableReason(shifted,'HE_STAIN','MSI_C',commonPanel),'');
+drawPanel.section=shifted;drawPanel.msiValueRasters=new Map();beforeDraw=draws.length;
+ctx.render.call(drawPanel);
+assert.equal(draws.length,beforeDraw+1,'different coordinates do not hide HE in the actual composite');
+assert.equal(drawPanel.dom.alignmentStatus.hidden,true);
+const jittered=plain(modernCommon);
+jittered.msiSeries.MSI_C.sourceGeometry.legacy.x[1][0]+=0.000001;
+assert.deepEqual(plain(resolveCommon(jittered)),The,'common alignment does not require a numeric tolerance');
+const legacyShifted=plain(shifted);
+delete legacyShifted.meta.alignment.HE_STAIN.sharedByCoordinate[frame.coordinateKey].targetKeys;
+assert.deepEqual(plain(resolveCommon(legacyShifted)),The,'previously saved common records work without saving again');
+legacyShifted.msiSeries.MSI_A.sourceGeometry.legacy.x=[[30,0],[35,1]];
+assert.deepEqual(plain(ctx.resolve.call({...panel,section:legacyShifted},'HE_STAIN')),The,
+  'a known source with changed numeric coordinates can still use its old common record');
+const newestCommon=plain(shifted),shiftedFrame=ctx.alignmentFrameDescriptor(shifted,'MSI_C',commonPanel);
+newestCommon.meta.alignment.HE_STAIN.sharedByCoordinate[shiftedFrame.coordinateKey]=
+  {...plain(common),frame:plain(shiftedFrame),T_he_to_msi:Tif,editOrder:4};
+assert.deepEqual(plain(ctx.resolve.call({...panel,section:newestCommon},'HE_STAIN')),Tif,
+  'latest common edit wins across all saved coordinate groups');
+newestCommon.meta.alignment.HE_STAIN.sharedByCoordinate[shiftedFrame.coordinateKey].T_he_to_msi=[[0,0,0],[0,0,0],[0,0,1]];
+assert.equal(ctx.resolve.call({...panel,section:newestCommon},'HE_STAIN'),null,
+  'invalid latest common transform cannot fall back to an older coordinate-matching record');
 const replacedCommon=plain(modernCommon);replacedCommon.images.HE_STAIN.blobId='new-he-image';
 assert.equal(resolveCommon(replacedCommon),null);
 assert.match(ctx.alignmentUnavailableReason(replacedCommon,'HE_STAIN','MSI_C',commonPanel),/画像が保存時と異なります/);
