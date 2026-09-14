@@ -27,8 +27,8 @@ const ctx=vm.createContext({JSON,Object,Array,Map,Set,Number,Math,console,App,
   }}});
 for(const name of ['SECTION_ALIGN_WC_KEYS','SECTION_ALIGN_META_KEYS'])
   vm.runInContext(new RegExp('const '+name+' = \\[[^\\]]*\\];').exec(html)[0],ctx);
-for(const name of ['alignmentFrameDescriptor','alignmentLegacySourceIsUnambiguous','alignmentLegacySeedIsCompatible','alignmentImageIdentity','alignmentUnavailableReason',
-  'alignmentValidAffine','buildHeToMsiAffine','captureSectionAlignment','applySectionAlignment',
+vm.runInContext(html.slice(html.indexOf('function alignmentFrameDescriptor('),html.indexOf('function createMsiSourceGeometry(')),ctx);
+for(const name of ['buildHeToMsiAffine','captureSectionAlignment','applySectionAlignment',
   'getShareAlignmentVersion','pushShareAlignment']) vm.runInContext(fn(name),ctx);
 vm.runInContext('this.resolve=({'+method('_resolveTHeToMsi')+'})._resolveTHeToMsi',ctx);
 
@@ -132,6 +132,73 @@ assert.equal(drawPanel.dom.alignmentStatus.hidden,true,'status clears when geome
 drawPanel.section={...sec,meta:{}};ctx.render.call(drawPanel);
 assert.equal(draws.length,2,'ordinary unmanaged legacy HE keeps existing default rendering');
 
+// A common record from the previous release can repair missing per-frame
+// records on read alone, including the real composite's hide/show decision.
+const commonSection=plain(sec);
+commonSection.msiSeries.MSI_C={...plain(ent),sourceFileId:'measurement-2',blobId:'blob-2'};
+commonSection.meta.alignment.HE_STAIN.sharedByCoordinate={[frame.coordinateKey]:record(The,'HE_STAIN')};
+commonSection.meta.alignment.IF_STAIN.sharedByCoordinate={[frame.coordinateKey]:record(Tif,'IF_STAIN')};
+const commonPanel={...panel,section:commonSection,_pickRefMsiKey:()=> 'MSI_C',msiValueRasters:new Map()};
+const cFrame=ctx.alignmentFrameDescriptor(commonSection,'MSI_C',commonPanel);
+const commonBefore=plain(commonSection);
+assert.deepEqual(plain(ctx.resolve.call(commonPanel,'HE_STAIN')),The,'legacy common setting repairs a source missing from byFrame');
+assert.deepEqual(plain(ctx.resolve.call(commonPanel,'IF_STAIN')),Tif,'each image retains its own common setting');
+assert.deepEqual(commonSection,commonBefore,'resolution does not mutate old project data');
+const pendingCommon=plain(commonSection);delete pendingCommon.msiSeries.MSI_C.sourceGeometry;
+drawPanel.section=pendingCommon;drawPanel._pickRefMsiKey=()=> 'MSI_C';drawPanel.msiValueRasters=new Map();
+let beforeDraw=draws.length;
+ctx.render.call(drawPanel);
+assert.equal(draws.length,beforeDraw,'unloaded coordinates remain pending');
+assert.match(drawPanel.dom.alignmentStatus.textContent,/読み込み後/);
+drawPanel.msiValueRasters.set('MSI_C',{sourceGeometry:plain(geometry)});
+ctx.render.call(drawPanel);
+assert.equal(draws.length,beforeDraw+1,'HE is actually drawn once the compatible source loads');
+assert.equal(drawPanel.dom.alignmentStatus.hidden,true);
+const commonOnly=plain(commonSection);
+delete commonOnly.meta.alignment.HE_STAIN.byFrame;
+drawPanel.section=commonOnly;ctx.render.call(drawPanel);
+assert.equal(draws.length,beforeDraw+2,'a common-only record is sufficient for rendering');
+const brokenCommon=plain(commonOnly);
+brokenCommon.meta.alignment={HE_STAIN:brokenCommon.meta.alignment.HE_STAIN};
+brokenCommon.meta.alignment.HE_STAIN.sharedByCoordinate[frame.coordinateKey].T_he_to_msi=[[0,0,0],[0,0,0],[0,0,1]];
+drawPanel.section=brokenCommon;ctx.render.call(drawPanel);
+assert.equal(draws.length,beforeDraw+2,'a singular common-only transform cannot fall through to raw unaligned HE');
+assert.match(drawPanel.dom.alignmentStatus.textContent,/変換設定/);
+
+// New common records bind the registered inventory, revision and reader, so
+// identical dimensions/coordinates alone cannot enroll a replacement source.
+const modernCommon=plain(commonSection);
+const common=modernCommon.meta.alignment.HE_STAIN.sharedByCoordinate[frame.coordinateKey];
+Object.assign(common,{scope:'shared',editOrder:3,targetKeys:[ctx.alignmentTargetKey(frame),ctx.alignmentTargetKey(cFrame)]});
+const resolveCommon=s=>ctx.resolve.call({...commonPanel,section:s},'HE_STAIN');
+for(const patch of [{sourceFileId:'new-file',blobId:'new-blob'},{sourceRevision:'new-revision'},{sheet:'different-sheet'}]) {
+  const changed=plain(modernCommon);Object.assign(changed.msiSeries.MSI_C,patch);
+  assert.equal(resolveCommon(changed),null,'common target inventory rejects '+JSON.stringify(patch));
+  assert.match(ctx.alignmentUnavailableReason(changed,'HE_STAIN','MSI_C',commonPanel),/対象外/);
+}
+const shifted=plain(modernCommon);shifted.msiSeries.MSI_C.sourceGeometry.legacy.x=[[20,0],[24,1]];
+assert.equal(resolveCommon(shifted),null);
+assert.match(ctx.alignmentUnavailableReason(shifted,'HE_STAIN','MSI_C',commonPanel),/座標配置が異なります/);
+const replacedCommon=plain(modernCommon);replacedCommon.images.HE_STAIN.blobId='new-he-image';
+assert.equal(resolveCommon(replacedCommon),null);
+assert.match(ctx.alignmentUnavailableReason(replacedCommon,'HE_STAIN','MSI_C',commonPanel),/画像が保存時と異なります/);
+const individual=Object.assign(record(Tif,'HE_STAIN'),{frame:plain(cFrame),scope:'source',editOrder:2});
+modernCommon.meta.alignment.HE_STAIN.byFrame[cFrame.key]=individual;
+assert.deepEqual(plain(resolveCommon(modernCommon)),The,'later common edit supersedes a stale exact-frame entry');
+individual.editOrder=4;
+assert.deepEqual(plain(resolveCommon(modernCommon)),Tif,'later individual edit wins');
+individual.T_he_to_msi=[[0,0,0],[0,0,0],[0,0,1]];
+assert.equal(resolveCommon(modernCommon),null,'corruption in the latest individual entry is not hidden by an older common setting');
+individual.T_he_to_msi=Tif;
+delete common.editOrder;delete individual.editOrder;
+assert.deepEqual(plain(resolveCommon(modernCommon)),Tif,'unknown legacy ordering preserves a valid individual alignment');
+const transported={...plain(commonSection),id:'reimported-common',meta:{}};
+ctx.applySectionAlignment(transported,plain(ctx.captureSectionAlignment(modernCommon)));
+assert.deepEqual(plain(resolveCommon(transported)),Tif,'target inventory and precedence survive the ZIP/share metadata transport');
+assert.deepEqual(transported.meta.alignment.HE_STAIN.sharedByCoordinate[frame.coordinateKey].targetKeys,common.targetKeys);
+const legacyReaderChanged=plain(commonSection);legacyReaderChanged.msiSeries.MSI_A.sheet='another-sheet';
+assert.equal(ctx.resolve.call({...panel,section:legacyReaderChanged},'HE_STAIN'),null,'old common data cannot silently rebind a known reader change');
+
 // Alignment metadata traverses the exact capture/apply pair used by shared
 // master selection, JSON transport and import. It never mutates source arrays.
 const snapshot=plain(sec),payload=ctx.captureSectionAlignment(sec);
@@ -158,9 +225,26 @@ assert.match(html,/alignmentImageReference:alignmentImageIdentity\(ent\)/,'ZIP s
 assert.match(html,/alignmentImageReference:alignmentImageIdentity\(t\.ent\)/,'publish serialization retains image identity');
 assert.equal((html.match(/alignmentImageReference:(?:ref|img|ent)\.alignmentImageReference/g)||[]).length,4,
   'all ZIP/server image import constructors retain identity');
-assert.match(fn('bakeAlignedHeToMsiPng'),/_resolveTHeToMsi\(layerKey\)/,'aligned PNG export resolves the selected histology layer');
-
 (async()=>{
+  // Execute PNG export itself: resolve only after lazy geometry loads and pin
+  // the original MSI key while the user switches to a different-sized image.
+  vm.runInContext(fn('bakeAlignedHeToMsiPng'),ctx);
+  let focus='MSI_C',loadCount=0,resolveKey=null,paintedTransform=null;
+  const exportSection=plain(commonSection);delete exportSection.msiSeries.MSI_C.sourceGeometry;
+  const exportPanel={...commonPanel,section:exportSection,msiValueRasters:new Map(),
+    _pickRefMsiKey:()=>focus,
+    async ensureMsiLayerLoaded(key){loadCount++;assert.equal(key,'MSI_C');focus='MSI_A';this.msiValueRasters.set(key,{sourceGeometry:plain(geometry)});return true;},
+    msiRasterSize:key=>key==='MSI_C'?{w:2,h:2}:{w:99,h:100},
+    _resolveTHeToMsi(he,key){resolveKey=key;assert.equal(loadCount,1);return ctx.resolve.call(this,he,key);}};
+  ctx._ensureHeImage=async()=>({complete:true,naturalWidth:20,naturalHeight:20});
+  ctx.get2dContext=()=>({transform(...args){paintedTransform=args;},drawImage(){}});
+  ctx.document={createElement:()=>({toBlob:cb=>cb({type:'image/png'})})};
+  const png=await ctx.bakeAlignedHeToMsiPng(exportPanel,exportSection,'HE_STAIN');
+  assert.ok(png);assert.equal(png.w,2);assert.equal(png.h,2);assert.equal(resolveKey,'MSI_C');
+  assert.deepEqual(paintedTransform,[1,0,0,1,11,12]);
+  focus='MSI_C';loadCount=0;
+  ctx._ensureHeImage=async()=>{exportSection.images.HE_STAIN.blobId='replaced-during-export';return {};};
+  assert.equal(await ctx.bakeAlignedHeToMsiPng(exportPanel,exportSection,'HE_STAIN'),null,'an HE replacement during decoding aborts the export');
   store.set(sec.id,{payload:{old:true},version:4});
   const baseline=ctx.getShareAlignmentVersion(sec);
   const draft=ctx.captureSectionAlignment(sec);draft.perSourceAlign=false;

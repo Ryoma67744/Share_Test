@@ -225,9 +225,15 @@ async function harness(options = {}) {
         const declaration = new RegExp('const ' + name + ' = \\[[^\\]]*\\];').exec(html);
         if (declaration) vm.runInContext(declaration[0], context);
     }
-    for (const name of ['alignmentFrameDescriptor', 'alignmentLegacySourceIsUnambiguous', 'alignmentLegacySeedIsCompatible', 'alignmentImageIdentity', 'alignmentValidAffine',
-        'captureSectionAlignment', 'applySectionAlignment', 'getShareAlignmentVersion']) {
+    vm.runInContext(html.slice(html.indexOf('function alignmentFrameDescriptor('),
+        html.indexOf('function createMsiSourceGeometry(')), context);
+    for (const name of ['captureSectionAlignment', 'applySectionAlignment', 'getShareAlignmentVersion']) {
         if (html.includes('function ' + name + '(')) vm.runInContext(sourceFunction(name), context);
+    }
+    for (const name of ['_resolveTHeToMsi', '_sourceHasGenuineAlignment']) {
+        const at = html.indexOf('    ' + name + '(');
+        const body = html.slice(at, html.indexOf('\n    }', at) + 6).trim();
+        panel[name] = vm.runInContext('({' + body + '}).' + name, context);
     }
     for (const filename of ['alignment-session.js']) {
         const full = path.join(__dirname, '../viewer', filename);
@@ -481,6 +487,126 @@ test('saved HE selection reopens and a source remembers its selected molecule du
     await reopened.change('[data-align-source]', 'file-2'); await reopened.change('[data-align-source]', 'file-1');
     assert.equal(reopened.$('[data-align-msi]').value, 'MSI_B');
     await reopened.click('[data-modal-cancel]'); reopened.assertNumericUnchanged();
+});
+
+test('common Save also aligns a compatible source first loaded after saving', async () => {
+    let laterGeometry;
+    const h = await harness({ prepare(section) {
+        compatibleSources(section);
+        laterGeometry = plain(section.msiSeries.MSI_C.sourceGeometry);
+        delete section.msiSeries.MSI_C.sourceGeometry;
+        delete section.meta.alignment.HE_STAIN.bySource;
+        section.meta.perSourceAlign = false;
+        section.meta.alignmentSourceMode = '__all__';
+    } });
+    await h.input('[data-scale-num]', 140);
+    await h.click('[data-save]');
+    assert.equal(h.outcome, 'saved');
+    h.panel.msiValueRasters.set('MSI_C', { sourceGeometry: laterGeometry });
+    const T = h.panel._resolveTHeToMsi('HE_STAIN', 'MSI_C');
+    assert.ok(T, 'saved common alignment must resolve after the other source loads');
+    assert.equal(T[0][0], 1.4);
+    const common=Object.values(h.section.meta.alignment.HE_STAIN.sharedByCoordinate)[0];
+    const cFrame=h.context.alignmentFrameDescriptor(h.section,'MSI_C',h.panel);
+    assert.ok(common.targetKeys.includes(h.context.alignmentTargetKey(cFrame)),'unloaded source is part of the saved target inventory');
+    assert.equal(common.scope,'shared');
+    assert.ok(common.editOrder>0);
+    const before=plain(h.section.meta);
+    h.panel.msiValueRasters.clear();
+    assert.equal(h.panel._resolveTHeToMsi('HE_STAIN','MSI_C'),null,'evicted geometry is confirmed again on load');
+    h.panel.msiValueRasters.set('MSI_C',{sourceGeometry:laterGeometry});
+    assert.deepEqual(plain(h.panel._resolveTHeToMsi('HE_STAIN','MSI_C')),plain(T));
+    assert.deepEqual(plain(h.section.meta),before,'read-only resolution never writes per-frame records');
+    h.assertNumericUnchanged();
+});
+
+test('a first common scope selection saves the current alignment without changing its numbers', async () => {
+    const first=await harness({prepare:compatibleSources});
+    await first.input('[data-scale-num]',163);await first.addPair();await first.click('[data-save]');
+    const h=await harness({section:first.section});
+    await h.change('[data-align-source]','__all__');
+    assert.equal(+h.$('[data-scale-num]').value,163);
+    expectPoints(h,1,1);
+    await h.click('[data-save]');
+    assert.equal(h.section.meta.perSourceAlign,false);
+    assert.equal(h.panel._resolveTHeToMsi('HE_STAIN','MSI_C')[0][0],1.63);
+    const order=Object.values(h.section.meta.alignment.HE_STAIN.sharedByCoordinate)[0].editOrder;
+    const reopened=await harness({section:h.section});await reopened.click('[data-save]');
+    assert.equal(Object.values(reopened.section.meta.alignment.HE_STAIN.sharedByCoordinate)[0].editOrder,order,
+        'unchanged Save must not become a new common broadcast');
+    reopened.assertNumericUnchanged();
+});
+
+test('Apply all includes an unloaded source without preloading every molecule', async () => {
+    let geometry;
+    const h=await harness({prepare(s){compatibleSources(s);geometry=plain(s.msiSeries.MSI_C.sourceGeometry);delete s.msiSeries.MSI_C.sourceGeometry;}});
+    await h.input('[data-scale-num]',145);
+    await h.click('[data-apply-all]');
+    assert.equal(h.outcome,'saved');
+    assert.equal(h.section.msiSeries.MSI_C.sourceGeometry,undefined,'broadcast does not load the other source');
+    h.panel.msiValueRasters.set('MSI_C',{sourceGeometry:geometry});
+    assert.equal(h.panel._resolveTHeToMsi('HE_STAIN','MSI_C')[0][0],1.45);
+});
+
+test('later common saves supersede older individual records even when that source is unloaded', async () => {
+    const first=await harness({prepare:compatibleSources});
+    await first.change('[data-align-source]','file-2');await first.input('[data-scale-num]',175);await first.click('[data-save]');
+    let geometry;
+    const second=await harness({section:first.section,prepare(s){
+        geometry=plain(s.msiSeries.MSI_C.sourceGeometry);delete s.msiSeries.MSI_C.sourceGeometry;
+        s.meta.alignmentMsiKey='MSI_A';s.meta.alignmentSourceMode='file-1';
+    }});
+    await second.input('[data-scale-num]',140);await second.click('[data-apply-all]');
+    second.panel.msiValueRasters.set('MSI_C',{sourceGeometry:geometry});
+    assert.equal(second.panel._resolveTHeToMsi('HE_STAIN','MSI_C')[0][0],1.4);
+    const third=await harness({section:second.section,prepare(s){s.msiSeries.MSI_C.sourceGeometry=geometry;}});
+    await third.change('[data-align-source]','file-2');
+    assert.equal(+third.$('[data-scale-num]').value,140,'individual editor starts from the effective common record');
+    await third.input('[data-scale-num]',190);await third.click('[data-save]');
+    assert.equal(third.panel._resolveTHeToMsi('HE_STAIN','MSI_C')[0][0],1.9);
+    const unchanged=await harness({section:third.section});
+    await unchanged.change('[data-align-source]','__all__');await unchanged.click('[data-save]');
+    assert.equal(unchanged.panel._resolveTHeToMsi('HE_STAIN','MSI_C')[0][0],1.9,'visiting common mode cannot overwrite a later individual edit');
+});
+
+test('choosing common scope on a new unaligned project does not save an accidental identity transform', async () => {
+    const h=await harness({prepare(s){compatibleSources(s);s.meta.alignment={};s.meta.world_coords={msi_um_per_px:{x:10,y:30}};}});
+    await h.change('[data-align-source]','__all__');await h.click('[data-save]');
+    assert.equal(h.section.meta.alignment.HE_STAIN,undefined);
+    assert.equal(h.section.meta.world_coords.T_he_to_msi,undefined);
+});
+
+test('Cancel after choosing a new common scope discards the broadcast request', async () => {
+    const h=await harness({prepare:compatibleSources});
+    const before=plain(h.section.meta);
+    await h.input('[data-scale-num]',163);await h.change('[data-align-source]','__all__');
+    await h.click('[data-modal-cancel]');
+    assert.deepEqual(plain(h.section.meta),before);assert.equal(h.saves.length,0);
+});
+
+test('revisiting a newly requested common scope does not outrank a later individual edit', async () => {
+    const h=await harness({prepare:compatibleSources});
+    await h.input('[data-scale-num]',130);
+    await h.change('[data-align-source]','__all__');
+    await h.change('[data-align-source]','file-2');await h.input('[data-scale-num]',190);
+    await h.change('[data-align-source]','__all__');await h.click('[data-save]');
+    assert.equal(h.panel._resolveTHeToMsi('HE_STAIN','MSI_A')[0][0],1.3);
+    assert.equal(h.panel._resolveTHeToMsi('HE_STAIN','MSI_C')[0][0],1.9);
+});
+
+test('a broken common-only record cannot seed an apparently verified default alignment', async () => {
+    const first=await harness({prepare:compatibleSources});
+    await first.input('[data-scale-num]',140);await first.click('[data-apply-all]');
+    const h=await harness({section:first.section,prepare(s){
+        const layer=s.meta.alignment.HE_STAIN;
+        delete layer.byFrame;delete layer.bySource;
+        Object.values(layer.sharedByCoordinate)[0].T_he_to_msi=[[0,0,0],[0,0,0],[0,0,1]];
+    }});
+    const before=plain(h.section.meta);
+    await h.click('[data-apply-all]');
+    assert.equal(h.closed,false);assert.equal(h.saves.length,0);
+    assert.deepEqual(plain(h.section.meta),before);
+    await h.click('[data-modal-cancel]');
 });
 
 (async () => {
