@@ -56,6 +56,9 @@ jobs:
             node "$test"
           done
 
+      - name: ROI save regression
+        run: node tests/roi_save_regression.js
+
       # devDependency の hyparquet-writer が入るので parquet のパリティも走る
       # (入っていないと SKIP されて素通りする)。
       - name: connector selftest (app <-> connector parity)
