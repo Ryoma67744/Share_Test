@@ -7,20 +7,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { html, standalone } = require('./viewer-runtime.cjs');
 
-function element() {
-  const node = {
-    children: [], dataset: {}, style: {}, textContent: '',
-    classList: { add() {}, remove() {} },
-    addEventListener() {}, appendChild(child) { this.children.push(child); },
-    querySelectorAll() { return []; },
-    _html: '',
-  };
-  Object.defineProperty(node, 'innerHTML', {
-    get() { return this._html; },
-    set(value) { this._html = value; this.children = []; },
-  });
-  return node;
-}
+const { element, geometryGlobals, roiDom } = require('./roi-dom.cjs');
 
 async function main() {
   const nodes = new Map();
@@ -30,6 +17,7 @@ async function main() {
       return nodes.get(id);
     },
     createElement: element,
+    createElementNS: (_namespace, tag) => element(tag),
   };
   const saved = new Map();
   const ProjectStorage = {
@@ -42,7 +30,7 @@ async function main() {
   const appEnd = html.indexOf('\n};', appStart) + 3;
   assert.ok(panelStart >= 0 && panelEnd > panelStart && appStart >= 0 && appEnd > appStart);
   const context = vm.createContext({
-    console, document, ProjectStorage, setTimeout, clearTimeout, structuredClone,
+    console, document, ...geometryGlobals, ProjectStorage, setTimeout, clearTimeout, structuredClone,
     Map, Set, uid: () => 'roi-new', prompt: () => 'Cortex',
     showToast: () => {}, updateAnalysisModeUi: () => {},
     // The real renderer receives the identity transform in this two-section
@@ -76,14 +64,9 @@ async function main() {
   app.activeSectionId = 'first';
   app.panels = new Map(sections.map(section => {
     const panel = Object.create(context.TestPanel.prototype);
-    const roiCtx = {
-      paths: [], clearRect() {}, beginPath() { this.path = []; },
-      moveTo(x, y) { this.path.push([x, y]); },
-      lineTo(x, y) { this.path.push([x, y]); },
-      closePath() {}, stroke() { this.paths.push(this.path); },
-    };
+    const roiCtx = { clearRect() {} };
     Object.assign(panel, {
-      section, project, roiCtx, dom: { croi: { width: 4, offsetWidth: 4, style: {} } },
+      section, project, roiCtx, dom: roiDom(4, 4),
       msiValueRasters: new Map([['MSI_A', { sourceGeometry }]]),
       _pickRefMsiKey: () => 'MSI_A', _msiRoiCanvasMatrix: () => null,
       setDrawingPointerActive() {}, renderComposite() {},
@@ -105,9 +88,9 @@ async function main() {
   assert.equal(project.rois.length, 1);
   assert.equal(document.getElementById('roi-list').children.length, 1,
     'ROI_LIST shows the new polygon despite an undrawn second section');
-  assert.ok(app.panels.get('first').roiCtx.paths.length >= 1,
+  assert.ok(app.panels.get('first').dom.roiSaved.children.length >= 1,
     'first section used the real ROI renderer to draw its polygon');
-  assert.equal(app.panels.get('second').roiCtx.paths.length, 0,
+  assert.equal(app.panels.get('second').dom.roiSaved.children.length, 0,
     'second section has no ROI outline');
   assert.equal(saved.get('project-a').rois.length, 1,
     'the drawing reached persistence after updating the list');
@@ -122,16 +105,16 @@ async function main() {
   for (const panel of app.panels.values()) {
     panel.project = reloaded;
     panel.section = reloaded.sections.find(section => section.id === panel.section.id);
-    panel.roiCtx.paths = [];
+    panel.dom.roiSaved.replaceChildren();
   }
   document.getElementById('roi-list').innerHTML = '<p>No ROI yet.</p>';
   context.populateRoiList();
   app.redrawAllRois();
   assert.equal(document.getElementById('roi-list').children.length, 1,
     'saved ROI is listed after a fresh project read');
-  assert.equal(app.panels.get('first').roiCtx.paths.length, 1,
+  assert.equal(app.panels.get('first').dom.roiSaved.children.length, 1,
     'saved polygon renders on its own section');
-  assert.equal(app.panels.get('second').roiCtx.paths.length, 0,
+  assert.equal(app.panels.get('second').dom.roiSaved.children.length, 0,
     'saved polygon leaves the other section empty');
   console.log('ROI list render regression: PASS');
 }

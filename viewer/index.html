@@ -235,7 +235,8 @@ body.splitting-v { cursor:row-resize !important; }
 .section-panel .viewer-rot { position:absolute; inset:0; transform-origin:50% 50%; transform: translate(var(--vt-tx, 0px), var(--vt-ty, 0px)) rotate(calc(var(--vt-rot, 0deg) - 90deg)) scale(var(--vt-scale, 1)); will-change:transform; }
 .section-panel canvas.disp { position:absolute; image-rendering:pixelated; }
 .section-panel canvas.disp.smooth { image-rendering:auto; }
-.section-panel canvas.roi { position:absolute; pointer-events:none; image-rendering:pixelated; }
+.section-panel canvas.roi { position:absolute; pointer-events:none; }
+.section-panel .roi-overlay { position:absolute; inset:0; width:100%; height:100%; z-index:3; pointer-events:none; overflow:hidden; }
 .section-panel .msi-scalebar {
     position:absolute; left:12px; bottom:10px; z-index:5;
     pointer-events:none;
@@ -7334,6 +7335,16 @@ class SectionPanel {
         const croi  = document.createElement('canvas'); croi.className  = 'roi';
         rot.appendChild(cdisp); rot.appendChild(croi);
         host.appendChild(rot);
+        // ROI decorations live in host CSS pixels, outside the image transform.
+        // The transparent canvas remains the input surface for existing gestures.
+        const roiSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        roiSvg.setAttribute('class', 'roi-overlay');
+        roiSvg.setAttribute('aria-hidden', 'true');
+        const roiSaved = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        const roiPreview = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        roiSvg.appendChild(roiSaved);
+        roiSvg.appendChild(roiPreview);
+        host.appendChild(roiSvg);
         const scalebar = document.createElement('div');
         scalebar.className = 'msi-scalebar';
         scalebar.style.display = 'none';
@@ -7352,7 +7363,7 @@ class SectionPanel {
         root.appendChild(thumbsCell);
 
         this.dom = {
-            root, host, rot, cdisp, croi, scalebar,
+            root, host, rot, cdisp, croi, roiSvg, roiSaved, roiPreview, scalebar,
             canvasCell, thumbsCell, layerBar, thumbs, label,
         };
         this.displayCtx = get2dContext(cdisp, { willReadFrequently: true });
@@ -7363,9 +7374,15 @@ class SectionPanel {
         this._wireViewerHostInteractions();
 
         if (typeof ResizeObserver !== 'undefined') {
-            let raf = 0;
-            const ro = new ResizeObserver(() => { if (raf) cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { raf = 0; this.setupCanvasSize(); }); });
-            ro.observe(host);
+            this._viewerResizeObserver = new ResizeObserver(() => {
+                if (this._destroyed || this._viewerResizeRaf) return;
+                this._viewerResizeRaf = requestAnimationFrame(() => {
+                    this._viewerResizeRaf = 0;
+                    if (this._destroyed) return;
+                    if (!this.setupCanvasSize()) this._scheduleRoiRedraw();
+                });
+            });
+            this._viewerResizeObserver.observe(host);
         }
 
         return root;
@@ -7400,6 +7417,11 @@ class SectionPanel {
     // 共有読みを他のパネルが待っていることがある) ので、**書き戻す側**で弾く。
     destroy() {
         this._destroyed = true;
+        if (this._roiRedrawRaf) cancelAnimationFrame(this._roiRedrawRaf);
+        if (this._viewerResizeRaf) cancelAnimationFrame(this._viewerResizeRaf);
+        this._roiRedrawRaf = this._viewerResizeRaf = 0;
+        if (this._viewerResizeObserver) this._viewerResizeObserver.disconnect();
+        this._viewerResizeObserver = null;
         if (this.dom && this.dom.root && this.dom.root.parentElement) this.dom.root.parentElement.removeChild(this.dom.root);
         if (this._thumbObserver) { try { this._thumbObserver.disconnect(); } catch (e) {} this._thumbObserver = null; }
         this._pendingDrawLoad = null;
@@ -8871,20 +8893,43 @@ class SectionPanel {
     }
     _withRoiFlip(fn) { fn(); } // full matrix is applied to every point instead
 
-    drawAllRois(highlightRoiId) {
-        const ctx = this.roiCtx;
-        const c = this.dom.croi;
-        if (!ctx || c.width === 0) return;
-        ctx.clearRect(0, 0, c.width, c.height);
-        const toggle = document.getElementById('roi-toggle');
-        if (toggle && !toggle.checked) {
-            this.drawDrawingPreview();
-            return;
+    _roiSvgElement(tag, attrs) {
+        const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+        for (const [name, value] of Object.entries(attrs)) el.setAttribute(name, String(value));
+        return el;
+    }
+
+    _scheduleRoiRedraw() {
+        if (this._destroyed || !this.dom.roiSvg || this._roiRedrawRaf) return;
+        this._roiRedrawRaf = requestAnimationFrame(() => {
+            this._roiRedrawRaf = 0;
+            if (!this._destroyed) this.drawAllRois();
+        });
+    }
+
+    _setRoiSvgViewport(geometry) {
+        this.dom.roiSvg.setAttribute('viewBox', '0 0 ' + geometry.hostWidth + ' ' + geometry.hostHeight);
+    }
+
+    drawAllRois(highlightRoiId = App.activeRoiId) {
+        if (this._destroyed) return;
+        if (this._roiRedrawRaf) cancelAnimationFrame(this._roiRedrawRaf);
+        this._roiRedrawRaf = 0;
+        const { croi, roiSvg, roiSaved, roiPreview } = this.dom;
+        // Clear any pre-SVG decoration; croi is now only an input surface.
+        if (this.roiCtx) this.roiCtx.clearRect(0, 0, croi.width, croi.height);
+        if (!roiSvg) return;
+        const geometry = this._roiViewportGeometry();
+        if (!geometry) {
+            roiSaved.replaceChildren();
+            roiPreview.replaceChildren();
+            return; // hidden/zero-size hosts are redrawn on resize
         }
-        const roiT = this._msiRoiCanvasMatrix();
-        const cssW = c.offsetWidth || c.width;
-        const pxPerCss = c.width / Math.max(1, cssW);
-        this._withRoiFlip(() => {
+        this._setRoiSvgViewport(geometry);
+        const toggle = document.getElementById('roi-toggle');
+        let renderedCount = 0;
+        if (!toggle || toggle.checked) {
+            const roiT = this._msiRoiCanvasMatrix();
             for (const roi of (this.project.rois || [])) {
                 if (this.project.roiHidden && this.project.roiHidden[roi.id]) continue;
                 const saved = (roi.polysBySection || {})[this.section.id];
@@ -8892,19 +8937,24 @@ class SectionPanel {
                 const poly = typeof roiPolygonForDisplay === 'function'
                     ? roiPolygonForDisplay(roi, this.section, this._pickRefMsiKey(), saved) : saved;
                 if (!poly || !poly.length) continue;
-                const isHi = roi.id === highlightRoiId;
+                const points = poly.map(p => this._canvasToRoiOverlay(...applyAffinePoint(roiT, p[0], p[1]), geometry));
+                if (!points.every(p => p.every(Number.isFinite))) continue;
                 const rgba = roi.rgba || [200, 200, 200, 255];
-                ctx.beginPath();
-                const points = poly.map(p => applyAffinePoint(roiT, p[0], p[1]));
-                ctx.moveTo(points[0][0], points[0][1]);
-                for (let i = 1; i < points.length; i++) ctx.lineTo(points[i][0], points[i][1]);
-                ctx.closePath();
-                ctx.strokeStyle = 'rgba(' + rgba[0] + ',' + rgba[1] + ',' + rgba[2] + ',0.95)';
-                ctx.lineWidth = (isHi ? 2.0 : 1.0) * pxPerCss;
-                ctx.stroke();
+                // Pan/zoom updates attributes on existing nodes rather than
+                // destroying every saved outline at each animation frame.
+                let polygon = roiSaved.children[renderedCount++];
+                if (!polygon) {
+                    polygon = this._roiSvgElement('polygon', { fill: 'none' });
+                    roiSaved.appendChild(polygon);
+                }
+                polygon.setAttribute('points', points.map(p => p.join(',')).join(' '));
+                polygon.setAttribute('stroke', 'rgba(' + rgba[0] + ',' + rgba[1] + ',' + rgba[2] + ',0.95)');
+                polygon.setAttribute('stroke-width', roi.id === highlightRoiId ? 2 : 1);
             }
-        });
-        this.drawDrawingPreview();
+        }
+        while (roiSaved.children.length > renderedCount) roiSaved.removeChild(roiSaved.children[roiSaved.children.length - 1]);
+        // The in-progress polygon stays visible even when Show is off.
+        this.drawDrawingPreview(geometry);
     }
 
     _drawingMatchesMsiSource(notify) {
@@ -8920,32 +8970,50 @@ class SectionPanel {
         return matches;
     }
 
-    drawDrawingPreview() {
+    drawDrawingPreview(geometry) {
+        const group = this.dom.roiPreview;
+        if (!group || this._destroyed) return;
+        group.replaceChildren();
         if (!App.drawing.mode || App.drawing.sectionId !== this.section.id) return;
         if (!this._drawingMatchesMsiSource(false)) return;
-        const ctx = this.roiCtx;
-        const c = this.dom.croi;
-        const roiT = this._msiRoiCanvasMatrix();
-        const cssW = c.offsetWidth || c.width;
-        const pxPerCss = c.width / Math.max(1, cssW);
         const verts = App.drawing.vertices;
         if (!verts.length) return;
-        const pts = verts.map(([mx, my]) => applyAffinePoint(roiT, mx, my));
-        this._withRoiFlip(() => {
-            ctx.save();
-            ctx.strokeStyle = 'rgba(255,255,255,0.95)';
-            ctx.lineWidth = 1.5 * pxPerCss;
-            ctx.setLineDash([4 * pxPerCss, 3 * pxPerCss]);
-            ctx.beginPath();
-            ctx.moveTo(pts[0][0], pts[0][1]);
-            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
-            ctx.stroke();
-            ctx.setLineDash([]);
-            ctx.fillStyle = 'rgba(255,255,255,0.95)';
-            const r = 3 * pxPerCss;
-            for (const [x, y] of pts) { ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fill(); }
-            ctx.restore();
+        geometry = geometry || this._roiViewportGeometry();
+        if (!geometry) return;
+        this._setRoiSvgViewport(geometry);
+        const roiT = this._msiRoiCanvasMatrix();
+        const pts = verts.map(([mx, my]) => this._canvasToRoiOverlay(...applyAffinePoint(roiT, mx, my), geometry));
+        if (!pts.every(p => p.every(Number.isFinite))) return;
+        // Keep every vertex core transparent even where the joining line or
+        // a neighbouring ring crosses it. Mask only the temporary decorations.
+        if (!this._roiPreviewMaskId) {
+            SectionPanel._roiMaskSerial = (SectionPanel._roiMaskSerial || 0) + 1;
+            this._roiPreviewMaskId = 'roi-preview-mask-' + SectionPanel._roiMaskSerial;
+        }
+        const defs = this._roiSvgElement('defs', {});
+        const mask = this._roiSvgElement('mask', {
+            id: this._roiPreviewMaskId, maskUnits: 'userSpaceOnUse', maskContentUnits: 'userSpaceOnUse',
+            x: 0, y: 0, width: geometry.hostWidth, height: geometry.hostHeight,
+            'mask-type': 'luminance',
         });
+        mask.appendChild(this._roiSvgElement('rect', {
+            x: 0, y: 0, width: geometry.hostWidth, height: geometry.hostHeight, fill: 'white',
+        }));
+        for (const [x, y] of pts) mask.appendChild(this._roiSvgElement('circle', { cx: x, cy: y, r: 2, fill: 'black' }));
+        defs.appendChild(mask);
+        group.appendChild(defs);
+        const marks = this._roiSvgElement('g', { mask: 'url(#' + this._roiPreviewMaskId + ')' });
+        group.appendChild(marks);
+        marks.appendChild(this._roiSvgElement('polyline', {
+            points: pts.map(p => p.join(',')).join(' '), fill: 'none',
+            stroke: 'rgba(255,255,255,0.95)', 'stroke-width': 1.5, 'stroke-dasharray': '4 3',
+        }));
+        // r=2.5 plus the 1px stroke gives a 6px outer diameter. No fill:
+        // the measurement point beneath each vertex remains visible.
+        for (const [x, y] of pts) marks.appendChild(this._roiSvgElement('circle', {
+            cx: x, cy: y, r: 2.5, fill: 'none',
+            stroke: 'rgba(255,255,255,0.95)', 'stroke-width': 1,
+        }));
     }
 
     canvasToMsi(canvasX, canvasY) {
@@ -8953,77 +9021,66 @@ class SectionPanel {
         return inv ? applyAffinePoint(inv, canvasX, canvasY) : [NaN, NaN];
     }
 
-    // Map a screen-space pointer position to canvas-internal pixels.
-    //
-    // Three independent things can drift between the click handler and the
-    // renderer, each one a past source of "click here, ROI shows up there":
-    //   (1) .viewer-rot's CSS transform (translate × rotate(rot - 90deg) ×
-    //       scale around its center — see the CSS rule near line 150).
-    //       Re-deriving its inverse by hand is correct for today's chain
-    //       but fragile to future additions (skew, perspective, …).
-    //   (2) The canvas does NOT fill .viewer-rot (no inset:0).
-    //       setupCanvasSize letterboxes it via explicit top/left/width/
-    //       height styles using INTEGER host.clientWidth/Height, while the
-    //       click handler used to re-derive the same margins from the
-    //       FRACTIONAL getBoundingClientRect — a few-pixel drift is normal,
-    //       especially right after a layout change.
-    //   (3) .viewer-rot's own width/height can disagree with the host's
-    //       rect under some code paths (setupCanvasSize re-asserts them
-    //       precisely because of past inconsistencies).
-    //
-    // We sidestep all three by letting the browser hand us the actual
-    // composed CSS matrix and inverting it via DOMMatrix, and by reading
-    // the canvas's own style.left/top/width/height directly so we use the
-    // exact values setupCanvasSize wrote to the DOM.
-    clientToCanvas(clientX, clientY) {
-        const c = this.dom.croi;
-        const host = this.dom.host;
-        const rot = this.dom.rot;
+    // One geometry snapshot serves both the input inverse and the SVG's
+    // forward projection. Use the browser's actual matrix/origin and the
+    // canvas placement written by setupCanvasSize, including fractional CSS
+    // sizes. Host bounds alone cannot recover a rotated canvas's coordinates.
+    _roiViewportGeometry() {
+        const { croi: c, host, rot } = this.dom;
         const H = host.getBoundingClientRect();
+        if (!(H.width > 0 && H.height > 0 && c.width > 0 && c.height > 0)) return null;
+        const style = getComputedStyle(rot);
+        const matrix = !style.transform || style.transform === 'none'
+            ? new DOMMatrixReadOnly() : new DOMMatrixReadOnly(style.transform);
+        const inverse = matrix.inverse();
+        const rotWidth = parseFloat(style.width) || rot.offsetWidth || H.width;
+        const rotHeight = parseFloat(style.height) || rot.offsetHeight || H.height;
+        const origin = (style.transformOrigin || '50% 50%').split(/\s+/);
+        const originValue = (value, size) => value && value.endsWith('%')
+            ? parseFloat(value) * size / 100 : parseFloat(value);
+        const ox = originValue(origin[0], rotWidth), oy = originValue(origin[1], rotHeight);
+        const cssW = parseFloat(c.style.width) || c.offsetWidth || H.width;
+        const cssH = parseFloat(c.style.height) || c.offsetHeight || H.height;
+        if (!(cssW > 0 && cssH > 0)) return null;
+        const styleLeft = parseFloat(c.style.left), styleTop = parseFloat(c.style.top);
+        return {
+            hostRect: H, hostWidth: H.width, hostHeight: H.height, matrix, inverse,
+            originX: Number.isFinite(ox) ? ox : rotWidth / 2,
+            originY: Number.isFinite(oy) ? oy : rotHeight / 2,
+            rotLeft: (rot.offsetLeft || 0) + (host.clientLeft || 0),
+            rotTop: (rot.offsetTop || 0) + (host.clientTop || 0),
+            canvasLeft: Number.isFinite(styleLeft) ? styleLeft : (rotWidth - cssW) / 2,
+            canvasTop: Number.isFinite(styleTop) ? styleTop : (rotHeight - cssH) / 2,
+            canvasWidth: cssW, canvasHeight: cssH,
+        };
+    }
 
-        // Browser-supplied transform matrix → invert.
-        // getComputedStyle(rot).transform does NOT include the
-        // transform-origin shift, so we still subtract / add the origin
-        // manually around the inversion.
-        const tStr = getComputedStyle(rot).transform;
-        const M = (!tStr || tStr === 'none')
-            ? new DOMMatrixReadOnly()
-            : new DOMMatrixReadOnly(tStr);
-        const inv = M.inverse();
+    _canvasToRoiOverlay(canvasX, canvasY, geometry) {
+        const g = geometry || this._roiViewportGeometry();
+        if (!g) return [NaN, NaN];
+        const c = this.dom.croi;
+        const p = g.matrix.transformPoint(new DOMPoint(
+            canvasX * g.canvasWidth / c.width + g.canvasLeft - g.originX,
+            canvasY * g.canvasHeight / c.height + g.canvasTop - g.originY));
+        return [p.x + g.originX + g.rotLeft, p.y + g.originY + g.rotTop];
+    }
 
-        // .viewer-rot has transform-origin: 50% 50% and (via inset:0 plus
-        // the explicit width/height write in setupCanvasSize) shares the
-        // host's content box. The transform-origin in screen space is
-        // therefore the host center.
-        const originScreenX = H.left + H.width  / 2;
-        const originScreenY = H.top  + H.height / 2;
+    canvasToClient(canvasX, canvasY, geometry) {
+        const g = geometry || this._roiViewportGeometry();
+        if (!g) return [NaN, NaN];
+        const p = this._canvasToRoiOverlay(canvasX, canvasY, g);
+        return [p[0] + g.hostRect.left, p[1] + g.hostRect.top];
+    }
 
-        const relX = clientX - originScreenX;
-        const relY = clientY - originScreenY;
-        // Inverse matrix: same offset in rot's pre-transform local frame,
-        // still measured from the transform-origin (rot center).
-        const tp = inv.transformPoint(new DOMPoint(relX, relY));
-
-        // Read the canvas's actual placement from its style/offset rather
-        // than recomputing letterbox margins. setupCanvasSize writes
-        // c.style.left/.top/.width/.height directly, so reading them back
-        // here matches the on-screen position exactly.
-        const cssW  = parseFloat(c.style.width)  || c.offsetWidth  || H.width;
-        const cssH  = parseFloat(c.style.height) || c.offsetHeight || H.height;
-        const styleLeft = parseFloat(c.style.left);
-        const styleTop  = parseFloat(c.style.top);
-        const cLeft = Number.isFinite(styleLeft) ? styleLeft : (H.width  - cssW) / 2;
-        const cTop  = Number.isFinite(styleTop)  ? styleTop  : (H.height - cssH) / 2;
-
-        // tp is from rot's center; canvas top-left lives at (cLeft, cTop)
-        // in rot-local coords (measured from rot's top-left), i.e. at
-        // (cLeft - H.width/2, cTop - H.height/2) measured from the center.
-        const canvasCssX = tp.x - (cLeft - H.width  / 2);
-        const canvasCssY = tp.y - (cTop  - H.height / 2);
-
-        const canvasX = canvasCssX * (c.width  / Math.max(1, cssW));
-        const canvasY = canvasCssY * (c.height / Math.max(1, cssH));
-        return [canvasX, canvasY];
+    clientToCanvas(clientX, clientY, geometry) {
+        const g = geometry || this._roiViewportGeometry();
+        if (!g) return [NaN, NaN];
+        const p = g.inverse.transformPoint(new DOMPoint(
+            clientX - g.hostRect.left - g.rotLeft - g.originX,
+            clientY - g.hostRect.top - g.rotTop - g.originY));
+        const c = this.dom.croi;
+        return [(p.x + g.originX - g.canvasLeft) * c.width / g.canvasWidth,
+                (p.y + g.originY - g.canvasTop) * c.height / g.canvasHeight];
     }
 
     attachDrawingHandlers() {
@@ -9034,31 +9091,21 @@ class SectionPanel {
             if (App.drawing.sectionId && App.drawing.sectionId !== this.section.id) return;
             if (!this._drawingMatchesMsiSource(true)) return;
             App.drawing.sectionId = this.section.id;
-            const [cx, cy] = this.clientToCanvas(e.clientX, e.clientY);
-            // canvas-internal px per CSS px, used to scale the close-loop
-            // hit-test threshold (~8 CSS pixels) into canvas pixels. Read
-            // the canvas's real CSS width straight from its style for
-            // consistency with clientToCanvas above.
-            const cssW = parseFloat(c.style.width) || c.offsetWidth || c.width;
-            const sxCss = c.width / Math.max(1, cssW);
+            const geometry = this._roiViewportGeometry();
+            if (!geometry) return;
+            const [cx, cy] = this.clientToCanvas(e.clientX, e.clientY, geometry);
             if (App.drawing.vertices.length >= 3) {
-                // Compare close-loop distance in MSI space so flip H/V
-                // (which mirrors the canvas-space coords) doesn't break
-                // the "click first vertex to finish" affordance.
-                const matrix = this._msiCanvasMatrix('msi');
-                const sx = Math.hypot(matrix[0][0], matrix[1][0]);
-                const sy = Math.hypot(matrix[0][1], matrix[1][1]);
-                const [mxClick, myClick] = this.canvasToMsi(cx, cy);
-                const [mx0, my0] = App.drawing.vertices[0];
-                // 8 CSS px → equivalent MSI distance: 8 * sxCss canvas px,
-                // and the canvas → MSI scale along the longer axis is 1/sx
-                // (vertical) so 8 * sxCss / Math.min(sx, sy) is the MSI
-                // tolerance that matches the original 8-CSS-px feel.
-                const tolMsi = (8 * sxCss) / Math.min(sx || 1, sy || 1);
-                const dmx = mxClick - mx0, dmy = myClick - my0;
-                if (Math.sqrt(dmx*dmx + dmy*dmy) < tolMsi) { App.finalizeDrawing(); return; }
+                const first = App.drawing.vertices[0];
+                const canvasFirst = applyAffinePoint(this._msiRoiCanvasMatrix(), first[0], first[1]);
+                const [firstX, firstY] = this.canvasToClient(canvasFirst[0], canvasFirst[1], geometry);
+                // The hit radius is always 8 screen CSS pixels, independent
+                // of zoom, pixel pitch, source geometry, rotation or flips.
+                if (Math.hypot(e.clientX - firstX, e.clientY - firstY) <= 8) {
+                    App.finalizeDrawing(); return;
+                }
             }
             const [mx, my] = this.canvasToMsi(cx, cy);
+            if (!Number.isFinite(mx) || !Number.isFinite(my)) return;
             App.drawing.vertices.push([mx, my]);
             this.drawAllRois();
         });
@@ -9073,7 +9120,7 @@ class SectionPanel {
 
     setDrawingPointerActive(active) {
         this.dom.croi.style.pointerEvents = active ? 'auto' : 'none';
-        this.dom.croi.style.cursor = active ? 'crosshair' : '';
+        this.dom.croi.style.cursor = active ? 'url("roi-cursor.svg") 6 6, crosshair' : '';
     }
 
     // ---- Layer bar ----
@@ -9634,8 +9681,9 @@ class SectionPanel {
         // Toolbar.refreshRotation reads getRotation() back from this panel
         // when this section is active, so we don't write the input directly.
         if (App.activeSectionId === this.section.id) Toolbar.refreshRotation();
-        // Scale bar pixel length tracks vt.scale, so refresh on every zoom.
+        // Scale bar and screen-space ROI positions track every view change.
         this.updateScaleBar();
+        this._scheduleRoiRedraw();
     }
 
     // Drag (no modifier) translates the section content; wheel zooms it. ROI
