@@ -26,12 +26,13 @@ function fixture() {
     async putBlob() {},
   };
   const context = vm.createContext({ console, setTimeout, clearTimeout, structuredClone,
-    ...d, App, ProjectStorage });
+    ...d, App, ProjectStorage, RoiMediaModel: require('../viewer/roi-media-model.js') });
   const FixedColors = loadFixedColors(context);
   vm.runInContext(defaultPaletteSource() + '\n' + [
     'pickUnusedColorKey', 'storeRoiPaletteColor', 'roiFixedColorEditable', 'setRoiFixedColor',
     'openRoiFixedColorPicker', 'populateRoiList', 'encodeRoiPolygon', 'decodeRoiPolygon',
     'groupRoiRowsByColor', 'remapRoiGeometry', 'freezeMsiSourceReferences',
+    'roiMediaForTransport', 'roiMediaReadOriginal',
     '_markerTargetIsCurrent', '_openSharedMarkerInput', 'applyMarkerColor',
     '_setMarkerSwatchLabel', '_restampMarkerSwatch', '_refreshKmdMarkerColor', '_bindMethodRowDelegation',
   ].map(sourceFunction).join('\n'), context);
@@ -186,6 +187,9 @@ async function roiTests() {
   // Execute the production publish payload builder, with no remote request.
   c.project = project; c.meta = { slug: 'test', viewerPassword: 'fixture' };
   c.masterPw = 'fixture'; c.sectionsPayload = [];
+  // This fixture has no attached photographs; obtain the actual versioned
+  // empty payload through the production transport helper, not a mock shape.
+  c.roiMediaPayload = c.roiMediaForTransport(project);
   const start = html.indexOf('    const roisPayload =', html.indexOf('async function _publishCoreInner('));
   const end = html.indexOf('    let result;', start);
   assert.ok(start > 0 && end > start);
