@@ -116,13 +116,29 @@
 
 // ===========================================================================
 // IndexedDB helpers — minimal subset of viewer/index.html's ProjectStorage.
-// We only need to list / read / delete project rows (no blobs) here.
+// Listing uses small summary rows. Deletion also reclaims unshared originals.
 // ---
 // IMPORTANT: keep DB_VERSION in sync with viewer/index.html. Both pages
 // open the same `desi-projects` database; bumping the version here and
 // not there raises "The requested version (X) is less than the existing
 // version (Y)" on whichever page lags behind.
 // ===========================================================================
+function collectProjectBlobIds(project) {
+    const ids = new Set();
+    for (const section of ((project && project.sections) || [])) {
+        for (const field of ['images', 'msiSeries', 'msiFiles']) {
+            for (const entry of Object.values(section[field] || {})) {
+                if (entry && entry.blobId) ids.add(entry.blobId);
+            }
+        }
+    }
+    const media = project && project.meta && project.meta.roiMedia;
+    if (media && Array.isArray(media.items)) {
+        for (const item of media.items) if (item && item.blobId) ids.add(item.blobId);
+    }
+    return ids;
+}
+
 const ProjectStorage = (() => {
     const DB_NAME = 'desi-projects';
     // v3: added the `project_index` store.
@@ -262,9 +278,22 @@ const ProjectStorage = (() => {
     async function deleteProject(id) {
         const db = await open();
         return new Promise((resolve, reject) => {
-            const tx = db.transaction(['projects', 'project_index'], 'readwrite');
-            tx.objectStore('projects').delete(id);
-            tx.objectStore('project_index').delete(id);
+            const tx = db.transaction(['projects', 'project_index', 'blobs'], 'readwrite');
+            const owned = new Set(), usedElsewhere = new Set();
+            const cursor = tx.objectStore('projects').openCursor();
+            cursor.onsuccess = (e) => {
+                const row = e.target.result;
+                if (row) {
+                    const target = row.value && row.value.id === id ? owned : usedElsewhere;
+                    for (const blobId of collectProjectBlobIds(row.value)) target.add(blobId);
+                    row.continue();
+                    return;
+                }
+                tx.objectStore('projects').delete(id);
+                tx.objectStore('project_index').delete(id);
+                for (const blobId of owned) if (!usedElsewhere.has(blobId)) tx.objectStore('blobs').delete(blobId);
+            };
+            cursor.onerror = () => reject(cursor.error);
             tx.oncomplete = () => resolve();
             tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
             tx.onerror = () => reject(tx.error);
@@ -317,6 +346,8 @@ const SupabaseClient = (() => {
         },
         deleteFolderShare(masterPw, slug) { return rpc('delete_folder_share', { _master_pw: masterPw, _slug: slug }); },
         deleteProjectDoc(masterPw, slug) { return rpc('delete_project_doc', { _master_pw: masterPw, _slug: slug }); },
+        unlockProjectMaster(slug, masterPw) { return rpc('unlock_project_master', { _master_pw: masterPw, _slug: slug }); },
+        fetchProjectDoc(token) { return rpc('get_project_doc', { p_token: token }); },
         // Mints a short-lived publish-session token. The token is written
         // into publish_sessions and authorises the matching slug's storage
         // writes (insert / update / delete) via the policy at
@@ -346,6 +377,82 @@ const SupabaseClient = (() => {
         },
     };
 })();
+
+// The deployed delete_project_doc RPC predates ROI photographs. Read its
+// existing document endpoint before deleting anything, so registered originals
+// are swept too without requiring a database migration.
+function scopedProjectStoragePath(path, slug) {
+    if (typeof path !== 'string' || !path || /[:?#\\\u0000-\u001f\u007f]/.test(path)) {
+        throw new Error('保存先パスが不正なため削除を中止しました');
+    }
+    const parts = path.split('/');
+    if (parts.some(part => {
+        let decoded;
+        try { decoded = decodeURIComponent(part); } catch (_) { return true; }
+        return !decoded || decoded === '.' || decoded === '..' || /[/\\\u0000-\u001f\u007f]/.test(decoded);
+    })) throw new Error('保存先パスが不正なため削除を中止しました');
+    return parts.length >= 2 && parts[0] === slug;
+}
+
+function collectServerProjectStoragePaths(doc, slug) {
+    if (!doc || typeof doc !== 'object' || !Array.isArray(doc.sections)) {
+        throw new Error('画像の保存先を確認できないため削除を中止しました');
+    }
+    const docSlug = (doc.meta && doc.meta.project_slug) || doc.slug;
+    if (docSlug && docSlug !== slug) throw new Error('対象プロジェクトが一致しないため削除を中止しました');
+    const paths = new Set(), retained = new Set();
+    const add = path => (scopedProjectStoragePath(path, slug) ? paths : retained).add(path);
+    for (const section of doc.sections) {
+        const storage = section.storage_paths || section.storagePaths || {};
+        for (const field of ['images', 'msiSeries']) {
+            for (const ref of Object.values(storage[field] || {})) if (ref && ref.path) add(ref.path);
+        }
+    }
+    const media = doc.meta && doc.meta.project_meta && doc.meta.project_meta.roiMedia;
+    if (media != null) {
+        if (media.version !== 1 || !Array.isArray(media.items)) {
+            throw new Error('ROI写真の保存形式を確認できないため削除を中止しました');
+        }
+        for (const item of media.items) {
+            if (!item || !item.storagePath) throw new Error('ROI写真の原本参照が不足しているため削除を中止しました');
+            add(item.storagePath);
+        }
+    }
+    return { paths, retained };
+}
+
+async function deleteServerProjectWithMedia(masterPw, slug) {
+    if (typeof slug !== 'string' || !slug || /[/\\\u0000-\u001f\u007f]/.test(slug)) {
+        throw new Error('対象プロジェクトが不正です');
+    }
+    const publish = await SupabaseClient.requestPublishSession(masterPw, slug);
+    if (!publish || !publish.token) throw new Error('画像削除用の認証を取得できないため削除を中止しました');
+    let registry;
+    try {
+        const raw = await SupabaseClient.unlockProjectMaster(slug, masterPw);
+        const session = Array.isArray(raw) ? raw[0] : raw;
+        if (!session || !session.token) throw new Error('read token unavailable');
+        registry = collectServerProjectStoragePaths(await SupabaseClient.fetchProjectDoc(session.token), slug);
+    } catch (e) {
+        throw new Error('登録画像の保存先を確認できないため、プロジェクトは削除していません: ' + (e.message || e));
+    }
+    const result = await SupabaseClient.deleteProjectDoc(masterPw, slug);
+    if (!result || result.ok !== true) throw new Error('プロジェクトの削除に失敗しました: ' + JSON.stringify(result));
+    let deleted = 0, failed = 0;
+    for (const path of (Array.isArray(result.paths) ? result.paths : [])) {
+        try {
+            (scopedProjectStoragePath(path, slug) ? registry.paths : registry.retained).add(path);
+        } catch (e) {
+            console.warn('Invalid storage cleanup path was not deleted', path, e);
+            failed++;
+        }
+    }
+    for (const path of registry.paths) {
+        try { await SupabaseClient.deleteStorageObject('atlases', path, publish.token); deleted++; }
+        catch (e) { console.warn('storage delete failed for', path, e); failed++; }
+    }
+    return { deleted, failed, retained: registry.retained.size };
+}
 
 // ===========================================================================
 // Master-mode gate. Hides the management UI until the user enters the master
@@ -1863,39 +1970,7 @@ async function renderList() {
                 if (!masterPw) return;
             }
             try {
-                // 1. publish_session token を先にミント (storage delete に
-                //    必要、share_locks.sql §4 のポリシー)。失敗するなら
-                //    master pw が違う可能性大なのでここで弾く。
-                let publishToken = null;
-                try {
-                    const sess = await SupabaseClient.requestPublishSession(masterPw, slug);
-                    publishToken = sess && sess.token;
-                } catch (e) {
-                    const msg = String((e && (e.message || e.details)) || '');
-                    if (/unauthorized|28000/i.test(msg)) {
-                        alert('Master password が違います');
-                        return;
-                    }
-                    console.warn('publish session mint failed', e);
-                }
-                // 2. delete_project_doc で DB 行削除 + storage path 一覧取得
-                const r = await SupabaseClient.deleteProjectDoc(masterPw, slug);
-                if (!r || r.ok !== true) {
-                    alert('削除失敗: ' + JSON.stringify(r));
-                    return;
-                }
-                // 3. 各 path を Storage API 経由で削除 (publish-token 経路)
-                const paths = Array.isArray(r.paths) ? r.paths : [];
-                let deleted = 0, failed = 0;
-                for (const p of paths) {
-                    try {
-                        await SupabaseClient.deleteStorageObject('atlases', p, publishToken);
-                        deleted++;
-                    } catch (e) {
-                        console.warn('storage delete failed for', p, e);
-                        failed++;
-                    }
-                }
+                const { deleted, failed, retained } = await deleteServerProjectWithMedia(masterPw, slug);
                 // master pw キャッシュ更新 (12 h)
                 try {
                     sessionStorage.setItem('desi:masterPw',
@@ -1910,6 +1985,7 @@ async function renderList() {
                 }
                 let msg = '削除しました (DB: ok, storage objects: ' + deleted + ' 件)';
                 if (failed) msg += ' / 失敗: ' + failed + ' 件 (orphan blob として残ります)';
+                if (retained) msg += ' / 他プロジェクトの画像: ' + retained + ' 件は保持しました';
                 showToast(msg, 3600);
                 await renderList();
             } catch (e) {

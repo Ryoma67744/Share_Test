@@ -16,6 +16,12 @@
     <script defer src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
     <script defer src="fixed-colors.js"></script>
+    <link rel="stylesheet" href="roi-media-viewer.css">
+    <script defer src="roi-media-model.js"></script>
+    <script defer src="roi-media-service.js"></script>
+    <script defer src="roi-media-msi.js"></script>
+    <script defer src="roi-media-viewer.js"></script>
+    <script defer src="roi-media-app.js"></script>
 <script>
   window.SUPABASE_URL     = "https://pxlrlhtcvwkqnlryencs.supabase.co";
   window.SUPABASE_ANON_KEY = "sb_publishable_2K4sqMmKk3g20Jmwho-awQ_Uu_hSKeU";
@@ -2857,7 +2863,21 @@ const ProjectStorage = (() => {
         const done = txDone(t);
         await pr(t.objectStore('projects').delete(id));
         await pr(t.objectStore('project_index').delete(id));
+        // An original can be shared by several attachments/projects. Reclaim
+        // only blobs no remaining project references, in this same transaction.
+        const stillUsed = new Set();
+        await new Promise((resolve, reject) => {
+            const req = t.objectStore('projects').openCursor();
+            req.onsuccess = (e) => {
+                const c = e.target.result;
+                if (!c) { resolve(); return; }
+                for (const bid of collectBlobIds(c.value)) stillUsed.add(bid);
+                c.continue();
+            };
+            req.onerror = () => reject(req.error);
+        });
         for (const bid of blobIds) {
+            if (stillUsed.has(bid)) continue;
             try { await pr(t.objectStore('blobs').delete(bid)); } catch (_) {}
         }
         await done;
@@ -2865,8 +2885,8 @@ const ProjectStorage = (() => {
 
     function collectBlobIds(project) {
         const out = new Set();
-        if (!project || !project.sections) return [];
-        for (const sec of project.sections) {
+        if (!project) return [];
+        for (const sec of (project.sections || [])) {
             for (const lk of Object.keys(sec.images || {})) {
                 const b = sec.images[lk];
                 if (b && b.blobId) out.add(b.blobId);
@@ -2875,6 +2895,12 @@ const ProjectStorage = (() => {
                 const b = sec.msiSeries[lk];
                 if (b && b.blobId) out.add(b.blobId);
             }
+            for (const b of Object.values(sec.msiFiles || {})) {
+                if (b && b.blobId) out.add(b.blobId);
+            }
+        }
+        for (const item of ((project.meta && project.meta.roiMedia && project.meta.roiMedia.items) || [])) {
+            if (item && item.blobId) out.add(item.blobId);
         }
         return Array.from(out);
     }
@@ -9583,6 +9609,7 @@ class SectionPanel {
         //   最初から全切片を見るガードがあり、そこと非対称だった。
         const blobStillUsed = (id) => {
             if (!id) return false;
+            if (typeof RoiMediaModel !== 'undefined' && RoiMediaModel.collectBlobIds(App.project).has(id)) return true;
             const sections = (App.project && App.project.sections) || [this.section];
             for (const sec of sections) {
                 for (const e of Object.values(sec.images || {})) if (e && e.blobId === id && e !== ent) return true;
@@ -9624,6 +9651,8 @@ class SectionPanel {
         if (App.activeSectionId === this.section.id) renderMethodTable();
         // This molecule may have lost its global-max holder; rescale others.
         App.recomputeMsiAbsScale();
+        // Refresh source compatibility while preserving unsaved photo fields.
+        if (typeof RoiMediaApp !== 'undefined') RoiMediaApp.refresh(true);
         App.queueSave();
     }
 
@@ -10802,6 +10831,18 @@ function populateRoiList() {
 
         const actions = document.createElement('div');
         actions.className = 'flex items-center gap-1 flex-none';
+        if (typeof RoiMediaApp !== 'undefined') {
+            const photo = document.createElement('button');
+            photo.type = 'button';
+            photo.className = 'roi-photo-button';
+            const n = RoiMediaApp.count(project,roi);
+            photo.textContent = '▧ ' + (n == null ? '!' : n);
+            photo.title = 'ROI画像とMSIを比較 / 画像を新規登録';
+            photo.setAttribute('aria-label', (roi.name || roi.colorKey) + ' の画像とMSIを比較');
+            photo.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); RoiMediaApp.open(project,roi); });
+            el.addEventListener('contextmenu', e => { e.preventDefault(); e.stopPropagation(); RoiMediaApp.open(project,roi); });
+            actions.appendChild(photo);
+        }
         // Read-only collaborator overlay has no draw/delete affordances:
         // it is not persisted locally and must not be published as master's.
         if (!roi._collab) {
@@ -10840,6 +10881,7 @@ function populateRoiList() {
         });
         host.appendChild(el);
     }
+    if (typeof RoiMediaApp !== 'undefined') RoiMediaApp.refresh();
 }
 
 // ★ グラフ用プルダウンの中身は「開かれたとき」に作る。
@@ -17689,6 +17731,63 @@ function promptOtsuExport() {
     return Promise.resolve('none');
 }
 
+// ROI photograph originals use a separate, versioned manifest. Never serialize
+// collaborator overlays or silently lose an attachment whose source is missing.
+function roiMediaForTransport(project) {
+    const registry = RoiMediaModel.getRegistry(project);
+    registry.items = registry.items.filter(item => {
+        const matching = (project.rois || []).filter(r => String(r.colorKey || '') === item.roiKey);
+        if (matching.length && matching.every(r => r._collab)) return false;
+        const roi = matching.find(r => !r._collab);
+        const section = (project.sections || []).find(s => String(s.id) === item.sectionId
+            || String(s.meta && s.meta.client_id || '') === item.sectionId);
+        if (!roi || !section || !Array.isArray((roi.polysBySection || {})[section.id])) {
+            throw new Error('ROI写真の対応先が見つかりません: ' + (item.title || item.filename || item.id));
+        }
+        return true;
+    });
+    return registry;
+}
+
+async function roiMediaReadOriginal(item) {
+    const local = item.blobId ? await ProjectStorage.getBlob(item.blobId) : null;
+    if (local && local.blob) return local;
+    if (item.storagePath) {
+        const url = SupabaseClient.publicUrl('atlases', item.storagePath);
+        if (!url) throw new Error('ROI写真の保存先を取得できません: ' + (item.title || item.filename));
+        const response = await fetch(url);
+        if (!response.ok) throw new Error('ROI写真の原本を取得できません (HTTP ' + response.status + '): ' + (item.title || item.filename));
+        return { blob: await response.blob(), mime: item.mime, filename: item.filename };
+    }
+    throw new Error('ROI写真の原本がありません: ' + (item.title || item.filename || item.id));
+}
+
+function roiMediaPublicItem(item, storagePath) {
+    const copy = JSON.parse(JSON.stringify(item));
+    delete copy.blobId;
+    delete copy.sourceUrl;
+    delete copy.sourcePath;
+    copy.storagePath = storagePath;
+    return copy;
+}
+
+function roiMediaRegistryFromDoc(doc) {
+    const projectMeta = (doc.meta && doc.meta.project_meta) || {};
+    const ids = Object.create(null);
+    for (const section of (doc.sections || [])) {
+        const clientId = (section.meta && section.meta.client_id) || section.id;
+        ids[section.id] = clientId;
+        ids[clientId] = clientId;
+        if (section.client_id) ids[section.client_id] = clientId;
+    }
+    const registry = RoiMediaModel.remapSections(RoiMediaModel.normalizeRegistry(projectMeta.roiMedia), ids);
+    for (const item of registry.items) {
+        if (!item.storagePath) throw new Error('共有ROI写真の原本参照がありません: ' + (item.title || item.filename));
+        delete item.blobId; // Remote documents must not address this browser's IndexedDB IDs.
+    }
+    return registry;
+}
+
 async function exportProjectAsZip() {
     if (_exportInProgress) { showToast('Export already running'); return; }
     _exportInProgress = true;
@@ -17700,13 +17799,14 @@ async function exportProjectAsZip() {
         const project = App.project;
         if (!project) return;
         freezeMsiSourceReferences(project);
+        const roiMedia = roiMediaForTransport(project);
         const zip = new JSZip();
         const projSafe = safeName(project.displayName || 'project');
 
         // Pre-pass: unique sample (section) name + a progress-unit estimate.
         const sampleNameById = new Map();
         const usedSampleNames = new Set();
-        let unitTotal = 0;
+        let unitTotal = roiMedia.items.length;
         for (const sec of (project.sections || [])) {
             let base = safeName(sec.displayName || ('Section_' + (sec.ordinal || '')));
             let uniq = base, k = 2;
@@ -17738,6 +17838,7 @@ async function exportProjectAsZip() {
             })),
             roiHidden: project.roiHidden || {},
             memo: ensureMemoShape(project.memo),
+            roiMedia: { version: 1, items: [] },
             sections: [],
         };
 
@@ -17878,6 +17979,28 @@ async function exportProjectAsZip() {
             tick(); await _yieldUi();
 
             manifest.sections.push(secEntry);
+        }
+
+        const mediaPaths = new Map();
+        for (const item of roiMedia.items) {
+            const identity = item.blobId || ('storage:' + item.storagePath);
+            let sourcePath = mediaPaths.get(identity);
+            if (!sourcePath) {
+                const original = await roiMediaReadOriginal(item);
+                sourcePath = 'ROI_Media/' + sanitizeStorageKeySegment(item.id) + '__'
+                    + sanitizeStorageKeySegment(item.filename || 'image.bin');
+                zip.file(sourcePath, original.blob);
+                mediaPaths.set(identity, sourcePath);
+            }
+            const portable = roiMediaPublicItem(item, null);
+            delete portable.storagePath;
+            portable.sourcePath = sourcePath;
+            // Shared sections use server UUIDs in the ZIP and are remapped on import.
+            const section = (project.sections || []).find(s => String(s.id) === item.sectionId
+                || String(s.meta && s.meta.client_id || '') === item.sectionId);
+            portable.sectionId = section.id;
+            manifest.roiMedia.items.push(portable);
+            tick(); await _yieldUi();
         }
 
         zip.file(projSafe + '.json', JSON.stringify(manifest, null, 2));
@@ -18349,6 +18472,10 @@ async function _publishCore(project, meta, masterPw, opts) {
 async function _publishCoreInner(project, meta, masterPw, opts) {
     opts = opts || {};
     freezeMsiSourceReferences(project);
+    // Snapshot before any await: edits made during an upload belong to the next
+    // publish and must never become references to originals not uploaded yet.
+    const roiMediaSnapshot = roiMediaForTransport(project);
+    const roiMediaPayload = { version: 1, items: [] };
     const silent = !!opts.silent;
     const onProgress = opts.onProgress || (() => {});
     const forceFull = !!opts.forceFullUpload || !!(project.shareInfo && project.shareInfo.forceFullUpload);
@@ -18435,13 +18562,32 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
             storagePaths: storage,
         });
     }
+    for (const item of roiMediaSnapshot.items) {
+        const filename = item.filename || 'image.bin';
+        const noUpload = !item.blobId;
+        // A previous successful upload remains authoritative for this binary.
+        // Model.replace removes storagePath when the photograph is replaced.
+        const sameProjectPath = item.storagePath && item.storagePath.startsWith(meta.slug + '/') ? item.storagePath : null;
+        const path = sameProjectPath || (noUpload ? null
+            : `${meta.slug}/roi-media/${sanitizeStorageKeySegment(item.id)}/r${item.revision || 1}/${sanitizeStorageKeySegment(item.blobId)}${storageExtOf(filename)}`);
+        if (!path) throw new Error('ROI写真の原本がありません: ' + (item.title || filename));
+        const publicItem = roiMediaPublicItem(item, path);
+        roiMediaPayload.items.push(publicItem);
+        const task = { blobId: item.blobId || null, noUpload, kindFolder: 'roi-media', slot: 'roiMedia',
+            key: 'ROI写真:' + (item.title || filename), ent: item, path, filename, publicItem };
+        if (!pathTasks.has(path)) pathTasks.set(path, []);
+        pathTasks.get(path).push(task);
+    }
 
     // Helper: write the upload ref into every task that shares this path,
     // so dedupe at upload time still produces a complete sectionsPayload.
     const writeRefToTasks = (path, ref) => {
         const tasks = pathTasks.get(path) || [];
         for (const t of tasks) {
-            if (t.slot === 'msiSeries') {
+            if (t.slot === 'roiMedia') {
+                t.publicItem.storagePath = ref.path;
+                t.publicItem.mime = ref.mime || t.ent.mime;
+            } else if (t.slot === 'msiSeries') {
                 const out = Object.assign({}, t.ent, ref);
                 // 受け手は自分の環境で URL を組み立て直すので、こちらの
                 // sourceUrl / storagePath は載せない (別オリジンの URL が
@@ -18519,11 +18665,13 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     // 参照なので size を読むのはタダ (836 MB を読み込んだりはしない)。
     const sizeByPath = new Map();
     const liveTasks = [];
+    const missingRoiMedia = [];
     await runWithConcurrency(uploadTasks, 8, async (t) => {
         let rec = null;
         try { rec = await ProjectStorage.getBlob(t.blobId); }
         catch (e) { console.warn('publish: getBlob failed', t.blobId, e); }
         if (!rec || !rec.blob) {
+            if (t.slot === 'roiMedia') missingRoiMedia.push(t.key);
             const names = (pathTasks.get(t.path) || [t]).map(x => x.key).filter(Boolean);
             skippedNoBlob.push(...(names.length ? names : [t.path]));
             return;
@@ -18531,6 +18679,9 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
         sizeByPath.set(t.path, rec.blob.size || 0);   // rec 自体は持たない
         liveTasks.push(t);
     });
+    if (missingRoiMedia.length) {
+        throw new Error('ROI写真の原本を確認できないため公開を中止しました: ' + missingRoiMedia.join(', '));
+    }
     const totalBytes = [...sizeByPath.values()].reduce((a, b) => a + b, 0);
 
     let progress = null;
@@ -18565,7 +18716,10 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     };
     const uploadOne = async (task) => {
         const blob = await ProjectStorage.getBlob(task.blobId);
-        if (!blob || !blob.blob) return;      // Stage C-0 で拾い済み (保険)
+        if (!blob || !blob.blob) {
+            if (task.slot === 'roiMedia') throw new Error('ROI写真の原本が失われました: ' + task.key);
+            return;      // Stage C-0 で拾い済み (保険)
+        }
         const size = sizeByPath.get(task.path) || 0;
         let lastErr = null;
         try {
@@ -18663,6 +18817,17 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     }
     if (progress) progress.setNote('アップロード完了。サーバへ反映しています…');
 
+    // If its ROI or section was deleted while bytes were uploading, do not
+    // commit a now-dangling attachment reference into the shared document.
+    try {
+        roiMediaForTransport(Object.assign({}, project, {
+            meta: Object.assign({}, project.meta || {}, { roiMedia: roiMediaSnapshot }),
+        }));
+    } catch (e) {
+        if (progress) { try { progress.close(); } catch (_) {} progress = null; }
+        throw e;
+    }
+
     // Exclude the read-only collaborator overlay (`_collab`): those ROIs are
     // authored by viewers and live authoritatively on the server. Master
     // publishes only its own ROIs; upsert_project_doc preserves the viewer
@@ -18694,6 +18859,8 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
         _meta: {
             anatomyPalette: project.anatomyPalette || {},
             memo: project.memo || {},
+            // Explicit empty registry clears the last removed attachment too.
+            roiMedia: roiMediaPayload,
             colormap: (project.meta && project.meta.colormap) || null,
             msiSmoothing: (project.meta && project.meta.msiSmoothing === 'linear') ? 'linear' : 'none',
             otsuBgRemove: !!(project.meta && project.meta.otsuBgRemove),
@@ -18734,6 +18901,16 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     }
     if (!result || result.ok !== true) {
         throw new Error(result && result.reason ? result.reason : 'upsert_failed');
+    }
+
+    for (const original of roiMediaSnapshot.items) {
+        const current = ((project.meta && project.meta.roiMedia && project.meta.roiMedia.items) || [])
+            .find(item => item.id === original.id);
+        const published = roiMediaPayload.items.find(item => item.id === original.id);
+        if (current && published && (current.revision || 1) === original.revision
+            && (current.blobId || null) === (original.blobId || null)) {
+            current.storagePath = published.storagePath;
+        }
     }
 
     const url = `${location.origin}${location.pathname}#share=${encodeURIComponent(meta.slug)}`;
@@ -21533,6 +21710,38 @@ async function importZipFile(file) {
             geometryBySection: remapRoiGeometry(r.geometryBySection, sectionsBySrcId),
         });
     }
+    const mediaDoc = projDoc.roiMedia || (projDoc.meta && projDoc.meta.roiMedia);
+    if (mediaDoc != null) {
+        if (mediaDoc.version !== 1 || !Array.isArray(mediaDoc.items)) {
+            throw new Error('このROI写真の保存形式には対応していません');
+        }
+        const mediaByPath = new Map();
+        const restored = [];
+        // Fail before creating the project if even one original is absent.
+        for (const item of mediaDoc.items) {
+            if (!item || !item.sourcePath || !zip.file(item.sourcePath)) {
+                throw new Error('ZIPにROI写真の原本がありません: ' + (item && (item.title || item.filename || item.id) || 'unknown'));
+            }
+            if (!sectionsBySrcId[item.sectionId]) throw new Error('ZIPのROI写真の対象切片が見つかりません: ' + item.sectionId);
+        }
+        for (const item of mediaDoc.items) {
+            let blobId = mediaByPath.get(item.sourcePath);
+            if (!blobId) {
+                const blob = await zip.file(item.sourcePath).async('blob');
+                blobId = uid('blob');
+                await ProjectStorage.putBlob({ id: blobId, blob, mime: item.mime || blob.type,
+                    filename: item.filename || item.sourcePath.split('/').pop() });
+                mediaByPath.set(item.sourcePath, blobId);
+            }
+            const copy = Object.assign({}, item, { blobId });
+            delete copy.sourcePath; delete copy.storagePath; delete copy.sourceUrl;
+            restored.push(copy);
+        }
+        newProject.meta = newProject.meta || {};
+        newProject.meta.roiMedia = RoiMediaModel.remapSections(
+            RoiMediaModel.normalizeRegistry({ version: 1, items: restored }), sectionsBySrcId);
+        roiMediaForTransport(newProject);
+    }
     await ProjectStorage.putProject(newProject);
     await App.openProject(newProject.id);
     showToast('Imported: ' + newProject.displayName);
@@ -24043,6 +24252,7 @@ const App = {
             rois: [],
             roiHidden: {},
             overlays: _overlaysFromSections(doc.sections),
+            meta: Object.assign({}, projectMeta, { roiMedia: roiMediaRegistryFromDoc(doc) }),
             memo: ensureMemoShape(projectMeta.memo || doc.memo),
             createdAt: doc.created_at || nowIso(),
             updatedAt: doc.updated_at || nowIso(),
@@ -24163,6 +24373,19 @@ const App = {
                 }
             }
         }
+        // Originals must be present before this becomes a local master copy.
+        // A failed photograph download aborts import; it never replaces an
+        // existing local project with incomplete attachment metadata.
+        for (const item of project.meta.roiMedia.items) {
+            if (!item.storagePath) throw new Error('共有ROI写真の原本参照がありません: ' + (item.title || item.filename));
+            try {
+                const { id, mime } = await ensureImported({ path: item.storagePath, mime: item.mime, filename: item.filename });
+                item.blobId = id;
+                item.mime = mime || item.mime;
+            } catch (e) {
+                throw new Error('ROI写真を取り込めませんでした: ' + (item.title || item.filename) + ' (' + (e.message || e) + ')');
+            }
+        }
         // 呼び出し側が「部分的にしか取り込めなかった」を判断できるようにする。
         // これが 0 でない限り、置き換え対象のローカル版を消してはいけない。
         if (failed.length) project.__importFailures = failed.length;
@@ -24200,10 +24423,12 @@ const App = {
             });
         } catch (e) { console.warn('import ROI fetch failed', e); }
 
+        if (project.meta.roiMedia.items.length) roiMediaForTransport(project);
         return project;
     },
 
     async _hydrateSharedProject(session) {
+        if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
         if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
         const doc = await SupabaseClient.fetchProjectDoc(session.token);
         if (!doc) { showToast('Share project の取得に失敗しました'); return; }
@@ -24237,7 +24462,9 @@ const App = {
             overlays: _overlaysFromSections(doc.sections).concat(loadShareOverlays(null)),
             // Carry master's project meta (colormap, etc.) intact so future
             // fields automatically round-trip without a hydrate-side patch.
-            meta: projectMeta,
+            // Photographs remain remote here and are loaded only when opened.
+            // Their section IDs are stable client IDs, matched by sectionKey.
+            meta: Object.assign({}, projectMeta, { roiMedia: roiMediaRegistryFromDoc(doc) }),
             memo: ensureMemoShape(projectMeta.memo || doc.memo),
             createdAt: doc.created_at || nowIso(),
             updatedAt: doc.updated_at || nowIso(),
@@ -24650,6 +24877,7 @@ const App = {
     },
 
     async openProject(id) {
+        if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
         if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
         if (SharePreview.isOpen()) SharePreview.close();
         const abortSwitch = () => {
@@ -24835,6 +25063,7 @@ const App = {
     async deleteCurrentProject() {
         if (!this.project) return;
         if (!confirm('プロジェクト "' + this.project.displayName + '" を削除しますか? (取り消し不可)')) return;
+        if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
         // Finish an older IDB transaction before deleting. Otherwise its late
         // put() can recreate the project after deleteProject has completed.
         if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = 0; }
@@ -25283,6 +25512,7 @@ const App = {
     },
 
     async deleteSection(id) {
+        if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
         const idx = this.project.sections.findIndex(s => s.id === id);
         if (idx < 0) return;
         const sec = this.project.sections[idx];
@@ -25297,6 +25527,11 @@ const App = {
             if (other === sec) continue;
             for (const e of Object.values(other.images || {})) if (e && e.blobId) blobIds.delete(e.blobId);
             for (const e of Object.values(other.msiSeries || {})) if (e && e.blobId) blobIds.delete(e.blobId);
+        }
+        if (typeof RoiMediaModel !== 'undefined') {
+            for (const bid of RoiMediaModel.collectBlobIds(this.project)) blobIds.delete(bid);
+            this.project.meta = this.project.meta || {};
+            this.project.meta.roiMedia = RoiMediaModel.removeSection(RoiMediaModel.getRegistry(this.project),id);
         }
         for (const bid of blobIds) await ProjectStorage.deleteBlob(bid).catch(() => {});
         this.project.sections.splice(idx, 1);
@@ -25322,6 +25557,7 @@ const App = {
     },
 
     async rebuildSectionPanels() {
+        if (typeof RoiMediaApp !== 'undefined') RoiMediaApp.close();
         const grid = document.getElementById('sections-grid');
         grid.innerHTML = '';
         this.panels.forEach(p => p.destroy());
@@ -25961,6 +26197,7 @@ const App = {
     },
 
     async deleteRoi(id) {
+        if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
         const target = (this.project.rois || []).find(r => r.id === id);
         const label = (target && (target.name || target.colorKey)) || 'ROI';
         if (this.shareMode) {
@@ -26001,6 +26238,10 @@ const App = {
             this._releaseRoiLock();
         } else if (!confirm('ROI 「' + label + '」 を削除しますか?')) {
             return;
+        }
+        if (!this.shareMode && target && typeof RoiMediaModel !== 'undefined') {
+            this.project.meta = this.project.meta || {};
+            this.project.meta.roiMedia = RoiMediaModel.removeRoi(RoiMediaModel.getRegistry(this.project),target.colorKey);
         }
         this.project.rois = (this.project.rois || []).filter(r => r.id !== id);
         if (this.activeRoiId === id) this.activeRoiId = null;
@@ -26754,6 +26995,7 @@ const App = {
             const hasPending = !this.shareMode && (
                 this._saveInflight ||
                 this.saveTimer ||
+                (typeof RoiMediaApp !== 'undefined' && RoiMediaApp.hasPending(this.project)) ||
                 this._syncState === 'error'
             );
             if (hasPending) {

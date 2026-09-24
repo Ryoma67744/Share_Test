@@ -70,6 +70,12 @@ jobs:
       - name: Fixed ROI and MRM color regression
         run: node tests/fixed_color_regression.js
 
+      - name: ROI microscope images, comparison and transport regressions
+        run: |
+          for test in tests/roi_media_*_regression.js; do
+            node "$test"
+          done
+
       # devDependency の hyparquet-writer が入るので parquet のパリティも走る
       # (入っていないと SKIP されて素通りする)。
       - name: connector selftest (app <-> connector parity)

@@ -31,6 +31,7 @@ const names = [
   'extractSourceMatrixForExport', 'msiCsvRowOrder', 'msiCsvCellText',
   'msiCellMetadata', 'buildOneCsvTable', 'buildSampleCsvGroups', 'csvEscape',
   'exportProjectAsZip', 'importZipFile', '_parquetWorkerBody', 'extractRawSourceMatrix',
+  'roiMediaForTransport', 'roiMediaReadOriginal',
   'buildMsiGrid', 'buildLegacyMsiGrid', 'msiSourceReference', 'createMsiSourceGeometry',
   'msiAxisInterpolate', 'pointInPolygon', 'roiContainsSourcePoint', 'msiValidRoiGeometry', 'msiRoiGeometryMeta',
 ];
@@ -38,6 +39,7 @@ const ctx = vm.createContext({
   console, TextDecoder, TextEncoder, Uint8Array, Int32Array, Float32Array,
   Float64Array, ArrayBuffer, Blob, Response, DecompressionStream, XLSX, Promise, Object, Math, JSON, BigInt,
   Number, String, Map, Set, Array, Error,
+  RoiMediaModel: require('../viewer/roi-media-model.js'),
   findCompoundMeta: () => null, formatDisplayName: value => value,
   sanitizeCompoundName: value => value,
   sortMethodKeys: keys => keys,
