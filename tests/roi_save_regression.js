@@ -4,13 +4,14 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { html, standalone } = require('./viewer-runtime.cjs');
+const { loadFixedColors, defaultPaletteSource } = require('./fixed-colors-runtime.cjs');
 
 function fakeElement() {
   const el = {
     children: [], style: {}, dataset: {}, classList: {
       add() {}, remove() {}, toggle() {},
     },
-    addEventListener() {}, appendChild(child) { this.children.push(child); },
+    addEventListener() {}, setAttribute() {}, appendChild(child) { this.children.push(child); },
     querySelectorAll() { return []; },
     _html: '',
   };
@@ -81,8 +82,12 @@ async function main() {
     setupGraphSelector: () => {},
     renderMemoForm: () => {},
   });
+  loadFixedColors(context);
   vm.runInContext([
+    defaultPaletteSource(),
     standalone('pickUnusedColorKey'),
+    standalone('storeRoiPaletteColor'),
+    standalone('roiFixedColorEditable'),
     standalone('msiValidRoiGeometry'),
     standalone('msiLayerSourceGeometry'),
     standalone('populateRoiList'),
