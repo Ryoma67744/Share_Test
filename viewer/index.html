@@ -850,7 +850,7 @@ body:not(.share-mode) #btn-share-preview:hover { background:#f3f4f6; border-colo
                     <p class="text-gray-500">No ROI yet.</p>
                 </div>
                 <div id="roi-draw-hint" class="hidden text-[11px] text-blue-700 mt-1 border-t pt-1">
-                    描画モード ON: アクティブな切片パネルを順にクリックして頂点を打ち、Enter またはダブルクリックで確定。Escape で中止。
+                    描画モード ON: アクティブな切片に3点以上の頂点を打ち、Enter・ダブルクリック・最初の点をクリックして確定。Escape または「中止」で破棄。
                 </div>
             </div>
 
@@ -22149,6 +22149,8 @@ const App = {
     shareMode: null,
     drawing: { mode: false, sectionId: null, vertices: [], targetRoiId: null },
     saveTimer: 0,
+    _saveRevision: 0,
+    _savedRevision: 0,
     // Method (MRM) table column-click sort. Session-only — reload reverts to
     // the legacy sourceFileId → layerKey order. Shared by both the main view
     // (renderMethodTable + the App ↑↓ keydown handler) and SharePreview so
@@ -24474,25 +24476,44 @@ const App = {
 
     async openProject(id) {
         if (SharePreview.isOpen()) SharePreview.close();
-        // Tear down any collaborator-ROI poll from a previously-open project
-        // and force re-auth for the new slug.
-        this._stopMasterCollabPoll();
-        this._collabSession = null;
+        const abortSwitch = () => {
+            const picker = document.getElementById('project-picker');
+            if (picker) picker.value = this.project ? this.project.id : '';
+            showToast('保存に失敗したため、プロジェクトの切り替えを中止しました。保存エラーを確認してください', 7000);
+        };
         // ★ 切り替えの前に、いま開いているプロジェクトの派生統計を書き切る。
         //   _doSave は this.project を見るので、フラッシュせずに差し替えると
         //   30 秒タイマーが「別のプロジェクト」を書いてしまい、こちらの統計は
         //   黙って捨てられる (再計算はできるが、無駄な書き込みが 1 回増える)。
         // 実編集の保留分も先に書き切る。400 ms タイマーが this.project の
         // 差し替え中に焼けると、どちらのプロジェクトを書いたのか曖昧になる。
-        try { await this._flushSave(); } catch (e) { console.warn('flush on switch failed', e); }
-        try { await this._flushDerivedSaveAsync(); } catch (e) { console.warn('derived flush on switch failed', e); }
+        try {
+            if (await this._flushSave() === false) { abortSwitch(); return; }
+        } catch (e) {
+            this._showSaveError((e && e.message) || String(e), 'openProject');
+            abortSwitch();
+            return;
+        }
+        // Tear down the old project's collaborator poll only after its edits
+        // have reached disk; a failed write leaves that project open to retry.
+        this._stopMasterCollabPoll();
+        this._collabSession = null;
         // 公開待ちのフラグとタイマーもプロジェクト単位。持ち越すと、切り替えた先の
         // プロジェクトを「変更が無いのに」公開してしまう。開き直したときは
         // project.__publishPending から復元するので、ここで消しても失われない。
         this._publishDirty = false;
         if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
         const project = await ProjectStorage.getProject(id);
-        if (!project) { localStorage.removeItem('desi:lastProjectId'); this.renderEmpty(); return; }
+        if (!project) {
+            this.project = null;
+            this.activeSectionId = null;
+            this.activeRoiId = null;
+            this.panels.forEach(p => p.destroy());
+            this.panels.clear();
+            localStorage.removeItem('desi:lastProjectId');
+            this.renderEmpty();
+            return;
+        }
         this.project = project;
         // 前回のセッションで公開しきれなかった編集があればここで拾い直す。
         this._publishDirty = !!project.__publishPending;
@@ -24636,6 +24657,13 @@ const App = {
     async deleteCurrentProject() {
         if (!this.project) return;
         if (!confirm('プロジェクト "' + this.project.displayName + '" を削除しますか? (取り消し不可)')) return;
+        // Finish an older IDB transaction before deleting. Otherwise its late
+        // put() can recreate the project after deleteProject has completed.
+        if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = 0; }
+        if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+        if (this._saveInflight) {
+            try { await this._saveInflight; } catch (e) { console.warn('save before delete failed', e); }
+        }
         const id = this.project.id;
         this.project = null;
         _roiRawGridCache.clear();
@@ -25658,7 +25686,10 @@ const App = {
         if(!sourceGeometry||!msiValidRoiGeometry(Object.assign({version:'msi-source-v1'},sourceGeometry))) {
             showToast('ROI の元座標を確認できません。頂点は保持しています。元の MSI に戻して確認してください',5000);return;
         }
-        if (verts.length < 3) { this.cancelDrawing(); return; }
+        if (verts.length < 3) {
+            showToast('ROI の確定には3点以上必要です（現在 ' + verts.length + ' 点）。頂点を追加するか「中止」を押してください', 4500);
+            return;
+        }
         let roi;
         if (targetRoiId) {
             roi = (this.project.rois || []).find(r => r.id === targetRoiId);
@@ -25743,7 +25774,9 @@ const App = {
                 showToast('ROI のサーバ保存に失敗しました。未保存として保持中です。ロックを取り直してもう一度お試しください。', 4500);
             }
         } else {
-            await this.queueSave(0);
+            this.queueSave(0);
+            await this._flushSave();
+            await this._verifyPersistence('finalizeDrawing', { roiAtSection: { roiId: roi.id, sectionId, vertices: verts } });
         }
     },
 
@@ -25876,6 +25909,9 @@ const App = {
         // 世代番号。真偽値だと「元から true のまま編集が入った」が区別できず、
         // アップロード中の編集を取りこぼす。
         this._publishEpoch = (this._publishEpoch || 0) + 1;
+        // A write already in flight may have cloned the project before this
+        // edit. Keep a revision so it cannot satisfy this save request.
+        this._saveRevision = (this._saveRevision || 0) + 1;
         if (this.project.shareInfo && this.project.shareInfo.slug) this.project.__publishPending = true;
         if (this.saveTimer) clearTimeout(this.saveTimer);
         this.saveTimer = setTimeout(() => {
@@ -25899,6 +25935,7 @@ const App = {
     queueSaveDerived() {
         if (!this.project) return;
         this._derivedDirty = true;
+        this._saveRevision = (this._saveRevision || 0) + 1;
         if (this._derivedSaveTimer) return;   // 既にタイマーが動いていれば延長しない
         this._derivedSaveTimer = setTimeout(() => {
             this._derivedSaveTimer = 0;
@@ -25946,62 +25983,61 @@ const App = {
             this._derivedDirty = false;
             if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
             this._publishDirty = false;
+            this._savedRevision = this._saveRevision || 0;
             return true;
         }
-        // Coalesce concurrent saves: the in-flight save already captures
-        // the latest project state at call time, so a second invocation
-        // can just wait for it.
+        // Serialize saves. IndexedDB clones the record when put() is issued:
+        // edits made during that transaction are absent from its snapshot.
+        // An in-flight caller waits for the loop below to persist its revision.
         if (this._saveInflight) return this._saveInflight;
+        const project = this.project;
         const work = (async () => {
-            let lastErr = null;
-            for (let attempt = 0; attempt < 3; attempt++) {
-                try {
-                    await ProjectStorage.putProject(this.project);
-                    // putProject はプロジェクト全体を書くので、ためていた派生
-                    // 統計もこの 1 回で一緒に永続化される。
-                    this._derivedDirty = false;
-                    if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
-                    // ここでは refreshProjectPicker を呼ばない。
-                    // listProjects() は IndexedDB の全プロジェクトを丸ごと復元して
-                    // <option> の 2 文字列しか使わないため、保存のたびに走らせると
-                    // 1 クリックあたり数 MB のデシリアライズになる。ピッカーの表示が
-                    // 変わりうるのは「作成 / 削除 / 名前変更」だけなので、その 3 箇所
-                    // (createNewProject → openProject / deleteCurrentProject /
-                    //  #project-name-input の change) で明示的に呼ぶ。
-                    // 副作用として、保存のたびに updatedAt 降順へ並べ替わる挙動は
-                    // 止まる (順序を読むコードは無く、次に開いたとき並び直る)。
-                    // 'local-saved' は「IDB へ書いた。5 秒後に公開する」という意味。
-                    // 派生統計だけを書いたときは公開は走らないので、この表示に
-                    // すると "💾 Local 保存中" のまま戻らず、しかもその状態は
-                    // クリックで強制再同期 (数 MB のアップロード) を起こす。
-                    // ★ 'no-server' は消さない。ここは**保存のたびに**走るので、
-                    //   publish が一度も通っていない (= _publishDirty が立った
-                    //   まま) 状態では、せっかく出した「⚠ サーバに接続できません」
-                    //   が次の編集で "💾 Local 保存中" に戻ってしまう。それでは
-                    //   「そのうち公開される」という誤解に逆戻りする。
-                    //   下の _scheduleAutoPublish() は従来どおり動かすので、
-                    //   部品が後から使えるようになれば autoPublishProject() 側で
-                    //   自然に復帰する。
-                    this._setSyncStatus(
-                        this._syncState === 'no-server' ? 'no-server'
-                        : this._publishDirty ? 'local-saved'
-                        : (this._syncState === 'synced' ? 'synced' : 'local-saved'));
-                    this._scheduleAutoPublish();
-                    return true;
-                } catch (e) {
-                    lastErr = e;
-                    const isQuota = e && (e.name === 'QuotaExceededError'
-                        || /quota/i.test(String(e.message || e)));
-                    if (isQuota) break;
-                    if (attempt < 2) await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+            while (true) {
+                const revision = this._saveRevision || 0;
+                let lastErr = null;
+                let saved = false;
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    try {
+                        await ProjectStorage.putProject(project);
+                        saved = true;
+                        break;
+                    } catch (e) {
+                        lastErr = e;
+                        const isQuota = e && (e.name === 'QuotaExceededError'
+                            || /quota/i.test(String(e.message || e)));
+                        if (isQuota) break;
+                        if (attempt < 2) await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
+                    }
                 }
+                if (!saved) {
+                    this._showSaveError((lastErr && lastErr.message) || String(lastErr || 'unknown'), 'queueSave');
+                    return false;
+                }
+                // A newer edit arrived after IndexedDB took its snapshot.
+                // Write the same project again before reporting success or
+                // letting a project switch proceed.
+                if (revision !== (this._saveRevision || 0)) continue;
+                this._savedRevision = revision;
+                this._derivedDirty = false;
+                if (this._derivedSaveTimer) { clearTimeout(this._derivedSaveTimer); this._derivedSaveTimer = 0; }
+                if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = 0; }
+                // Project picker summaries only change on create/delete/rename.
+                // Keep server status unchanged when the server is unavailable.
+                this._setSyncStatus(
+                    this._syncState === 'no-server' ? 'no-server'
+                    : this._publishDirty ? 'local-saved'
+                    : (this._syncState === 'synced' ? 'synced' : 'local-saved'));
+                this._scheduleAutoPublish();
+                return true;
             }
-            this._showSaveError((lastErr && lastErr.message) || String(lastErr || 'unknown'), 'queueSave');
-            return false;
         })();
-        this._saveInflight = work;
-        try { return await work; }
-        finally { this._saveInflight = null; }
+        // Clear the marker before waking callers. Otherwise a caller can
+        // await an already-settled promise after a new edit and skip its write.
+        const inflight = work.finally(() => {
+            if (this._saveInflight === inflight) this._saveInflight = null;
+        });
+        this._saveInflight = inflight;
+        return await inflight;
     },
 
     // Flush any pending debounced save and wait for any in-flight save to
@@ -26011,16 +26047,20 @@ const App = {
         // ためてある派生統計もここで書き切る。_flushSave の呼び出し元はすべて
         // 「書いてから IDB を読み直して検証する」形なので、派生を残したままだと
         // いずれ古い値を読むことになる。
-        if (this._derivedDirty) { try { await this._flushDerivedSaveAsync(); } catch (e) {} }
-        if (this.saveTimer) {
-            clearTimeout(this.saveTimer);
-            this.saveTimer = 0;
-            await this._doSave();
-            return;
+        let derivedOk = true;
+        if (this._derivedDirty) {
+            try { derivedOk = await this._flushDerivedSaveAsync(); }
+            catch (e) { this._showSaveError((e && e.message) || String(e), 'derivedSave'); derivedOk = false; }
         }
-        if (this._saveInflight) {
-            await this._saveInflight;
+        const hadPending = !!this.saveTimer;
+        if (this.saveTimer) { clearTimeout(this.saveTimer); this.saveTimer = 0; }
+        if (hadPending || this._saveInflight || this._savedRevision !== (this._saveRevision || 0)) {
+            do {
+                if (await this._doSave() === false) return false;
+            } while (this._savedRevision !== (this._saveRevision || 0));
+            return true;
         }
+        return derivedOk !== false;
     },
 
     // Surface a save / verify failure to the user. Updates the sync
@@ -26038,7 +26078,7 @@ const App = {
     // Read back from IDB after a critical mutation and assert that the
     // expected invariant holds. Catches the failure mode where queueSave
     // throws silently or the section / MSI count never reaches disk.
-    // expect: { sectionCount?, msiAtSection?: { sectionId, count } }
+    // expect: { sectionCount?, msiAtSection?: { sectionId, count }, roiAtSection?: { roiId, sectionId, vertices } }
     async _verifyPersistence(reason, expect) {
         if (!this.project) return true;
         try {
@@ -26059,6 +26099,15 @@ const App = {
                 const got = sec ? Object.keys(sec.msiSeries || {}).length : -1;
                 if (got !== expect.msiAtSection.count) {
                     this._showSaveError('IDB の MSI 数が想定 (' + expect.msiAtSection.count + ') と違います: ' + got, reason);
+                    return false;
+                }
+            }
+            if (expect.roiAtSection) {
+                const { roiId, sectionId, vertices } = expect.roiAtSection;
+                const roi = (idb.rois || []).find(r => r.id === roiId);
+                const saved = roi && (roi.polysBySection || {})[sectionId];
+                if (!Array.isArray(saved) || JSON.stringify(saved) !== JSON.stringify(vertices)) {
+                    this._showSaveError('ROI が IDB に保存されていません: ' + roiId, reason);
                     return false;
                 }
             }
@@ -26372,8 +26421,7 @@ const App = {
     wireUi() {
         document.getElementById('project-picker').addEventListener('change', (e) => {
             const id = e.target.value;
-            if (id) this.openProject(id);
-            else this.renderEmpty();
+            this.openProject(id || null);
         });
         document.getElementById('project-name-input').addEventListener('change', (e) => {
             if (!this.project) return;
