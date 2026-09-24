@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { element, geometryGlobals, roiDom, svgPoints } = require('./roi-dom.cjs');
 const html = fs.readFileSync(path.join(__dirname, '../viewer/index.html'), 'utf8');
 const helpers = html.slice(html.indexOf('function displayAffineMultiply('), html.indexOf('// ---- HE↔MSI registration math'));
 const classStart = html.indexOf('class SectionPanel {');
@@ -27,8 +28,8 @@ class Context2D {
   closePath(){} stroke(){this.paths.push(this.path);} setLineDash(){} arc(){} fill(){} clip(p){this.clipped=p;}
 }
 function canvas(w=0,h=0){const c={width:w,height:h,style:{},classList:{toggle(){}},toDataURL(){return 'mock';}};c.ctx=new Context2D(c);return c;}
-const context=vm.createContext({console,Math,Number,Map,Set,JSON,Uint8ClampedArray,
-  document:{createElement:()=>canvas(),getElementById:()=>null},get2dContext:c=>c.ctx,
+const context=vm.createContext({console,Math,Number,Map,Set,JSON,Uint8ClampedArray,...geometryGlobals,
+  document:{createElement:()=>canvas(),createElementNS:(_ns,tag)=>element(tag),getElementById:()=>null},get2dContext:c=>c.ctx,
   App:{viewMode:'free',roiOnlyMode:false,msiSmoothing:'none',drawing:{mode:false},getMsiWindow:()=>({min:0,max:1})},
   getActiveColormap:()=>Array.from({length:256},()=>[0,0,0]),getColormapBackground:()=>[0,0,0],
   otsuKeepGridForLayer:()=>null,identStamp:()=>'',_activeColormapName:'test',MSI_LUT_CACHE_MAX:4,msiRawFallbackMax:()=>1,
@@ -43,7 +44,7 @@ function panelFor(sec,W=7,H=3,includeHe=false){
   const panel=Object.create(context.Panel.prototype);
   const frame=sectionCanvasFrame(sec,H*2,W*2,includeHe);
   Object.assign(panel,{section:sec,project:{rois:[]},_displayCanvasFrame:frame,
-    dom:{cdisp:canvas(frame.width,frame.height),croi:canvas(frame.width,frame.height)},
+    dom:{...roiDom(frame.width,frame.height),cdisp:canvas(frame.width,frame.height),croi:canvas(frame.width,frame.height)},
     imageSources:{MSI_a:{complete:true,naturalWidth:W,naturalHeight:H}},imageSettings:{MSI_a:{opacity:1}},
     visibleLayers:new Set(['MSI_a']),msiValueRasters:new Map(),
     _maybeWarnRasterDimMismatch(){},_ensureDrawableLoaded(){},_resolveTHeToMsi(){return null;},
@@ -74,7 +75,9 @@ for(const rot of [0,90,180,270,37])for(const msi of [0,90,180,270,-23])for(const
     assert.ok(main[0]>=-1e-9&&main[0]<=p.dom.cdisp.width+1e-9&&main[1]>=-1e-9&&main[1]<=p.dom.cdisp.height+1e-9,'all corners fit backing canvas');
   }
   p.project.rois=[{id:'r',polysBySection:{s:landmarks.slice(4)}}];p.drawAllRois();
-  p.roiCtx.paths[0].forEach((pt,i)=>close(pt,point(actual,landmarks[i+4].map(v=>v+0.5)),'ROI outlines follow rotMSI'));
+  assert.equal(p.dom.roiSaved.children.length,1,'one actual saved SVG outline');
+  const outline=svgPoints(p.dom.roiSaved.children[0]);assert.equal(outline.length,landmarks.length-4);
+  outline.forEach((pt,i)=>close(pt,point(actual,landmarks[i+4].map(v=>v+0.5)),'ROI outlines follow rotMSI'));
   context.App.roiOnlyMode=true;p.renderComposite();context.App.roiOnlyMode=false;
   p.displayCtx.clipped.points.forEach((pt,i)=>close(pt,point(actual,landmarks[i+4].map(v=>v+0.5)),'ROI-only clip follows actual image'));
   cases++;
@@ -241,7 +244,7 @@ for(const rot of [0,90,180,270,37]){
   context.Toolbar={refreshRotation(){}};
   const sec={id:'viewport',meta:{viewerTransform:{tx:19,ty:-7,scale:2,rot:0}},msiSeries:{MSI_a:{}}};
   const before=JSON.stringify(sec);
-  const setup=p=>{p.dom.host={clientWidth:240,clientHeight:160};p.dom.rot={style:{setProperty(){}}};p.msiRasterSize=()=>({w:7,h:3});};
+  const setup=p=>{p.dom.host={clientWidth:240,clientHeight:160,getBoundingClientRect(){return {left:0,top:0,width:this.clientWidth,height:this.clientHeight};}};p.dom.rot={style:{setProperty(){}}};p.msiRasterSize=()=>({w:7,h:3});};
   const p=panelFor(sec);setup(p);p.setupCanvasSize();
   const t=p._ensureViewerTransform(), magnification=t.scale*p._viewerFit.nativeFit;
   p.dom.host.clientWidth=110;p.dom.host.clientHeight=320;p.setupCanvasSize();
@@ -254,7 +257,7 @@ for(const rot of [0,90,180,270,37]){
 // must not change the native-image magnification or pan after compensation.
 {
   const sec={id:'linear',meta:{viewerTransform:{tx:13,ty:4,scale:1,rot:0}},msiSeries:{MSI_a:{}}};
-  const p=panelFor(sec,600,300);p.dom.host={clientWidth:800,clientHeight:500};p.dom.rot={style:{setProperty(){}}};p.msiRasterSize=()=>({w:600,h:300});
+  const p=panelFor(sec,600,300);p.dom.host={clientWidth:800,clientHeight:500,getBoundingClientRect(){return {left:0,top:0,width:this.clientWidth,height:this.clientHeight};}};p.dom.rot={style:{setProperty(){}}};p.msiRasterSize=()=>({w:600,h:300});
   context.App.msiSmoothing='linear';p.setupCanvasSize();const initial=p._ensureViewerTransform().scale*p._viewerFit.nativeFit;
   const backing=p.dom.cdisp.width;p.dom.host.clientWidth=400;p.setupCanvasSize();
   assert.notEqual(p.dom.cdisp.width,backing,'fixture crosses supersampling boundary');
@@ -288,8 +291,8 @@ for(const baseline of ['legacy-180','native-raster']){
   const sec={id:'drawing',meta:{},msiSeries:{MSI_a:{}}},p=panelFor(sec);
   context.App.drawing={mode:true,sectionId:'drawing',vertices:[[0,0],[1,1]],sourceGeometry:JSON.parse(JSON.stringify(geometry))};
   context.msiLayerSourceGeometry=()=>geometry;
-  assert.equal(p._drawingMatchesMsiSource(false),true);p.drawDrawingPreview();assert.equal(p.roiCtx.paths.length,1);
-  geometry.sourceRef='source-B';assert.equal(p._drawingMatchesMsiSource(false),false);p.drawDrawingPreview();assert.equal(p.roiCtx.paths.length,1);
+  assert.equal(p._drawingMatchesMsiSource(false),true);p.drawDrawingPreview();assert.equal(p.dom.roiPreview.querySelectorAll('polyline').length,1);
+  geometry.sourceRef='source-B';assert.equal(p._drawingMatchesMsiSource(false),false);p.drawDrawingPreview();assert.equal(p.dom.roiPreview.children.length,0);
   geometry.sourceRef='source-A';geometry.displayGeometry.W=8;assert.equal(p._drawingMatchesMsiSource(false),false);
   assert.deepEqual(context.App.drawing.vertices,[[0,0],[1,1]],'source mismatch retains unfinished vertices');
   context.App.drawing={mode:false};

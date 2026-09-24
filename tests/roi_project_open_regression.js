@@ -6,20 +6,7 @@ const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { html, standalone } = require('./viewer-runtime.cjs');
 
-function element() {
-  const node = {
-    children: [], dataset: {}, style: {}, textContent: '',
-    classList: { add() {}, remove() {}, toggle() {} },
-    addEventListener() {}, appendChild(child) { this.children.push(child); },
-    querySelectorAll() { return []; },
-    _html: '',
-  };
-  Object.defineProperty(node, 'innerHTML', {
-    get() { return this._html; },
-    set(value) { this._html = value; this.children = []; },
-  });
-  return node;
-}
+const { element, geometryGlobals, roiDom } = require('./roi-dom.cjs');
 
 async function main() {
   const nodes = new Map();
@@ -29,6 +16,7 @@ async function main() {
       return nodes.get(id);
     },
     createElement: element,
+    createElementNS: (_namespace, tag) => element(tag),
   };
   document.getElementById('roi-toggle').checked = true;
   document.getElementById('roi-list').innerHTML = 'No ROI yet.';
@@ -43,7 +31,7 @@ async function main() {
       rgba: [255, 0, 0, 255], polysBySection: { right: [[0, 0], [2, 0], [0, 2]] } }],
   };
   const context = vm.createContext({
-    console, document, Map, Set, setTimeout, clearTimeout,
+    console, document, ...geometryGlobals, Map, Set, setTimeout, clearTimeout,
     ProjectStorage: { getProject: async () => structuredClone(savedProject) },
     SharePreview: { isOpen: () => false },
     _roiRawGridCache: new Map(), parquetReleaseAll() {},
@@ -80,15 +68,10 @@ async function main() {
   app.renderAnalysis = () => {};
   function panel(section) {
     const p = Object.create(context.TestPanel.prototype);
-    const roiCtx = {
-      paths: [], clearRect() { this.paths = []; }, beginPath() { this.path = []; },
-      moveTo(x, y) { this.path.push([x, y]); },
-      lineTo(x, y) { this.path.push([x, y]); },
-      closePath() {}, stroke() { this.paths.push(this.path); },
-    };
+    const roiCtx = { clearRect() {} };
     Object.assign(p, {
       section, project: null, roiCtx,
-      dom: { croi: { width: 100, offsetWidth: 100 } },
+      dom: roiDom(100, 100),
       imageSources: { MSI_focus: {} }, visibleLayers: new Set(['MSI_other']),
       imageSettings: {}, _pickRefMsiKey: () => 'MSI_focus',
       _msiRoiCanvasMatrix: () => [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
@@ -115,9 +98,9 @@ async function main() {
     'saved ROI is listed after the Compound focus is enabled on both sections');
   assert.equal(document.getElementById('analysis-scope').textContent, '2 section(s) total',
     'analysis scope is initialized after opening the project');
-  assert.equal(app.panels.get('left').roiCtx.paths.length, 0,
+  assert.equal(app.panels.get('left').dom.roiSaved.children.length, 0,
     'undrawn left section has no ROI outline');
-  assert.equal(app.panels.get('right').roiCtx.paths.length, 1,
+  assert.equal(app.panels.get('right').dom.roiSaved.children.length, 1,
     'right section renders its saved polygon');
   console.log('ROI project-open regression: PASS');
 }
