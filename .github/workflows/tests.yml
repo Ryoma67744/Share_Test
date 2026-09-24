@@ -59,6 +59,11 @@ jobs:
       - name: ROI save regression
         run: node tests/roi_save_regression.js
 
+      - name: ROI list rendering and project open regressions
+        run: |
+          node tests/roi_list_render_regression.js
+          node tests/roi_project_open_regression.js
+
       # devDependency の hyparquet-writer が入るので parquet のパリティも走る
       # (入っていないと SKIP されて素通りする)。
       - name: connector selftest (app <-> connector parity)
