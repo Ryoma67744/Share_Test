@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const { defaultPaletteSource } = require('./fixed-colors-runtime.cjs');
 const html = fs.readFileSync(path.join(__dirname, '../viewer/index.html'), 'utf8');
 function fn(name) {
   const at = html.indexOf('function ' + name + '(');
@@ -10,6 +11,7 @@ function fn(name) {
   return html.slice(at, html.indexOf('\n}', at) + 2);
 }
 const ctx = vm.createContext({ Map, Array, Object });
+vm.runInContext(defaultPaletteSource(), ctx);
 for (const name of ['encodeRoiPolygon', 'decodeRoiPolygon', 'remapRoiGeometry', 'groupRoiRowsByColor', 'diagBadgeHtml']) {
   vm.runInContext(fn(name), ctx);
 }

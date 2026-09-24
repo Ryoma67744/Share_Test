@@ -15,6 +15,7 @@
     <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+    <script defer src="fixed-colors.js"></script>
 <script>
   window.SUPABASE_URL     = "https://pxlrlhtcvwkqnlryencs.supabase.co";
   window.SUPABASE_ANON_KEY = "sb_publishable_2K4sqMmKk3g20Jmwho-awQ_Uu_hSKeU";
@@ -222,8 +223,7 @@ body.preview #panel-analysis { display:none !important; }
 .sec-canvas-cell.active .canvas-label { background:rgba(37,99,235,0.85); }
 #method-rows .marker-swatch { width:14px; height:14px; border-radius:50%; border:1px solid #cbd5e1; cursor:pointer; padding:0; vertical-align:middle; }
 #method-rows .marker-swatch:hover { border-color:#1d4ed8; }
-/* 色ピッカーは表の外に 1 個だけ置いて使い回す (_openSharedMarkerInput)。
-   行ごとに持たせると 1390 個の <input type="color"> になる。 */
+/* 固定色ピッカーは ROI と Method 表で 1 個だけ使い回す。 */
 .splitter { background:transparent; flex-shrink:0; }
 .splitter:hover, .splitter.dragging { background:#60a5fa; }
 .splitter-h { width:6px; cursor:col-resize; align-self:stretch; }
@@ -10507,16 +10507,93 @@ class SectionPanel {
 // =============================================================
 // ROI list + cross-section analysis
 // =============================================================
-function pickUnusedColorKey(project) {
+function pickUnusedColorKey(project, shared = false) {
     const used = new Set((project.rois || []).map(r => r.colorKey).filter(Boolean));
-    const palette = project.anatomyPalette || DEFAULT_ANATOMY_PALETTE;
+    const ownPalette = project.anatomyPalette || {};
+    const palette = Object.keys(ownPalette).length ? ownPalette : DEFAULT_ANATOMY_PALETTE;
     const named = [], unnamed = [];
     for (const [k, v] of Object.entries(palette)) {
-        const item = { key: k, rgba: (v && v.rgba) || [128, 128, 128, 255], name: (v && v.name) || '' };
+        const item = { key: k, rgba: ((v && v.rgba) || [128, 128, 128, 255]).slice(), name: (v && v.name) || '' };
         if (item.name) named.push(item); else unnamed.push(item);
     }
-    for (const e of named.concat(unnamed)) if (!used.has(e.key)) return e;
-    return { key: 'Auto_' + (project.rois || []).length, rgba: [200, 200, 200, 255], name: '' };
+    // A named anatomy entry is an intentional existing mapping. Otherwise a
+    // master-authored ROI gets a stable identity independent of its display hue.
+    for (const e of named) if (!used.has(e.key)) return e;
+    if (shared || project.__share) {
+        // Shared editors cannot persist palette changes. Use only colors that
+        // the existing wire palette (or its legacy defaults) can reconstruct.
+        for (const e of unnamed) if (!used.has(e.key)) return e;
+        let n = 1;
+        while (used.has('Auto_' + n) || Object.prototype.hasOwnProperty.call(palette, 'Auto_' + n)) n++;
+        return { key: 'Auto_' + n, rgba: [255, 0, 0, 200], name: '' };
+    }
+    let n = 1;
+    while (used.has('ROI_' + n) || Object.prototype.hasOwnProperty.call(ownPalette, 'ROI_' + n)) n++;
+    const count = (project.rois || []).filter(r => !r._collab).length;
+    const preset = FixedColors.colors[count % FixedColors.colors.length];
+    return { key: 'ROI_' + n, rgba: FixedColors.toRgba(preset.hex), name: '' };
+}
+
+function storeRoiPaletteColor(project, roi) {
+    // Never mutate an entry shared with another project or the legacy defaults.
+    // colorKey is also the server grouping identity: recoloring must keep it.
+    const palette = Object.assign({}, project.anatomyPalette || {});
+    const current = palette[roi.colorKey] || DEFAULT_ANATOMY_PALETTE[roi.colorKey] || {};
+    palette[roi.colorKey] = Object.assign({}, current, { rgba: roi.rgba.slice() });
+    project.anatomyPalette = palette;
+}
+
+function roiFixedColorEditable(project, roi) {
+    return !!(project && roi && roi.colorKey && App.project === project
+        && !App.shareMode && !project.__share && !roi._collab
+        && (project.rois || []).includes(roi));
+}
+
+async function setRoiFixedColor(project, roi, hex) {
+    if (!roiFixedColorEditable(project, roi) || !FixedColors.isPreset(hex)) return false;
+    const rgba = FixedColors.toRgba(hex);
+    roi.rgba = rgba.slice();
+    storeRoiPaletteColor(project, roi);
+    // Saving must not depend on a canvas/DOM repaint succeeding.
+    App.queueSave(0);
+    try {
+        populateRoiList();
+        App.redrawAllRois();
+        App.renderAnalysis();
+    } catch (e) { console.warn('ROI color repaint failed', e); }
+    const isCurrent = () => roiFixedColorEditable(project, roi)
+        && JSON.stringify(roi.rgba) === JSON.stringify(rgba);
+    try {
+        if (await App._flushSave() === false) return false;
+        if (!isCurrent()) return true;
+        const saved = await ProjectStorage.getProject(project.id);
+        // Switching projects, deleting the ROI, or choosing another color while
+        // IDB is reading must not verify or report an error for a stale edit.
+        if (!isCurrent()) return true;
+        const savedRoi = saved && (saved.rois || []).find(r => r.id === roi.id);
+        const savedPalette = saved && saved.anatomyPalette && saved.anatomyPalette[roi.colorKey];
+        if (!savedRoi || savedRoi.colorKey !== roi.colorKey
+            || JSON.stringify(savedRoi.rgba) !== JSON.stringify(rgba)
+            || !savedPalette || JSON.stringify(savedPalette.rgba) !== JSON.stringify(rgba)) {
+            App._showSaveError('ROI の色の永続化が確認できません', 'setRoiFixedColor');
+            return false;
+        }
+    } catch (e) {
+        if (isCurrent()) App._showSaveError('ROI の色の保存確認に失敗しました: ' + ((e && e.message) || e), 'setRoiFixedColor');
+        return false;
+    }
+    return true;
+}
+
+function openRoiFixedColorPicker(anchor, project, roi) {
+    if (!roiFixedColorEditable(project, roi)) return;
+    const rgba = roi.rgba || [128, 128, 128, 255];
+    const hex = '#' + rgba.slice(0, 3).map(v => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0')).join('');
+    FixedColors.open({
+        anchor, value: hex, allowClear: false, title: 'ROI の色',
+        isValid: () => roiFixedColorEditable(project, roi),
+        onSelect: value => setRoiFixedColor(project, roi, value),
+    });
 }
 
 // Server-side `rois` rows are flat (one per section + colorKey). The
@@ -10563,7 +10640,7 @@ function groupRoiRowsByColor(rows, palette) {
         const ck = r.color_key || 'default';
         let entry = byColor.get(ck);
         if (!entry) {
-            const pal = palette[ck];
+            const pal = palette[ck] || DEFAULT_ANATOMY_PALETTE[ck];
             entry = {
                 id: r.id,
                 colorKey: ck,
@@ -10660,10 +10737,24 @@ function populateRoiList() {
         });
         left.appendChild(showChk);
 
-        const sw = document.createElement('span');
-        sw.className = 'color-swatch';
+        const sw = document.createElement('button');
+        sw.type = 'button';
+        sw.className = 'color-swatch flex-none';
+        sw.style.padding = '0';
         const c = roi.rgba || [128, 128, 128, 255];
         sw.style.backgroundColor = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (c[3] / 255) + ')';
+        const colorEditable = roiFixedColorEditable(project, roi);
+        sw.disabled = !colorEditable;
+        sw.title = colorEditable ? 'ROI の色を選択'
+            : (roi._collab ? '共同研究者の ROI の色は閲覧のみです' : '共有画面では ROI の色は閲覧のみです');
+        sw.setAttribute('aria-label', (roi.name || roi.colorKey || 'ROI') + ' の色');
+        if (colorEditable) {
+            sw.style.cursor = 'pointer';
+            sw.addEventListener('click', (e) => {
+                e.preventDefault(); e.stopPropagation();
+                openRoiFixedColorPicker(sw, project, roi);
+            });
+        }
         left.appendChild(sw);
 
         const nameSp = document.createElement('span');
@@ -12578,10 +12669,9 @@ function renderMethodTable() {
             : 'background:transparent;';
 
         const cellHtml = '' +
-            // <input type="color"> は 1390 行ぶん作ると DOM が重いので、
-            // 表の外に 1 個だけ置いたものを使い回す (_sharedMarkerInput)。
+            // 固定色ピッカーは共有し、行には軽いスウォッチだけを置く。
             '<td class="px-1 py-1 border-b border-gray-100 text-center" data-cell="marker">' +
-                '<button type="button" class="marker-swatch" title="Set marker colour" style="' + markerSwatchStyle + '"></button>' +
+                '<button type="button" class="marker-swatch" aria-haspopup="dialog" style="' + markerSwatchStyle + '"></button>' +
             '</td>' +
             '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + diagBadge + '</td>' +
             // ノンターゲットは m/z・アダクト・分子式 + 強度 (Mean/Max)。
@@ -12603,6 +12693,7 @@ function renderMethodTable() {
                     ' data-layer-key="' + safe(layerKey) + '" title="MRM管理へ登録">' +
                  '</td>'));
         tr.innerHTML = cellHtml;
+        _setMarkerSwatchLabel(tr.querySelector('.marker-swatch'), markerColor);
         // リスナーは行に付けない。1390 行 × 7 個 ≒ 8300 個のリスナーになり、
         // 表を組み直すたびに全部作り直していた。クリック / ダブルクリック /
         // 右クリックは tbody 1 箇所で受けて data-layer-key から行を特定する
@@ -12668,7 +12759,7 @@ function _bindMethodRowDelegation(tbody) {
             ev.stopPropagation();
             // Right click (or shift) clears the marker.
             if (ev.shiftKey || ev.button === 2) { applyMarkerColor(panel, layerKey, null); return; }
-            _openSharedMarkerInput(panel, layerKey);
+            _openSharedMarkerInput(panel, layerKey, t);
             return;
         }
         // 選択チェックは行のクリック動作 (化合物切替 / レイヤー操作) を起こさない。
@@ -12736,51 +12827,79 @@ function _bindMethodRowDelegation(tbody) {
     });
 }
 
-// 表の外に 1 個だけ置く色ピッカー。行ごとに <input type="color"> を持つと
-// 1390 個の DOM ノードになるので、押されたスウォッチに合わせて使い回す。
-let _sharedMarkerInput = null;
-function _openSharedMarkerInput(panel, layerKey) {
-    if (!_sharedMarkerInput) {
-        const inp = document.createElement('input');
-        inp.type = 'color';
-        // 画面外へ置く (display:none だと一部ブラウザで click() が効かない)。
-        inp.style.cssText = 'position:fixed;left:-9999px;top:0;width:0;height:0;opacity:0;';
-        inp.tabIndex = -1;
-        inp.addEventListener('input', (ev) => {
-            const tgt = _sharedMarkerInput._target;
-            if (!tgt) return;
-            // パネルが作り直されていたら書き込まない。この入力は document.body に
-            // 残り続けるので、_target が古いパネル (= 古い project 一式) を
-            // 掴んだままになるのを避ける意味もある。
-            const live = App.panels && App.panels.get(tgt.sectionId);
-            if (!live || live !== tgt.panel) { _sharedMarkerInput._target = null; return; }
-            applyMarkerColor(tgt.panel, tgt.layerKey, ev.target.value);
-        });
-        // ピッカーを閉じたら参照を手放す (パネル / project を掴み続けない)。
-        inp.addEventListener('change', () => { _sharedMarkerInput._target = null; });
-        document.body.appendChild(inp);
-        _sharedMarkerInput = inp;
-    }
-    const ent = panel.section.msiSeries && panel.section.msiSeries[layerKey];
-    _sharedMarkerInput.value = (ent && ent.markerColor) || '#ff0000';
-    _sharedMarkerInput._target = { panel, layerKey, sectionId: panel.section.id };
-    _sharedMarkerInput.click();
+// ピッカーを開いた後に PJ・切片・レイヤーが入れ替わっても、古い対象には書き込まない。
+function _markerTargetIsCurrent(panel, layerKey, project, section, ent) {
+    return !!(project && App.project === project && panel && !panel._destroyed
+        && section && panel.section === section && App.activeSectionId === section.id
+        && App.panels && App.panels.get(section.id) === panel
+        && (project.sections || []).includes(section)
+        && ent && section.msiSeries && section.msiSeries[layerKey] === ent);
+}
+
+function _openSharedMarkerInput(panel, layerKey, anchor) {
+    const project = App.project;
+    const section = panel && panel.section;
+    const ent = section && section.msiSeries && section.msiSeries[layerKey];
+    const isValid = () => _markerTargetIsCurrent(panel, layerKey, project, section, ent);
+    if (!isValid()) return;
+    const share = document.body.classList.contains('share-mode');
+    FixedColors.open({
+        anchor,
+        value: ent.markerColor || null,
+        allowClear: true,
+        title: 'Method の色',
+        note: 'この切片のみ' + (share ? '・この画面のみ（再読込で元に戻ります）' : ''),
+        isValid,
+        onSelect: (color) => { if (isValid()) applyMarkerColor(panel, layerKey, color); },
+    });
 }
 
 // Persist a marker colour on a single MSI layer and refresh the bits of UI
 // (Method table, thumbnail outline, Section panel outline) that rely on it.
 function applyMarkerColor(panel, layerKey, color) {
-    const ent = panel.section.msiSeries && panel.section.msiSeries[layerKey];
-    if (!ent) return;
+    const section = panel && panel.section;
+    const ent = section && section.msiSeries && section.msiSeries[layerKey];
+    if (!_markerTargetIsCurrent(panel, layerKey, App.project, section, ent)) return;
+    if (color != null && !FixedColors.isPreset(color)) return;
+    if ((ent.markerColor || null) === color) return;
     if (color) ent.markerColor = color;
     else delete ent.markerColor;
-    panel.refreshMarkerOutline(layerKey);
-    panel.rebuildLayerBar();
-    // 表全体ではなく該当スウォッチ 1 個だけ塗り替える。色ピッカーはドラッグ中
-    // input を連射するので、1 目盛りごとに 1390 行を組み直していた。
-    // markerColor は並び順にも絞り込みにも効かないので、メモも触らなくてよい。
-    _restampMarkerSwatch(layerKey, color);
-    App.queueSave();
+    // 共有画面の色は表示中だけ有効。保存済みと誤認させる同期操作は行わない。
+    if (!document.body.classList.contains('share-mode')) App.queueSave();
+    // 保存を先に予約し、描画失敗で編集が失われないようにする。
+    try {
+        panel.refreshMarkerOutline(layerKey);
+        panel.rebuildLayerBar();
+        // 表全体ではなく該当スウォッチだけを更新する。
+        _restampMarkerSwatch(layerKey, color);
+        _refreshKmdMarkerColor(layerKey);
+    } catch (e) { console.warn('Method color repaint failed', e); }
+}
+
+function _setMarkerSwatchLabel(sw, color) {
+    if (!sw) return;
+    const preset = FixedColors.colors.find(c => c.hex.toLowerCase() === String(color || '').toLowerCase());
+    const name = preset ? preset.name : color ? '既存の独自色' : '色なし';
+    const label = 'Method の色：' + name + '（固定10色から選択・Shift＋クリック／右クリックで解除）';
+    sw.title = label;
+    sw.setAttribute('aria-label', label);
+}
+
+function _refreshKmdMarkerColor(layerKey) {
+    if (App.analysisMode !== 'kmd') return;
+    const host = document.getElementById('graph-container');
+    const model = host && host._lastKmd;
+    const canvas = host && host.querySelector('canvas.kmd-scatter');
+    const point = model && model.points.find(p => p.key === layerKey);
+    if (!point || !canvas) return;
+    // buildKmdPoints と同じ「先に現れる色付き切片」を採用する。
+    // 変更された点の色だけ更新し、系列解析や Method 表の再構築は行わない。
+    point.markerColor = null;
+    for (const section of ((App.project && App.project.sections) || [])) {
+        const ent = section.msiSeries && section.msiSeries[layerKey];
+        if (ent && ent.markerColor) { point.markerColor = ent.markerColor; break; }
+    }
+    drawKmdScatter(canvas, model);
 }
 
 function _restampMarkerSwatch(layerKey, color) {
@@ -12798,6 +12917,7 @@ function _restampMarkerSwatch(layerKey, color) {
     sw.style.cssText = color
         ? ('background:' + color + ';border-color:' + color + ';')
         : 'background:transparent;';
+    _setMarkerSwatchLabel(sw, color);
 }
 
 // 行の状態クラス (active / focus) だけを貼り直す。実測棚卸しの
@@ -24084,6 +24204,7 @@ const App = {
     },
 
     async _hydrateSharedProject(session) {
+        if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
         const doc = await SupabaseClient.fetchProjectDoc(session.token);
         if (!doc) { showToast('Share project の取得に失敗しました'); return; }
         // The RPC returns { id, slug, displayName, anatomyPalette, sections[], meta }.
@@ -24529,6 +24650,7 @@ const App = {
     },
 
     async openProject(id) {
+        if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
         if (SharePreview.isOpen()) SharePreview.close();
         const abortSwitch = () => {
             const picker = document.getElementById('project-picker');
@@ -24573,7 +24695,9 @@ const App = {
         this._publishDirty = !!project.__publishPending;
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         parquetReleaseAll();               // worker が抱えている parquet 索引も返す
-        this.project.anatomyPalette = this.project.anatomyPalette || DEFAULT_ANATOMY_PALETTE;
+        if (!this.project.anatomyPalette || this.project.anatomyPalette === DEFAULT_ANATOMY_PALETTE) {
+            this.project.anatomyPalette = JSON.parse(JSON.stringify(DEFAULT_ANATOMY_PALETTE));
+        }
         this.project.sections = this.project.sections || [];
         this.sectionVisibility().ensure();
         this.project.rois = this.project.rois || [];
@@ -24689,7 +24813,7 @@ const App = {
         const project = {
             id: uid('proj'),
             displayName: name,
-            anatomyPalette: DEFAULT_ANATOMY_PALETTE,
+            anatomyPalette: JSON.parse(JSON.stringify(DEFAULT_ANATOMY_PALETTE)),
             sections: [],
             rois: [],
             roiHidden: {},
@@ -25241,6 +25365,7 @@ const App = {
     },
 
     setActiveSection(id) {
+        if (id !== this.activeSectionId && typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
         this.activeSectionId = id;
         this.panels.forEach(p => p.setActive(p.section.id === id));
         renderMethodTable();
@@ -25751,7 +25876,7 @@ const App = {
             roi.polysBySection = roi.polysBySection || {};
             roi.polysBySection[sectionId] = verts;
         } else {
-            const def = pickUnusedColorKey(this.project);
+            const def = pickUnusedColorKey(this.project, !!this.shareMode);
             const name = (prompt('ROI 名を入力してください', def.name || def.key) || '').trim() || def.name || def.key;
             roi = {
                 id: uid('roi'),
@@ -25762,6 +25887,7 @@ const App = {
             };
             this.project.rois = this.project.rois || [];
             this.project.rois.push(roi);
+            if (!this.shareMode && !this.project.__share) storeRoiPaletteColor(this.project, roi);
         }
         roi.geometryBySection=roi.geometryBySection||{};
         roi.geometryBySection[sectionId]=sourceGeometry ? {

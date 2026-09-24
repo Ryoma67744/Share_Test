@@ -5,6 +5,7 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { html, standalone } = require('./viewer-runtime.cjs');
+const { loadFixedColors, defaultPaletteSource } = require('./fixed-colors-runtime.cjs');
 
 const { element, geometryGlobals, roiDom } = require('./roi-dom.cjs');
 
@@ -51,7 +52,10 @@ async function main() {
   const panelStart = html.indexOf('class SectionPanel {');
   const appStart = html.indexOf('const App = {');
   assert.ok(panelStart >= 0 && appStart >= 0);
+  loadFixedColors(context);
   vm.runInContext([
+    defaultPaletteSource(),
+    standalone('roiFixedColorEditable'),
     standalone('roiPolygonForDisplay'),
     standalone('populateRoiList'),
     html.slice(panelStart, html.indexOf('\n}\n', panelStart) + 2),

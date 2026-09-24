@@ -6,6 +6,7 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { html, standalone } = require('./viewer-runtime.cjs');
+const { loadFixedColors, defaultPaletteSource } = require('./fixed-colors-runtime.cjs');
 
 const { element, geometryGlobals, roiDom } = require('./roi-dom.cjs');
 
@@ -39,8 +40,10 @@ async function main() {
     msiSourceReference: () => 'source-one',
     msiAxisInterpolate: (_axis, value) => value,
   });
+  loadFixedColors(context);
   vm.runInContext([
-    ...['pickUnusedColorKey', 'msiValidRoiGeometry', 'msiRoiGeometryMeta',
+    defaultPaletteSource(),
+    ...['pickUnusedColorKey', 'storeRoiPaletteColor', 'roiFixedColorEditable', 'msiValidRoiGeometry', 'msiRoiGeometryMeta',
       'msiLayerSourceGeometry', 'roiPolygonForDisplay', 'populateRoiList'].map(standalone),
     html.slice(panelStart, panelEnd),
     html.slice(appStart, appEnd),
