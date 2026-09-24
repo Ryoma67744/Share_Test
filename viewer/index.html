@@ -3919,6 +3919,10 @@ function msiDisplayRasterPointToLegacy(section,key,point) {
         msiAxisInterpolate(g.legacy.y,g.displayGeometry.y.origin+point[1]*g.displayGeometry.y.step,false)];
 }
 function roiPolygonForDisplay(roi,section,key,poly) {
+    // A project-wide ROI is normally drawn on only some sections. Callers
+    // also iterate across undrawn sections; an absent polygon has no display
+    // coordinates to transform.
+    if (!Array.isArray(poly) || !poly.length) return null;
     const g=msiLayerSourceGeometry(section,key);if(!g)return null;
     const meta=msiRoiGeometryMeta(roi,section);
     if(!meta&&new Set(Object.values(section.msiSeries||{}).map(msiSourceReference)).size>1)return null;
@@ -8531,6 +8535,7 @@ class SectionPanel {
                 for (const roi of (this.project.rois || [])) {
                     if (hidden[roi.id]) continue;
                     const saved = roi.polysBySection && roi.polysBySection[this.section.id];
+                    if (!Array.isArray(saved) || !saved.length) continue;
                     const poly = typeof roiPolygonForDisplay === 'function'
                         ? roiPolygonForDisplay(roi, this.section, this._pickRefMsiKey(), saved) : saved;
                     if (!poly || !poly.length) continue;
@@ -8883,6 +8888,7 @@ class SectionPanel {
             for (const roi of (this.project.rois || [])) {
                 if (this.project.roiHidden && this.project.roiHidden[roi.id]) continue;
                 const saved = (roi.polysBySection || {})[this.section.id];
+                if (!Array.isArray(saved) || !saved.length) continue;
                 const poly = typeof roiPolygonForDisplay === 'function'
                     ? roiPolygonForDisplay(roi, this.section, this._pickRefMsiKey(), saved) : saved;
                 if (!poly || !poly.length) continue;
