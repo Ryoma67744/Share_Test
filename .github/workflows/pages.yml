@@ -23,12 +23,30 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: |
+            connector/package-lock.json
+            tests/package-lock.json
+      - name: Install connector test dependencies
+        working-directory: connector
+        run: npm ci --no-audit --no-fund
+      - name: Install canvas test dependencies
+        working-directory: tests
+        run: npm ci --no-audit --no-fund
+      - name: Run all regressions and connector selftest
+        run: node tools/test.cjs
+      - name: Build online distribution
+        run: node tools/build.cjs --mode web --out dist/web
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: dist/web
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v4
