@@ -410,6 +410,9 @@ export function writeEditedExp(doc, rows) {
 // scalar can depend on channel numbers too (for example ChannelOrder,2,1).
 const selectionScalars = /^(?:NumFunctions|NoOfFunctions|NumberOfFunctions|FunctionCount|FunctionType|ScanType|FunctionNumber|FunctionIndex|Polarity|IonMode|IonPolarity|IonizationMode)$/i;
 const selectionFunctionMarker = /^(?:\[Function[ _]*1\]|Function[ _]*1:?)$/i;
+// A section title has no channel-dependent value. Recognize this reported
+// header explicitly; it does not exempt the records following it from checks.
+const selectionGeneralHeader = /^(?:GENERAL INFORMATION|\[GENERAL INFORMATION\])$/i;
 const MAX_TIMING_SCALE = 128;
 function indexedKey(key) {
   for (const pattern of indexedPatterns) {
@@ -454,6 +457,11 @@ function selectionTiming(doc) {
   for (const line of original.lines) {
     if (!line.text.trim() || /^\s*(?:;|#|\/\/)/.test(line.text)) continue;
     if (line.value === null && selectionFunctionMarker.test(line.text.trim())) continue;
+    if (selectionGeneralHeader.test(line.key) && (line.value === null || !line.value.trim())) {
+      if (seen.has('general information')) fail('SELECTION_PROFILE', 'GENERAL INFORMATION が複数あるため、選択行だけの出力には対応していません。');
+      seen.add('general information');
+      continue;
+    }
     if (indexedKey(line.key)) continue;
     if (line.value === null || (!['NumSIRMasses', 'NoOfChannels', 'FunctionScanTime(sec)'].includes(line.key) && !selectionScalars.test(line.key))) {
       fail('SELECTION_PROFILE', `項目「${line.key}」のチャンネル依存を確認できないため、選択行だけの出力には対応していません。`);

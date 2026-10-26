@@ -138,7 +138,10 @@ async function run() {
         await page.waitForFunction(() => document.querySelector('[aria-label="1 行目 CE（衝突）"]').value === '15');
 
         // On a supported fixed-dwell layout, the download contains checked rows only.
-        await page.getByLabel('.exp ファイルを選択', { exact: true }).setInputFiles(selectionFixture);
+        await page.getByLabel('.exp ファイルを選択', { exact: true }).setInputFiles({
+            name: 'flat-mrm-selection-synthetic.exp', mimeType: 'application/octet-stream',
+            buffer: Buffer.concat([Buffer.from('GENERAL INFORMATION\r\n'), await readFile(selectionFixture)]),
+        });
         await page.getByText(/flat-mrm-selection-synthetic\.exp/).waitFor();
         await page.getByLabel('1 行目を選択', { exact: true }).uncheck();
         await ce.fill('Infinity'); // An unchecked invalid value is not exported.
@@ -153,6 +156,7 @@ async function run() {
         assert.equal(selected.rows[0].details.dwell, '0.0200');
         assert.equal(selected.rows[0].details.delay, '0.0042');
         assert.match(output.bytes.toString(), /FunctionScanTime\(sec\),0\.0242/);
+        assert.ok(output.bytes.toString().startsWith('GENERAL INFORMATION\r\n'), 'Section header is retained in the actual download');
         assert.equal(await page.getByRole('textbox', { name: /^\d+ 行目 化合物名$/ }).count(), 2, 'Export does not delete rows from the working document');
         await page.getByText(/未保存/).waitFor();
         await page.getByLabel('2 行目を選択', { exact: true }).uncheck();
