@@ -9,6 +9,7 @@ import { parseExp } from '../mrm/exp-core.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = resolve(root, 'tests/fixtures/exp/flat-mrm-synthetic.exp');
 const selectionFixture = resolve(root, 'tests/fixtures/exp/flat-mrm-selection-synthetic.exp');
+const massLynxFixture = resolve(root, 'tests/fixtures/exp/masslynx-mrm-synthetic.exp');
 // UI tests use injected in-memory services. No Supabase or real account is used.
 const harness = `<!doctype html><html lang="ja"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -180,6 +181,27 @@ async function run() {
         assert.equal(await page.getByLabel('2 行目を選択', { exact: true }).isChecked(), true);
         await page.setViewportSize({width:800,height:900});
         assert.equal(await exportButton.isVisible(), true);
+
+        // The sectioned MassLynx layout keeps global settings and source times.
+        await page.getByLabel('.exp ファイルを選択', { exact: true }).setInputFiles(massLynxFixture);
+        await page.getByText(/masslynx-mrm-synthetic\.exp/).waitFor();
+        await page.getByText(/元のFunctionScanTime・InterScan・Dwell・Delayを保持/).waitFor();
+        await page.getByLabel('1 行目を選択', { exact: true }).uncheck();
+        await page.getByLabel('3 行目を選択', { exact: true }).uncheck();
+        await page.getByLabel('2 行目 CE（衝突）', { exact: true }).fill('17');
+        assert.equal(await exportButton.isDisabled(), false);
+        output = await downloadBytes(page, () => exportButton.click());
+        const massLynxSelected = parseExp(output.bytes);
+        assert.equal(massLynxSelected.rows.length, 1);
+        assert.equal(massLynxSelected.rows[0].name, 'Synthetic_B');
+        assert.equal(massLynxSelected.rows[0].ce, '17');
+        assert.equal(massLynxSelected.rows[0].details.dwell, '0.0200');
+        assert.equal(massLynxSelected.polarity, 'positive');
+        assert.match(output.bytes.toString(), /FunctionScanTime\(sec\),0\.1200\r\n/);
+        assert.match(output.bytes.toString(), /FunctionInterScanTime\(sec\),0\.0050\r\n/);
+        assert.match(output.bytes.toString(), /AnalogChannelDescription8,/);
+        assert.match(output.bytes.toString(), /MUXAnalogOffset8,/);
+        assert.equal(await page.getByRole('textbox', { name: /^\d+ 行目 化合物名$/ }).count(), 3);
         assert.deepEqual(errors, [], 'No browser runtime errors');
         console.log('exp browser regression: all workflows passed');
     } finally {

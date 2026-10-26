@@ -1,9 +1,9 @@
 /**
  * Lossless editor for the single, flat MRM layout emitted by mrm.html.
- * This is deliberately not a general MassLynx method converter. No real vendor
- * .exp fixture has been supplied: multiple functions and arbitrary structural
- * edits are rejected. Selecting fewer channels requires a strict, known layout
- * with manual dwell and an exactly verifiable scan-time relationship.
+ * This is deliberately not a general MassLynx method converter. Multiple
+ * functions and arbitrary structural edits are rejected. Selecting fewer
+ * channels requires a known layout with manual dwell. Sectioned MassLynx MRM
+ * files preserve source timing; the minimal generated layout verifies its sum.
  * Unknown bytes are retained, and edited values are patched into original bytes.
  */
 export const MAX_EXP_BYTES = 1024 * 1024;
@@ -151,7 +151,7 @@ function sameValue(a, b, field) { return field === 'name' ? a === b : canonicalN
 function findPolarity(lines, warnings) {
   const found = new Set();
   for (const line of lines) {
-    if (!/^(?:Polarity|IonMode|IonPolarity|IonizationMode)$/i.test(line.key) || line.value === null) continue;
+    if (!/^(?:Polarity|FunctionPolarity|IonMode|IonPolarity|IonizationMode)$/i.test(line.key) || line.value === null) continue;
     const raw = line.value.trim().toLowerCase();
     if (['+', 'positive', 'pos', 'es+', 'esi+'].includes(raw)) found.add('positive');
     else if (['-', 'negative', 'neg', 'es-', 'esi-'].includes(raw)) found.add('negative');
@@ -238,10 +238,13 @@ export function parseExp(input, options = {}) {
     rows.push(row);
   }
   const polarity = findPolarity(lines, warnings);
+  if (lines.some(line => line.key === 'FunctionTypes')) {
+    warnings.push('この形式の部分出力では、元のFunctionScanTime・InterScan・Dwell・Delayを保持します。測定時間を再計算しないため、出力後はMassLynxで時間設定を確認してください。');
+  }
   warnings.push('実ファイル・対象 MassLynx での互換性確認が必要です。任意の行追加・削除・並べ替えには対応していません。チェックした行だけの出力は、既知の項目と固定Dwellの時間設定を検証できる形式に限ります。');
   const doc = freeze({ version: 1, parserVersion: PARSER_VERSION, profile: 'flat-mrm-v1', filename, encoding,
     bom: bomLength > 0, byteLength: bytes.length, rows, polarity, warnings,
-    capabilities: { editValues: true, structural: false, selectedExport: 'validated-profile', reason: '任意の行追加・削除・並べ替えは未対応です。選択した行だけの出力は、既知の項目・固定Dwell・チャンネルごとの時間合計を検証できる場合に利用できます。' },
+    capabilities: { editValues: true, structural: false, selectedExport: 'validated-profile', reason: '任意の行追加・削除・並べ替えは未対応です。選択した行だけの出力は、既知の項目・固定Dwell・形式ごとの時間設定を検証できる場合に利用できます。' },
   });
   originals.set(doc, { bytes, encoding, bomLength, map, lines });
   return doc;
@@ -408,11 +411,89 @@ export function writeEditedExp(doc, rows) {
 
 // Structural export is deliberately stricter than value editing: an unknown
 // scalar can depend on channel numbers too (for example ChannelOrder,2,1).
-const selectionScalars = /^(?:NumFunctions|NoOfFunctions|NumberOfFunctions|FunctionCount|FunctionType|ScanType|FunctionNumber|FunctionIndex|Polarity|IonMode|IonPolarity|IonizationMode)$/i;
+const selectionScalars = /^(?:NumFunctions|NoOfFunctions|NumberOfFunctions|FunctionCount|FunctionType|ScanType|FunctionNumber|FunctionIndex|Polarity|FunctionPolarity|IonMode|IonPolarity|IonizationMode)$/i;
 const selectionFunctionMarker = /^(?:\[Function[ _]*1\]|Function[ _]*1:?)$/i;
 // A section title has no channel-dependent value. Recognize this reported
 // header explicitly; it does not exempt the records following it from checks.
 const selectionGeneralHeader = /^(?:GENERAL INFORMATION|\[GENERAL INFORMATION\])$/i;
+// Explicitly reviewed global fields from the supplied single-function MassLynx
+// layout. Numeric suffixes here are analog inputs / solvent windows, not MRM
+// channel numbers. Never use a blanket "unknown metadata is harmless" rule.
+const massLynxGeneralKeys = new Set(`ExperimentName Sorted ExperimentCreationTime VersionNumber ExperimentDuration
+ExperimentCalibrationFilename ExperimentNegCalibrationFilename SolventDelayDivertValveEnabled
+ReferenceFrequency ReferenceConeVoltage ReferenceScanTime ReferenceCentroidAverage ReferenceSetMass ReferenceCollisionEnergy
+PositivePolarity WMode DREExtended ExperimentExtension ExperimentExtensionData NumberOfFunctions FunctionTypes`.split(/\s+/));
+const massLynxFunctionKeys = new Set(`FunctionType FunctionDataFormat FunctionIonMode FunctionPolarity FunctionInstrumentConditions
+FunctionStartMass FunctionEndMass FunctionStartTime(min) FunctionEndTime(min) FunctionScanTime(sec) FunctionInterScanTime(sec)
+NumFunctions Resolution PrimaryScanLock SecondaryScanLock ThresholdLock StepLock FunctionOnOffState FunctionExclusiveState
+PeakDisplayTuneMode SIRMode NumSIRMasses FastLockOn UseWMode ConeVoltage UseTunePageConeVoltage UseCVRamp CVRampStart CVRampEnd
+CVRampStartMass CVRampEndMass UseTuneProbeTemp ProbeTemp UseProbeTempRamp ProbeTempRampStart ProbeTempRampEnd ProbeTempRampInc
+Gain PointsPerAMU StoreZeros UseSoftIonisationMode SetMass CollisionEnergy UseTunePageCE UseCERamp CERampStart CERampEnd
+CERampStartMass CERampEndMass Enhanced NoOfChannels Span MassesVSorted PICChannelNum PICActThreshold PICMinActThreshold
+PICCollisionEnergy PICScanFunc UseDefPICActThreshold UseDefPICScanFuncType UseDefPICCollisionEnergy EnableMRMSmooth
+MRMSmoothWidth MRMSmoothRepeats DefaultPICScanType DefaultPICActThreshold DefaultPICMinimumActThreshold DefaultPICResetThreshold
+DefaultPICMassAboveParent DefaultPICMinimumMass DefaultPICCollisionEnergy DefaultPICDataFormat DefaultPICScanDuration
+DefaultPICScanSpeed FractionLowMassIndex FractionHighMassIndex FractionMultiplier FractionMode PointsPerPeakWidth
+RequiredPointsPerPeak ExperimentVSorted DesiXStart DesiYStart DesiXLength DesiXStep DesiXRate DesiYLength DesiYStep DesiSlot`.split(/\s+/));
+massLynxFunctionKeys.add('Scans To Sum');
+massLynxFunctionKeys.add('Multiple Scan Duration');
+const massLynxGeneralIndexed = /^(?:(?:AnalogChannelDescription|MUXAnalogOffset)[1-8]|SolventDelay(?:Start|End|Temp)[1-4])$/;
+const inactiveTimedEvents = 'No Change,No Change,No Change,No Change,No Change,LC,5,No Action,No Action,250,20,0,0';
+
+function massLynxSelectionLayout(doc) {
+  const original = originalOf(doc), map = new Map();
+  let section = null;
+  for (const line of original.lines) {
+    if (!line.text.trim() || /^\s*(?:;|#|\/\/)/.test(line.text)) continue;
+    if (selectionGeneralHeader.test(line.key) && (line.value === null || !line.value.trim())) {
+      if (section !== null) fail('SELECTION_PROFILE', 'GENERAL INFORMATION はファイル冒頭に1回だけ必要です。');
+      section = 'general'; continue;
+    }
+    if (line.value === null && selectionFunctionMarker.test(line.text.trim())) {
+      if (section !== 'general') fail('SELECTION_PROFILE', 'GENERAL INFORMATION の後に FUNCTION 1 が1回だけ必要です。');
+      section = 'function'; continue;
+    }
+    const allowed = section === 'general'
+      ? massLynxGeneralKeys.has(line.key) || massLynxGeneralIndexed.test(line.key)
+      : section === 'function' && (massLynxFunctionKeys.has(line.key) || indexedKey(line.key));
+    if (!allowed || line.value === null) fail('SELECTION_PROFILE', `項目「${line.key}」はこのセクションの選択出力に対応していません。`);
+    if (map.has(line.key)) fail('SELECTION_PROFILE', `項目「${line.key}」が重複しています。`);
+    map.set(line.key, line);
+  }
+  if (section !== 'function') fail('SELECTION_PROFILE', 'FUNCTION 1 がありません。');
+  const expect = (key, value) => {
+    const line = requireLine(map, key);
+    if (typeof value === 'number' ? canonicalNumber(line.value) !== canonicalNumber(value) : line.value.trim() !== value) {
+      fail('SELECTION_PROFILE', `${key} が対応する値 ${value} ではないため、選択行だけの出力には対応していません。`);
+    }
+  };
+  expect('VersionNumber', 1); expect('NumberOfFunctions', 1); expect('NumFunctions', 1);
+  expect('FunctionTypes', 'MRM'); expect('FunctionType', 'MRM');
+  const polarity = requireLine(map, 'FunctionPolarity').value.trim().toLowerCase();
+  if (!['positive', 'negative'].includes(polarity)) fail('SELECTION_PROFILE', 'FunctionPolarity を確認できません。');
+  expect('PositivePolarity', polarity === 'positive' ? 1 : 0);
+  // These features can refer to channel indices; absent/active/unknown states
+  // are not silently carried into a document with different channel numbers.
+  expect('PICChannelNum', -1); expect('FractionMode', 0);
+  expect('MassesVSorted', 0); expect('ExperimentVSorted', 0); expect('ReferenceFrequency', 0);
+  for (const key of ['FractionLowMassIndex', 'FractionHighMassIndex']) {
+    const values = requireLine(map, key).value.split(',');
+    if (values.length !== 32 || values.some(value => canonicalNumber(value) !== '0')) fail('SELECTION_PROFILE', `${key} が無効な32項目の配列ではありません。`);
+  }
+  expect('ExperimentExtension', 'TIMED_EVENTS_EXTENSION');
+  if (requireLine(map, 'ExperimentExtensionData').value.split(',').map(value => value.trim()).join(',') !== inactiveTimedEvents) {
+    fail('SELECTION_PROFILE', 'このタイムイベント設定の選択出力には対応していません。');
+  }
+  timingDecimal(requireLine(map, 'FunctionInterScanTime(sec)').value, 'FunctionInterScanTime(sec)');
+  const channelFields = new Map();
+  for (const key of map.keys()) {
+    const entry = indexedKey(key);
+    if (entry) channelFields.set(entry.index, (channelFields.get(entry.index) || 0) + 1);
+  }
+  for (const row of doc.rows) if (channelFields.get(row.channel) !== indexedPatterns.length) {
+    fail('SELECTION_PROFILE', `チャンネル ${row.channel} の設定が不足しています。`);
+  }
+}
 const MAX_TIMING_SCALE = 128;
 function indexedKey(key) {
   for (const pattern of indexedPatterns) {
@@ -454,7 +535,9 @@ function formatTiming(value) {
 }
 function selectionTiming(doc) {
   const original = originalOf(doc), seen = new Set();
-  for (const line of original.lines) {
+  const preserveSource = original.lines.some(line => line.key === 'FunctionTypes');
+  if (preserveSource) massLynxSelectionLayout(doc);
+  for (const line of preserveSource ? [] : original.lines) {
     if (!line.text.trim() || /^\s*(?:;|#|\/\/)/.test(line.text)) continue;
     if (line.value === null && selectionFunctionMarker.test(line.text.trim())) continue;
     if (selectionGeneralHeader.test(line.key) && (line.value === null || !line.value.trim())) {
@@ -485,10 +568,10 @@ function selectionTiming(doc) {
     return addTimings([dwell, delay]);
   });
   const scan = timingDecimal(requireLine(original.map, 'FunctionScanTime(sec)').value, 'FunctionScanTime(sec)', true);
-  if (!equalTimings(scan, addTimings(timings))) {
+  if (!preserveSource && !equalTimings(scan, addTimings(timings))) {
     fail('SELECTION_TIMING', 'FunctionScanTime(sec) が全チャンネルのDwellとDelayの合計に一致しません。時間設定の意味を確定できないため、選択行だけの出力には対応していません。');
   }
-  return timings;
+  return { channels: timings, preserveSource };
 }
 function selectedContext(doc, rows, selectedIds) {
   originalOf(doc);
@@ -557,8 +640,10 @@ function selectedPatches(doc, context) {
     else if (numbers.get(entry.index) !== entry.index) patches.push({ ...channelSuffixSpan(original, line, entry.index), bytes: encodeValue(String(numbers.get(entry.index)), original.encoding) });
   }
   for (const key of ['NumSIRMasses', 'NoOfChannels']) patches.push(numericPatch(original.map.get(key), String(kept.length), original.encoding));
-  const selectedTime = addTimings(kept.map(row => context.timings[row.channel - 1]));
-  patches.push(numericPatch(original.map.get('FunctionScanTime(sec)'), formatTiming(selectedTime), original.encoding));
+  if (!context.timings.preserveSource) {
+    const selectedTime = addTimings(kept.map(row => context.timings.channels[row.channel - 1]));
+    patches.push(numericPatch(original.map.get('FunctionScanTime(sec)'), formatTiming(selectedTime), original.encoding));
+  }
   return patches.sort((a, b) => a.start - b.start);
 }
 function verifySelectedOutput(doc, output, context) {

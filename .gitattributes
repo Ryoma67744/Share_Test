@@ -2,6 +2,9 @@
 * text=auto eol=lf
 *.bat text eol=crlf
 
+# Lossless .exp regressions include CRLF and CRCRLF bytes on every platform.
+tests/fixtures/exp/*.exp -text -whitespace
+
 # Pinned dependency checksums cover the exact downloaded/reviewed bytes.
 vendor/** -text -whitespace
 *.png -text
