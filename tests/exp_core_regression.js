@@ -10,6 +10,11 @@ const path = require('node:path');
   const { parseExp, createDraft, validateEdits, writeEditedExp, verifyExport, serializeDocument, restoreDocument, ExpError, validateSelectedExport, writeSelectedExp } = core;
   const fixture = fs.readFileSync(path.join(__dirname, 'fixtures/exp/flat-mrm-synthetic.exp'), 'utf8');
   const selectionFixture = fs.readFileSync(path.join(__dirname, 'fixtures/exp/flat-mrm-selection-synthetic.exp'), 'utf8');
+  const { buildExp } = await import('../connector/src/exp.js');
+  const builtWithHeader = buildExp('GENERAL INFORMATION\r\n' + selectionFixture.replaceAll('\n', '\r\n'), [
+    { name: 'Lactate-NEG', precursor: 89, product: 43, cv: 20, ce: 11 },
+    { name: 'NEG_13C-Lactate-NEG', precursor: 92, product: 46, cv: 20, ce: 11 },
+  ]);
   const utf8 = text => new TextEncoder().encode(text);
   const decode = bytes => new TextDecoder().decode(bytes);
   const bytesEqual = (actual, expected) => assert.deepEqual(Buffer.from(actual), Buffer.from(expected));
@@ -344,6 +349,40 @@ FunctionScanTime(sec),0.0242
       rows[0].ce = '13.5';
       bytesEqual(writeSelectedExp(doc, rows, ['channel-1', 'channel-2']), writeEditedExp(doc, rows));
     }
+  });
+
+  test('GENERAL INFORMATION section headers survive selected export byte-for-byte', () => {
+    for (const header of ['GENERAL INFORMATION', ' GENERAL INFORMATION \t', 'GENERAL INFORMATION,', 'GENERAL INFORMATION, \t', '[GENERAL INFORMATION]', 'general information']) {
+      for (const newline of ['\n', '\r\n', '\r']) {
+        const source = header + newline + selectionFixture.replaceAll('\n', newline);
+        const expected = header + newline + secondSelected.replaceAll('\n', newline);
+        for (const encode of [utf8, text => utf16(text, false, true), text => utf16(text, true, true)]) {
+          const doc = parseExp(encode(source)), rows = createDraft(doc);
+          assert.equal(validateSelectedExport(doc, rows, ['channel-2']).valid, true);
+          bytesEqual(writeSelectedExp(doc, rows, ['channel-2']), encode(expected));
+          bytesEqual(writeSelectedExp(doc, rows, ['channel-1', 'channel-2']), encode(source));
+        }
+      }
+    }
+  });
+
+  test('GENERAL INFORMATION does not allow unknown settings or duplicate sections', () => {
+    for (const header of ['GENERAL INFORMATION,2,1', 'GENERAL INFORMATION\nCreatedBy,Test', 'GENERAL INFORMATION\nChannelOrder,2,1', 'GENERAL INFORMATION\nVendorRetentionTime_2,2.50', 'GENERAL INFORMATION\n[GENERAL INFORMATION]', 'GENERAL INFORMATION extra']) {
+      const source = header + '\n' + selectionFixture, doc = read(source), rows = createDraft(doc);
+      assert.equal(validateSelectedExport(doc, rows, ['channel-2']).valid, false, header);
+      throwsCode(() => writeSelectedExp(doc, rows, ['channel-2']), 'SELECTION');
+      bytesEqual(writeSelectedExp(doc, rows, ['channel-1', 'channel-2']), utf8(source));
+    }
+  });
+
+  test('existing builder output with GENERAL INFORMATION supports selected export', () => {
+    const source = builtWithHeader, doc = read(source), rows = createDraft(doc);
+    const output = writeSelectedExp(doc, rows, ['channel-2']);
+    const parsed = parseExp(output);
+    assert.equal(parsed.rows.length, 1);
+    assert.equal(parsed.rows[0].name, doc.rows[1].name);
+    assert.ok(decode(output).startsWith('GENERAL INFORMATION\r\n'));
+    assert.ok(decode(output).includes('FunctionScanTime(sec),0.0137\r\n'));
   });
 
   test('selection IDs reject zero, duplicate, unknown, non-array and sparse values', () => {
