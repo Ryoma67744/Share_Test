@@ -41,9 +41,14 @@ jobs:
         working-directory: tests
         run: npm ci --no-audit --no-fund
 
-      # Includes every *_regression.js / *_regression.cjs and connector parity.
+      # Includes all non-browser regressions (.js/.cjs/.mjs) and connector parity.
       - name: Run all regressions and connector selftest
         run: node tools/test.cjs
+      - name: Install browser for .exp editing workflows
+        working-directory: tests
+        run: npx playwright install --with-deps chromium
+      - name: Existing .exp browser workflows
+        run: node tests/exp_editor_browser_regression.mjs
       - name: Build online distribution
         run: node tools/build.cjs --mode web --out dist/web
       - name: Fetch and verify pinned Windows runtime

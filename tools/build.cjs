@@ -16,8 +16,10 @@ const VIEWER_FILES = [
   'roi-media-model.js', 'roi-media-msi.js', 'roi-media-service.js',
   'roi-media-viewer.css', 'roi-media-viewer.js', 'section-visibility.js',
 ].map(file => 'viewer/' + file);
+const MRM_FILES = ['exp-core.mjs', 'exp-editor.mjs', 'exp-editor.css', 'exp-library-import.mjs']
+  .map(file => 'mrm/' + file);
 const COMMON_FILES = ['.nojekyll', 'index.html', 'mrm.html', 'version.js', 'runtime-config.js',
-  'app-runtime.js', 'offline/offline.js', 'offline/local-mrm.js', 'vendor/SOURCES.json', ...VIEWER_FILES];
+  'app-runtime.js', 'offline/offline.js', 'offline/local-mrm.js', 'vendor/SOURCES.json', 'docs/EXP_EDITOR.md', ...VIEWER_FILES, ...MRM_FILES];
 const OFFLINE_FILES = ['offline/server.cjs', 'offline/config.cjs', 'offline/make-manifest.cjs',
   'START_HERE.txt', 'DISTRIBUTION_NOTE.txt', 'OFFLINE_GUIDE.md'];
 function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }

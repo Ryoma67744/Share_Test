@@ -74,6 +74,22 @@ async function verifyOnlineGateAndRouting(file) {
         const rows = await vm.runInContext('SupabaseClient.listMrmLibrary("real-master")', c);
         assert.equal(rows[0].id, 'cloud-row');
         assert.deepEqual(calls.at(-1), ['list_mrm_library', { _master_pw: 'real-master' }]);
+        vm.runInContext('renderLibrary = () => {}; loadLibrary = async () => {}; var expServices = expEditorServices()', c);
+        assert.deepEqual(Object.keys(vm.runInContext('expServices', c)).sort(), [
+            'getDocument', 'getLibrary', 'getPassword', 'library', 'listDocuments', 'refreshLibrary', 'registerRows', 'saveDocument',
+        ]);
+        await vm.runInContext('expServices.refreshLibrary()', c);
+        assert.equal(vm.runInContext('expServices.getLibrary()[0].id', c), 'cloud-row');
+        await vm.runInContext('expServices.registerRows([{row_id:"channel-1"}])', c);
+        assert.deepEqual(calls.at(-1), ['register_from_exp_batch', { _master_pw: 'test-password', _rows: [{row_id:'channel-1'}] }]);
+        await vm.runInContext('expServices.saveDocument({name:"Method",payload:{version:1},id:"doc-1",expected_revision:2})', c);
+        assert.deepEqual(calls.at(-1), ['save_mrm_exp_document', {
+            _master_pw: 'test-password', _name: 'Method', _payload: {version:1}, _id: 'doc-1', _expected_revision: 2,
+        }]);
+        await vm.runInContext('expServices.listDocuments()', c);
+        assert.deepEqual(calls.at(-1), ['list_mrm_exp_documents', { _master_pw: 'test-password' }]);
+        await vm.runInContext('expServices.getDocument("doc-1")', c);
+        assert.deepEqual(calls.at(-1), ['get_mrm_exp_document', { _master_pw: 'test-password', _id: 'doc-1' }]);
     } else {
         await vm.runInContext('SupabaseClient.listProjectsV2("real-master")', c);
         assert.deepEqual(calls.at(-1), ['list_projects_v2', { _master_pw: 'real-master' }]);
@@ -166,6 +182,27 @@ async function main() {
     assert.equal(vm.runInContext('SupabaseClient.configured()', mrm), false);
     assert.equal(vm.runInContext('SupabaseClient.libraryAvailable()', mrm), true);
     assert.equal((await vm.runInContext('SupabaseClient.listMrmLibrary("")', mrm)).length, 0);
+    const localCompoundId = await mrm.DesiLocalMrm.rpc('upsert_compound', { _name: 'Offline lactate', _polarity: '-' });
+    await mrm.DesiLocalMrm.rpc('upsert_transition', { _compound_id: localCompoundId, _precursor: 89, _product: 43, _ce: 11, _cv: 20 });
+    vm.runInContext('var originalRenderLibrary = renderLibrary; renderLibrary = () => {}; var localExpServices = expEditorServices()', mrm);
+    const localExpServices = vm.runInContext('localExpServices', mrm);
+    assert.equal(localExpServices.getPassword(), 'offline-local');
+    for (const key of ['registerRows', 'saveDocument', 'listDocuments', 'getDocument']) {
+        assert.equal(localExpServices[key], undefined, 'offline .exp must not expose unsupported RPC: ' + key);
+    }
+    await localExpServices.refreshLibrary();
+    const { libraryChoices } = await import('../mrm/exp-editor.mjs');
+    const replacement = libraryChoices(localExpServices.getLibrary())[0];
+    assert.equal(replacement.name, 'Offline lactate'); assert.equal(replacement.polarity, '-');
+    assert.equal(replacement.precursor, 89); assert.equal(replacement.ce, 11);
+    await mrm.DesiLocalMrm.rpc('upsert_compound', { _name: 'Later local row', _polarity: '+' });
+    await localExpServices.refreshLibrary();
+    assert.equal(localExpServices.getLibrary().length, 2, 'the editor reads the current persisted local library');
+    assert.equal(mrm.sessionStorage.getItem('desi:masterPw'), null);
+    // Restore the initial empty library for the existing empty-state regression below.
+    await mrm.DesiLocalMrm.importDocument({format:'desi-offline-mrm',version:1,compounds:[],sets:[],template:null,ignored:[]});
+    await localExpServices.refreshLibrary();
+    vm.runInContext('renderLibrary = originalRenderLibrary', mrm);
     vm.runInContext('markMasterUnlocked(_readCachedMasterPw())', mrm);
     assert.equal(mrm.sessionStorage.getItem('desi:masterUnlocked'), null);
     assert.equal(mrm.sessionStorage.getItem('desi:masterPw'), null);

@@ -1,0 +1,41 @@
+.exp-dialog { width:min(1240px,96vw); max-height:94vh; padding:0; border:1px solid #cbd5e1; border-radius:12px; color:#0f172a; box-shadow:0 18px 70px #0f172a50; font:14px system-ui,sans-serif; }
+.exp-dialog::backdrop { background:#0f172a99; }
+.exp-editor { display:flex; flex-direction:column; gap:14px; padding:22px; }
+.exp-head,.exp-toolbar,.exp-actions,.exp-options { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.exp-head { justify-content:space-between; }
+.exp-head h2 { font-size:19px; font-weight:700; margin:0; }
+.exp-editor p { margin:0; line-height:1.6; }
+.exp-help { color:#64748b; font-size:12px; }
+.exp-editor button,.exp-editor select,.exp-editor input { font:inherit; }
+.exp-editor button { border:1px solid #cbd5e1; border-radius:5px; background:#fff; color:#1e293b; padding:7px 11px; cursor:pointer; }
+.exp-editor button:hover { background:#eff6ff; }
+.exp-editor button:disabled { opacity:.45; cursor:not-allowed; }
+.exp-editor button.exp-primary { background:#2563eb; color:white; border-color:#2563eb; }
+.exp-editor input:not([type=checkbox]),.exp-editor select { padding:6px; border:1px solid #cbd5e1; background:white; color:#0f172a; border-radius:4px; }
+.exp-editor label { display:inline-flex; align-items:center; gap:6px; }
+.exp-editor :focus-visible { outline:2px solid #2563eb; outline-offset:2px; }
+.exp-file { max-width:290px; font-size:12px !important; }
+.exp-summary { padding:10px 12px; background:#f1f5f9; border-radius:6px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.exp-scroll { overflow:auto; max-height:45vh; border:1px solid #e2e8f0; border-radius:6px; }
+.exp-table { width:100%; border-collapse:collapse; text-align:left; font-size:12px; }
+.exp-table th { background:#f8fafc; position:sticky; top:0; z-index:1; color:#475569; white-space:nowrap; }
+.exp-table th,.exp-table td { padding:7px 5px; border-bottom:1px solid #e2e8f0; vertical-align:top; }
+.exp-table input:not([type=checkbox]) { width:100%; min-width:82px; box-sizing:border-box; }
+.exp-table td.exp-name input { min-width:190px; }
+.exp-table input.exp-changed { background:#fff7d6; border-color:#f59e0b; }
+.exp-table input[aria-invalid=true] { background:#fff1f2; border-color:#dc2626; }
+.exp-table .exp-row-number { color:#64748b; white-space:nowrap; }
+.exp-table details { min-width:130px; max-width:220px; }
+.exp-table details div { white-space:pre-wrap; overflow-wrap:anywhere; padding:6px 0; }
+.exp-diagnostics { color:#b91c1c; font-size:12px; white-space:pre-wrap; }
+.exp-status { min-height:20px; font-size:12px; color:#334155; white-space:pre-wrap; }
+.exp-warning { padding:10px; color:#92400e; background:#fffbeb; border:1px solid #fde68a; border-radius:5px; }
+.exp-panel { border:1px solid #cbd5e1; border-radius:7px; padding:12px; display:flex; flex-direction:column; gap:10px; }
+.exp-panel:empty { display:none; }
+.exp-panel h3 { font-size:14px; margin:0; font-weight:700; }
+.exp-actions { justify-content:flex-end; padding-top:8px; border-top:1px solid #e2e8f0; }
+.exp-draft-name { min-width:200px; }
+.exp-grow { flex:1; }
+.exp-check { display:flex !important; align-items:flex-start !important; font-size:12px; }
+.exp-check input { margin-top:3px; }
+@media (max-width:640px) { .exp-editor { padding:12px; gap:10px; } .exp-dialog { max-height:97vh; width:98vw; } .exp-scroll { max-height:48vh; } .exp-toolbar>* { max-width:100%; } }

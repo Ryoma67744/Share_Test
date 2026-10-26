@@ -9,6 +9,7 @@ const { createManifest } = require('../offline/make-manifest.cjs');
 const { verifyPackage } = require('../offline/server.cjs');
 const JSZip = require('../vendor/jszip.min.js');
 const root = path.resolve(__dirname, '..');
+const mrmResources = ['mrm/exp-core.mjs', 'mrm/exp-editor.mjs', 'mrm/exp-editor.css', 'mrm/exp-library-import.mjs', 'docs/EXP_EDITOR.md'];
 const commit = '1234567890abcdef1234567890abcdef12345678';
 function put(dir, rel, data) {
   fs.mkdirSync(path.dirname(path.join(dir, rel)), { recursive: true });
@@ -74,9 +75,10 @@ async function main() {
     assert.match(web.buildInfo.version, /^v\d{4}-\d{2}-\d{2}\.\d+$/);
     assert.equal(appConfiguration(web.out).mode, 'online');
     assertProjectBaseResources(web.out);
+    for (const resource of mrmResources) assert.ok(web.files.includes(resource), 'web includes MRM editor asset: ' + resource);
     for (const rel of sourceFiles) assert.deepEqual(fs.readFileSync(path.join(web.out, rel)), fs.readFileSync(path.join(root, rel)), 'web copies source bytes: ' + rel);
     assert.ok(web.files.includes('.nojekyll') && web.files.includes('vendor/SOURCES.json'));
-    assert.ok(!web.files.some(file => /^(?:runtime|tests|tools|docs|connector)\//.test(file) || /offline-smoke|\.exe$|\.bat$|\.xlsx$|\.parquet$|\.zip$/.test(file)), 'web has no development fixtures or executable runtime');
+    assert.ok(!web.files.some(file => /^(?:runtime|tests|tools|connector)\//.test(file) || (file.startsWith('docs/') && file !== 'docs/EXP_EDITOR.md') || /offline-smoke|\.exe$|\.bat$|\.xlsx$|\.parquet$|\.zip$/.test(file)), 'web has no development fixtures or executable runtime');
     assert.ok(!web.files.includes('offline/server.cjs'));
     const webSnapshot = snapshot(web.out);
     put(web.out, 'stale-generated.txt', 'stale');
@@ -105,10 +107,11 @@ async function main() {
     assert.equal(appConfiguration(offline.out).mode, 'offline');
     assert.deepEqual(appConfiguration(offline.out).cloud, { url: '', anonKey: '' });
     assertProjectBaseResources(offline.out);
+    for (const resource of mrmResources) assert.ok(offline.files.includes(resource), 'offline includes MRM editor asset: ' + resource);
     for (const rel of sourceFiles.filter(file => file !== 'runtime-config.js')) {
       assert.deepEqual(fs.readFileSync(path.join(offline.out, rel)), fs.readFileSync(path.join(web.out, rel)), 'shared app/vendor bytes: ' + rel);
     }
-    assert.ok(!offline.files.some(file => /offline-smoke|^tests\/|^tools\/|^docs\//.test(file)));
+    assert.ok(!offline.files.some(file => /offline-smoke|^tests\/|^tools\//.test(file) || (file.startsWith('docs/') && file !== 'docs/EXP_EDITOR.md')));
     assert.deepEqual(fs.readFileSync(path.join(offline.out, 'runtime/node.exe')), fakeRuntime);
     const bat = fs.readFileSync(path.join(offline.out, 'START_OFFLINE.bat'), 'utf8');
     assert.ok(bat.includes(fixtureLock.runtime.sha256));

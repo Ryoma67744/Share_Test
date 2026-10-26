@@ -8,6 +8,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
 <title>DESI Data Share — MRM管理</title>
+<link rel="stylesheet" href="mrm/exp-editor.css">
 <script src="vendor/tailwind.js"></script>
 <!-- defer: built lazily in _client(); XLSX is only used by the Excel
      import / export buttons. Neither is referenced while parsing. -->
@@ -162,6 +163,7 @@
         <input id="excel-input" type="file" accept=".xlsx,.xls" style="display:none">
         <button id="btn-reload" class="btn">再読込</button>
         <button id="btn-exp-template" class="btn" title="出力用テンプレート .exp を設定/確認">テンプレ設定</button>
+        <button id="btn-exp-edit" class="btn" title="過去の .exp を開き、原本の設定を保持して MRM を編集">.exp を開いて編集</button>
         <button id="btn-sets" class="btn" title="MRM メソッドセット (保存/読込・プロジェクト履歴から)">メソッドセット</button>
         <button id="btn-reconcile" class="btn" title="実測PJで測定されているが未登録の化合物を一括で登録/無視">実測棚卸し</button>
         <button id="btn-exp-export" class="btn" title="チェックしたトランジションを .exp に出力" disabled>選択を.exp出力 (0)</button>
@@ -257,6 +259,15 @@ const SupabaseClient = (() => {
         },
         getExpTemplate(pw) { return rpc('get_exp_template', { _master_pw: pw }); },
         setExpTemplate(pw, content) { return rpc('set_exp_template', { _master_pw: pw, _content: content }); },
+        registerFromExp(pw, rows) { return rpc('register_from_exp_batch', { _master_pw: pw, _rows: rows }); },
+        saveExpDocument(pw, doc) {
+            return rpc('save_mrm_exp_document', {
+                _master_pw: pw, _name: doc.name, _payload: doc.payload,
+                _id: doc.id || null, _expected_revision: doc.expected_revision ?? null,
+            });
+        },
+        listExpDocuments(pw) { return rpc('list_mrm_exp_documents', { _master_pw: pw }); },
+        getExpDocument(pw, id) { return rpc('get_mrm_exp_document', { _master_pw: pw, _id: id }); },
         listMrmSets(pw) { return rpc('list_mrm_sets', { _master_pw: pw }); },
         upsertMrmSet(pw, s) {
             return rpc('upsert_mrm_set', {
@@ -2642,6 +2653,47 @@ function bindFilterBar() {
     });
 }
 
+// Explicit capabilities keep file editing usable in both runtime modes.
+function expEditorServices() {
+    const requirePassword = () => {
+        const pw = _readCachedMasterPw();
+        if (!pw) throw new Error('認証が切れました。MRM 管理画面を再読み込みしてください。');
+        return pw;
+    };
+    const callExpRpc = async (fn) => {
+        try { return await fn(); }
+        catch (e) {
+            if (/PGRST202|could not find.*function|function.*does not exist/i.test(String(e && (e.code || '') + ' ' + (e.message || e)))) {
+                throw new Error('保存・登録用の DB 更新が必要です。管理者が supabase/mrm_exp_import.sql を適用してください。.exp 編集とローカル保存は利用できます。');
+            }
+            throw e;
+        }
+    };
+    const services = {
+        library,
+        getLibrary: () => library,
+        refreshLibrary: async () => {
+            library = (await SupabaseClient.listMrmLibrary(requirePassword())) || [];
+            renderLibrary();
+            return library;
+        },
+        getPassword: requirePassword,
+    };
+    // The local adapter does not implement the atomic .exp registration or
+    // saved-document RPCs. Keep local editing available without exposing them.
+    if (window.DESI_OFFLINE === true) return services;
+    return Object.assign(services, {
+        registerRows: async (rows) => {
+            const result = await callExpRpc(() => SupabaseClient.registerFromExp(requirePassword(), rows));
+            await loadLibrary();
+            return result;
+        },
+        saveDocument: (doc) => callExpRpc(() => SupabaseClient.saveExpDocument(requirePassword(), doc)),
+        listDocuments: () => callExpRpc(() => SupabaseClient.listExpDocuments(requirePassword())),
+        getDocument: (id) => callExpRpc(() => SupabaseClient.getExpDocument(requirePassword(), id)),
+    });
+}
+
 async function init() {
     await requireMasterUnlock();
     if (window.DESI_OFFLINE === true) {
@@ -2694,6 +2746,18 @@ async function init() {
     })();
     document.getElementById('btn-reload').addEventListener('click', () => loadLibrary());
     document.getElementById('btn-exp-template').addEventListener('click', () => openTemplateModal());
+    document.getElementById('btn-exp-edit').addEventListener('click', async () => {
+        try {
+            const { openExpEditor } = await import('./mrm/exp-editor.mjs');
+            const editor = await openExpEditor(expEditorServices());
+            if (window.DESI_OFFLINE === true && !editor.dialog.querySelector('.exp-offline-note')) {
+                const note = document.createElement('p');
+                note.className = 'exp-help exp-offline-note';
+                note.textContent = 'オフライン版: .exp の編集、ローカルライブラリからの置換、.exp と作業ファイルの保存・復元を利用できます。この画面からのライブラリ登録とクラウドへのメソッド保存・読込は利用できません。';
+                editor.dialog.querySelector('.exp-head').after(note);
+            }
+        } catch (e) { reportError(e, '.exp 編集'); }
+    });
     document.getElementById('btn-sets').addEventListener('click', () => openSetsModal());
     document.getElementById('btn-reconcile').addEventListener('click', () => openReconcileModal());
     document.getElementById('btn-exp-export').addEventListener('click', () => exportSelectedExp());

@@ -68,6 +68,9 @@ async function main() {
   put(root, 'offline/offline.js', '/* local only */');
   put(root, 'offline/local-mrm.js', '/* local library */');
   put(root, 'USER_GUIDE.master.en.md', '# Guide');
+  put(root, 'docs/EXP_EDITOR.md', '# MRM guide');
+  const mrmResources = ['exp-core.mjs', 'exp-editor.mjs', 'exp-editor.css', 'exp-library-import.mjs'];
+  for (const file of mrmResources) put(root, 'mrm/' + file, '/* ' + file + ' */');
   put(root, '.git/config', 'do not serve');
   put(root, 'runtime/node.exe', 'do not serve');
   put(root, 'connector/README.md', 'do not serve');
@@ -81,7 +84,7 @@ async function main() {
     '/.git/config','/runtime/node.exe','/connector/README.md','/offline/server.cjs',
     '/offline/manifest.json','/offline/config.cjs','/runtime-config.js',
     '/%72untime-config.js','/runtime%2dconfig.js','/tests/fixtures/browser/offline-smoke.html',
-    '/vendor/a/b.js']) equal(resolveStatic(url, root), null, url);
+    '/vendor/a/b.js', '/mrm/developer-only.mjs', '/mrm/nested/exp-editor.mjs', '/docs/guide-template.html']) equal(resolveStatic(url, root), null, url);
   for (const [input, size, expected] of [
     ['bytes=2-5',10,{start:2,end:5}], ['bytes=8-',10,{start:8,end:9}],
     ['bytes=-3',10,{start:7,end:9}], ['bytes=-99',10,{start:0,end:9}],
@@ -142,6 +145,13 @@ async function main() {
   }
   equal((await request(server, '/viewer/?project=fixture')).body, 'viewer fixture');
   equal((await request(server, '/USER_GUIDE.master.en.md')).body, '# Guide');
+  equal((await request(server, '/docs/EXP_EDITOR.md')).body, '# MRM guide');
+  for (const file of mrmResources) {
+    const response = await request(server, '/mrm/' + file);
+    equal(response.status, 200, file + ' is served offline');
+    equal(response.body, '/* ' + file + ' */');
+    equal(response.headers['content-type'], file.endsWith('.css') ? 'text/css; charset=utf-8' : 'text/javascript; charset=utf-8');
+  }
   equal((await request(server, '/vendor/module.mjs')).headers['content-type'], 'text/javascript; charset=utf-8');
   const appRuntime = await request(server, '/app-runtime.js');
   equal(appRuntime.status,200);

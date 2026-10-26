@@ -863,6 +863,8 @@ You can import an existing MRM list (xlsx) sheet by sheet. Use **`ファイル�
 
 ### 19-5. `.exp` export and what the AI (Custom GPT) can see
 
+**Edit an existing `.exp`**: use **`.exp を開いて編集`** to load a supported single, flat MRM block and edit compound names, Precursor, Product, CV and CE. Export preserves the source's other settings, encoding and row order. You can save/reopen a local working file, optionally save a method in the database, or preview selected rows before explicitly registering them into the library. Row insertion, deletion, reordering and multiple functions are not supported in this version. Real instrument files still require MassLynx acceptance testing. Online registration and method storage require `supabase/mrm_exp_import.sql`; see [the detailed guide (Japanese)](docs/EXP_EDITOR.md).
+
 **`.exp` export**: you can select and export from either shelf (that is how you go and test an archived MRM). If any archived entries are included, a **confirmation listing the count and compound names** appears first. A selection of validated entries only exports without any prompt, exactly as before.
 
 **AI connector (Custom GPT)**: by default it **only sees the validated library**.

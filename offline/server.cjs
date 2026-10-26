@@ -56,7 +56,7 @@ function resolveStatic(urlPath, root = ROOT) {
   if (decoded.endsWith('/')) decoded += 'index.html';
   // runtime-config.js is deliberately absent: its dynamic offline response
   // must never be bypassed with an encoded path to the online source file.
-  const allowed = /^\/(?:index\.html|mrm\.html|version\.js|app-runtime\.js|OFFLINE_GUIDE\.md|USER_GUIDE(?:\.[a-z]+)*\.md|viewer\/[\w.-]+|vendor\/[\w.-]+|offline\/(?:offline|local-mrm)\.js)$/;
+  const allowed = /^\/(?:index\.html|mrm\.html|version\.js|app-runtime\.js|OFFLINE_GUIDE\.md|USER_GUIDE(?:\.[a-z]+)*\.md|docs\/EXP_EDITOR\.md|mrm\/(?:exp-core\.mjs|exp-editor\.mjs|exp-editor\.css|exp-library-import\.mjs)|viewer\/[\w.-]+|vendor\/[\w.-]+|offline\/(?:offline|local-mrm)\.js)$/;
   if (!allowed.test(decoded)) return null;
   const file = path.resolve(root, '.' + decoded);
   if (!file.startsWith(root + path.sep)) return null;
