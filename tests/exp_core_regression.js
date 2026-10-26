@@ -7,8 +7,9 @@ const path = require('node:path');
 
 (async function () {
   const core = await import('../mrm/exp-core.mjs');
-  const { parseExp, createDraft, validateEdits, writeEditedExp, verifyExport, serializeDocument, restoreDocument, ExpError } = core;
+  const { parseExp, createDraft, validateEdits, writeEditedExp, verifyExport, serializeDocument, restoreDocument, ExpError, validateSelectedExport, writeSelectedExp } = core;
   const fixture = fs.readFileSync(path.join(__dirname, 'fixtures/exp/flat-mrm-synthetic.exp'), 'utf8');
+  const selectionFixture = fs.readFileSync(path.join(__dirname, 'fixtures/exp/flat-mrm-selection-synthetic.exp'), 'utf8');
   const utf8 = text => new TextEncoder().encode(text);
   const decode = bytes => new TextDecoder().decode(bytes);
   const bytesEqual = (actual, expected) => assert.deepEqual(Buffer.from(actual), Buffer.from(expected));
@@ -285,6 +286,216 @@ const path = require('node:path');
     rows[0].cv = '21';
     const restored = restoreDocument(serializeDocument(doc, rows));
     bytesEqual(writeEditedExp(restored.document, restored.rows), utf8(source.replace('ConeVoltage(V)_1,20.0000', 'ConeVoltage(V)_1,21')));
+  });
+
+  // Written independently as the exact output for retaining channel 2. The
+  // blank left by removed channel 1 is intentionally retained.
+  const secondSelected = `; Synthetic regression fixture only; not a vendor-validated acquisition method.
+NumFunctions,1
+FunctionType,MRM
+Polarity,ES-
+NumSIRMasses,1
+SIRMass1,92.0000
+SIRMass_2_1,46.0000
+SIRAutoDwell1,0
+SIRDwellTime1,0.0200
+SIRDelay1,0.0042
+UseAsLockMass1,0
+UseSampleList1,0
+UseSampleList_21,0
+NoOfChannels,1
+
+UseSLMassesP_1,0
+UseSLMassesD_1,0
+Mass(amu)_1,92.0000
+Mass2(amu)_1,46.0000
+AutoDwell_1,0
+Dwell(s)_1,0.0200
+ConeVoltage(V)_1,20.0000
+CollisionEnergy(eV)_1,11.0000
+InterChannelDelay(s)_1,0.0042
+CompoundName_1,NEG_13C-Lactate-NEG
+
+CompoundFormula_1,C3H6O3
+CompoundComment_1,another comment
+FunctionScanTime(sec),0.0242
+`;
+
+  test('selected output removes every excluded key, renumbers both blocks and keeps row-specific conditions', () => {
+    const doc = read(selectionFixture), rows = createDraft(doc), before = JSON.stringify(rows);
+    assert.deepEqual(validateSelectedExport(doc, rows, ['channel-2']), {
+      valid: true, errors: [], selectedCount: 1, excludedCount: 1, changedCells: 0,
+    });
+    const output = writeSelectedExp(doc, rows, ['channel-2']);
+    bytesEqual(output, utf8(secondSelected));
+    const parsed = parseExp(output);
+    assert.equal(parsed.rows[0].precursor, '92.0000');
+    assert.deepEqual(parsed.rows[0].details, doc.rows[1].details);
+    assert.equal(parsed.rows[0].id, 'channel-1');
+    assert.equal(JSON.stringify(rows), before, 'Selection export does not mutate the full draft.');
+    bytesEqual(writeEditedExp(doc, rows), utf8(selectionFixture), 'The original document still has both rows.');
+  });
+
+  test('all selected preserves existing byte-exact behavior even with unknown dependencies', () => {
+    for (const source of [fixture, selectionFixture, selectionFixture.replace('FunctionScanTime(sec),0.0379', 'FunctionScanTime(sec),123')]) {
+      const doc = read(source), rows = createDraft(doc);
+      assert.equal(validateSelectedExport(doc, rows, ['channel-2', 'channel-1']).valid, true);
+      bytesEqual(writeSelectedExp(doc, rows, ['channel-2', 'channel-1']), utf8(source));
+      rows[0].ce = '13.5';
+      bytesEqual(writeSelectedExp(doc, rows, ['channel-1', 'channel-2']), writeEditedExp(doc, rows));
+    }
+  });
+
+  test('selection IDs reject zero, duplicate, unknown, non-array and sparse values', () => {
+    const doc = read(selectionFixture), rows = createDraft(doc);
+    for (const ids of [[], ['channel-1', 'channel-1'], ['channel-3'], ['channel-1', 'foreign'], [null], null, {}, new Set(['channel-1']), new Array(1)]) {
+      assert.equal(validateSelectedExport(doc, rows, ids).valid, false);
+      throwsCode(() => writeSelectedExp(doc, rows, ids), 'SELECTION');
+    }
+    const validation = validateSelectedExport(doc, rows, []);
+    assert.equal(validation.selectedCount, 0); assert.equal(validation.excludedCount, 2);
+  });
+
+  test('excluded invalid edits are ignored but excluded row identities and order are still validated', () => {
+    const doc = read(selectionFixture), rows = createDraft(doc);
+    rows[0].name = '\ninvalid'; rows[0].precursor = ''; rows[0].ce = 'Infinity';
+    rows[1].precursor = '93.5'; rows[1].product = '47'; rows[1].ce = '13';
+    assert.equal(validateSelectedExport(doc, rows, ['channel-2']).changedCells, 3);
+    const output = writeSelectedExp(doc, rows, ['channel-2']);
+    const expected = secondSelected.replace('SIRMass1,92.0000', 'SIRMass1,93.5')
+      .replace('Mass(amu)_1,92.0000', 'Mass(amu)_1,93.5').replace('SIRMass_2_1,46.0000', 'SIRMass_2_1,47')
+      .replace('Mass2(amu)_1,46.0000', 'Mass2(amu)_1,47').replace('CollisionEnergy(eV)_1,11.0000', 'CollisionEnergy(eV)_1,13');
+    bytesEqual(output, utf8(expected));
+    assert.equal(validateSelectedExport(doc, rows, ['channel-1']).valid, false);
+    assert.equal(validateSelectedExport(doc, rows, ['channel-1', 'channel-2']).valid, false);
+    for (const candidate of [rows.slice(1), rows.slice().reverse(), [null, rows[1]], [{ ...rows[0], id: 'foreign' }, rows[1]], new Array(2), null]) {
+      assert.equal(validateSelectedExport(doc, candidate, ['channel-2']).valid, false);
+      throwsCode(() => writeSelectedExp(doc, candidate, ['channel-2']), 'SELECTION');
+    }
+    const minimal = createDraft(doc).map(({ id, name, precursor, product, cv, ce }) => ({ id, name, precursor, product, cv, ce }));
+    bytesEqual(writeSelectedExp(doc, minimal, ['channel-2']), utf8(secondSelected), 'Only row IDs and editable values are trusted from a draft.');
+  });
+
+  test('unknown numbered and unnumbered dependencies block subset but never alter full export', () => {
+    for (const record of ['VendorRetentionTime_2,2.50', 'VendorSetting,unknown', 'ChannelOrder,2,1', 'EndMarker,untouched', 'CompoundAlias_1,Lactate', 'unexpected marker', '[Function1', 'Polarity']) {
+      const source = selectionFixture + record + '\n', doc = read(source), rows = createDraft(doc);
+      const result = validateSelectedExport(doc, rows, ['channel-2']);
+      assert.equal(result.valid, false, record);
+      assert.ok(result.errors.some(error => error.message.includes(record.split(',')[0])), record);
+      throwsCode(() => writeSelectedExp(doc, rows, ['channel-2']), 'SELECTION');
+      bytesEqual(writeSelectedExp(doc, rows, ['channel-1', 'channel-2']), utf8(source));
+    }
+    const duplicate = read(selectionFixture + 'Polarity,ES-\n');
+    assert.equal(validateSelectedExport(duplicate, createDraft(duplicate), ['channel-1']).valid, false);
+  });
+
+  test('known Function 1 markers and comments retain their exact placement and bytes', () => {
+    for (const marker of ['[Function 1]', 'Function1', 'Function_1:', '; channel 2 note', '# channel 1 note', '// channel 2 note']) {
+      const source = marker + '\n' + selectionFixture, doc = read(source);
+      bytesEqual(writeSelectedExp(doc, createDraft(doc), ['channel-2']), utf8(marker + '\n' + secondSelected));
+    }
+  });
+
+  test('manual AutoDwell, complete timing pairs and verified original total are mandatory for subset', () => {
+    const sources = [
+      selectionFixture.replace('FunctionScanTime(sec),0.0379', 'FunctionScanTime(sec),0.1960'),
+      selectionFixture.replace('FunctionScanTime(sec),0.0379', 'FunctionScanTime(sec),0.037900000000000001'),
+      selectionFixture.replace('FunctionScanTime(sec),0.0379', 'FunctionScanTime(sec),NaN'),
+      selectionFixture.replace('FunctionScanTime(sec),0.0379', 'FunctionScanTime(sec),-1'),
+      selectionFixture.replace('SIRAutoDwell1,0', 'SIRAutoDwell1,1').replace('AutoDwell_1,0', 'AutoDwell_1,1'),
+      selectionFixture.replace('SIRDwellTime1,0.0100', 'SIRDwellTime1,0').replace('Dwell(s)_1,0.0100', 'Dwell(s)_1,0'),
+      selectionFixture.replace('SIRDelay1,0.0037', 'SIRDelay1,-0.0037').replace('InterChannelDelay(s)_1,0.0037', 'InterChannelDelay(s)_1,-0.0037'),
+      selectionFixture.replace('SIRDwellTime1,0.0100', 'SIRDwellTime1,1e-129').replace('Dwell(s)_1,0.0100', 'Dwell(s)_1,1e-129'),
+    ];
+    for (const key of ['SIRAutoDwell1', 'AutoDwell_1', 'SIRDwellTime1', 'Dwell(s)_1', 'SIRDelay1', 'InterChannelDelay(s)_1', 'FunctionScanTime(sec)']) {
+      sources.push(selectionFixture.split('\n').filter(line => !line.startsWith(key + ',')).join('\n'));
+    }
+    for (const source of sources) {
+      const doc = read(source), rows = createDraft(doc);
+      assert.equal(validateSelectedExport(doc, rows, ['channel-2']).valid, false, source);
+      throwsCode(() => writeSelectedExp(doc, rows, ['channel-2']), 'SELECTION');
+      bytesEqual(writeSelectedExp(doc, rows, ['channel-1', 'channel-2']), utf8(source));
+    }
+  });
+
+  test('scan time is summed exactly with heterogeneous per-channel timing and exponent notation', () => {
+    const source = selectionFixture.replaceAll('0.0100', '1e-2').replaceAll('0.0037', '0.003700000000000001')
+      .replace('FunctionScanTime(sec),0.0379', 'FunctionScanTime(sec),0.037900000000000001');
+    const doc = read(source), rows = createDraft(doc);
+    const output = decode(writeSelectedExp(doc, rows, ['channel-1']));
+    assert.ok(output.includes('FunctionScanTime(sec),0.013700000000000001\n'));
+    assert.ok(output.includes('SIRDwellTime1,1e-2\n'));
+    assert.ok(output.includes('Dwell(s)_1,1e-2\n'));
+    bytesEqual(writeSelectedExp(doc, rows, ['channel-2']), utf8(secondSelected));
+  });
+
+  function makeChannels(channels) {
+    const lines = ['NumFunctions,1', 'FunctionType,MRM', 'Polarity,ES-', 'NumSIRMasses,' + channels.length];
+    channels.forEach((value, n) => {
+      const i = n + 1;
+      lines.push(`SIRMass${i},${value}`, `SIRMass_2_${i},${value - 1}`, `SIRAutoDwell${i},0`, `SIRDwellTime${i},0.01`, `SIRDelay${i},0.0037`, `UseAsLockMass${i},0`, `UseSampleList${i},0`, `UseSampleList_2${i},0`);
+    });
+    lines.push('NoOfChannels,' + channels.length);
+    channels.forEach((value, n) => {
+      const i = n + 1;
+      lines.push(`UseSLMassesP_${i},0`, `UseSLMassesD_${i},0`, `Mass(amu)_${i},${value}`, `Mass2(amu)_${i},${value - 1}`, `AutoDwell_${i},0`, `Dwell(s)_${i},0.01`, `ConeVoltage(V)_${i},20`, `CollisionEnergy(eV)_${i},11`, `InterChannelDelay(s)_${i},0.0037`, `CompoundName_${i},Compound ${value}`, `CompoundFormula_${i},Formula ${value}`, `CompoundComment_${i},Comment ${value}`);
+    });
+    const ticks = channels.length * 137;
+    lines.push('FunctionScanTime(sec),' + (ticks / 10000).toFixed(4));
+    return lines.join('\n') + '\n';
+  }
+
+  test('first, middle and last exclusions preserve source order and renumber multidigit suffixes', () => {
+    const values = Array.from({ length: 12 }, (_, i) => 100 + i), source = makeChannels(values), doc = read(source), rows = createDraft(doc);
+    for (const selected of [[2, 11], [1, 3, 12], [12], [1], [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]]) {
+      const ids = selected.slice().reverse().map(i => 'channel-' + i);
+      const expected = makeChannels(selected.map(i => values[i - 1])).replace(/FunctionScanTime\(sec\),([\d.]+)\n/, (_, total) => 'FunctionScanTime(sec),' + String(Number(total)) + '\n');
+      bytesEqual(writeSelectedExp(doc, rows, ids), utf8(expected));
+    }
+  });
+
+  test('subset retains key whitespace, value whitespace and exact original newlines', () => {
+    for (const newline of ['\n', '\r\n', '\r']) {
+      const source = selectionFixture.replace('SIRMass2,92.0000', '  SIRMass2 \t,  92.0000\t')
+        .replace('UseSampleList_22,0', '\tUseSampleList_22 \t,0')
+        .replace('NoOfChannels,2', 'NoOfChannels, 2 \t')
+        .replace('FunctionScanTime(sec),0.0379', 'FunctionScanTime(sec), 0.0379 \t').replaceAll('\n', newline);
+      const expected = secondSelected.replace('SIRMass1,92.0000', '  SIRMass1 \t,  92.0000\t')
+        .replace('UseSampleList_21,0', '\tUseSampleList_21 \t,0')
+        .replace('NoOfChannels,1', 'NoOfChannels, 1 \t')
+        .replace('FunctionScanTime(sec),0.0242', 'FunctionScanTime(sec), 0.0242 \t').replaceAll('\n', newline);
+      const doc = read(source), rows = createDraft(doc);
+      bytesEqual(writeSelectedExp(doc, rows, ['channel-2']), utf8(expected));
+    }
+    const source = selectionFixture.replace('SIRMass2,92.0000\n', 'SIRMass2,92.0000\r\n').trimEnd();
+    const expected = secondSelected.replace('SIRMass1,92.0000\n', 'SIRMass1,92.0000\r\n').trimEnd();
+    const doc = read(source);
+    bytesEqual(writeSelectedExp(doc, createDraft(doc), ['channel-2']), utf8(expected));
+  });
+
+  test('subset output preserves UTF-8 BOM and UTF-16 LE/BE encodings and original key bytes', () => {
+    const sourceText = selectionFixture.replace('UseSampleList_22,0', ' \tUseSampleList_22 \t,0');
+    const expectedText = secondSelected.replace('UseSampleList_21,0', ' \tUseSampleList_21 \t,0');
+    const source = new Uint8Array([0xef, 0xbb, 0xbf, ...utf8(sourceText)]), doc = parseExp(source);
+    bytesEqual(writeSelectedExp(doc, createDraft(doc), ['channel-2']), new Uint8Array([0xef, 0xbb, 0xbf, ...utf8(expectedText)]));
+    for (const bigEndian of [false, true]) for (const bom of [false, true]) {
+      const encoding = bigEndian ? 'utf-16be' : 'utf-16le';
+      const encoded = utf16(sourceText, bigEndian, bom), document = parseExp(encoded, { encoding: bom ? 'auto' : encoding }), rows = createDraft(document);
+      rows[1].name = '選択した乳酸';
+      bytesEqual(writeSelectedExp(document, rows, ['channel-2']), utf16(expectedText.replace('NEG_13C-Lactate-NEG', '選択した乳酸'), bigEndian, bom));
+    }
+  });
+
+  test('subset output preserves Shift_JIS and Windows-1252 row bytes while encoding edits correctly', () => {
+    const [before, after] = selectionFixture.split('NEG_13C-Lactate-NEG');
+    const [keptBefore, keptAfter] = secondSelected.split('NEG_13C-Lactate-NEG');
+    const japanese = Buffer.from([0x93, 0xfa, 0x96, 0x7b]), editedJapanese = Buffer.from([0x93, 0x8c, 0x8b, 0x9e]);
+    const source = Buffer.concat([Buffer.from(before), japanese, Buffer.from(after)]), doc = parseExp(source, { encoding: 'shift_jis' }), rows = createDraft(doc);
+    bytesEqual(writeSelectedExp(doc, rows, ['channel-2']), Buffer.concat([Buffer.from(keptBefore), japanese, Buffer.from(keptAfter)]));
+    rows[1].name = '東京';
+    bytesEqual(writeSelectedExp(doc, rows, ['channel-2']), Buffer.concat([Buffer.from(keptBefore), editedJapanese, Buffer.from(keptAfter)]));
+    const western = parseExp(Buffer.from(selectionFixture.replace('NEG_13C-Lactate-NEG', 'Café µ'), 'latin1'), { encoding: 'windows-1252' });
+    bytesEqual(writeSelectedExp(western, createDraft(western), ['channel-2']), Buffer.from(secondSelected.replace('NEG_13C-Lactate-NEG', 'Café µ'), 'latin1'));
   });
 
   console.log(`exp_core_regression: ${checks} test groups passed (synthetic fixtures; instrument compatibility unverified).`);

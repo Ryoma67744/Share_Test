@@ -100,7 +100,8 @@ try {
  const get=()=>scalar('select public.get_mrm_exp_document($1,$2) as value',['test-master',document.id]);
  assert.deepEqual((await get()).payload,payload);
  assert.equal(restoreDocument((await get()).payload).rows.length,parsed.rows.length); checks++;
- document=await save(payload,document.id,1); assert.equal(document.revision,2); checks++;
+ document=await save({...payload,selectedIds:[parsed.rows[1].id]},document.id,1); assert.equal(document.revision,2); checks++;
+ assert.deepEqual((await get()).payload.selectedIds,[parsed.rows[1].id]); checks++;
  await expectError(()=>save(payload,document.id,1),/changed or missing/);
  await expectError(()=>save(payload,null,null,'wrong'),/unauthorized/);
  await expectError(()=>save({...payload,version:2}),/Invalid version/);

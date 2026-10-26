@@ -4,9 +4,11 @@ import { readFile } from 'node:fs/promises';
 import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { parseExp } from '../mrm/exp-core.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const fixture = resolve(root, 'tests/fixtures/exp/flat-mrm-synthetic.exp');
+const selectionFixture = resolve(root, 'tests/fixtures/exp/flat-mrm-selection-synthetic.exp');
 // UI tests use injected in-memory services. No Supabase or real account is used.
 const harness = `<!doctype html><html lang="ja"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -76,9 +78,12 @@ async function run() {
         await page.getByLabel('.exp ファイルを選択', { exact: true }).setInputFiles(fixture);
         await page.getByLabel('1 行目 CE（衝突）', { exact: true }).waitFor();
         const source = await readFile(fixture);
-        const exportButton = page.getByRole('button', { name: '編集した .exp を保存', exact: true });
+        const exportButton = page.getByRole('button', { name: /^選択したMRMを \.exp 保存/ });
         let output = await downloadBytes(page, () => exportButton.click());
         assert.deepEqual(output.bytes, source, 'Untouched browser download equals source bytes');
+        await page.getByLabel('2 行目を選択', { exact: true }).uncheck();
+        assert.equal(await exportButton.isDisabled(), true, 'Unsupported structure blocks partial export instead of including unchecked rows');
+        await page.getByLabel('2 行目を選択', { exact: true }).check();
         const ce = page.getByLabel('1 行目 CE（衝突）', { exact: true });
         await ce.fill('15');
         output = await downloadBytes(page, () => exportButton.click());
@@ -131,6 +136,44 @@ async function run() {
         await page.getByRole('button', { name: '保存したメソッドを開く', exact: true }).click();
         await page.getByRole('button', { name: '開く', exact: true }).click();
         await page.waitForFunction(() => document.querySelector('[aria-label="1 行目 CE（衝突）"]').value === '15');
+
+        // On a supported fixed-dwell layout, the download contains checked rows only.
+        await page.getByLabel('.exp ファイルを選択', { exact: true }).setInputFiles(selectionFixture);
+        await page.getByText(/flat-mrm-selection-synthetic\.exp/).waitFor();
+        await page.getByLabel('1 行目を選択', { exact: true }).uncheck();
+        await ce.fill('Infinity'); // An unchecked invalid value is not exported.
+        await page.getByLabel('2 行目 CE（衝突）', { exact: true }).fill('17');
+        assert.equal(await exportButton.isDisabled(), false);
+        assert.match(await exportButton.innerText(), /1件/);
+        output = await downloadBytes(page, () => exportButton.click());
+        const selected = parseExp(output.bytes);
+        assert.equal(selected.rows.length, 1);
+        assert.equal(selected.rows[0].name, 'NEG_13C-Lactate-NEG');
+        assert.equal(selected.rows[0].ce, '17');
+        assert.equal(selected.rows[0].details.dwell, '0.0200');
+        assert.equal(selected.rows[0].details.delay, '0.0042');
+        assert.match(output.bytes.toString(), /FunctionScanTime\(sec\),0\.0242/);
+        assert.equal(await page.getByRole('textbox', { name: /^\d+ 行目 化合物名$/ }).count(), 2, 'Export does not delete rows from the working document');
+        await page.getByText(/未保存/).waitFor();
+        await page.getByLabel('2 行目を選択', { exact: true }).uncheck();
+        assert.equal(await exportButton.isDisabled(), true, 'Zero selected rows cannot be downloaded');
+        await page.getByLabel('2 行目を選択', { exact: true }).check();
+        await ce.fill('19');
+        const selectedDraft = await downloadBytes(page, () => page.getByRole('button', { name: '作業ファイルを保存', exact: true }).click());
+        await page.getByLabel('1 行目を選択', { exact: true }).check();
+        await page.locator('input[type=file][accept=".json"]').setInputFiles({ name: selectedDraft.name, mimeType: 'application/json', buffer: selectedDraft.bytes });
+        await page.waitForFunction(() => !document.querySelector('[aria-label="1 行目を選択"]').checked);
+        assert.equal(await page.getByLabel('2 行目を選択', { exact: true }).isChecked(), true);
+        await page.getByRole('button', { name: 'メソッドとして保存', exact: true }).click();
+        await page.getByLabel('メソッド名', { exact: true }).fill('選択保存メソッド');
+        await page.getByRole('button', { name: '新規保存', exact: true }).click();
+        await page.getByRole('status').filter({hasText:'版 1'}).waitFor();
+        await page.getByLabel('1 行目を選択', { exact: true }).check();
+        await page.getByRole('button', { name: '保存したメソッドを開く', exact: true }).click();
+        await page.getByRole('combobox', { name: '保存したメソッド', exact: true }).selectOption('doc-2');
+        await page.getByRole('button', { name: '開く', exact: true }).click();
+        await page.waitForFunction(() => !document.querySelector('[aria-label="1 行目を選択"]').checked);
+        assert.equal(await page.getByLabel('2 行目を選択', { exact: true }).isChecked(), true);
         await page.setViewportSize({width:800,height:900});
         assert.equal(await exportButton.isVisible(), true);
         assert.deepEqual(errors, [], 'No browser runtime errors');

@@ -1,4 +1,4 @@
-import { parseExp, createDraft, validateEdits, writeEditedExp, serializeDocument, restoreDocument, MAX_EXP_BYTES } from './exp-core.mjs';
+import { parseExp, createDraft, validateEdits, validateSelectedExport, writeSelectedExp, serializeDocument, restoreDocument, MAX_EXP_BYTES } from './exp-core.mjs';
 import { matchExpRows, canonicalNumeric } from './exp-library-import.mjs';
 
 const FIELDS = ['name', 'precursor', 'product', 'cv', 'ce'];
@@ -35,9 +35,35 @@ async function digest(bytes) {
     return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), value => value.toString(16).padStart(2, '0')).join('');
 }
 
+/** Keep selection in source order; an omitted selection is a legacy all-row draft. */
+function normalizeSelection(rows, selectedIds) {
+    if (selectedIds === undefined) return rows.map(row => row.id);
+    const ids = new Set(rows.map(row => row.id));
+    if (!Array.isArray(selectedIds) || selectedIds.some(id => typeof id !== 'string' || !ids.has(id)) ||
+        new Set(selectedIds).size !== selectedIds.length) {
+        throw new Error('保存されたMRMの選択状態が不正です。現在の編集内容を保持しました。');
+    }
+    const selected = new Set(selectedIds);
+    return rows.filter(row => selected.has(row.id)).map(row => row.id);
+}
+
+export function editorStateKey(rows, selectedIds) {
+    return JSON.stringify({ rows, selectedIds: normalizeSelection(rows, selectedIds) });
+}
+
+/** Additional UI metadata is accepted and preserved by the document storage RPC. */
+export function serializeEditorDocument(doc, rows, selectedIds) {
+    return { ...serializeDocument(doc, rows), selectedIds: normalizeSelection(rows, selectedIds) };
+}
+
+function restoreEditorDocument(payload) {
+    const restored = restoreDocument(payload);
+    return { ...restored, selectedIds: normalizeSelection(restored.rows, payload.selectedIds) };
+}
+
 /** Portable drafts include an integrity checksum and the original bytes. */
-export async function createDraftArchive(doc, rows) {
-    const payload = serializeDocument(doc, rows);
+export async function createDraftArchive(doc, rows, selectedIds) {
+    const payload = serializeEditorDocument(doc, rows, selectedIds);
     return { format: ARCHIVE_FORMAT, version: 1, sha256: await digest(base64Bytes(payload.originalBase64)), document: payload };
 }
 
@@ -48,7 +74,7 @@ export async function restoreDraftArchive(archive) {
     }
     const actual = await digest(base64Bytes(archive.document.originalBase64));
     if (actual !== archive.sha256) throw new Error('原本のハッシュが一致しません。作業ファイルが破損しています。');
-    return restoreDocument(archive.document);
+    return restoreEditorDocument(archive.document);
 }
 
 /** Server documents carry a checksum calculated when their source was saved. */
@@ -58,7 +84,7 @@ export async function restoreSavedDocument(saved) {
     }
     const actual = await digest(base64Bytes(saved.payload.originalBase64));
     if (actual !== saved.source_sha256) throw new Error('保存メソッドの原本ハッシュが一致しません。現在の編集内容を保持しました。');
-    return restoreDocument(saved.payload);
+    return restoreEditorDocument(saved.payload);
 }
 
 export function safeDownloadName(filename, suffix) {
@@ -91,7 +117,7 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
     const head = node('div', undefined, 'exp-head');
     const title = node('h2', '.exp を開いて編集'); title.id = 'exp-editor-title';
     const close = button('閉じる', () => closeEditor()); head.append(title, close);
-    const description = node('p', '元の .exp を読み込み、化合物名・質量・CV・CEを編集して別名保存します。ライブラリへの登録は別操作です。', 'exp-help');
+    const description = node('p', '元の .exp を読み込み、化合物名・質量・CV・CEを編集して別名保存します。チェックしたMRMだけを .exp に出力します。同じチェックはライブラリ登録・1行の置換にも使用します。', 'exp-help');
     const toolbar = node('div', undefined, 'exp-toolbar');
     const expFile = node('input', undefined, 'exp-file'); expFile.type = 'file'; expFile.accept = '.exp';
     expFile.setAttribute('aria-label', '.exp ファイルを選択');
@@ -103,7 +129,7 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
     loadRemote.hidden = !listDocuments || !getDocument;
     toolbar.append(expFile, labelled('文字コード', encoding), loadDraft, loadRemote, draftFile);
     const summary = node('div', 'ファイルを選択してください。', 'exp-summary');
-    const warning = node('p', '対応形式を検査してから編集します。チャンネルの追加・削除・並べ替えは、測定時間の計算と機種仕様の検証が必要なため、この版では利用できません。', 'exp-warning');
+    const warning = node('p', '対応形式を検査してから編集します。一部のMRMだけを出力できるのは、チャンネル条件と測定時間の構造を確認できる形式です。行の追加・削除・並べ替えは利用できません。', 'exp-warning');
     const controls = node('div', undefined, 'exp-toolbar');
     const replace = button('選択した1行をライブラリのMRMで置換', showLibraryReplacement);
     const reset = button('変更をすべて元に戻す', () => {
@@ -113,39 +139,45 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
     controls.append(replace, reset);
     for (const label of ['行を追加', '行を削除', '並べ替え']) {
         const disabled = button(label); disabled.disabled = true;
-        disabled.title = 'この版では原本のチャンネル構造を保持します。'; controls.append(disabled);
+        disabled.title = '編集表の行の追加・削除・並べ替えには対応していません。出力対象はチェックで指定します。'; controls.append(disabled);
     }
     const gridWrap = node('div', undefined, 'exp-scroll');
     const table = node('table', undefined, 'exp-table');
     table.setAttribute('aria-label', '.exp のMRM編集');
     const tableHead = node('thead'); const heading = node('tr');
     const selectAll = node('input'); selectAll.type = 'checkbox'; selectAll.setAttribute('aria-label', 'すべてのMRMを選択');
-    const selectionHead = node('th'); selectionHead.append(selectAll); heading.append(selectionHead, node('th', '順番'));
+    const selectionHead = node('th'); selectionHead.append(selectAll, document.createTextNode(' 出力対象')); heading.append(selectionHead, node('th', '順番'));
     for (const field of FIELDS) heading.append(node('th', LABELS[field]));
     heading.append(node('th', 'その他の条件（保持）')); tableHead.append(heading);
     const body = node('tbody'); table.append(tableHead, body); gridWrap.append(table);
     const diagnostics = node('div', undefined, 'exp-diagnostics'); diagnostics.setAttribute('role', 'alert');
+    const exportDiagnostics = node('div', undefined, 'exp-diagnostics'); exportDiagnostics.setAttribute('role', 'alert');
+    exportDiagnostics.setAttribute('aria-label', '.exp 出力の確認');
     const panel = node('div', undefined, 'exp-panel');
     const status = node('div', undefined, 'exp-status'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
     const actions = node('div', undefined, 'exp-actions');
     const importButton = button('選択したMRMをライブラリへ登録', () => runTask(showRegistration)); importButton.hidden = !registerRows;
     const draftButton = button('作業ファイルを保存', () => runTask(async () => {
-        const archive = await createDraftArchive(state.doc, state.rows);
+        const archive = await createDraftArchive(state.doc, state.rows, selectedIds());
         download(JSON.stringify(archive, null, 2), safeDownloadName(state.doc.filename, '.mrm-draft.json'), 'application/json');
-        state.savedRows = rowsKey(); update(); status.textContent = '原本と編集内容を含む作業ファイルを保存しました。';
+        state.savedRows = rowsKey(); update(); status.textContent = '原本・全行の編集内容・チェック状態を含む作業ファイルを保存しました。';
     }));
     const saveRemote = button('メソッドとして保存', showSaveDocument); saveRemote.hidden = !saveDocument;
-    const exportButton = button('編集した .exp を保存', () => runTask(async () => {
-        const bytes = writeEditedExp(state.doc, state.rows);
+    const exportButton = button('選択したMRMを .exp 保存 (0件)', () => runTask(async () => {
+        const selected = selectedIds();
+        const bytes = writeSelectedExp(state.doc, state.rows, selected);
         download(bytes, safeDownloadName(state.doc.filename, '_edited.exp'));
-        state.savedRows = rowsKey(); update(); status.textContent = '.exp を保存しました。対象のMassLynxで変更値と保持された測定条件を確認してください。';
+        const excluded = state.rows.length - selected.length;
+        if (excluded === 0) state.savedRows = rowsKey();
+        update(); status.textContent = `${selected.length} 件のMRMを .exp に保存しました（除外 ${excluded} 件）。対象のMassLynxで変更値と測定条件を確認してください。${excluded ? '\n全行の編集内容とチェック状態を残すには、作業ファイルまたはメソッドとして保存してください。' : ''}`;
     }), 'exp-primary');
     actions.append(importButton, draftButton, saveRemote, exportButton);
-    content.append(head, description, toolbar, summary, warning, controls, gridWrap, diagnostics, panel, status, actions);
+    content.append(head, description, toolbar, summary, warning, controls, gridWrap, diagnostics, exportDiagnostics, panel, status, actions);
     document.body.append(dialog);
 
     function currentLibrary() { return getLibrary ? getLibrary() : typeof library === 'function' ? library() : library; }
-    function rowsKey() { return JSON.stringify(state.rows); }
+    function selectedIds() { return state.rows.filter(row => state.selected.has(row.id)).map(row => row.id); }
+    function rowsKey() { return editorStateKey(state.rows, selectedIds()); }
     function dirty() { return !!state.doc && rowsKey() !== state.savedRows; }
     function canReplace() { return !dirty() || confirm('保存していない編集があります。破棄して別のファイルを開きますか？'); }
     function closeEditor() {
@@ -169,8 +201,9 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
             update();
         }
     }
-    function installDocument(doc, rows, metadata = {}) {
-        state.doc = doc; state.rows = rows; state.selected = new Set(rows.map(row => row.id));
+    function installDocument(doc, rows, metadata = {}, selection) {
+        const selected = normalizeSelection(rows, selection);
+        state.doc = doc; state.rows = rows; state.selected = new Set(selected);
         state.savedRows = rowsKey(); state.documentId = metadata.id || null; state.revision = metadata.revision || null;
         state.name = metadata.name || safeDownloadName(doc.filename, ''); panel.replaceChildren(); renderRows();
         status.textContent = '読み込みました。黄色のセルは原本から変更された項目です。';
@@ -201,6 +234,7 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
     }
     function update() {
         const validation = state.doc ? validateEdits(state.doc, state.rows) : { valid: false, errors: [], changedCells: 0 };
+        const exportValidation = state.doc ? validateSelectedExport(state.doc, state.rows, selectedIds()) : { valid: false, errors: [] };
         const originals = new Map((state.doc?.rows || []).map(row => [row.id, row]));
         for (const row of state.rows) for (const field of FIELDS) {
             const input = state.cells.get(row.id)?.get(field); if (!input) continue;
@@ -211,16 +245,18 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
             input.setAttribute('aria-invalid', issue ? 'true' : 'false'); input.title = issue?.message || '';
             input.disabled = state.busy;
         }
-        diagnostics.textContent = validation.errors.map(error => {
+        function issueText(error) {
             const index = state.rows.findIndex(row => row.id === error.rowId);
             return `${index >= 0 ? `${index + 1}行目 ` : ''}${LABELS[error.field] || error.field || ''}: ${error.message}`;
-        }).join('\n');
+        }
+        diagnostics.textContent = validation.errors.length ? `作業全体の確認（作業ファイル・メソッド保存／ライブラリ登録）:\n${validation.errors.map(issueText).join('\n')}` : '';
+        exportDiagnostics.textContent = exportValidation.errors.length ? `.exp を出力できません:\n${exportValidation.errors.map(issueText).join('\n')}` : '';
         if (state.doc) {
             const polarity = state.doc.polarity === 'positive' ? '+' : state.doc.polarity === 'negative' ? '−' : '未指定（登録時に指定）';
             const count = Array.isArray(validation.changedCells) ? validation.changedCells.length : validation.changedCells;
-            summary.textContent = `${state.doc.filename} ｜ ${state.doc.encoding} ｜ 極性 ${polarity} ｜ ${state.rows.length} チャンネル ｜ 変更 ${count ?? '—'} 項目${dirty() ? ' ｜ 未保存' : ''}${state.revision ? ` ｜ 保存版 ${state.revision}` : ''}`;
+            summary.textContent = `${state.doc.filename} ｜ ${state.doc.encoding} ｜ 極性 ${polarity} ｜ ${state.rows.length} チャンネル ｜ 出力対象 ${state.selected.size} 件 / 除外 ${state.rows.length - state.selected.size} 件 ｜ 変更 ${count ?? '—'} 項目${dirty() ? ' ｜ 未保存' : ''}${state.revision ? ` ｜ 保存版 ${state.revision}` : ''}`;
             const warnings = (state.doc.warnings || []).map(item => typeof item === 'string' ? item : item.message).filter(Boolean);
-            warning.textContent = [state.doc.capabilities?.reason || 'チャンネルの追加・削除・並べ替えは、この版では利用できません。', ...warnings].join('\n');
+            warning.textContent = ['チェックを外したMRMは出力から除外します。一部出力は対応形式のみ可能です。行の追加・削除・並べ替えは利用できません。', ...warnings].join('\n');
         }
         selectAll.checked = state.rows.length > 0 && state.selected.size === state.rows.length;
         selectAll.indeterminate = state.selected.size > 0 && state.selected.size < state.rows.length;
@@ -229,7 +265,9 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
         for (const control of [expFile, encoding, loadDraft, loadRemote, close]) control.disabled = state.busy;
         replace.disabled = state.busy || !state.doc || state.selected.size !== 1;
         reset.disabled = state.busy || !state.doc;
-        for (const control of [draftButton, saveRemote, exportButton]) control.disabled = state.busy || !validation.valid;
+        for (const control of [draftButton, saveRemote]) control.disabled = state.busy || !validation.valid;
+        exportButton.textContent = `選択したMRMを .exp 保存 (${state.selected.size}件)`;
+        exportButton.disabled = state.busy || !exportValidation.valid;
         importButton.disabled = state.busy || !validation.valid || !state.selected.size;
         for (const control of panel.querySelectorAll('button,input,select')) control.disabled = state.busy || control.dataset.blocked === 'true';
     }
@@ -252,7 +290,7 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
         try {
             if (file.size > MAX_DRAFT_BYTES) throw new Error('作業ファイルは16 MB以下を選んでください。');
             const restored = await restoreDraftArchive(JSON.parse(await file.text()));
-            if (canReplace()) installDocument(restored.document, restored.rows);
+            if (canReplace()) installDocument(restored.document, restored.rows, {}, restored.selectedIds);
         } finally { draftFile.value = ''; }
     }));
 
@@ -354,11 +392,11 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
         }), 'exp-primary');
         panel.append(name, save);
         if (state.documentId) panel.append(button('別メソッドとして新規保存', () => runTask(() => saveToServer(true, name.value))));
-        panel.append(node('p', '原本の .exp と編集値を保存します。同時に変更された場合は上書きせず、再読み込みを求めます。', 'exp-help'));
+        panel.append(node('p', '原本の .exp と全行の編集値・チェック状態を保存します。同時に変更された場合は上書きせず、再読み込みを求めます。', 'exp-help'));
     }
     async function saveToServer(asNew, name) {
         if (!name.trim()) throw new Error('メソッド名を入力してください。');
-        const payload = serializeDocument(state.doc, state.rows);
+        const payload = serializeEditorDocument(state.doc, state.rows, selectedIds());
         const result = await saveDocument({ name: name.trim(), payload, id: asNew ? null : state.documentId, expected_revision: asNew ? null : state.revision }, { password: await password() });
         state.documentId = result.id; state.revision = result.revision; state.name = result.name || name.trim();
         state.savedRows = rowsKey(); panel.replaceChildren(); status.textContent = `「${state.name}」を保存しました（版 ${state.revision}）。`;
@@ -372,7 +410,7 @@ export async function openExpEditor({ library = [], getLibrary, refreshLibrary, 
         panel.append(select, button('開く', () => runTask(async () => {
             const saved = await getDocument(select.value, { password: await password() });
             const restored = await restoreSavedDocument(saved);
-            if (canReplace()) installDocument(restored.document, restored.rows, saved);
+            if (canReplace()) installDocument(restored.document, restored.rows, saved, restored.selectedIds);
         })));
         status.textContent = '';
     }

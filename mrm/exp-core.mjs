@@ -1,8 +1,9 @@
 /**
  * Lossless editor for the single, flat MRM layout emitted by mrm.html.
  * This is deliberately not a general MassLynx method converter. No real vendor
- * .exp fixture has been supplied: multiple functions and structural edits are
- * rejected until their dependent fields can be validated against actual files.
+ * .exp fixture has been supplied: multiple functions and arbitrary structural
+ * edits are rejected. Selecting fewer channels requires a strict, known layout
+ * with manual dwell and an exactly verifiable scan-time relationship.
  * Unknown bytes are retained, and edited values are patched into original bytes.
  */
 export const MAX_EXP_BYTES = 1024 * 1024;
@@ -107,7 +108,7 @@ function readLines(bytes, encoding, bomLength, decoder) {
     if (text.includes('\0')) fail('BINARY', 'NUL を含むファイルは対応していません。文字コードを確認してください。');
     const hasComma = comma < end;
     const key = hasComma ? decoder.decode(bytes.subarray(start, comma)).trim() : text.trim();
-    lines.push({ start, end, eolEnd, key, text, valueStart: hasComma ? comma + step : end,
+    lines.push({ start, end, eolEnd, key, text, keyEnd: comma, valueStart: hasComma ? comma + step : end,
       value: hasComma ? decoder.decode(bytes.subarray(comma + step, end)) : null });
     start = eolEnd;
   }
@@ -237,12 +238,12 @@ export function parseExp(input, options = {}) {
     rows.push(row);
   }
   const polarity = findPolarity(lines, warnings);
-  warnings.push('実ファイル・対象 MassLynx での互換性確認が必要です。行の追加・削除・並べ替えには対応していません。');
+  warnings.push('実ファイル・対象 MassLynx での互換性確認が必要です。任意の行追加・削除・並べ替えには対応していません。チェックした行だけの出力は、既知の項目と固定Dwellの時間設定を検証できる形式に限ります。');
   const doc = freeze({ version: 1, parserVersion: PARSER_VERSION, profile: 'flat-mrm-v1', filename, encoding,
     bom: bomLength > 0, byteLength: bytes.length, rows, polarity, warnings,
-    capabilities: { editValues: true, structural: false, reason: '元のチャンネル数・順序を保持します。行構造と時間設定を変更する操作は、実ファイルでの仕様確認後に対応します。' },
+    capabilities: { editValues: true, structural: false, selectedExport: 'validated-profile', reason: '任意の行追加・削除・並べ替えは未対応です。選択した行だけの出力は、既知の項目・固定Dwell・チャンネルごとの時間合計を検証できる場合に利用できます。' },
   });
-  originals.set(doc, { bytes, encoding, bomLength, map });
+  originals.set(doc, { bytes, encoding, bomLength, map, lines });
   return doc;
 }
 
@@ -402,6 +403,178 @@ export function writeEditedExp(doc, rows) {
   if (!validation.valid) throw new ExpError('EDITS', '入力内容を修正してください。', validation.errors);
   const output = applyPatches(original.bytes, patchesFor(doc, rows));
   verifyExport(doc, output, rows);
+  return output;
+}
+
+// Structural export is deliberately stricter than value editing: an unknown
+// scalar can depend on channel numbers too (for example ChannelOrder,2,1).
+const selectionScalars = /^(?:NumFunctions|NoOfFunctions|NumberOfFunctions|FunctionCount|FunctionType|ScanType|FunctionNumber|FunctionIndex|Polarity|IonMode|IonPolarity|IonizationMode)$/i;
+const selectionFunctionMarker = /^(?:\[Function[ _]*1\]|Function[ _]*1:?)$/i;
+const MAX_TIMING_SCALE = 128;
+function indexedKey(key) {
+  for (const pattern of indexedPatterns) {
+    const match = key.match(pattern);
+    if (match) return { prefix: match[1], index: Number(match[2]) };
+  }
+  return null;
+}
+function timingDecimal(raw, key, positive = false) {
+  const number = finiteNumber(raw);
+  if (number === null || number < 0 || (positive && number <= 0)) {
+    fail('SELECTION_TIMING', `${key} は${positive ? '正の' : '0以上の'}固定時間である必要があります。`);
+  }
+  const match = String(raw).trim().match(/^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/);
+  const exponent = BigInt(match[4] || '0');
+  if (exponent > BigInt(MAX_TIMING_SCALE) || exponent < -BigInt(MAX_TIMING_SCALE)) {
+    fail('SELECTION_TIMING', `${key} の時間表記が検証可能な精度を超えています。`);
+  }
+  let scale = (match[3] || '').length - Number(exponent);
+  if (Math.abs(scale) > MAX_TIMING_SCALE) fail('SELECTION_TIMING', `${key} の時間表記が検証可能な精度を超えています。`);
+  let units = BigInt((match[2] || '') + (match[3] || ''));
+  if (scale < 0) { units *= 10n ** BigInt(-scale); scale = 0; }
+  while (scale && units % 10n === 0n) { units /= 10n; scale--; }
+  return { units, scale };
+}
+function addTimings(values) {
+  const scale = Math.max(0, ...values.map(value => value.scale));
+  const units = values.reduce((sum, value) => sum + value.units * 10n ** BigInt(scale - value.scale), 0n);
+  return { units, scale };
+}
+function equalTimings(a, b) {
+  const scale = Math.max(a.scale, b.scale);
+  return a.units * 10n ** BigInt(scale - a.scale) === b.units * 10n ** BigInt(scale - b.scale);
+}
+function formatTiming(value) {
+  if (!value.scale) return String(value.units);
+  const digits = String(value.units).padStart(value.scale + 1, '0');
+  return (digits.slice(0, -value.scale) + '.' + digits.slice(-value.scale)).replace(/0+$/, '').replace(/\.$/, '');
+}
+function selectionTiming(doc) {
+  const original = originalOf(doc), seen = new Set();
+  for (const line of original.lines) {
+    if (!line.text.trim() || /^\s*(?:;|#|\/\/)/.test(line.text)) continue;
+    if (line.value === null && selectionFunctionMarker.test(line.text.trim())) continue;
+    if (indexedKey(line.key)) continue;
+    if (line.value === null || (!['NumSIRMasses', 'NoOfChannels', 'FunctionScanTime(sec)'].includes(line.key) && !selectionScalars.test(line.key))) {
+      fail('SELECTION_PROFILE', `項目「${line.key}」のチャンネル依存を確認できないため、選択行だけの出力には対応していません。`);
+    }
+    const identity = line.key.toLowerCase();
+    if (seen.has(identity)) fail('SELECTION_PROFILE', `項目「${line.key}」が重複しているため、選択行だけの出力には対応していません。`);
+    seen.add(identity);
+  }
+  const timings = doc.rows.map(row => {
+    const i = row.channel;
+    for (const key of [`SIRAutoDwell${i}`, `AutoDwell_${i}`]) {
+      if (canonicalNumber(requireLine(original.map, key).value) !== '0') {
+        fail('SELECTION_TIMING', `${key} が明示的な0ではありません。選択行だけの出力は固定Dwellに限ります。`);
+      }
+    }
+    const dwell = timingDecimal(requireLine(original.map, `Dwell(s)_${i}`).value, `Dwell(s)_${i}`, true);
+    const sirDwell = timingDecimal(requireLine(original.map, `SIRDwellTime${i}`).value, `SIRDwellTime${i}`, true);
+    const delay = timingDecimal(requireLine(original.map, `InterChannelDelay(s)_${i}`).value, `InterChannelDelay(s)_${i}`);
+    const sirDelay = timingDecimal(requireLine(original.map, `SIRDelay${i}`).value, `SIRDelay${i}`);
+    if (!equalTimings(dwell, sirDwell) || !equalTimings(delay, sirDelay)) fail('SELECTION_TIMING', `チャンネル ${i} のSIRとMRMの時間設定が一致しません。`);
+    return addTimings([dwell, delay]);
+  });
+  const scan = timingDecimal(requireLine(original.map, 'FunctionScanTime(sec)').value, 'FunctionScanTime(sec)', true);
+  if (!equalTimings(scan, addTimings(timings))) {
+    fail('SELECTION_TIMING', 'FunctionScanTime(sec) が全チャンネルのDwellとDelayの合計に一致しません。時間設定の意味を確定できないため、選択行だけの出力には対応していません。');
+  }
+  return timings;
+}
+function selectedContext(doc, rows, selectedIds) {
+  originalOf(doc);
+  const errors = [], known = new Set(doc.rows.map(row => row.id)), selected = new Set();
+  const error = message => errors.push({ rowId: null, field: null, message });
+  if (!Array.isArray(selectedIds)) error('選択行の識別子は配列で指定してください。');
+  else for (const id of selectedIds) {
+    if (typeof id !== 'string' || !known.has(id)) error('不明な行が選択されています。ファイルを読み直してください。');
+    else if (selected.has(id)) error('同じ行が重複して選択されています。');
+    else selected.add(id);
+  }
+  if (!selected.size) error('出力するMRMを1行以上チェックしてください。');
+  const selectedCount = selected.size, excludedCount = doc.rows.length - selectedCount;
+  let effectiveRows = [], changedCells = 0, timings = null;
+  if (!Array.isArray(rows) || rows.length !== doc.rows.length) error('行の追加・削除は未対応です。チェックで出力対象を選択してください。');
+  else {
+    effectiveRows = doc.rows.map((base, index) => {
+      const row = rows[index];
+      if (!row || typeof row !== 'object' || row.id !== base.id) {
+        errors.push({ rowId: base.id, field: null, message: '行の入れ替えまたは識別子の変更は未対応です。' });
+        return base;
+      }
+      return selected.has(base.id) ? row : base;
+    });
+    const validation = validateEdits(doc, effectiveRows);
+    errors.push(...validation.errors); changedCells = validation.changedCells;
+  }
+  if (!errors.length && excludedCount) {
+    try { timings = selectionTiming(doc); }
+    catch (issue) {
+      if (!(issue instanceof ExpError)) throw issue;
+      error(issue.message);
+    }
+  }
+  return { valid: !errors.length, errors, selectedCount, excludedCount, changedCells, selected, effectiveRows, timings };
+}
+
+/** Validate selected values, plus the strict structural profile for a subset. */
+export function validateSelectedExport(doc, rows, selectedIds) {
+  const { valid, errors, selectedCount, excludedCount, changedCells } = selectedContext(doc, rows, selectedIds);
+  return { valid, errors, selectedCount, excludedCount, changedCells };
+}
+function numericPatch(line, value, encoding) {
+  const leading = line.value.match(/^\s*/)[0], trailing = line.value.match(/\s*$/)[0];
+  return { start: line.valueStart, end: line.end, bytes: encodeValue(leading + value + trailing, encoding) };
+}
+function channelSuffixSpan(original, line, index) {
+  const wide = original.encoding.startsWith('utf-16'), step = wide ? 2 : 1;
+  const unit = pos => wide ? (original.encoding === 'utf-16le'
+    ? original.bytes[pos] + original.bytes[pos + 1] * 256
+    : original.bytes[pos] * 256 + original.bytes[pos + 1]) : original.bytes[pos];
+  const digit = pos => pos >= line.start && unit(pos) >= 48 && unit(pos) <= 57;
+  let end = line.keyEnd;
+  while (end > line.start && !digit(end - step)) end -= step;
+  // UseSampleList_2<index> contains a literal digit in its prefix.
+  return { start: end - String(index).length * step, end };
+}
+function selectedPatches(doc, context) {
+  const original = originalOf(doc), patches = patchesFor(doc, context.effectiveRows), numbers = new Map();
+  const kept = doc.rows.filter(row => context.selected.has(row.id));
+  kept.forEach((row, index) => numbers.set(row.channel, index + 1));
+  for (const line of original.lines) {
+    const entry = indexedKey(line.key);
+    if (!entry) continue;
+    if (!numbers.has(entry.index)) patches.push({ start: line.start, end: line.eolEnd, bytes: new Uint8Array() });
+    else if (numbers.get(entry.index) !== entry.index) patches.push({ ...channelSuffixSpan(original, line, entry.index), bytes: encodeValue(String(numbers.get(entry.index)), original.encoding) });
+  }
+  for (const key of ['NumSIRMasses', 'NoOfChannels']) patches.push(numericPatch(original.map.get(key), String(kept.length), original.encoding));
+  const selectedTime = addTimings(kept.map(row => context.timings[row.channel - 1]));
+  patches.push(numericPatch(original.map.get('FunctionScanTime(sec)'), formatTiming(selectedTime), original.encoding));
+  return patches.sort((a, b) => a.start - b.start);
+}
+function verifySelectedOutput(doc, output, context) {
+  const original = originalOf(doc), expected = applyPatches(original.bytes, selectedPatches(doc, context));
+  if (output.length !== expected.length || output.some((value, i) => value !== expected[i])) fail('EXPORT_CHANGED', '選択出力の対象以外のバイト列が変更されています。');
+  const parsed = parseExp(output, { filename: doc.filename, encoding: doc.encoding });
+  const kept = context.effectiveRows.filter(row => context.selected.has(row.id));
+  if (parsed.rows.length !== kept.length) fail('EXPORT_VALUE', '出力したチャンネル数が選択数と一致しません。');
+  kept.forEach((row, index) => {
+    for (const field of fields) if (!sameValue(parsed.rows[index][field], row[field], field)) fail('EXPORT_VALUE', `出力したチャンネル ${index + 1} の ${field} が選択内容と一致しません。`);
+    const base = doc.rows.find(item => item.id === row.id);
+    for (const key of Object.keys(base.details)) if (parsed.rows[index].details[key] !== base.details[key]) fail('EXPORT_VALUE', `出力したチャンネル ${index + 1} の ${key} が原本と一致しません。`);
+  });
+  // A generated subset must also satisfy the same timing/profile invariant.
+  selectionTiming(parsed);
+}
+
+/** Export checked rows in source order; leave the original and draft intact. */
+export function writeSelectedExp(doc, rows, selectedIds) {
+  const context = selectedContext(doc, rows, selectedIds);
+  if (!context.valid) throw new ExpError('SELECTION', '選択したMRMを出力できません。', context.errors);
+  if (!context.excludedCount) return writeEditedExp(doc, rows);
+  const output = applyPatches(originalOf(doc).bytes, selectedPatches(doc, context));
+  verifySelectedOutput(doc, output, context);
   return output;
 }
 
