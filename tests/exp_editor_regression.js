@@ -8,7 +8,7 @@ globalThis.crypto ||= webcrypto;
 
 async function main() {
     const { parseExp, createDraft, writeEditedExp } = await import('../mrm/exp-core.mjs');
-    const { createDraftArchive, restoreDraftArchive, restoreSavedDocument, safeDownloadName, libraryChoices } = await import('../mrm/exp-editor.mjs');
+    const { createDraftArchive, restoreDraftArchive, restoreSavedDocument, serializeEditorDocument, editorStateKey, safeDownloadName, libraryChoices } = await import('../mrm/exp-editor.mjs');
     const text = [
         'Polarity,Negative', 'NoOfChannels,2', 'NumSIRMasses,2', 'FunctionScanTime(sec),0.0400',
         ...[1, 2].flatMap(i => [
@@ -29,6 +29,7 @@ async function main() {
     assert.equal(restored.rows[1].ce, '15');
     assert.equal(restored.rows[1].details.dwell, '0.0200');
     assert.deepEqual(restored.rows.map(row => row.id), ['channel-1', 'channel-2']);
+    assert.deepEqual(restored.selectedIds, ['channel-1', 'channel-2']);
     const output = new TextDecoder().decode(writeEditedExp(restored.document, restored.rows));
     assert.equal(output, text.replace('CollisionEnergy(eV)_2,11.00', 'CollisionEnergy(eV)_2,15'));
     assert.equal(doc.rows[1].ce, originalCe, 'Editing must never mutate the immutable original');
@@ -42,6 +43,7 @@ async function main() {
     const saved = { id: 'saved-1', revision: 1, source_sha256: archive.sha256, payload: archive.document };
     const serverRoundTrip = await restoreSavedDocument(saved);
     assert.deepEqual(writeEditedExp(serverRoundTrip.document, serverRoundTrip.rows), writeEditedExp(doc, rows));
+    assert.deepEqual(serverRoundTrip.selectedIds, ['channel-1', 'channel-2']);
     await assert.rejects(() => restoreSavedDocument({ ...saved, source_sha256: '0'.repeat(64) }), /ハッシュが一致/);
     const damagedSaved = structuredClone(saved);
     damagedSaved.payload.originalBase64 = Buffer.from(text.replace('Dwell(s)_2,0.0200', 'Dwell(s)_2,0.9000')).toString('base64');
@@ -59,6 +61,37 @@ async function main() {
     await assert.rejects(() => restoreDraftArchive(nonFinite), /不正/);
     const invalidRows = createDraft(doc); invalidRows[0].precursor = '';
     await assert.rejects(() => createDraftArchive(doc, invalidRows), /修正/);
+
+    // Partial export does not discard unselected rows from a resumable document.
+    const partialArchive = await createDraftArchive(doc, rows, ['channel-2']);
+    assert.deepEqual(partialArchive.document.selectedIds, ['channel-2']);
+    const partialDraft = await restoreDraftArchive(JSON.parse(JSON.stringify(partialArchive)));
+    assert.deepEqual(partialDraft.selectedIds, ['channel-2']);
+    assert.equal(partialDraft.rows.length, 2);
+    assert.equal(partialDraft.rows[1].ce, '15');
+    const partialPayload = serializeEditorDocument(doc, rows, ['channel-2']);
+    const partialSaved = await restoreSavedDocument({ ...saved, payload: partialPayload });
+    assert.deepEqual(partialSaved.selectedIds, ['channel-2']);
+    assert.equal(partialSaved.rows.length, 2);
+    assert.deepEqual((await restoreDraftArchive(await createDraftArchive(doc, rows, []))).selectedIds, [], 'An explicit empty selection stays empty');
+    assert.deepEqual((await restoreSavedDocument({ ...saved, payload: serializeEditorDocument(doc, rows, []) })).selectedIds, []);
+    const legacyArchive = structuredClone(archive); delete legacyArchive.document.selectedIds;
+    assert.deepEqual((await restoreDraftArchive(legacyArchive)).selectedIds, ['channel-1', 'channel-2'], 'Legacy drafts default to all rows');
+    assert.deepEqual((await restoreSavedDocument({ ...saved, payload: legacyArchive.document })).selectedIds, ['channel-1', 'channel-2'], 'Legacy methods default to all rows');
+    assert.deepEqual(serializeEditorDocument(doc, rows, ['channel-2', 'channel-1']).selectedIds, ['channel-1', 'channel-2'], 'Selection keeps original channel order');
+    for (const badSelection of [null, 'channel-1', [1], ['channel-3'], ['channel-1', 'channel-1']]) {
+        const badArchive = structuredClone(archive); badArchive.document.selectedIds = badSelection;
+        await assert.rejects(() => restoreDraftArchive(badArchive), /選択状態が不正/);
+        await assert.rejects(() => restoreSavedDocument({ ...saved, payload: badArchive.document }), /選択状態が不正/);
+        assert.throws(() => serializeEditorDocument(doc, rows, badSelection), /選択状態が不正/);
+    }
+    const allSelectedKey = editorStateKey(rows, ['channel-1', 'channel-2']);
+    const partialSelectedKey = editorStateKey(rows, ['channel-2']);
+    assert.notEqual(allSelectedKey, partialSelectedKey, 'Changing checkbox state is an unsaved change');
+    assert.notEqual(partialSelectedKey, editorStateKey(rows, []));
+    assert.equal(allSelectedKey, editorStateKey(rows, ['channel-2', 'channel-1']), 'Selection click order does not make a change');
+    const unselectedEdit = structuredClone(rows); unselectedEdit[0].name = 'unchecked edit';
+    assert.notEqual(partialSelectedKey, editorStateKey(unselectedEdit, ['channel-2']), 'Unselected row changes remain in the dirty fingerprint');
 
     assert.equal(safeDownloadName('../bad\nname.exp', '_edited.exp'), '.._bad_name_edited.exp');
     assert.equal(safeDownloadName('名前.EXP', '.mrm-draft.json'), '名前.mrm-draft.json');
