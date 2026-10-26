@@ -1,12 +1,3 @@
-# これらのテストは「絵は出るので人には気づけない」壊れ方を捕まえるために
-# 置いてある。手元で走らせないと働かないままなので、PR で必ず走らせる。
-#   - viewer_preview_regression.js … 22,000 行の単一ファイルの構文ゲート、
-#     parse worker の関数リスト漏れ、Analyte ヘッダ、改名時の CE/CV 保持
-#   - manage_tree_regression.js … 管理画面のフォルダ階層。ノードの身元が
-#     localId だけだと別 PC でフォルダから出てしまう (直したもの) の見張り
-#   - connector selftest … アプリのコードを viewer/index.html から切り出して
-#     connector の移植と数値を突き合わせる (.exp / parquet / .raw /
-#     buildMsiGrid)。ここが落ちたら AI がアプリと違う数値を答える状態。
 name: Tests
 
 on:
@@ -20,78 +11,63 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            node: '22'
+          - os: windows-latest
+            node: '24.21.0'
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 公式ビルドは full ICU 付き。TextDecoder('windows-1252') が要る
-      # (_extern.inf の "Source Temperature (°C)" など Waters の 8bit テキスト)。
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: |
             connector/package-lock.json
             tests/package-lock.json
 
-      - name: viewer regression tests
-        run: node tests/viewer_preview_regression.js
-
-      - name: manage tree regression tests
-        run: node tests/manage_tree_regression.js
-
-      - name: connector dependencies
+      - name: Install connector test dependencies
         working-directory: connector
         run: npm ci --no-audit --no-fund
 
-      - name: Canvas pixel regression dependencies
+      - name: Install canvas test dependencies
         working-directory: tests
         run: npm ci --no-audit --no-fund
 
-      - name: Existing .exp editor and database regressions
-        run: |
-          node tests/exp_core_regression.js
-          node tests/exp_editor_regression.js
-          node tests/exp_library_import_regression.mjs
-          node tests/exp_import_db_regression.mjs
-
+      # Includes all non-browser regressions (.js/.cjs/.mjs) and connector parity.
+      - name: Run all regressions and connector selftest
+        run: node tools/test.cjs
       - name: Install browser for .exp editing workflows
         working-directory: tests
         run: npx playwright install --with-deps chromium
-
       - name: Existing .exp browser workflows
         run: node tests/exp_editor_browser_regression.mjs
-
-      - name: MSI source, geometry, rendering, loading and persistence regressions
-        run: |
-          for test in tests/msi_*_regression.js; do
-            node "$test"
-          done
-
-      - name: ROI save regression
-        run: node tests/roi_save_regression.js
-
-      - name: ROI list rendering and project open regressions
-        run: |
-          node tests/roi_list_render_regression.js
-          node tests/roi_project_open_regression.js
-
-      - name: ROI screen overlay and cursor regression
-        run: node tests/roi_screen_overlay_regression.js
-
-      - name: Fixed ROI and MRM color regression
-        run: node tests/fixed_color_regression.js
-
-      - name: ROI microscope images, comparison and transport regressions
-        run: |
-          for test in tests/roi_media_*_regression.js; do
-            node "$test"
-          done
-
-      # devDependency の hyparquet-writer が入るので parquet のパリティも走る
-      # (入っていないと SKIP されて素通りする)。
-      - name: connector selftest (app <-> connector parity)
-        working-directory: connector
-        run: npm run selftest
+      - name: Build online distribution
+        run: node tools/build.cjs --mode web --out dist/web
+      - name: Fetch and verify pinned Windows runtime
+        if: runner.os == 'Windows'
+        run: node tools/fetch-runtime.cjs
+      - name: Build offline distribution
+        if: runner.os == 'Windows'
+        run: node tools/build.cjs --mode offline --out dist/offline --runtime-dir runtime --zip dist/Share_Test_Offline.zip
+      - name: Verify packaged Windows launcher
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: dist\offline\START_OFFLINE.bat --verify-only
+      - name: Upload tested offline package
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Share_Test_Offline-${{ github.sha }}
+          path: |
+            dist/Share_Test_Offline.zip
+            dist/Share_Test_Offline.zip.sha256
+          if-no-files-found: error
+          retention-days: 14

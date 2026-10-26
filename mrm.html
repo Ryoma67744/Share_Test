@@ -1,23 +1,20 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
+<script src="runtime-config.js"></script>
+<script src="app-runtime.js"></script>
+<script src="offline/offline.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
 <title>DESI Data Share — MRM管理</title>
 <link rel="stylesheet" href="mrm/exp-editor.css">
-<script src="https://cdn.tailwindcss.com"></script>
+<script src="vendor/tailwind.js"></script>
 <!-- defer: built lazily in _client(); XLSX is only used by the Excel
      import / export buttons. Neither is referenced while parsing. -->
-<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+<script defer src="vendor/supabase.min.js"></script>
 <!-- ③ SheetJS: parse Excel MRM lists for bulk import (same version as viewer/index.html). -->
-<script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-<script>
-  // Keep these in sync with index.html / viewer/index.html. Same Supabase
-  // project, same anon key.
-  window.SUPABASE_URL      = "https://pxlrlhtcvwkqnlryencs.supabase.co";
-  window.SUPABASE_ANON_KEY = "sb_publishable_2K4sqMmKk3g20Jmwho-awQ_Uu_hSKeU";
-</script>
+<script defer src="vendor/xlsx.full.min.js"></script>
 <style>
   body { background:#f8fafc; color:#0f172a; }
   .card { background:#fff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.04); }
@@ -194,6 +191,7 @@
 
 <div id="modal-host"></div>
 
+<script src="offline/local-mrm.js"></script>
 <script>
 'use strict';
 
@@ -204,6 +202,7 @@
 const SupabaseClient = (() => {
     let client = null;
     function _client() {
+        if (window.DESI_OFFLINE === true) return null;
         if (client) return client;
         if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) return null;
         if (typeof supabase === 'undefined' || !supabase.createClient) return null;
@@ -211,6 +210,7 @@ const SupabaseClient = (() => {
         return client;
     }
     async function rpc(name, args) {
+        if (window.DESI_OFFLINE === true) return window.DesiLocalMrm.rpc(name, args || {});
         const c = _client();
         if (!c) throw new Error('supabase_not_configured');
         const { data, error } = await c.rpc(name, args || {});
@@ -218,7 +218,9 @@ const SupabaseClient = (() => {
         return data;
     }
     return {
+        // configured always describes cloud access, as on the other pages.
         configured() { return !!_client(); },
+        libraryAvailable() { return window.DESI_OFFLINE === true ? !!window.DesiLocalMrm : !!_client(); },
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
         listMrmLibrary(pw) { return rpc('list_mrm_library', { _master_pw: pw }); },
         // `shelf` ('main' | 'archive') is optional everywhere: passing null keeps
@@ -318,6 +320,7 @@ function isMasterUnlocked() {
     } catch (e) { return false; }
 }
 function markMasterUnlocked(pw) {
+    if (window.DESI_OFFLINE === true) return;
     try {
         sessionStorage.setItem(MASTER_UNLOCK_KEY, JSON.stringify({
             unlockedAt: Date.now(), expiresAt: Date.now() + MASTER_UNLOCK_TTL_MS,
@@ -332,6 +335,7 @@ function markMasterUnlocked(pw) {
     }
 }
 function _readCachedMasterPw() {
+    if (window.DESI_OFFLINE === true) return 'offline-local';
     try {
         const raw = sessionStorage.getItem('desi:masterPw');
         if (!raw) return '';
@@ -382,6 +386,7 @@ function openMasterUnlockModal() {
     });
 }
 async function requireMasterUnlock() {
+    if (window.DESI_OFFLINE === true) return true;
     if (isMasterUnlocked()) return true;
     return openMasterUnlockModal();
 }
@@ -494,7 +499,11 @@ function findTransition(tid) {
 
 async function loadLibrary() {
     const host = document.getElementById('lib');
-    if (!SupabaseClient.configured()) {
+    if (!SupabaseClient.libraryAvailable()) {
+        if (window.DESI_OFFLINE === true) {
+            host.innerHTML = '<div class="card p-6 text-center text-sm text-red-600">ローカルMRMの部品を読み込めませんでした。配布ZIPをすべて展開してから起動し直してください。</div>';
+            return;
+        }
         // ★ 「未設定」と「部品を読み込めなかった」は別物。まとめて "未設定" と
         //   言うと、設定は正しいのに設定を疑わせる誤誘導になる。
         const libMissing = (typeof supabase === 'undefined' || !supabase.createClient);
@@ -525,8 +534,9 @@ function usagesHtml(tr) {
     const us = tr.usages || [];
     if (!us.length) return '<div class="usage-list muted">使用履歴なし</div>';
     const items = us.map(u => {
-        const proj = u.project_slug
-            ? '<a data-action="open-usage" data-slug="' + safe(u.project_slug) + '">' + safe(u.project_name || u.project_slug) + ' ↗</a>'
+        const projectId = window.DESI_OFFLINE === true ? u.project_local_id : u.project_slug;
+        const proj = projectId
+            ? '<a data-action="open-usage" data-slug="' + safe(projectId) + '">' + safe(u.project_name || projectId) + ' ↗</a>'
             : '<span>' + safe(u.project_name || '(プロジェクト名なし)') + '</span>';
         const stxt = (u.sample_types && u.sample_types.length) ? u.sample_types.join(', ') : (u.sample_name || '');
         const sample = stxt ? ' / ' + safe(stxt) : '';
@@ -805,7 +815,9 @@ function renderLibrary() {
     if (!units.length) {
         let msg;
         if (shelfTotal) msg = '条件に一致する化合物がありません。';
-        else if (currentShelf === 'archive') msg = 'アーカイブはまだ空です。「実測棚卸し」から、過去に測定したが未登録の化合物をまとめて登録できます。';
+        else if (currentShelf === 'archive') msg = window.DESI_OFFLINE === true
+            ? 'アーカイブはまだ空です。「+ 化合物」または「一括登録」で登録先を使用実績アーカイブにして登録できます。'
+            : 'アーカイブはまだ空です。「実測棚卸し」から、過去に測定したが未登録の化合物をまとめて登録できます。';
         else msg = 'まだ登録がありません。「+ 化合物」で追加するか、結果画面の Method 表から登録してください。';
         host.innerHTML = note + '<div class="card p-6 text-center text-sm text-gray-500">' + msg + '</div>';
         return;
@@ -975,8 +987,9 @@ async function openUsageModal() {
         <form class="row">
           <label>プロジェクト名 <input type="text" name="project_name"></label>
           <label>サンプル種 (脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可) <input type="text" name="sample_types"></label>
-          <label>プロジェクト slug (任意。入力すると遡りリンクが有効になります)
+          <label ${window.DESI_OFFLINE === true ? 'style="display:none"' : ''}>プロジェクト slug (任意。入力すると遡りリンクが有効になります)
             <input type="text" name="project_slug"></label>
+          ${window.DESI_OFFLINE === true ? '<p class="muted" style="font-size:11px;">プロジェクト画面の「選択を管理へ登録」から登録した履歴には、ローカルのプロジェクトへのリンクが付きます。</p>' : ''}
           <p class="err" data-err></p>
           <div class="actions">
             <button type="button" class="btn" data-modal-cancel>Cancel</button>
@@ -1066,6 +1079,7 @@ async function addUsage(tid) {
 }
 function openUsageLink(slug) {
     if (!slug) return;
+    if (window.DESI_OFFLINE === true) { location.href = 'viewer/index.html?project=' + encodeURIComponent(slug); return; }
     location.href = 'viewer/index.html#share=' + encodeURIComponent(slug);
 }
 
@@ -1134,7 +1148,7 @@ function _renderProjPopover(anchorEl, name, state) {
                     ? '<a class="pp-link" data-slug="' + safe(p.slug) + '" title="このプロジェクトを開く">' + label + ' ↗</a>'
                     : '<span>' + label + '</span>';
                 const badge = '<span class="pp-badge ' + (p.is_public ? 'pub' : 'prv') + '">'
-                    + (p.is_public ? '公開' : '非公開') + '</span>';
+                    + (window.DESI_OFFLINE === true ? 'ローカル' : (p.is_public ? '公開' : '非公開')) + '</span>';
                 return '<li>' + name + badge + '</li>';
             }).join('') + '</ul>';
         }
@@ -2100,7 +2114,8 @@ function projectsFromUsages() {
     for (const c of (library || [])) {
         for (const tr of (c.transitions || [])) {
             for (const u of (tr.usages || [])) {
-                if (u.project_slug && !map.has(u.project_slug)) map.set(u.project_slug, u.project_name || u.project_slug);
+                const id = window.DESI_OFFLINE === true ? u.project_local_id : u.project_slug;
+                if (id && !map.has(id)) map.set(id, u.project_name || id);
             }
         }
     }
@@ -2113,7 +2128,7 @@ function selectByProject(slug) {
     let n = 0;
     for (const c of (library || [])) {
         for (const tr of (c.transitions || [])) {
-            if ((tr.usages || []).some(u => u.project_slug === slug)) { selectedTransitions.add(tr.id); n++; }
+            if ((tr.usages || []).some(u => (window.DESI_OFFLINE === true ? u.project_local_id : u.project_slug) === slug)) { selectedTransitions.add(tr.id); n++; }
         }
     }
     renderLibrary(); updateExportBar(); renderSelectedPanel();
@@ -2638,8 +2653,83 @@ function bindFilterBar() {
     });
 }
 
+// Explicit capabilities keep file editing usable in both runtime modes.
+function expEditorServices() {
+    const requirePassword = () => {
+        const pw = _readCachedMasterPw();
+        if (!pw) throw new Error('認証が切れました。MRM 管理画面を再読み込みしてください。');
+        return pw;
+    };
+    const callExpRpc = async (fn) => {
+        try { return await fn(); }
+        catch (e) {
+            if (/PGRST202|could not find.*function|function.*does not exist/i.test(String(e && (e.code || '') + ' ' + (e.message || e)))) {
+                throw new Error('保存・登録用の DB 更新が必要です。管理者が supabase/mrm_exp_import.sql を適用してください。.exp 編集とローカル保存は利用できます。');
+            }
+            throw e;
+        }
+    };
+    const services = {
+        library,
+        getLibrary: () => library,
+        refreshLibrary: async () => {
+            library = (await SupabaseClient.listMrmLibrary(requirePassword())) || [];
+            renderLibrary();
+            return library;
+        },
+        getPassword: requirePassword,
+    };
+    // The local adapter does not implement the atomic .exp registration or
+    // saved-document RPCs. Keep local editing available without exposing them.
+    if (window.DESI_OFFLINE === true) return services;
+    return Object.assign(services, {
+        registerRows: async (rows) => {
+            const result = await callExpRpc(() => SupabaseClient.registerFromExp(requirePassword(), rows));
+            await loadLibrary();
+            return result;
+        },
+        saveDocument: (doc) => callExpRpc(() => SupabaseClient.saveExpDocument(requirePassword(), doc)),
+        listDocuments: () => callExpRpc(() => SupabaseClient.listExpDocuments(requirePassword())),
+        getDocument: (id) => callExpRpc(() => SupabaseClient.getExpDocument(requirePassword(), id)),
+    });
+}
+
 async function init() {
     await requireMasterUnlock();
+    if (window.DESI_OFFLINE === true) {
+        // This action reconciles the cloud's project inventory. Explicitly
+        // omit it; registrations and their local project history still work.
+        document.getElementById('btn-reconcile').hidden = true;
+        const note = document.createElement('p');
+        note.className = 'text-xs text-gray-500 mt-2';
+        note.textContent = 'オフライン版: MRM・使用履歴・メソッドセット・.exp テンプレートはこのブラウザーに保存します。実測棚卸し（クラウド全体の検索）は対象外です。測定 PJ はこの PC で管理へ登録した履歴を表示します。';
+        document.querySelector('header').after(note);
+        const toolbar = document.getElementById('btn-reload').parentElement;
+        const exportBtn = document.createElement('button'); exportBtn.className = 'btn'; exportBtn.textContent = 'MRM バックアップ';
+        exportBtn.addEventListener('click', () => {
+            try {
+                const doc = window.DesiLocalMrm.exportDocument();
+                const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob); const a = document.createElement('a');
+                a.href = url; a.download = 'DESI_MRM_backup_' + new Date().toISOString().slice(0, 10) + '.json';
+                a.click(); setTimeout(() => URL.revokeObjectURL(url), 10000);
+            } catch (e) { alert('MRM バックアップ失敗: ' + e.message); }
+        });
+        const restoreBtn = document.createElement('button'); restoreBtn.className = 'btn'; restoreBtn.textContent = 'MRM 復元';
+        const input = document.createElement('input'); input.type = 'file'; input.accept = '.json,application/json'; input.hidden = true;
+        restoreBtn.addEventListener('click', () => input.click());
+        input.addEventListener('change', async () => {
+            const file = input.files[0]; input.value = ''; if (!file) return;
+            try {
+                const doc = window.DesiLocalMrm.validate(JSON.parse(await file.text()));
+                if (!confirm('現在の MRM 全体をバックアップ（化合物 ' + doc.compounds.length + ' 件）で置き換えます。先に現在の MRM バックアップを保存してください。復元しますか?')) return;
+                await window.DesiLocalMrm.importDocument(doc);
+                _projCache.clear(); clearSelection(); await loadLibrary();
+                alert('MRM を復元しました');
+            } catch (e) { alert('MRM 復元失敗: ' + e.message); }
+        });
+        toolbar.append(exportBtn, restoreBtn, input);
+    }
     document.getElementById('btn-back').addEventListener('click', () => { location.href = 'index.html'; });
     document.getElementById('btn-add-compound').addEventListener('click', () => addCompound());
     (() => {
@@ -2659,38 +2749,13 @@ async function init() {
     document.getElementById('btn-exp-edit').addEventListener('click', async () => {
         try {
             const { openExpEditor } = await import('./mrm/exp-editor.mjs');
-            const requirePassword = () => {
-                const pw = _readCachedMasterPw();
-                if (!pw) throw new Error('認証が切れました。MRM 管理画面を再読み込みしてください。');
-                return pw;
-            };
-            const callExpRpc = async (fn) => {
-                try { return await fn(); }
-                catch (e) {
-                    if (/PGRST202|could not find.*function|function.*does not exist/i.test(String(e && (e.code || '') + ' ' + (e.message || e)))) {
-                        throw new Error('保存・登録用の DB 更新が必要です。管理者が supabase/mrm_exp_import.sql を適用してください。.exp 編集とローカル保存は利用できます。');
-                    }
-                    throw e;
-                }
-            };
-            await openExpEditor({
-                library,
-                getLibrary: () => library,
-                refreshLibrary: async () => {
-                    library = (await SupabaseClient.listMrmLibrary(requirePassword())) || [];
-                    renderLibrary();
-                    return library;
-                },
-                getPassword: requirePassword,
-                registerRows: async (rows) => {
-                    const result = await callExpRpc(() => SupabaseClient.registerFromExp(requirePassword(), rows));
-                    await loadLibrary();
-                    return result;
-                },
-                saveDocument: (doc) => callExpRpc(() => SupabaseClient.saveExpDocument(requirePassword(), doc)),
-                listDocuments: () => callExpRpc(() => SupabaseClient.listExpDocuments(requirePassword())),
-                getDocument: (id) => callExpRpc(() => SupabaseClient.getExpDocument(requirePassword(), id)),
-            });
+            const editor = await openExpEditor(expEditorServices());
+            if (window.DESI_OFFLINE === true && !editor.dialog.querySelector('.exp-offline-note')) {
+                const note = document.createElement('p');
+                note.className = 'exp-help exp-offline-note';
+                note.textContent = 'オフライン版: .exp の編集、ローカルライブラリからの置換、.exp と作業ファイルの保存・復元を利用できます。この画面からのライブラリ登録とクラウドへのメソッド保存・読込は利用できません。';
+                editor.dialog.querySelector('.exp-head').after(note);
+            }
         } catch (e) { reportError(e, '.exp 編集'); }
     });
     document.getElementById('btn-sets').addEventListener('click', () => openSetsModal());

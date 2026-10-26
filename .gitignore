@@ -1,1 +1,9 @@
-.claude/ 
+.claude/
+
+# Generated distributions and downloaded Windows runtime.
+/runtime/
+/dist/
+/HOW_TO_USE.html
+/START_OFFLINE.bat
+/offline/manifest.json
+/viewer/offline-smoke*

@@ -1,0 +1,35 @@
+Share_Test 共通ソース版 — 検証方法と範囲
+版: v2026-10-09.1
+
+開発者・CIでの回帰確認
+以下はNode.js 22以降を用意したソースリポジトリのルートで実行します。
+配布ZIPにはtools、tests、connectorを含めません。初回の依存関係取得にはネット接続が必要です。
+  npm ci --prefix tests --no-audit --no-fund
+  npm ci --prefix connector --no-audit --no-fund
+  node tools/test.cjs
+
+このコマンドは既存の画像・MSI・ROI・connector検証に加え、起動設定、オンライン認証、
+ローカルMRM、モード間のZIP互換性、ローカルサーバー、配布物生成を確認します。
+ブラウザー検証用の小さな合成ファイルはtests/fixtures/browserに置き、配布ZIPには入れません。
+
+任意の実ブラウザー確認
+ソースリポジトリのルートで実行します。
+  node tests/browser-smoke-server.cjs
+  http://127.0.0.1:8765/viewer/offline-smoke.html
+通常利用のサーバーを止めてから実行します。本番のWorker処理を使い、圧縮XLSX、Deflate TIFF、
+SNAPPY/ZSTD Parquet、HTTP Rangeを小さな合成データで確認します。
+
+配布版の検証
+展開した配布フォルダーでPowerShellまたはコマンドプロンプトを開いて実行します。
+  .\START_OFFLINE.bat --verify-only
+同梱ファイルのハッシュを確認します。インターネットや追加のインストールは不要です。
+ビルド元チェックアウトの基準コミットとアプリ版はbuild-info.jsonに記録されます。
+未コミットの変更を含むローカルビルドでは、基準コミットだけで変更内容を再現できません。
+
+確認範囲の限界
+全てのユーザー実データ、大容量データ、装置固有RAW形式、Windowsやブラウザーの全バージョンを
+確認したものではありません。オンラインの実クラウドへの書き込みは、テスト用プロジェクトで
+別途行ってください。ローカルの自動テストは認証/RPCの境界を代替サーバーで確認します。
+アプリの外部通信制限は、Windowsやブラウザー自体の独立した更新通信を停止する機能ではありません。
+
+作業データはブラウザープロファイル内です。プロジェクトZIPとMRM JSONを別々に保管してください。

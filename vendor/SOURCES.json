@@ -1,0 +1,182 @@
+{
+  "note": "Pinned HTTPS sources. source_sha256 is the download checksum; packaged_sha256 includes reviewed local ESM import/source-map rewrites. Windows Node runtime is included only in the offline release.",
+  "assets": [
+    {
+      "sha256": "176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15",
+      "file": "vendor/tailwind.js",
+      "source": "https://cdn.tailwindcss.com/3.4.17",
+      "source_sha256": "176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15",
+      "packaged_sha256": "176e894661aa9cdc9a5cba6c720044cbbf7b8bd80d1c9a142a7c24b1b6c50d15"
+    },
+    {
+      "sha256": "c9506197caf809a075b6dee1da0d36fb19da7158ffe8a88e7b0c96c5d8623c99",
+      "file": "vendor/xlsx.full.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js",
+      "source_sha256": "c9506197caf809a075b6dee1da0d36fb19da7158ffe8a88e7b0c96c5d8623c99",
+      "packaged_sha256": "c9506197caf809a075b6dee1da0d36fb19da7158ffe8a88e7b0c96c5d8623c99"
+    },
+    {
+      "sha256": "e3e76115f49571e39624c3316a76b3c4c5b2c5ca518dfec4b66a9f7af8c6d059",
+      "file": "vendor/UTIF.js",
+      "source": "https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js",
+      "source_sha256": "e3e76115f49571e39624c3316a76b3c4c5b2c5ca518dfec4b66a9f7af8c6d059",
+      "packaged_sha256": "e3e76115f49571e39624c3316a76b3c4c5b2c5ca518dfec4b66a9f7af8c6d059"
+    },
+    {
+      "sha256": "29cfa0542b9864b6640cfdcc8f15b184db6431b532db2702a3ce97e5f2a7fc1c",
+      "file": "vendor/pako.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/pako@1.0.11/dist/pako.min.js",
+      "source_sha256": "29cfa0542b9864b6640cfdcc8f15b184db6431b532db2702a3ce97e5f2a7fc1c",
+      "packaged_sha256": "29cfa0542b9864b6640cfdcc8f15b184db6431b532db2702a3ce97e5f2a7fc1c"
+    },
+    {
+      "sha256": "acc7e41455a80765b5fd9c7ee1b8078a6d160bbbca455aeae854de65c947d59e",
+      "file": "vendor/jszip.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
+      "source_sha256": "acc7e41455a80765b5fd9c7ee1b8078a6d160bbbca455aeae854de65c947d59e",
+      "packaged_sha256": "acc7e41455a80765b5fd9c7ee1b8078a6d160bbbca455aeae854de65c947d59e"
+    },
+    {
+      "sha256": "15fabce5b65898b32b03f5ed25e9f891a729ad4c0d6d877110a7744aa847a894",
+      "file": "vendor/marked.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js",
+      "source_sha256": "15fabce5b65898b32b03f5ed25e9f891a729ad4c0d6d877110a7744aa847a894",
+      "packaged_sha256": "15fabce5b65898b32b03f5ed25e9f891a729ad4c0d6d877110a7744aa847a894"
+    },
+    {
+      "sha256": "c0845096a7c4a6741f362ac506c94c1c7d27dc603bcc1bf64a587f76f2dbe3a1",
+      "file": "vendor/purify.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js",
+      "source_sha256": "c0845096a7c4a6741f362ac506c94c1c7d27dc603bcc1bf64a587f76f2dbe3a1",
+      "packaged_sha256": "aaf5b285046aa3a9ac0c70611ed7f01fd0177b9b57fcadfc2a677518b6aa4e42"
+    },
+    {
+      "sha256": "ad9ddce4f412e0233bcfd50b3e6d4dba75b96736d090fa07af39d412884fdb72",
+      "file": "vendor/hyparquet.mjs",
+      "source": "https://cdn.jsdelivr.net/npm/hyparquet@1.27.1/+esm",
+      "source_sha256": "ad9ddce4f412e0233bcfd50b3e6d4dba75b96736d090fa07af39d412884fdb72",
+      "packaged_sha256": "00c0ddb7f31e7fa0ffb3c846052f581803cc26854803d2bd05cdc58110dc1a9d"
+    },
+    {
+      "sha256": "84473c5028d01fd3a84ce501e80fc026b7f8c54dd2a97d7fed7578d394a3cf3f",
+      "file": "vendor/compressors.mjs",
+      "source": "https://cdn.jsdelivr.net/npm/hyparquet-compressors@1.1.1/+esm",
+      "source_sha256": "84473c5028d01fd3a84ce501e80fc026b7f8c54dd2a97d7fed7578d394a3cf3f",
+      "packaged_sha256": "7b550e0ea2592ea9e9ef24102086e1e495417db3d043328e86b044f7f6dea8cb"
+    },
+    {
+      "sha256": "21add2d34e89a9b47179cea75c77c0c6ce9e9de53bc48b2e56dc5f7cfd49c1ab",
+      "file": "vendor/fzstd.mjs",
+      "source": "https://cdn.jsdelivr.net/npm/fzstd@0.1.1/+esm",
+      "source_sha256": "21add2d34e89a9b47179cea75c77c0c6ce9e9de53bc48b2e56dc5f7cfd49c1ab",
+      "packaged_sha256": "496d6e09a313bee2e39c63c6e8ff1509ac0fbff92285adeff6c6e4d3af40c4ef"
+    },
+    {
+      "sha256": "170789900f87fb98922d4de82d30d0f34f5440ea1e72d4a65e548879cb47cca0",
+      "file": "vendor/hysnappy.mjs",
+      "source": "https://cdn.jsdelivr.net/npm/hysnappy@1.0.0/+esm",
+      "source_sha256": "170789900f87fb98922d4de82d30d0f34f5440ea1e72d4a65e548879cb47cca0",
+      "packaged_sha256": "d38953a977368b625c0bb17ab0904e13bddfd3ad4d725a99dad02d6ef6dfc58c"
+    },
+    {
+      "sha256": "62249119bb7df6e54300f37a37145c26a6d4420410aac8881a119c5b427cf751",
+      "file": "vendor/LICENSE-fzstd.txt",
+      "source": "https://cdn.jsdelivr.net/npm/fzstd@0.1.1/LICENSE",
+      "source_sha256": "62249119bb7df6e54300f37a37145c26a6d4420410aac8881a119c5b427cf751",
+      "packaged_sha256": "62249119bb7df6e54300f37a37145c26a6d4420410aac8881a119c5b427cf751"
+    },
+    {
+      "sha256": "6e19a315e03f36020f37dedcb1dd93b4eba6ebfd94ccdd13ec55b940776fb55e",
+      "file": "vendor/LICENSE-hysnappy.txt",
+      "source": "https://cdn.jsdelivr.net/npm/hysnappy@1.0.0/LICENSE",
+      "source_sha256": "6e19a315e03f36020f37dedcb1dd93b4eba6ebfd94ccdd13ec55b940776fb55e",
+      "packaged_sha256": "6e19a315e03f36020f37dedcb1dd93b4eba6ebfd94ccdd13ec55b940776fb55e"
+    },
+    {
+      "sha256": "4d2a38ac35cda06a555c84074a819d413339cd3691b822cae50f8f322fe01f64",
+      "file": "vendor/LICENSE-xlsx.txt",
+      "source": "https://cdn.jsdelivr.net/npm/xlsx@0.18.5/LICENSE",
+      "source_sha256": "4d2a38ac35cda06a555c84074a819d413339cd3691b822cae50f8f322fe01f64",
+      "packaged_sha256": "4d2a38ac35cda06a555c84074a819d413339cd3691b822cae50f8f322fe01f64"
+    },
+    {
+      "sha256": "c1fb8861eca211bf5aea574358aba7039396c0c1824c2a1477cc126d398efd89",
+      "file": "vendor/LICENSE-utif.txt",
+      "source": "https://cdn.jsdelivr.net/npm/utif@3.1.0/LICENSE",
+      "source_sha256": "c1fb8861eca211bf5aea574358aba7039396c0c1824c2a1477cc126d398efd89",
+      "packaged_sha256": "c1fb8861eca211bf5aea574358aba7039396c0c1824c2a1477cc126d398efd89"
+    },
+    {
+      "sha256": "a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539",
+      "file": "vendor/LICENSE-pako.txt",
+      "source": "https://cdn.jsdelivr.net/npm/pako@1.0.11/LICENSE",
+      "source_sha256": "a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539",
+      "packaged_sha256": "a04665b3b2de56c66730c1f720f528175739e4104f79073614aa611da1e85539"
+    },
+    {
+      "sha256": "566c953c6090b1218ca6217dd7359d45dde46581968586dc607d59a78af6a9c4",
+      "file": "vendor/LICENSE-jszip.txt",
+      "source": "https://cdn.jsdelivr.net/npm/jszip@3.10.1/LICENSE.markdown",
+      "source_sha256": "566c953c6090b1218ca6217dd7359d45dde46581968586dc607d59a78af6a9c4",
+      "packaged_sha256": "566c953c6090b1218ca6217dd7359d45dde46581968586dc607d59a78af6a9c4"
+    },
+    {
+      "sha256": "8e3a3f82f59a60958f56ca08f445647c32a4733dc7ca6c2c46f6eb898471ab9c",
+      "file": "vendor/LICENSE-marked.txt",
+      "source": "https://cdn.jsdelivr.net/npm/marked@12.0.2/LICENSE.md",
+      "source_sha256": "8e3a3f82f59a60958f56ca08f445647c32a4733dc7ca6c2c46f6eb898471ab9c",
+      "packaged_sha256": "8e3a3f82f59a60958f56ca08f445647c32a4733dc7ca6c2c46f6eb898471ab9c"
+    },
+    {
+      "sha256": "7de658e2401fe36e2a3965a5a11a560d2fffe768194849718a4b58c75bf84bda",
+      "file": "vendor/LICENSE-dompurify.txt",
+      "source": "https://cdn.jsdelivr.net/npm/dompurify@3.1.6/LICENSE",
+      "source_sha256": "7de658e2401fe36e2a3965a5a11a560d2fffe768194849718a4b58c75bf84bda",
+      "packaged_sha256": "7de658e2401fe36e2a3965a5a11a560d2fffe768194849718a4b58c75bf84bda"
+    },
+    {
+      "sha256": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985",
+      "file": "vendor/LICENSE-tailwind.txt",
+      "source": "https://cdn.jsdelivr.net/npm/tailwindcss@3.4.17/LICENSE",
+      "source_sha256": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985",
+      "packaged_sha256": "60e0b68c0f35c078eef3a5d29419d0b03ff84ec1df9c3f9d6e39a519a5ae7985"
+    },
+    {
+      "sha256": "6e19a315e03f36020f37dedcb1dd93b4eba6ebfd94ccdd13ec55b940776fb55e",
+      "file": "vendor/LICENSE-hyparquet.txt",
+      "source": "https://cdn.jsdelivr.net/npm/hyparquet@1.27.1/LICENSE",
+      "source_sha256": "6e19a315e03f36020f37dedcb1dd93b4eba6ebfd94ccdd13ec55b940776fb55e",
+      "packaged_sha256": "6e19a315e03f36020f37dedcb1dd93b4eba6ebfd94ccdd13ec55b940776fb55e"
+    },
+    {
+      "sha256": "6e19a315e03f36020f37dedcb1dd93b4eba6ebfd94ccdd13ec55b940776fb55e",
+      "file": "vendor/LICENSE-compressors.txt",
+      "source": "https://cdn.jsdelivr.net/npm/hyparquet-compressors@1.1.1/LICENSE",
+      "source_sha256": "6e19a315e03f36020f37dedcb1dd93b4eba6ebfd94ccdd13ec55b940776fb55e",
+      "packaged_sha256": "6e19a315e03f36020f37dedcb1dd93b4eba6ebfd94ccdd13ec55b940776fb55e"
+    },
+    {
+      "version": "v24.21.0",
+      "sha256": "ba4e6d110e8c1592a1ecd390f6b05f3da124b13871a5be62b341a07a853c6c32",
+      "file": "runtime/node.exe",
+      "source": "https://nodejs.org/dist/v24.21.0/win-x64/node.exe",
+      "officialChecksum": "https://nodejs.org/dist/v24.21.0/SHASUMS256.txt",
+      "source_sha256": "ba4e6d110e8c1592a1ecd390f6b05f3da124b13871a5be62b341a07a853c6c32",
+      "packaged_sha256": "ba4e6d110e8c1592a1ecd390f6b05f3da124b13871a5be62b341a07a853c6c32"
+    },
+    {
+      "file": "vendor/supabase.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js",
+      "version": "2.117.3",
+      "source_sha256": "d6a5c4414a5d4ce646d9c1de223aa7067d3ff664c15394ffeb7fcffc763354a3",
+      "packaged_sha256": "d6a5c4414a5d4ce646d9c1de223aa7067d3ff664c15394ffeb7fcffc763354a3"
+    },
+    {
+      "file": "vendor/LICENSE-supabase.txt",
+      "source": "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/LICENSE",
+      "version": "2.117.3",
+      "source_sha256": "334dd6820e2eaeab2064e7c59001b810566728a28a41a7c1dbf69bbee17d0936",
+      "packaged_sha256": "334dd6820e2eaeab2064e7c59001b810566728a28a41a7c1dbf69bbee17d0936"
+    }
+  ]
+}

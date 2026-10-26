@@ -1,6 +1,9 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
+<script src="../runtime-config.js"></script>
+<script src="../app-runtime.js"></script>
+<script src="../offline/offline.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
@@ -8,13 +11,14 @@
     <meta http-equiv="Pragma" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <title>DESI Data Share</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="../vendor/tailwind.js"></script>
     <!-- Load-critical but only used from functions that run after
          DOMContentLoaded, so `defer` lets them download in parallel without
          blocking first paint (they finish executing before App.init runs). -->
-    <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js"></script>
-    <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+    <script defer src="../vendor/xlsx.full.min.js"></script>
+    <script defer src="../vendor/pako.min.js"></script>
+    <script defer src="../vendor/UTIF.js"></script>
+    <script defer src="../vendor/supabase.min.js"></script>
     <script defer src="fixed-colors.js"></script>
     <link rel="stylesheet" href="roi-media-viewer.css">
     <script defer src="roi-media-model.js"></script>
@@ -23,15 +27,13 @@
     <script defer src="roi-media-viewer.js"></script>
     <script defer src="roi-media-app.js"></script>
 <script>
-  window.SUPABASE_URL     = "https://pxlrlhtcvwkqnlryencs.supabase.co";
-  window.SUPABASE_ANON_KEY = "sb_publishable_2K4sqMmKk3g20Jmwho-awQ_Uu_hSKeU";
   // Libraries not needed just to view are loaded on first use (jszip =
   // Export/Import, marked + dompurify = Help), so a recipient who only views
   // never downloads them. Injected via loadScript() and awaited at call sites.
   window.LAZY_LIBS = {
-    jszip:     "https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js",
-    marked:    "https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js",
-    dompurify: "https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"
+    jszip:     "../vendor/jszip.min.js",
+    marked:    "../vendor/marked.min.js",
+    dompurify: "../vendor/purify.min.js"
   };
   window.loadScript = function (src) {
     window.__scriptPromises = window.__scriptPromises || {};
@@ -699,6 +701,12 @@ body:not(.share-mode) #btn-share-preview:hover { background:#f3f4f6; border-colo
    (`if (!inShareMode || isAdmin) ... display='none'`)。CSS を重ねると
    片方だけ直されて食い違うので、ここには書かない。 */
 
+/* Keep the local-save status readable when the desktop toolbar wraps. */
+body.offline-mode > div > header { flex-wrap:wrap; }
+body.offline-mode > div > header > div { flex-wrap:wrap; }
+body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
+#offline-viewer-status { white-space:nowrap; flex-shrink:0; }
+
 /* ===== Mobile bottom tab bar + drawers (active only ≤900px) ===== */
 #m-tabbar, #m-drawer-backdrop { display:none; }
 
@@ -1125,9 +1133,46 @@ body:not(.share-mode) #btn-share-preview:hover { background:#f3f4f6; border-colo
 <script src="section-visibility.js"></script>
 <script src="alignment-session.js"></script>
 <script src="alignment-workspace.js"></script>
+<script src="../offline/local-mrm.js"></script>
 <link rel="stylesheet" href="alignment-workspace.css">
 <script>
 "use strict";
+// A local project has no publication credentials or pending cloud work.
+// Keep source identity metadata intact: alignment/ROI geometry may depend on it.
+function detachOfflineProject(project) {
+    if (!project) return project;
+    delete project.shareInfo;
+    delete project.__share;
+    delete project.__publishPending;
+    delete project.__importFailures;
+    return project;
+}
+
+function setupOfflineViewer() {
+    if (!(typeof window !== 'undefined' && window.DESI_OFFLINE === true)) return;
+    document.body.classList.add('offline-mode');
+    document.title = 'DESI — オフライン';
+    const title = document.getElementById('app-title');
+    if (title) title.textContent = 'DESI オフライン';
+    const badge = document.createElement('button');
+    badge.type = 'button';
+    badge.id = 'offline-viewer-status';
+    badge.textContent = 'このPCに保存 · ZIPでバックアップ';
+    badge.title = 'インターネットへの接続・公開・同期は行いません。ブラウザーのデータを消す前に Export ZIP でバックアップしてください。';
+    badge.style.cssText = 'font-size:11px;color:#166534;background:#dcfce7;padding:3px 7px;border-radius:4px;';
+    badge.addEventListener('click', () => {
+        if (App._syncState === 'error') App._doSave().catch(e => App._showSaveError(e.message, 'retry'));
+    });
+    if (title && title.parentNode) title.parentNode.appendChild(badge);
+    for (const id of ['btn-publish-share', 'btn-share-info', 'btn-share-admin-login', 'sync-status']) {
+        const el = document.getElementById(id);
+        if (el) { el.hidden = true; el.style.setProperty('display', 'none', 'important'); }
+    }
+    const register = document.getElementById('btn-mrm-register');
+    if (register) register.title = '選択した行をこのPCのMRMライブラリへ登録';
+    const preview = document.querySelector('#btn-share-preview');
+    if (preview) preview.title = 'このPC内の画像比較プレビューを開く';
+}
 // =============================================================
 // Constants & shared helpers
 // =============================================================
@@ -2830,7 +2875,7 @@ const ProjectStorage = (() => {
         return await pr(t.objectStore('projects').get(id)) || null;
     }
 
-    async function putProject(project) {
+    async function putProject(project, options) {
         // Guard: a summary row from listProjects() is not a project. Writing
         // one here would replace a whole project with a stub (its sections and
         // msiSeries would be gone). Fail loudly instead.
@@ -2838,6 +2883,7 @@ const ProjectStorage = (() => {
             throw new Error('putProject: refusing to write a listProjects() summary row as a project (id=' + project.id + ')');
         }
         const rec = Object.assign({}, project, { updatedAt: nowIso() });
+        if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) detachOfflineProject(rec);
         // Never persist the read-only collaborator overlay (`_collab`): it is a
         // transient, in-memory-only view of viewer-authored server ROIs. Stripping
         // here — the single write choke point — keeps it out of IndexedDB (and thus
@@ -2850,9 +2896,26 @@ const ProjectStorage = (() => {
         // crash between them).
         const t = await tx(['projects', 'project_index'], 'readwrite');
         const done = txDone(t);
-        await pr(t.objectStore('projects').put(rec));
-        await pr(t.objectStore('project_index').put(indexRowFor(rec)));
-        await done;   // ★ コミットまで待つ。ここを省くと容量超過で消えても成功に見える
+        try {
+            const projects = t.objectStore('projects');
+            if (options && options.createOnly) {
+                // Read/write transactions on this store serialize across tabs.
+                // Choose the recovery ID and insert in the SAME transaction so
+                // concurrent ZIP imports can never replace an existing project.
+                while (await pr(projects.get(rec.id))) rec.id = uid('proj');
+                await pr(projects.add(rec));
+            } else {
+                await pr(projects.put(rec));
+            }
+            await pr(t.objectStore('project_index').put(indexRowFor(rec)));
+            await done;   // ★ コミットまで待つ。ここを省くと容量超過で消えても成功に見える
+        } catch (e) {
+            try { t.abort(); } catch (_) {}
+            await done.catch(() => {});
+            throw e;
+        }
+        // Expose a collision fallback only after both records have committed.
+        if (options && options.createOnly) project.id = rec.id;
         return rec;
     }
 
@@ -5886,16 +5949,18 @@ function rawLayerKeyFor(section, label, polarity) {
 // =============================================================
 // Parse Web Worker — offload heavy xlsx / txt / TIFF parsing off the main
 // thread so importing large files no longer freezes the UI. The worker
-// importScripts the same CDN XLSX/UTIF libs and runs the EXACT same pure
+// importScripts the same pinned XLSX/UTIF libs and runs the EXACT same pure
 // functions (injected via Function.prototype.toString) as the main thread, so
 // output is identical by construction. When Worker/OffscreenCanvas are
 // unavailable or the worker errors, every caller falls back to the unchanged
 // main-thread functions — no regression.
 // =============================================================
 const PARSE_WORKER_LIBS = [
-    'https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js',
-    'https://cdn.jsdelivr.net/npm/utif@3.1.0/UTIF.js',
-];
+    'xlsx.full.min.js',
+    'pako.min.js',
+    'UTIF.js',
+].map(filename => typeof window !== 'undefined' && window.DesiRuntime && window.DesiRuntime.asset
+    ? window.DesiRuntime.asset(filename) : new URL('../vendor/' + filename, location.href).href);
 let _parseWorker = null;
 let _parseWorkerBroken = false;
 let _parseSeq = 0;
@@ -6022,7 +6087,7 @@ async function _parseWorkerOnMessage(e) {
             result = { dataUrl: await decodeTiffArrayBufferToDataUrl(buf) };
         } else if (msg.op === 'xlsx-columns') {
             buf = p.blob ? await p.blob.arrayBuffer() : null;
-            result = inspectXlsxColumns(buf, p.sheet, p.headerRow);
+            result = await inspectXlsxColumns(buf, p.sheet, p.headerRow);
         } else {
             throw new Error('unknown op: ' + msg.op);
         }
@@ -6165,15 +6230,17 @@ async function inspectXlsxColumnsAuto(file, buf, sheetName, headerRow1based) {
 //   hyparquet / hyparquet-compressors は **ESM 専用** (package.json の
 //   "type":"module"、UMD/IIFE バンドル無し) なので importScripts では読めない。
 //   → モジュール worker (`new Worker(url, {type:'module'})`) を別に立てる。
-//   CDN は依存を解決した `+esm` バンドルを使う。生の src/index.js を指すと
+//   同梱の依存解決済み ESM バンドルを使う。生の src/index.js を指すと
 //   hyparquet-compressors の bare specifier (fzstd / hysnappy) で失敗する。
 //
 // なぜ ZSTD の伸長器を渡すのか:
 //   hyparquet が組み込みで解けるのは UNCOMPRESSED と SNAPPY だけ。実データは
 //   ZSTD なので、渡さないと `parquet unsupported compression codec: ZSTD` になる。
 const PARQUET_LIBS = {
-    hyparquet:   'https://cdn.jsdelivr.net/npm/hyparquet@1.27.1/+esm',
-    compressors: 'https://cdn.jsdelivr.net/npm/hyparquet-compressors@1.1.1/+esm',
+    hyparquet: typeof window !== 'undefined' && window.DesiRuntime && window.DesiRuntime.asset
+        ? window.DesiRuntime.asset('hyparquet.mjs') : new URL('../vendor/hyparquet.mjs', location.href).href,
+    compressors: typeof window !== 'undefined' && window.DesiRuntime && window.DesiRuntime.asset
+        ? window.DesiRuntime.asset('compressors.mjs') : new URL('../vendor/compressors.mjs', location.href).href,
 };
 
 let _pqWorker = null;          // 常駐 worker のハンドル (_makeParquetWorker)
@@ -6833,10 +6900,13 @@ function parquetSrcFromUrl(url, byteLength) { return { url, byteLength: byteLeng
 // ent (msiSeries のエントリ) から供給元を引く。共有先の parquet は
 // sourceUrl だけを持ち、ローカルには保存されていない。
 async function parquetSrcForEnt(ent) {
-    if (ent && ent.sourceUrl) return parquetSrcFromUrl(ent.sourceUrl, ent.sourceBytes);
+    const offline = typeof window !== 'undefined' && window.DESI_OFFLINE === true;
+    if (!offline && ent && ent.sourceUrl) return parquetSrcFromUrl(ent.sourceUrl, ent.sourceBytes);
+    if (offline && (!ent || !ent.blobId)) throw new Error('オフライン版では元の Parquet ファイルが必要です。原本を含む ZIP を取り込むか、ファイルを再登録してください。');
     if (!ent || !ent.blobId) return null;
     const rec = await ProjectStorage.getBlob(ent.blobId);
     if (rec && rec.blob) return parquetSrcFromBlob(rec.blob);
+    if (offline) throw new Error('このPCに Parquet 原本がありません: ' + (ent.filename || ent.blobId) + '。原本を含む ZIP を取り込むか、ファイルを再登録してください。');
     // ★ ローカルの blob が消えている。parquet だけは**ダウンロードして戻さない**
     //   — 数百 MB を IndexedDB に置こうとして容量超過で消える、を繰り返すだけ
     //   なので、共有側と同じように Storage の URL へ HTTP Range で読みに行く。
@@ -13096,6 +13166,7 @@ async function registerSelectedToMrmLibrary() {
             role: opts.role || null,
             tags: opts.tags || [],
             project_slug: slug, project_name: projName,
+            ...(typeof window !== 'undefined' && window.DESI_OFFLINE === true ? { project_local_id: project.id } : {}),
             sample_types: sampleTypes,
         };
     });
@@ -13205,6 +13276,7 @@ async function registerSelectedToMrmLibrary() {
                 _role: r.role,
                 _project_slug: r.project_slug,
                 _project_name: r.project_name,
+                ...(typeof window !== 'undefined' && window.DESI_OFFLINE === true ? { _project_local_id: r.project_local_id } : {}),
                 _sample_types: r.sample_types,
             });
             ok++;
@@ -17402,6 +17474,10 @@ async function ensureLocalBlob(ent, project) {
     let rec = null;
     try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
     if (rec && rec.blob) return rec;
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
+        throw new Error('このPCに原本がありません: ' + (ent.filename || ent.blobId)
+            + '。原本を含む ZIP を取り込むか、ファイルを再登録してください。');
+    }
     const running = _blobRepairInFlight.get(ent.blobId);
     if (running) return running;
     const path = storagePathForEnt(ent, project || (typeof App !== 'undefined' ? App.project : null));
@@ -17752,6 +17828,10 @@ function roiMediaForTransport(project) {
 async function roiMediaReadOriginal(item) {
     const local = item.blobId ? await ProjectStorage.getBlob(item.blobId) : null;
     if (local && local.blob) return local;
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
+        throw new Error('このPCにROI写真の原本がありません: ' + (item.title || item.filename || item.id)
+            + '。原本を含む ZIP を取り込んでください。');
+    }
     if (item.storagePath) {
         const url = SupabaseClient.publicUrl('atlases', item.storagePath);
         if (!url) throw new Error('ROI写真の保存先を取得できません: ' + (item.title || item.filename));
@@ -17842,6 +17922,16 @@ async function exportProjectAsZip() {
             sections: [],
         };
 
+        // Historical field name retained for archives made by the first
+        // offline release. Version 1 is portable in BOTH runtime modes.
+        // Original ROI media has its dedicated transport/remapping below;
+        // publication state and credentials never belong in a portable ZIP.
+        const portableMeta = JSON.parse(JSON.stringify(project.meta || {}, (key, value) =>
+            ['roiMedia', 'shareInfo', '__share', '__publishPending', 'viewerPassword', 'adminPassword', 'masterPw'].includes(key)
+                ? undefined : value));
+        manifest.offlineSettings = { version: 1, meta: portableMeta,
+            overlays: JSON.parse(JSON.stringify(project.overlays || [])) };
+
         // Dedup identical full HE/IF images by content so a whole-slide image
         // reused across sections is written once ("one full + per-section crops").
         const fullByHash = new Map();
@@ -17861,7 +17951,12 @@ async function exportProjectAsZip() {
             // HE/IF: full original (+ MSI-aligned PNG when a transform exists).
             for (const [layerKey, ent] of Object.entries(sec.images || {})) {
                 const rec = await ProjectStorage.getBlob(ent.blobId);
-                if (!rec) { tick(); tick(); continue; }
+                if (!rec || !rec.blob) {
+                    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
+                        throw new Error('このPCに HE/IF 原本がありません: ' + (ent.filename || layerKey) + '。原本を再登録してから Export ZIP を実行してください。');
+                    }
+                    tick(); tick(); continue;
+                }
                 const fname = ent.filename || (layerKey + '.tif');
                 // One copy per unique content: reuse the path for identical
                 // images (same whole slide on many sections) instead of
@@ -18400,6 +18495,7 @@ function openPublishProgressModal(totalCount, opts) {
 // Read the master-pw from the 12 h sessionStorage cache. Returns '' when
 // no fresh entry exists; callers decide whether to prompt or skip.
 function _readCachedMasterPw() {
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) return 'offline-local';
     try {
         const raw = sessionStorage.getItem('desi:masterPw');
         if (!raw) return '';
@@ -18408,6 +18504,7 @@ function _readCachedMasterPw() {
     } catch (e) { return ''; }
 }
 function _saveCachedMasterPw(pw) {
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) return;
     try {
         sessionStorage.setItem('desi:masterPw',
             JSON.stringify({ pw, expiresAt: Date.now() + 12 * 3600 * 1000 }));
@@ -18936,6 +19033,10 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
 }
 
 async function publishProjectToShare() {
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
+        showToast('オフライン版では公開・同期を行いません。Export ZIP で保存してください。');
+        return;
+    }
     const project = App.project;
     if (!project) { showToast('プロジェクトを開いてから実行してください'); return; }
     if (!SupabaseClient.configured()) {
@@ -19179,6 +19280,7 @@ function _readHelpAudience() {
 }
 
 async function openHelpModal(audience, lang) {
+    const offline = typeof window !== 'undefined' && window.DESI_OFFLINE === true;
     const isShare = !!(typeof App !== 'undefined' && App && App.shareMode);
     if (isShare) {
         // Share recipients only ever see the recipient guide; the manage /
@@ -19191,8 +19293,10 @@ async function openHelpModal(audience, lang) {
     lang = (lang === 'en' || lang === 'ja') ? lang : _readHelpLang();
     if (!isShare) { try { localStorage.setItem('desi:helpAudience', audience); } catch (e) {} }
     try { localStorage.setItem('desi:helpLang', lang); } catch (e) {}
-    const cacheKey = audience + ':' + lang;
-    const cfg = _helpGuideSources[cacheKey];
+    const cacheKey = offline ? 'offline:ja' : audience + ':' + lang;
+    const cfg = offline ? { path: '../OFFLINE_GUIDE.md', title: 'DESI オフライン — 操作ガイド',
+        openLabel: '新しいタブで開く', closeLabel: '閉じる', errTitle: '操作ガイドを開けませんでした',
+        errBody: e => 'OFFLINE_GUIDE.md の読み込みに失敗しました (' + e + ')' } : _helpGuideSources[cacheKey];
     let md = _helpMarkdownCache[cacheKey];
     if (md == null) {
         try {
@@ -19249,9 +19353,9 @@ async function openHelpModal(audience, lang) {
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
           <h2 style="margin:0;">${cfg.title}</h2>
           <div style="display:flex;gap:4px;align-items:center;">
-            ${isShare ? '' : `<div style="display:flex;gap:4px;">${_helpAudiences.map(a => audTab(a, audience === a.key)).join('')}</div>
+            ${(isShare || offline) ? '' : `<div style="display:flex;gap:4px;">${_helpAudiences.map(a => audTab(a, audience === a.key)).join('')}</div>
             <div style="width:1px;height:18px;background:#cbd5e1;margin:0 4px;"></div>`}
-            <div style="display:flex;gap:4px;">${langBtn('ja', lang === 'ja', '日本語')}${langBtn('en', lang === 'en', 'English')}</div>
+            <div style="display:flex;gap:4px;">${offline ? '' : langBtn('ja', lang === 'ja', '日本語') + langBtn('en', lang === 'en', 'English')}</div>
           </div>
         </div>
         <div class="help-body">${bodyHtml}</div>
@@ -21447,6 +21551,7 @@ async function openProjectsManagerModal() {
 }
 
 async function importZipFile(file) {
+    const offline = typeof window !== 'undefined' && window.DESI_OFFLINE === true;
     await loadScript(LAZY_LIBS.jszip);
     const zip = await JSZip.loadAsync(file);
     // Find the project doc — root-level *.json with format=desi_data_share_v1.
@@ -21485,16 +21590,49 @@ async function importZipFile(file) {
         }
     }
 
+    // Reuse an available archive ID on offline recovery so the separately
+    // backed-up MRM usage history still points at its original local project.
+    // A second import remains a separate project and never replaces existing data.
+    const archivedId = offline && typeof projDoc.id === 'string'
+        && /^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$/.test(projDoc.id) ? projDoc.id : null;
     const newProject = {
-        id: uid('proj'),
+        id: archivedId || uid('proj'),
         displayName: projDoc.displayName || 'Imported',
         anatomyPalette: projDoc.anatomyPalette || DEFAULT_ANATOMY_PALETTE,
         sections: [],
         rois: [],
-        roiHidden: projDoc.roiHidden || {},
+        roiHidden: {},
         memo: ensureMemoShape(projDoc.memo),
         createdAt: nowIso(),
     };
+    // Interpret archive settings by their version, never by the current
+    // runtime. An offline ZIP must retain its display settings online too.
+    const settings = projDoc.offlineSettings;
+    if (settings && settings.version === 1) {
+        const meta = settings.meta && typeof settings.meta === 'object' && !Array.isArray(settings.meta) ? settings.meta : {};
+        newProject.meta = JSON.parse(JSON.stringify(meta, (key, value) =>
+            ['roiMedia', 'shareInfo', '__share', '__publishPending', 'viewerPassword', 'adminPassword', 'masterPw'].includes(key)
+                ? undefined : value));
+        newProject.overlays = Array.isArray(settings.overlays) ? JSON.parse(JSON.stringify(settings.overlays)) : [];
+        // ZIP imports are independent local/master projects. Shared overlay
+        // ownership/version markers would otherwise exclude these definitions
+        // when the recovered project is published under its new identity.
+        for (const overlay of newProject.overlays) {
+            if (!overlay || typeof overlay !== 'object') continue;
+            delete overlay._server;
+            delete overlay._local;
+            delete overlay._serverVersion;
+        }
+    }
+    if (projDoc.displaySettings && typeof projDoc.displaySettings === 'object') {
+        newProject.meta = newProject.meta || {};
+        const display = projDoc.displaySettings;
+        if (typeof display.otsuBgRemove === 'boolean') newProject.meta.otsuBgRemove = display.otsuBgRemove;
+        if (Number.isFinite(display.otsuStrength)) newProject.meta.otsuStrength = display.otsuStrength;
+        if (display.otsuManualThreshold === null || Number.isFinite(display.otsuManualThreshold)) {
+            newProject.meta.otsuManualThreshold = display.otsuManualThreshold;
+        }
+    }
 
     const sectionsBySrcId = {};
     if (projDoc.format === 'desi_data_share_v2') {
@@ -21504,10 +21642,16 @@ async function importZipFile(file) {
         // blob is stored once and reused by all its compounds).
         const pathToBlobId = new Map();
         const ensureBlobRoot = async (relPath, mimeHint, fnameHint) => {
-            if (!relPath) return null;
+            if (!relPath) {
+                if (offline) throw new Error('ZIPに原本のパスがありません: ' + (fnameHint || 'unknown'));
+                return null;
+            }
             if (pathToBlobId.has(relPath)) return pathToBlobId.get(relPath);
             const f = zip.file(relPath);
-            if (!f) return null;
+            if (!f) {
+                if (offline) throw new Error('ZIPに原本がありません: ' + relPath + '。原本を含む ZIP を取り込んでください。');
+                return null;
+            }
             const blob = await f.async('blob');
             const blobId = uid('blob');
             await ProjectStorage.putBlob({
@@ -21572,6 +21716,7 @@ async function importZipFile(file) {
             }
             for (const [layerKey, p] of Object.entries(sEnt.parquetSeries || {})) {
                 const bid = pqBlobByFid.get(p.sourceFileId);
+                if (!bid && offline) throw new Error('ZIPに Parquet 原本がありません: ' + (p.filename || layerKey));
                 if (!bid) continue;
                 newSec.msiSeries[layerKey] = {
                     kind: 'parquet', blobId: bid,
@@ -21588,6 +21733,7 @@ async function importZipFile(file) {
             // そちらが正なので、CSV 経路のあとに流して上書きする。
             for (const [layerKey, r] of Object.entries(sEnt.rawSeries || {})) {
                 const bid = pqBlobByFid.get(r.sourceFileId);
+                if (!bid && offline) throw new Error('ZIPに RAW 原本がありません: ' + (r.filename || layerKey));
                 if (!bid) continue;   // Source/ が無ければ CSV 由来のレイヤーを残す
                 newSec.msiSeries[layerKey] = {
                     kind: 'raw', blobId: bid,
@@ -21644,10 +21790,16 @@ async function importZipFile(file) {
             // IndexedDB blob — matching the exporter's source-file dedup.
             const pathToBlobId = new Map();
             const ensureBlob = async (relPath, mimeHint, fnameHint) => {
-                if (!relPath) return null;
+                if (!relPath) {
+                    if (offline) throw new Error('ZIPに原本のパスがありません: ' + (fnameHint || 'unknown'));
+                    return null;
+                }
                 if (pathToBlobId.has(relPath)) return pathToBlobId.get(relPath);
                 const f = zip.file(dir + relPath);
-                if (!f) return null;
+                if (!f) {
+                    if (offline) throw new Error('ZIPに原本がありません: ' + dir + relPath);
+                    return null;
+                }
                 const blob = await f.async('blob');
                 const blobId = uid('blob');
                 await ProjectStorage.putBlob({
@@ -21701,8 +21853,10 @@ async function importZipFile(file) {
             const newSecId = sectionsBySrcId[srcSecId];
             if (newSecId) newPolys[newSecId] = poly;
         }
+        const roiId = uid('roi');
+        if ((projDoc.roiHidden || {})[r.id]) newProject.roiHidden[roiId] = true;
         newProject.rois.push({
-            id: uid('roi'),
+            id: roiId,
             colorKey: r.colorKey,
             name: r.name,
             rgba: r.rgba,
@@ -21742,7 +21896,10 @@ async function importZipFile(file) {
             RoiMediaModel.normalizeRegistry({ version: 1, items: restored }), sectionsBySrcId);
         roiMediaForTransport(newProject);
     }
-    await ProjectStorage.putProject(newProject);
+    if (offline) {
+        detachOfflineProject(newProject);
+    }
+    await ProjectStorage.putProject(newProject, { createOnly: true });
     await App.openProject(newProject.id);
     showToast('Imported: ' + newProject.displayName);
 }
@@ -22228,21 +22385,22 @@ const Toolbar = {
 };
 
 // =============================================================
-// Supabase wiring for the read-only "Share" mode. The constants below
-// are filled in by the maintainer after running supabase/schema.sql +
-// supabase/share_locks.sql in their Supabase project. When either is
-// blank the app silently stays in pure-local Master mode and every
-// share-only entrypoint becomes a no-op.
+// Supabase wiring for the read-only "Share" mode. The shared runtime
+// supplies the deployment's cloud settings; offline mode leaves them blank
+// and rejects cloud-only entrypoints before constructing a client.
 // =============================================================
-const SUPABASE_URL = window.SUPABASE_URL || '';
-const SUPABASE_ANON_KEY = window.SUPABASE_ANON_KEY || '';
+// SUPABASE_URL and SUPABASE_ANON_KEY are supplied by app-runtime.js.
+// Do not shadow its immutable window properties with global lexical bindings.
 
 // サーバ機能が使えない理由。**「未設定」と「部品を読み込めなかった」は別物**で、
 // 前者は正常 (ローカル専用で動かしている)、後者は異常。同じ null にまとめると
 // 呼び出し側が黙って諦めるしかなくなる。index.html:1246 と同じ約束
 // (戻り値はそのまま見せられるメッセージ / 使えるときは null)。
-// ここが見るのは window.* ではなく上の const。
+// 接続設定は app-runtime.js が固定したグローバルを参照する。
 function serverUnavailableReason() {
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
+        return 'このPC専用のオフライン版です。公開・クラウド同期は利用しません。';
+    }
     if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
         return 'このページはサーバ機能なしで動いています (接続先が未設定)';
     }
@@ -22267,6 +22425,7 @@ const SupabaseClient = (() => {
     let lastError = null;
 
     function _client() {
+        if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) return null;
         if (client) return client;
         if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return null;
         if (typeof supabase === 'undefined' || !supabase.createClient) {
@@ -22280,6 +22439,11 @@ const SupabaseClient = (() => {
     }
 
     async function rpc(name, args) {
+        if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
+            if (['list_mrm_library', 'register_from_result', 'register_from_result_batch'].includes(name)
+                    && window.DesiLocalMrm) return window.DesiLocalMrm.rpc(name, args || {});
+            throw new Error('オフライン版ではクラウドへ接続しません');
+        }
         const c = _client();
         if (!c) throw new Error('supabase_not_configured');
         const { data, error } = await c.rpc(name, args || {});
@@ -22370,6 +22534,7 @@ const SupabaseClient = (() => {
         deleteShareImage(token, id) { return rpc('delete_share_image', { p_token: token, p_id: id }); },
         // Storage オブジェクトの削除 (共有先は x-share-token で <slug>/shared/ のみ)。
         deleteStorageObjectAsShare(bucket, path, shareToken) {
+            if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) return Promise.reject(new Error('offline_cloud_disabled'));
             const url = SUPABASE_URL.replace(/\/+$/, '') + '/storage/v1/object/'
                       + encodeURIComponent(bucket) + '/' + path.split('/').map(encodeURIComponent).join('/');
             return fetch(url, {
@@ -22424,6 +22589,7 @@ const SupabaseClient = (() => {
         // opts.shareToken を渡すと x-share-token で送る (共有先が <slug>/shared/ 配下へ
         // 上げる経路。Storage 側は publish token とは別のポリシーで受ける)。
         uploadBlob(bucket, path, blob, contentType, publishToken, opts) {
+            if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) return Promise.reject(new Error('offline_cloud_disabled'));
             const o = opts || {};
             if (!SUPABASE_URL || !SUPABASE_ANON_KEY) return Promise.reject(new Error('supabase_not_configured'));
             const url = SUPABASE_URL.replace(/\/+$/, '') + '/storage/v1/object/'
@@ -22524,6 +22690,7 @@ const SupabaseClient = (() => {
 })();
 
 const App = {
+    get offline() { return typeof window !== 'undefined' && window.DESI_OFFLINE === true; },
     project: null,
     panels: new Map(),       // sectionId -> SectionPanel
     activeSectionId: null,
@@ -23652,6 +23819,7 @@ const App = {
     },
 
     async init() {
+        if (this.offline) setupOfflineViewer();
         await ProjectStorage.open();
         // Ask the browser to keep our IDB out of its automatic eviction
         // pool. The Promise resolves to true / false depending on the
@@ -23738,6 +23906,7 @@ const App = {
         // the hash and load the target (e.g. clicking a project in a shared
         // folder index). The initial load hash never fires hashchange -> no loop.
         window.addEventListener('hashchange', () => {
+            if (this.offline) return;
             try {
                 const p = new URLSearchParams((location.hash || '').replace(/^#/, ''));
                 if ((p.get('share') || '').trim() || (p.get('folder') || '').trim()) location.reload();
@@ -23778,7 +23947,7 @@ const App = {
         // directly without going through it, send them back to the
         // manager so they have to authenticate. Share recipients
         // (#share=<slug>) are exempt — they have their own viewer pw.
-        if (!shareSlug) {
+        if (!shareSlug && !this.offline) {
             try {
                 const raw = sessionStorage.getItem('desi:masterUnlocked');
                 const p = raw ? JSON.parse(raw) : null;
@@ -23811,7 +23980,10 @@ const App = {
         // viewer.
         const params = new URLSearchParams(location.search || '');
         const importSlug = (params.get('import') || '').trim();
-        if (importSlug) {
+        if (this.offline && (importSlug || /(?:^|[&#])(share|folder)=/.test(location.hash || ''))) {
+            showToast('共有URLからの取得はオフライン版では利用できません。原本を含む Export ZIP を取り込んでください。', 9000);
+        }
+        if (importSlug && !this.offline) {
             this.wireUi();
             const newId = await this._importProjectFromServer(importSlug);
             if (newId) {
@@ -23837,12 +24009,16 @@ const App = {
             try { await this.openProject(requestedId); opened = !!this.project; }
             catch (e) { console.warn('Failed to open requested project:', e); }
         }
-        if (!opened && last) {
+        const requestedMissing = this.offline && !!requestedId && !opened;
+        if (!opened && last && !requestedMissing) {
             try { await this.openProject(last); opened = !!this.project; }
             catch (e) { console.warn('Failed to open last project:', e); }
         }
         if (!opened) this.renderEmpty();
         this.wireUi();
+        if (requestedMissing) {
+            showToast('指定されたプロジェクトがこのPCにありません。該当する Export ZIP を取り込んでから、もう一度開いてください。', 12000);
+        }
         // ?openHelp=<audience> (sent from the manager page's Help button or
         // a direct link) opens the help modal directly after init. Accepts
         // 'manage' / 'master' / 'viewer' or '1' (auto-pick).
@@ -23858,7 +24034,7 @@ const App = {
             try {
                 // refreshProjectPicker lists again; do it once and reuse.
                 const all = await ProjectStorage.listProjects();
-                if (!all.length) {
+                if (!all.length && !requestedMissing) {
                     location.replace('../');
                     return;
                 }
@@ -23868,6 +24044,7 @@ const App = {
     },
 
     _readShareSlug() {
+        if (this.offline) return null;
         try {
             const h = (location.hash || '').replace(/^#/, '');
             if (!h) return null;
@@ -23879,6 +24056,7 @@ const App = {
 
     // ① Phase 2: folder-share index route (viewer/index.html#folder=<slug>).
     _readFolderSlug() {
+        if (this.offline) return null;
         try {
             const params = new URLSearchParams((location.hash || '').replace(/^#/, ''));
             const slug = params.get('folder');
@@ -23892,6 +24070,7 @@ const App = {
     // demand; nothing is persisted to IndexedDB so closing the tab clears
     // the cache.
     async bootstrapShareMode(slug) {
+        if (this.offline) return;
         if (!SupabaseClient.configured()) {
             showToast(serverUnavailableReason()
                 || 'Share モードは設定されていません (SUPABASE_URL / ANON_KEY 未設定)', 5200);
@@ -24007,7 +24186,7 @@ const App = {
                     const errBody = String((publicErr.message || publicErr.details || publicErr.hint) || '');
                     const looksLikeAuthFail = /api[_\- ]?key|apikey|JWT|unauthorized|invalid.*token|PGRST301|PGRST302/i.test(errBody);
                     if (looksLikeAuthFail) {
-                        showToast('Supabase の認証に失敗しました (' + (errBody || publicErr.status || 'unknown') + ')。index.html の SUPABASE_ANON_KEY を確認してください。', 9000);
+                        showToast('Supabase の認証に失敗しました (' + (errBody || publicErr.status || 'unknown') + ')。runtime-config.js のクラウド設定を確認してください。', 9000);
                         this.renderEmpty();
                         return;
                     }
@@ -24152,6 +24331,7 @@ const App = {
     // a real master project record (no `__share: true`, fresh local id, all
     // blobs persisted) and returns the new project id for App.init to open.
     async _importProjectFromServer(slug) {
+        if (this.offline) { showToast('オフライン版では ZIP から取り込んでください。'); return null; }
         if (!SupabaseClient.configured()) {
             alert(serverUnavailableReason() || 'Supabase が未設定です');
             return null;
@@ -24428,6 +24608,7 @@ const App = {
     },
 
     async _hydrateSharedProject(session) {
+        if (this.offline) return;
         if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
         if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
         const doc = await SupabaseClient.fetchProjectDoc(session.token);
@@ -24876,6 +25057,21 @@ const App = {
         if (this.project) sel.value = this.project.id;
     },
 
+    _syncOfflineProjectUrl(id) {
+        if (!this.offline) return;
+        try {
+            const url = new URL(location.href);
+            url.searchParams.delete('import');
+            if (id) url.searchParams.set('project', id);
+            else url.searchParams.delete('project');
+            const hash = new URLSearchParams(url.hash.replace(/^#/, ''));
+            hash.delete('share');
+            hash.delete('folder');
+            url.hash = hash.toString();
+            history.replaceState(history.state, '', url.pathname + url.search + url.hash);
+        } catch (e) { console.warn('local project URL could not be updated', e); }
+    },
+
     async openProject(id) {
         if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
         if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
@@ -24915,11 +25111,17 @@ const App = {
             this.panels.forEach(p => p.destroy());
             this.panels.clear();
             localStorage.removeItem('desi:lastProjectId');
+            if (this.offline && !id) this._syncOfflineProjectUrl(null);
             this.renderEmpty();
             return;
         }
         this.project = project;
         // 前回のセッションで公開しきれなかった編集があればここで拾い直す。
+        if (this.offline) {
+            detachOfflineProject(project);
+            this.shareMode = null;
+            document.body.classList.remove('share-mode', 'share-admin');
+        }
         this._publishDirty = !!project.__publishPending;
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         parquetReleaseAll();               // worker が抱えている parquet 索引も返す
@@ -24970,6 +25172,7 @@ const App = {
             if (stInp) stInp.value = String(this.otsuStrength);
         } catch (e) { /* non-fatal */ }
         localStorage.setItem('desi:lastProjectId', id);
+        if (this.offline) this._syncOfflineProjectUrl(id);
         document.getElementById('project-name-input').value = project.displayName || '';
         document.getElementById('sections-empty').classList.toggle('hidden', this.project.sections.length > 0);
         await this.rebuildSectionPanels();
@@ -25010,7 +25213,7 @@ const App = {
         // Master mode: pull collaborator (viewer) ROIs from the server as a
         // read-only overlay, then keep polling. Guarded to master + a shared
         // project; share mode uses its own _startShareRoiPoll instead.
-        if (!this.shareMode && this.project && this.project.shareInfo && this.project.shareInfo.slug) {
+        if (!this.offline && !this.shareMode && this.project && this.project.shareInfo && this.project.shareInfo.slug) {
             this._refreshMasterCollabRois().catch(e => console.warn('collab initial pull failed', e));
             this._startMasterCollabPoll();
         }
@@ -25019,7 +25222,7 @@ const App = {
     refreshShareInfoButton() {
         const btn = document.getElementById('btn-share-info');
         if (!btn) return;
-        const has = !!(this.project && this.project.shareInfo && this.project.shareInfo.url);
+        const has = !this.offline && !!(this.project && this.project.shareInfo && this.project.shareInfo.url);
         btn.style.display = has ? '' : 'none';
         // Initialise the sync indicator alongside the share-info button.
         // For a fresh-opened project we show "synced" when shareInfo
@@ -25079,6 +25282,7 @@ const App = {
         this.panels.clear();
         await ProjectStorage.deleteProject(id);
         localStorage.removeItem('desi:lastProjectId');
+        if (this.offline) this._syncOfflineProjectUrl(null);
         await this.refreshProjectPicker();
         this.renderEmpty();
     },
@@ -25798,6 +26002,7 @@ const App = {
     // ROI lock prevents simultaneous edits, but it doesn't push updates,
     // so a polling loop is the simplest way to converge the two views.
     _startShareRoiPoll() {
+        if (this.offline) return;
         if (!this.shareMode || !this.shareMode.token) return;
         if (this._roiPollTimer) return;
         this._roiPollTimer = setInterval(() => {
@@ -26020,6 +26225,7 @@ const App = {
     },
 
     async _refreshMasterCollabRois() {
+        if (this.offline) return;
         if (this.shareMode) return;                                  // share mode has its own poll
         if (!this.project || !this.project.shareInfo || !this.project.shareInfo.slug) return;
         if (this.drawing && this.drawing.mode) return;               // don't reshuffle mid-polygon
@@ -26080,6 +26286,7 @@ const App = {
     },
 
     _startMasterCollabPoll() {
+        if (this.offline) return;
         if (this.shareMode) return;
         if (!this.project || !this.project.shareInfo || !this.project.shareInfo.slug) return;
         if (this._collabPollTimer) return;
@@ -26389,6 +26596,7 @@ const App = {
     // loss like the Section-2 incident becomes impossible.
     async _doSave() {
         if (!this.project) return false;
+        if (this.offline) detachOfflineProject(this.project);
         // ★ 共有プロジェクトはローカルに書かない。
         //
         //   正は「サーバ側の共有ドキュメント」で、開くたびに
@@ -26491,7 +26699,8 @@ const App = {
         const tag = reason ? '[' + reason + ']' : '[save]';
         console.error('[persistence]' + tag, msg);
         if (typeof showToast === 'function') {
-            showToast('保存エラー (' + (reason || 'save') + '): ' + msg + ' — 上部の sync indicator をクリックで再試行', 12000);
+            showToast('保存エラー (' + (reason || 'save') + '): ' + msg
+                + (this.offline ? ' — 上部の保存状態をクリックで再試行' : ' — 上部の sync indicator をクリックで再試行'), 12000);
         }
         try { this._setSyncStatus('error', msg); } catch (e) {}
     },
@@ -26578,6 +26787,7 @@ const App = {
     // batches up ROI / slider edits so we only push to Supabase when
     // the user actually pauses.
     _scheduleAutoPublish() {
+        if (this.offline) return;
         if (this.shareMode) return;                       // share recipient view: no master access
         if (!this.project || this.project.__share) return;
         if (!this.project.shareInfo || !this.project.shareInfo.slug) return;  // never published yet
@@ -26598,6 +26808,7 @@ const App = {
     },
 
     async autoPublishProject() {
+        if (this.offline) return;
         const project = this.project;
         if (!project || project.__share) return;
         if (!project.shareInfo || !project.shareInfo.slug) return;
@@ -26687,6 +26898,7 @@ const App = {
     // remembered lastSyncedAt. Returns true when the server has a newer
     // row, signalling that another PC pushed since this one last synced.
     async _serverIsNewerThanLocal(project) {
+        if (this.offline) return false;
         const localIso = project.shareInfo && project.shareInfo.lastSyncedAt;
         if (!localIso) return false;              // no baseline yet → allow first sync
         try {
@@ -26717,6 +26929,16 @@ const App = {
     //   error <msg>      → other failure (network, RPC error, etc.)
     _setSyncStatus(state, a, b) {
         this._syncState = state;
+        if (this.offline) {
+            const badge = document.getElementById('offline-viewer-status');
+            if (badge) {
+                badge.textContent = state === 'error' ? '保存失敗 · クリックで再試行' : 'このPCに保存 · ZIPでバックアップ';
+                badge.style.color = state === 'error' ? '#b91c1c' : '#166534';
+                badge.title = state === 'error' ? String(a || '保存に失敗しました。再試行してください。')
+                    : 'インターネットへの接続・公開・同期は行いません。Export ZIP でバックアップしてください。';
+            }
+            return;
+        }
         const el = document.getElementById('sync-status');
         if (!el) return;
         const hidden = state === 'hidden'
