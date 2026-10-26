@@ -1,5 +1,7 @@
 # Supabase setup (Phase 1)
 
+> **既存 .exp の編集機能**: ファイル編集とローカル保存にはDB更新は不要です。MRM登録・原本付きメソッドの保存には、`mrm_library.sql` → `mrm_reconcile.sql` → `mrm_exp_import.sql` の順で適用してください。詳細は [EXP_EDITOR.md](../docs/EXP_EDITOR.md) を参照してください。
+
 このディレクトリは **共有 ROI / 認証 / 保護コンテンツ配信** を Supabase 上に立てるためのスクリプト一式です。Phase 1 では `cor_slide_1_10` を Supabase に乗せ、ログインモーダルと ROI 共有を動かすところまでをゴールにします。
 
 > 必要なものは Supabase の **無料プラン** だけです。クレジットカード登録なしで試せます。

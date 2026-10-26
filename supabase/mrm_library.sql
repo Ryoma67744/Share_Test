@@ -234,6 +234,8 @@ begin
     if not public._verify_master_pw(_master_pw) then
         raise exception 'unauthorized' using errcode = '28000';
     end if;
+    -- Share the batch allocator lock before reading max(serial_no).
+    perform pg_advisory_xact_lock(hashtext('public.mrm_compounds.serial_no'));
     if _name is null or length(trim(_name)) = 0 then
         raise exception 'name required';
     end if;
@@ -281,6 +283,8 @@ begin
     if not public._verify_master_pw(_master_pw) then
         raise exception 'unauthorized' using errcode = '28000';
     end if;
+    -- Explicit serial edits also serialize with automatic number assignment.
+    perform pg_advisory_xact_lock(hashtext('public.mrm_compounds.serial_no'));
     update public.mrm_compounds
        set name        = coalesce(nullif(trim(_name), ''), name),
            tags        = coalesce(_tags, '{}'),
@@ -465,6 +469,8 @@ begin
     if not public._verify_master_pw(_master_pw) then
         raise exception 'unauthorized' using errcode = '28000';
     end if;
+    -- Share the batch allocator lock before reading max(serial_no).
+    perform pg_advisory_xact_lock(hashtext('public.mrm_compounds.serial_no'));
     if _name is null or length(trim(_name)) = 0 then
         raise exception 'name required';
     end if;

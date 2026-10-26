@@ -50,6 +50,20 @@ jobs:
         working-directory: tests
         run: npm ci --no-audit --no-fund
 
+      - name: Existing .exp editor and database regressions
+        run: |
+          node tests/exp_core_regression.js
+          node tests/exp_editor_regression.js
+          node tests/exp_library_import_regression.mjs
+          node tests/exp_import_db_regression.mjs
+
+      - name: Install browser for .exp editing workflows
+        working-directory: tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Existing .exp browser workflows
+        run: node tests/exp_editor_browser_regression.mjs
+
       - name: MSI source, geometry, rendering, loading and persistence regressions
         run: |
           for test in tests/msi_*_regression.js; do
