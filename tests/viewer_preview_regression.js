@@ -837,6 +837,32 @@ async function testWorkerXlsxDecodeCache() {
   assert.ok(posts.every((entry) => entry.ok));
 }
 
+async function testWorkerXlsxColumnsAwaitsInspection() {
+  const posts = [];
+  const expected = { sheetNames: ['Sheet1'], headers: [{ col: 'A', name: 'x' }], dataRows: 4 };
+  let fail = false;
+  // Real Worker.postMessage cannot clone a Promise. Simulate that boundary,
+  // including the handler's normal error envelope, instead of retaining refs.
+  const self = { postMessage(message) { posts.push(structuredClone(message)); } };
+  const context = vm.createContext({
+    self,
+    async inspectXlsxColumns() {
+      await Promise.resolve();
+      if (fail) throw new Error('column inspection failed');
+      return expected;
+    },
+  });
+  vm.runInContext(`${extractFunction(html, '_parseWorkerOnMessage')}; self.handler = _parseWorkerOnMessage;`, context);
+  const payload = { blob: new Blob(['fixture']), sheet: 'Sheet1', headerRow: 1 };
+  await self.handler({ data: { id: 1, op: 'xlsx-columns', payload } });
+  assert.deepEqual(posts, [{ id: 1, ok: true, result: expected }],
+    'XLSX column inspection must resolve before crossing the worker message boundary');
+  fail = true;
+  await self.handler({ data: { id: 2, op: 'xlsx-columns', payload } });
+  assert.deepEqual(posts[1], { id: 2, ok: false, error: 'column inspection failed' },
+    'async inspection rejection must use the worker error envelope');
+}
+
 // Waters writes .raw/imaging/Analyte N.txt with an all-zero padding row above the
 // real m/z rows. Zeros are finite, so the "first pair of consecutive numeric-only
 // rows" heuristic used to latch onto the padding, reject every column for
@@ -2442,10 +2468,35 @@ function testShareImageRulesAreEnforced() {
     'キャンセルしたらロックを返すこと');
 }
 
+function testWorkerAssetsFollowApplicationBase() {
+  const parseStart = html.indexOf('const PARSE_WORKER_LIBS = [');
+  const parquetStart = html.indexOf('const PARQUET_LIBS = {');
+  assert.ok(parseStart >= 0 && parquetStart >= 0);
+  const parse = html.slice(parseStart, html.indexOf('\nlet _parseWorker', parseStart));
+  const parquet = html.slice(parquetStart, html.indexOf('\n};', parquetStart) + 3);
+  for (const base of ['http://127.0.0.1:8765/', 'https://example.invalid/Share_Test/']) {
+    for (const withRuntime of [true, false]) {
+      const ctx = vm.createContext({ URL, location: { href: base + 'viewer/index.html' },
+        window: withRuntime ? { DesiRuntime: { asset: name => new URL('vendor/' + name, base).href } } : {} });
+      vm.runInContext(parse + '\n' + parquet + '\nglobalThis.assets = { parse: PARSE_WORKER_LIBS, parquet: PARQUET_LIBS };', ctx);
+      assert.deepEqual(Array.from(ctx.assets.parse), ['xlsx.full.min.js', 'pako.min.js', 'UTIF.js'].map(name => base + 'vendor/' + name));
+      assert.equal(ctx.assets.parquet.hyparquet, base + 'vendor/hyparquet.mjs');
+      assert.equal(ctx.assets.parquet.compressors, base + 'vendor/compressors.mjs');
+    }
+  }
+  const scriptSources = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
+  assert.deepEqual(scriptSources.slice(0, 3), ['../runtime-config.js', '../app-runtime.js', '../offline/offline.js']);
+  assert.ok(scriptSources.includes('../vendor/supabase.min.js'));
+  assert.ok(!scriptSources.some(src => src.startsWith('/') || /^https?:/.test(src)), 'viewer assets must work under a project Pages path');
+  assert.doesNotMatch(html, /window\.SUPABASE_(?:URL|ANON_KEY)\s*=/, 'shared runtime owns cloud configuration');
+  assert.doesNotMatch(html, /\b(?:const|let)\s+SUPABASE_(?:URL|ANON_KEY)\b/, 'do not shadow immutable runtime globals');
+}
+
 async function main() {
   compileInlineScripts('viewer/index.html', 2);
   compileInlineScripts('index.html', 1);
   compileInlineScripts('mrm.html', 1);
+  testWorkerAssetsFollowApplicationBase();
   assert.match(html, /data-preview-range-reset/);
   assert.match(html, /data-otsu-toggle/);   // プレビューの背景除去(Otsu)
   assert.match(html, /data-add-overlay/);   // プレビューの ＋重ね合わせ
@@ -2456,6 +2507,7 @@ async function main() {
   await testSelectionAndProjectLoadRaceGuard();
   testRangeResetAndSingleRepaint();
   await testWorkerXlsxDecodeCache();
+  await testWorkerXlsxColumnsAwaitsInspection();
   testAnalyteHeaderShapes();
   testRenameKeepsInstrumentCeCv();
   testWorkerBakePath();

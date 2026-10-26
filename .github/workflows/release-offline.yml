@@ -1,0 +1,101 @@
+name: Build offline release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the tested package as a GitHub Release
+        type: boolean
+        default: false
+      release_tag:
+        description: Existing v* tag at the selected commit (required only when publishing manually)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.21.0'
+          cache: npm
+          cache-dependency-path: |
+            connector/package-lock.json
+            tests/package-lock.json
+      - name: Install connector test dependencies
+        working-directory: connector
+        run: npm ci --no-audit --no-fund
+      - name: Install canvas test dependencies
+        working-directory: tests
+        run: npm ci --no-audit --no-fund
+      - name: Run all regressions and connector selftest
+        run: node tools/test.cjs
+      - name: Build online distribution
+        run: node tools/build.cjs --mode web --out dist/web
+      - name: Fetch and verify pinned Windows runtime
+        run: node tools/fetch-runtime.cjs
+      - name: Build offline distribution
+        run: node tools/build.cjs --mode offline --out dist/offline --runtime-dir runtime --zip dist/Share_Test_Offline.zip
+      - name: Verify packaged Windows launcher
+        shell: cmd
+        run: dist\offline\START_OFFLINE.bat --verify-only
+      - name: Upload tested release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-release-files
+          path: |
+            dist/Share_Test_Offline.zip
+            dist/Share_Test_Offline.zip.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    needs: build
+    if: (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.release_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout tested commit and tags
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify release tag identifies the tested commit
+        shell: bash
+        run: |
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo 'Publishing requires an existing v* tag at the selected commit.' >&2
+            exit 1
+          fi
+          tag_commit=$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")
+          tested_commit=$(git rev-parse HEAD)
+          if [[ "$tag_commit" != "$tested_commit" ]]; then
+            echo 'The release tag must identify the commit that was just built and tested.' >&2
+            exit 1
+          fi
+      - name: Download tested release files
+        uses: actions/download-artifact@v4
+        with:
+          name: offline-release-files
+          path: release-files
+      - name: Verify ZIP checksum
+        working-directory: release-files
+        run: sha256sum --check Share_Test_Offline.zip.sha256
+      - name: Publish new GitHub Release
+        working-directory: release-files
+        run: |
+          gh release create "$RELEASE_TAG" \
+            Share_Test_Offline.zip Share_Test_Offline.zip.sha256 \
+            --verify-tag --title "Share_Test Offline ${RELEASE_TAG}" --generate-notes

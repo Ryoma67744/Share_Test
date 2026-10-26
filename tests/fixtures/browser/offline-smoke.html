@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Offline dependency and production worker smoke</title>
+<script src="/runtime-config.js"></script><script src="/app-runtime.js"></script><script src="/offline/offline.js"></script>
+<style>body{font:16px system-ui;margin:32px;max-width:1100px;background:#f8fafc;color:#172554}h1{font-size:24px}li{padding:8px;margin:5px 0;background:white;border:1px solid #cbd5e1;overflow-wrap:anywhere}.pass{color:#166534}.fail{color:#991b1b}#summary{font-size:20px;font-weight:700}pre{white-space:pre-wrap}button{font:inherit;padding:8px}img{width:100px;image-rendering:pixelated}</style></head>
+<body><h1>Offline production worker smoke</h1>
+<p>Test-only page. Builds actual production worker sources from the local viewer factories and runs them in real browser Workers. No project or browser database is modified. This tests parsing dependencies, not the complete user workflow.</p>
+<p id="summary" role="status">RUNNING</p><ol id="results"></ol>
+<p><a href="/viewer/offline-smoke-project.zip" download>Download synthetic UI import ZIP</a> · <a href="/">Open project manager</a></p>
+<details><summary>Requests and errors</summary><pre id="details"></pre></details>
+<script>
+(() => {
+  const list=document.getElementById('results'), summary=document.getElementById('summary');
+  const live=new Set(), errors=[], results=[];let seq=0;
+  const assert=(ok,msg)=>{if(!ok)throw new Error(msg);};
+  const json=value=>JSON.stringify(value,(_key,v)=>typeof v==='bigint'?(v<=BigInt(Number.MAX_SAFE_INTEGER)&&v>=BigInt(Number.MIN_SAFE_INTEGER)?Number(v):v.toString()+'n'):v);
+  const eq=(actual,expected)=>assert(json(actual)===json(expected),json(actual)+' != '+json(expected));
+  document.addEventListener('securitypolicyviolation',e=>errors.push('CSP: '+e.violatedDirective+' '+e.blockedURI));
+  window.addEventListener('unhandledrejection',e=>errors.push('Unhandled: '+String(e.reason)));
+  const test=async(name,fn)=>{const li=document.createElement('li');li.textContent='RUNNING '+name;list.append(li);try{const info=await fn();li.textContent='PASS '+name+(info?' — '+info:'');li.className='pass';results.push({name,ok:true});}catch(e){li.textContent='FAIL '+name+' — '+e.message;li.className='fail';results.push({name,ok:false,error:e.stack||e.message});}};
+  async function get(name,type='blob'){const r=await fetch('/viewer/'+name);assert(r.ok,'HTTP '+r.status+' '+name);return type==='text'?r.text():r.blob();}
+  function declaration(html,name){let i=html.indexOf('function '+name+'(');assert(i>=0,'Missing production '+name);if(html.slice(i-6,i)==='async ')i-=6;const end=html.indexOf('\n}',i);assert(end>i,'Unclosed production '+name);return html.slice(i,end+2);}
+  function constant(html,name){const marker='const '+name+' = ';const i=html.indexOf(marker);assert(i>=0,'Missing '+name);return html.slice(i,html.indexOf(';',i)+1);}
+  function makeWorker(source,module){const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));const worker=new Worker(url,module?{type:'module'}:{});live.add(worker);const pending=new Map();
+    worker.onmessage=e=>{const p=pending.get(e.data.id);if(!p)return;pending.delete(e.data.id);clearTimeout(p.timer);e.data.ok?p.resolve(e.data.result):p.reject(new Error(e.data.error));};
+    worker.onerror=e=>{for(const p of pending.values()){clearTimeout(p.timer);p.reject(new Error(e.message||'worker error'));}pending.clear();};
+    return{call(message){return new Promise((resolve,reject)=>{const id=++seq;const timer=setTimeout(()=>{pending.delete(id);reject(new Error('Worker timeout (30 s)'));},30000);pending.set(id,{resolve,reject,timer});worker.postMessage({id,...message});});},close(){worker.terminate();URL.revokeObjectURL(url);live.delete(worker);}};
+  }
+  async function main(){
+    const html=await get('index.html','text');let parse,pq;
+    await test('Offline activation',()=>assert(window.DESI_OFFLINE===true,'Server config not active'));
+    await test('Build actual production parse worker',()=>{
+      const factory=declaration(html,'_buildParseWorkerSource');
+      const names=factory.match(/const fns = \[([\s\S]*?)\];/)[1].replace(/\/\/[^\n]*/g,'').split(',').map(x=>x.trim()).filter(Boolean);
+      const code=[constant(html,'PARSE_WORKER_LIBS'),constant(html,'MSI_ROBUST_PERCENTILE'),constant(html,'MSI_DEFAULT_DISPLAY_PERCENTILE'),...names.map(n=>declaration(html,n)),factory,'return _buildParseWorkerSource();'].join('\n');
+      parse=makeWorker(new Function(code)(),false);return names.length+' production functions';
+    });
+    await test('Production XLSX column parser in classic Worker',async()=>{
+      assert(parse,'Parse worker unavailable');const r=await parse.call({op:'xlsx-columns',payload:{blob:await get('offline-smoke-data.xlsx'),sheet:'Smoke',headerRow:1}});
+      eq(r.headers.map(x=>x.name),['x','y','signal']);eq(r.dataRows,4);return 'compressed XLSX, 3 headers / 4 rows';
+    });
+    await test('Production XLSX raster and OffscreenCanvas in classic Worker',async()=>{
+      assert(parse,'Parse worker unavailable');const r=await parse.call({op:'xlsx-raster',payload:{blob:await get('offline-smoke-data.xlsx'),def:{sheet:'Smoke',col_x:'A',col_y:'B',col_v:'C',data_start_row:2,bakeMode:'full'}}});
+      eq([r.width,r.height],[2,2]);eq(Array.from(r.values).sort((a,b)=>a-b),[10,20,30,40]);assert(r.dataUrl.startsWith('data:image/png'),'No raster PNG');return '2×2 / exact intensities 10,20,30,40';
+    });
+    await test('Production Deflate TIFF decoder with pako in classic Worker',async()=>{
+      assert(parse,'Parse worker unavailable');const r=await parse.call({op:'tiff-decode',payload:{blob:await get('offline-smoke-deflate.tif')}});
+      assert(r.dataUrl.startsWith('data:image/png'),'No TIFF PNG');const bitmap=await createImageBitmap(await(await fetch(r.dataUrl)).blob());eq([bitmap.width,bitmap.height],[2,2]);
+      const c=document.createElement('canvas');c.width=2;c.height=2;const cx=c.getContext('2d');cx.drawImage(bitmap,0,0);eq(Array.from(cx.getImageData(0,0,2,2).data),[255,0,0,255,0,255,0,255,0,0,255,255,255,255,255,255]);bitmap.close();return 'RGB pixels verified after TIFF → PNG';
+    });
+    await test('Build actual production Parquet module worker',()=>{
+      const code=[constant(html,'PARQUET_LIBS'),declaration(html,'_parquetWorkerBody'),declaration(html,'_buildParquetWorkerSource'),'return _buildParquetWorkerSource();'].join('\n');pq=makeWorker(new Function(code)(),true);return 'local ES modules + embedded WASM';
+    });
+    for(const codec of ['snappy','zstd']) await test('Production '+codec.toUpperCase()+' Parquet index and columns in module Worker',async()=>{
+      assert(pq,'Parquet worker unavailable');const blob=await get('offline-smoke-'+codec+'.parquet');const r=await pq.call({op:'open',fileId:codec,blob});eq(r.numRows,4);eq(r.colNames,['x','y','signal']);
+      const cols=await pq.call({op:'columns',fileId:codec,blob,colIdxs:[0,1,2]});eq(cols.map(x=>Array.from(x)),[[0,1,0,1],[0,0,1,1],[10,20,30,40]]);return '4 rows / 3 exact columns';
+    });
+    await test('Production Parquet URL Range route through local server',async()=>{
+      assert(pq,'Parquet worker unavailable');const url=new URL('offline-smoke-zstd.parquet',location.href).href;const r=await pq.call({op:'open',fileId:'range',url});eq(r.numRows,4);const col=await pq.call({op:'column',fileId:'range',url,colIdx:2});eq(Array.from(col),[10,20,30,40]);return 'HEAD + HTTP 206 Range + ZSTD';
+    });
+    parse?.close();pq?.close();
+    const resources=performance.getEntriesByType('resource').map(x=>x.name);await test('No page resource requested from an external origin',()=>{const outside=resources.filter(u=>/^https?:/.test(u)&&new URL(u).origin!==location.origin);eq(outside,[]);eq(errors,[]);return resources.length+' observed page resources; worker failures are surfaced above';});
+    const failed=results.filter(x=>!x.ok);summary.textContent=failed.length?'FAIL '+failed.length+' / '+results.length:'PASS '+results.length+' / '+results.length;summary.className=failed.length?'fail':'pass';summary.dataset.complete='true';document.body.dataset.complete='true';
+    document.getElementById('details').textContent=JSON.stringify({results,errors,pageResources:resources},null,2);
+  }
+  main().catch(e=>{summary.textContent='FAIL bootstrap: '+e.message;summary.className='fail';document.body.dataset.complete='true';document.getElementById('details').textContent=e.stack;}).finally(()=>{for(const w of live)w.terminate();});
+})();
+</script></body></html>

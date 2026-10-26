@@ -1,0 +1,13 @@
+# Keep parser fixtures and source extraction identical on Windows and Linux.
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# Pinned dependency checksums cover the exact downloaded/reviewed bytes.
+vendor/** -text -whitespace
+*.png -text
+*.jpg -text
+*.pdf -text
+*.zip -text
+*.xlsx -text
+*.parquet -text
+*.tif -text

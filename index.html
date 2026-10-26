@@ -1,26 +1,23 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
+<script src="runtime-config.js"></script>
+<script src="app-runtime.js"></script>
+<script src="offline/offline.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
 <title>DESI Data Share — Projects</title>
-<script src="https://cdn.tailwindcss.com"></script>
+<script src="vendor/tailwind.js"></script>
 <!-- defer: none of these is touched while the document parses. The Supabase
      client is built lazily inside _client() (which already guards on the
      global being undefined), and marked / DOMPurify are only used by the help
      modal. Leaving them synchronous blocked first paint on three CDN
      round-trips. Tailwind stays synchronous — deferring it flashes unstyled
      content. viewer/index.html has used this pattern since it shipped. -->
-<script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
-<script defer src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
-<script>
-  // Keep these in sync with viewer/index.html. Both pages connect to the
-  // same Supabase project so the same anon key is used here.
-  window.SUPABASE_URL      = "https://pxlrlhtcvwkqnlryencs.supabase.co";
-  window.SUPABASE_ANON_KEY = "sb_publishable_2K4sqMmKk3g20Jmwho-awQ_Uu_hSKeU";
-</script>
+<script defer src="vendor/supabase.min.js"></script>
+<script defer src="vendor/marked.min.js"></script>
+<script defer src="vendor/purify.min.js"></script>
 <style>
   body { background:#f8fafc; color:#0f172a; }
   .card { background:#fff; border:1px solid #e5e7eb; border-radius:8px; box-shadow:0 1px 3px rgba(0,0,0,0.04); }
@@ -87,7 +84,7 @@
         <button id="btn-new-folder" class="btn" title="プロジェクトをまとめるフォルダ (サブプロジェクト階層) を作成">+ フォルダ</button>
         <button id="btn-refresh-server" class="btn">サーバから一覧取得</button>
       </div>
-      <div class="text-xs text-gray-500">ローカル (このブラウザ) と、サーバ (Supabase) の両方から一覧表示します</div>
+      <div id="storage-description" class="text-xs text-gray-500">ローカル (このブラウザ) と、サーバ (Supabase) の両方から一覧表示します</div>
     </div>
     <div class="flex items-center gap-2 flex-wrap mt-3">
       <input id="proj-search" type="search" placeholder="プロジェクトを検索 (名前・装置・サンプル種・メモ・slug)"
@@ -308,6 +305,7 @@ const ProjectStorage = (() => {
 const SupabaseClient = (() => {
     let client = null;
     function _client() {
+        if (window.DESI_OFFLINE === true) return null;
         if (client) return client;
         if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) return null;
         // 部品を読めていないのは異常。呼び出し側は serverUnavailableReason() で
@@ -361,6 +359,7 @@ const SupabaseClient = (() => {
         // headers). Wrapping fetch lets us reuse the same publish_session
         // token across many path deletions.
         async deleteStorageObject(bucket, path, publishToken) {
+            if (window.DESI_OFFLINE === true) throw new Error('オフライン版ではクラウド操作は使用できません');
             if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) throw new Error('supabase_not_configured');
             const url = window.SUPABASE_URL.replace(/\/+$/, '') + '/storage/v1/object/'
                       + encodeURIComponent(bucket) + '/' + path.split('/').map(encodeURIComponent).join('/');
@@ -484,6 +483,7 @@ function isMasterUnlocked() {
 }
 
 function markMasterUnlocked(pw) {
+    if (window.DESI_OFFLINE === true) return;
     try {
         sessionStorage.setItem(MASTER_UNLOCK_KEY, JSON.stringify({
             unlockedAt: Date.now(),
@@ -797,6 +797,7 @@ function openChangeProjectPwModal(slug, name) {
 }
 
 async function requireMasterUnlock() {
+    if (window.DESI_OFFLINE === true) return true;
     if (isMasterUnlocked()) return true;
     return openMasterUnlockModal();
 }
@@ -811,6 +812,7 @@ function readCachedOwnerPw() {
     return '';
 }
 function saveCachedOwnerPw(pw) {
+    if (window.DESI_OFFLINE === true) return;
     try { sessionStorage.setItem(OWNER_PW_KEY, JSON.stringify({ pw, expiresAt: Date.now() + 12*60*60*1000 })); } catch (e) {}
 }
 
@@ -882,6 +884,12 @@ async function _ensureMasterPwForTree() {
 }
 
 async function loadWorkspaceTree() {
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
+        const raw = localStorage.getItem('desi:offlineWorkspaceTree:v1');
+        workspaceTree = raw ? JSON.parse(raw) : _emptyTree();
+        if (!workspaceTree || !Array.isArray(workspaceTree.children)) throw new Error('ローカルのフォルダ情報が不正です');
+        _treeLoaded = true; _treeDirty = false; return;
+    }
     if (!SupabaseClient.configured()) { _ensureTree(); _treeLoaded = true; return; }   // no server → nothing to clobber
     // ★ 取得は in-memory のツリーを丸ごと置き換え、_treeDirty も落とす。まだ
     //   サーバに届いていない自己修復があるなら、ここで先に流し切る。
@@ -905,6 +913,14 @@ async function persistTreeAndRender() {
 }
 async function _persistTreeAndRender() {
     await renderList();   // optimistic
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
+        try { localStorage.setItem('desi:offlineWorkspaceTree:v1', JSON.stringify(workspaceTree)); _treeDirty = false; }
+        catch (e) {
+            await loadWorkspaceTree(); await renderList();
+            alert('フォルダ構成を保存できませんでした: ' + (e.message || e));
+        }
+        return;
+    }
     // Guard: never write a tree we never successfully loaded — a transient
     // get_workspace_tree failure would otherwise overwrite the real hierarchy
     // with an empty/near-empty one on the next folder op.
@@ -930,6 +946,13 @@ async function _persistTreeAndRender() {
 // it never prompts for a password and never alerts — a heal that cannot be
 // saved now is simply retried on the next render (_treeDirty stays set).
 async function saveTreeQuiet() {
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
+        if (_treeDirty && _treeLoaded && !_treePersisting) {
+            try { localStorage.setItem('desi:offlineWorkspaceTree:v1', JSON.stringify(workspaceTree)); _treeDirty = false; }
+            catch (e) { console.error('ローカルのフォルダ保存失敗', e); showToast('フォルダ情報を保存できませんでした。ブラウザーの空き容量を確認してください。', 6000); }
+        }
+        return;
+    }
     // 先行する保存があるなら、捨てずに待ってから判断し直す。待った結果として
     // 自分の分がもう保存済みなら _treeDirty が下りているので何もしない。
     if (_treeSavePromise) { try { await _treeSavePromise; } catch (e) {} }
@@ -1160,6 +1183,7 @@ function _buildProjectResolver(rows) {
 // A row's identity is its published slug; a never-published local project falls
 // back to its browser-local id.
 function _rowSlug(r) {
+    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) return '';
     return (r && r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r && r.server && r.server.slug) || '';
 }
 function _rowKey(r) {
@@ -1254,6 +1278,7 @@ function _buildFolderIndexDoc(folderNode, resolveProject, includeSubfolders, sta
 }
 
 async function openFolderShareModal(folderId) {
+    if (window.DESI_OFFLINE === true) return;
     _ensureTree();
     const node = _treeFolderById(folderId);
     if (!node) return;
@@ -1642,6 +1667,8 @@ async function buildRows() {
     // the full records are several MB each for a non-target project. The
     // summary carries exactly the fields the list reads (including shareInfo).
     const local = await ProjectStorage.listSummaries();
+    // A downloaded project's old share metadata must never select a cloud route.
+    if (window.DESI_OFFLINE === true) return local.map(lp => ({ kind: 'local-only', local: Object.assign({}, lp, { shareInfo: null }) }));
     const localBySlug = new Map();
     const localOnly = [];
     for (const lp of local) {
@@ -1742,7 +1769,7 @@ function rowHtml(r) {
                   ? '<button type="button" class="btn primary" data-action="open-local">Open</button>'
                   : '<button type="button" class="btn primary" data-action="open-server" title="サーバから取り込んで master mode で開きます (master password 要)">Open (master)</button>'}
               ${(!r.local && slug) ? '<button type="button" class="btn" data-action="open-share" title="閲覧専用 share view で開きます">Share view</button>' : ''}
-              ${url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : '')}
+              ${window.DESI_OFFLINE === true ? '' : (url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : ''))}
               ${r.local ? '<button type="button" class="btn danger" data-action="delete-local">Delete</button>' : ''}
               ${(!r.local && slug) ? '<button type="button" class="btn danger" data-action="delete-server" title="サーバから完全に削除 (master password 要)">Delete</button>' : ''}
               ${slug ? '<button type="button" class="btn" data-action="change-pw" title="viewer / admin パスワードを変更 (master password 要)">🔑 パスワード</button>' : ''}
@@ -1752,7 +1779,7 @@ function rowHtml(r) {
           </div>
           <div class="text-xs text-gray-600 mt-2">
             実験日: ${safe(date)} ・ 装置: ${safe(machine)}${matrix ? ' / Matrix: ' + safe(matrix) : ''}${stypes.length ? ' ・ サンプル種: ' + safe(stypes.join(', ')) : ''}
-            ${gk ? ' ・ <a class="text-blue-600 hover:underline" href="' + safe(gk) + '" target="_blank" rel="noopener">Google Keep ↗</a>' : ''}
+            ${gk && window.DESI_OFFLINE !== true ? ' ・ <a class="text-blue-600 hover:underline" href="' + safe(gk) + '" target="_blank" rel="noopener">Google Keep ↗</a>' : ''}
           </div>
           ${note ? '<div class="text-xs text-gray-500 mt-1 whitespace-pre-line">' + safe(note) + '</div>' : ''}
         </div>`;
@@ -1765,7 +1792,7 @@ async function renderList() {
     if (!rows.length && !(workspaceTree.children && workspaceTree.children.length)) {
         list.innerHTML = `
             <div class="card p-6 text-center text-sm text-gray-500">
-              プロジェクトがまだありません。<br>「+ 新規プロジェクト」で作成するか、「サーバから一覧取得」で過去のプロジェクトを呼び出してください。
+              プロジェクトがまだありません。<br>${window.DESI_OFFLINE === true ? '「+ 新規プロジェクト」で作成してください。既存 ZIP はプロジェクトを開き、Import ZIP から読み込めます。' : '「+ 新規プロジェクト」で作成するか、「サーバから一覧取得」で過去のプロジェクトを呼び出してください。'}
             </div>`;
         return;
     }
@@ -1832,7 +1859,7 @@ async function renderList() {
             + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-rename="' + safe(n.id) + '" title="名前変更">改名</button>'
             + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-move="' + safe(n.id) + '" title="このフォルダを移動">移動</button>'
             + '<button class="btn danger" style="font-size:11px;padding:2px 6px;" data-folder-del="' + safe(n.id) + '" title="削除">削除</button>'
-            + '<button class="btn" style="font-size:11px;padding:2px 6px;' + (n.shareSlug ? 'background:#ecfdf5;border-color:#a7f3d0;' : '') + '" data-folder-share="' + safe(n.id) + '" title="このフォルダを共有 (受け手向けインデックス)">' + (n.shareSlug ? '共有中' : '共有') + '</button>'
+            + (window.DESI_OFFLINE === true ? '' : '<button class="btn" style="font-size:11px;padding:2px 6px;' + (n.shareSlug ? 'background:#ecfdf5;border-color:#a7f3d0;' : '') + '" data-folder-share="' + safe(n.id) + '" title="このフォルダを共有 (受け手向けインデックス)">' + (n.shareSlug ? '共有中' : '共有') + '</button>')
             + '</div>';
     };
     const renderNodes = (nodes, depth) => {
@@ -1947,7 +1974,7 @@ async function renderList() {
         });
         click('delete-local', async () => {
             if (!localId) return;
-            if (!confirm('ローカルからこのプロジェクトを削除しますか? (サーバに publish 済みなら、サーバ側のデータは残ります)')) return;
+            if (!confirm(window.DESI_OFFLINE === true ? 'このブラウザーからプロジェクトを削除しますか? 必要なデータは先に Export ZIP でバックアップしてください。' : 'ローカルからこのプロジェクトを削除しますか? (サーバに publish 済みなら、サーバ側のデータは残ります)')) return;
             await ProjectStorage.deleteProject(localId);
             await renderList();
         });
@@ -2220,6 +2247,15 @@ async function openHelpModal(audience, lang) {
 }
 
 async function init() {
+    if (window.DESI_OFFLINE === true) {
+        document.getElementById('btn-refresh-server').hidden = true;
+        document.getElementById('btn-change-master-pw').hidden = true;
+        document.getElementById('storage-description').textContent = 'オフライン版: この PC の同じブラウザーに保存します。各プロジェクトの Export ZIP と MRM バックアップを定期的に保存してください。';
+        const note = document.createElement('p');
+        note.className = 'text-xs text-gray-500 mt-2';
+        note.textContent = 'ブラウザーのデータ削除・別ブラウザー・別アドレスでは保存データを引き継げません。起動 BAT から毎回同じアドレスで開いてください。';
+        document.getElementById('storage-description').appendChild(note);
+    }
     // Gate the entire management UI behind a password. The unlock modal
     // refuses to dismiss until a valid password is entered, so anything
     // below this line only runs once the user is authenticated.
@@ -2262,6 +2298,7 @@ async function init() {
     });
     document.getElementById('btn-new-folder').addEventListener('click', () => treeCreateFolder(null));
     document.getElementById('btn-help').addEventListener('click', () => {
+        if (window.DESI_OFFLINE === true) { location.href = 'OFFLINE_GUIDE.md'; return; }
         // Native modal so we don't bounce away from the manager. Default
         // audience is 'manage' since this page IS the management screen.
         openHelpModal('manage').catch(e => console.error(e));
