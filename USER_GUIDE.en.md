@@ -473,11 +473,11 @@ Each CSV has a `.source-cells.json` sidecar recording source row IDs, coordinate
 
 Select **PPTレポート** beside **Export ZIP** at the top of the shared view to download the current project as a `.pptx`. **Regular viewers create the report directly without an options dialog, and CV/CE is omitted. No Admin login is required.**
 
-The report uses the published Memo, molecule and section names, precursor/product values and other viewable information. It starts with black-background section-by-molecule image matrices, followed by white-background molecule detail pages, then registered information. Each detail page has an editable Max/Mean table at the top, up to two section images below, and a vertical color bar on the right.
+The report uses molecule and section names, precursor/product values and other viewable image labels. It contains only black-background section-by-molecule image matrices and white-background molecule detail pages. Project information pages, Memo, detailed instrument acquisition conditions and source filenames are omitted. Each detail page has an editable Max/Mean table at the top, up to two section images below, and a vertical color bar on the right.
 
 To choose whether to include CV/CE, first sign in using the existing **🔑 Admin** button and the project's Admin password. Then select **PPTレポート** to open the options dialog. **CV・CEを含める** (include CV/CE) starts OFF for every export; turn it ON only when needed and select **作成** (Create). **No additional password is requested when creating a PowerPoint.** **キャンセル** (Cancel) produces no report.
 
-Public and viewer reports omit CV/CE, dwell, detailed instrument acquisition conditions and source filenames. Admin reports retain other registered measurement information and include CV/CE when the option is ON. Passwords and authentication tokens are never included in the PowerPoint file.
+Public and viewer reports omit CV/CE. Admins can turn the option ON to include the registered transition's CV/CE in the molecule detail subtitle. Passwords and authentication tokens are never included in the PowerPoint file.
 
 All project sections and molecules are included regardless of section visibility or Method filters, with additional pages for large collections. Images use a common display-raster p99.8 upper limit across sections with the same molecule and measurement conditions, using a black/blue/purple/red/yellow palette. Saved rotation and reflection are retained. Viewer Range, palette, Otsu removal and zoom do not affect the report. An individual scale bar is added only when an image’s physical dimensions can be calculated from calibrated pixel pitch and its display transform. Images with unknown dimensions omit the scale bar; different images do not share one.
 
