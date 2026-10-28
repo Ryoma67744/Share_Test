@@ -89,7 +89,7 @@
         }
         return sections;
     }
-    function imageScaleBar(pptx, slide, entry, bounds) {
+    function imageScaleBar(pptx, slide, entry, bounds, cell) {
         const image = entry && entry.image;
         if (!bounds || !image || !Number.isFinite(image.physicalWidthUm) || image.physicalWidthUm <= 0
             || !Number.isFinite(image.physicalHeightUm) || image.physicalHeightUm <= 0) return;
@@ -100,19 +100,23 @@
         let length = order;
         for (const factor of [1, 2, 5, 10]) if (factor * order <= target) length = factor * order;
         const width = bounds.w * length / image.physicalWidthUm;
-        const x = bounds.x + bounds.w - width, y = bounds.y + bounds.h + 0.13;
+        const x = bounds.x + bounds.w - width;
         const label = length >= 1000 ? number(length / 1000) + ' mm' : number(length) + ' µm';
-        slide.addShape(pptx.ShapeType.rect, {x, y, w: width, h: 0.025,
+        // Reserve a white band below the entire image region. Previously the
+        // small label straddled the image edge and could disappear on black
+        // pixels. Keep the calibrated width; only increase ink/text visibility.
+        slide.addShape(pptx.ShapeType.rect, {x, y: 6.97, w: width, h: 0.055,
             line: {color: '000000', transparency: 100}, fill: {color: '000000'}});
-        text(slide, label, {x: Math.max(bounds.x, x - 0.3), y: y - 0.14,
-            w: Math.max(width, 0.6), h: 0.13}, {fontSize: 8, color: '000000', align: 'center'});
+        const labelWidth = Math.min(cell.w, Math.max(width, 1.0));
+        const labelX = Math.max(cell.x, Math.min(x + width / 2 - labelWidth / 2, cell.x + cell.w - labelWidth));
+        text(slide, label, {x: labelX, y: 6.68, w: labelWidth, h: 0.23},
+            {fontSize: 11, bold: true, color: '000000', align: 'center'});
     }
     function entryFor(molecule, section) {
         return (molecule.sections || []).find(entry => string(entry.sectionId) === section.id) ||
             { sectionId: section.id, name: section.name, image: null, max: null, mean: null, missingReason: 'No registered MSI layer' };
     }
-    // Approximate East Asian width conservatively. Splitting creates additional
-    // editable rows/pages instead of discarding long notes or shrinking them away.
+    // Approximate East Asian width conservatively for compact matrix labels.
     function wrap(value, capacity) {
         const lines = []; let line = '', width = 0;
         for (const character of string(value).replace(/\r\n?/g, '\n')) {
@@ -128,141 +132,6 @@
         const lines = wrap(value, capacity);
         if (lines.length > maxLines) return lines.slice(0, maxLines).join('\n').replace(/.$/, '…');
         return lines.join('\n');
-    }
-    const FIELD_LABELS = {
-        sample: 'Sample', analysis: 'Analysis', machine: 'Instrument', instrument: 'Instrument',
-        operator: 'Operator', date: 'Date', note: 'Note', notes: 'Notes', tissue: 'Tissue',
-        species: 'Species', treatment: 'Treatment', sections: 'Sections', sectionId: 'Section ID',
-        acquisition: 'Acquisition', pixelPitch: 'Pixel pitch (µm/px)', name: 'Name',
-        raw: 'Raw metadata', fileName: 'File name', filename: 'File name', file: 'File',
-        sourceFile: 'Source file', rawFile: 'Raw file', acquiredAt: 'Acquired at',
-        scanSpeed: 'Scan speed', msMethod: 'MS method', rtStart: 'RT start', rtEnd: 'RT end',
-        polarity: 'Polarity', precursor: 'Precursor m/z', product: 'Product m/z',
-        ce: 'Collision energy', cv: 'Cone voltage', mz: 'm/z', adduct: 'Adduct',
-        percentile: 'Percentile (%)', basis: 'Image scale',
-        statisticsBasis: 'Statistics', percentileValue: 'p99.8 value',
-        sampleCount: 'Measured pixels', upper: 'Upper limit', upperBasis: 'Upper limit source'
-    };
-    function fieldLabel(key) {
-        const label = FIELD_LABELS[key] || string(key).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
-        return label.charAt(0).toUpperCase() + label.slice(1);
-    }
-    function metadataRows(metadata, options = {}) {
-        const result = [], parents = new Set();
-        if (metadata == null || (typeof metadata === 'object' && !Object.keys(metadata).length)) return result;
-        const labelValue = item => item && typeof item === 'object' &&
-            Object.prototype.hasOwnProperty.call(item, 'label') && Object.prototype.hasOwnProperty.call(item, 'value');
-        const internal = new Set(['id', 'sectionId', 'layerKey']);
-        const containers = new Set(['acquisition', 'raw', 'metadata']);
-        const join = (prefix, label) => [prefix, label].filter(Boolean).join(' / ');
-        const visit = (value, prefix, skipName = false) => {
-            if (value == null || value === '') return;
-            if (value && typeof value === 'object') {
-                if (parents.has(value)) { result.push({ label: prefix, value: '[Circular reference]' }); return; }
-                parents.add(value);
-                const entries = Object.entries(value);
-                const list = Array.isArray(value) || entries.every(([key]) => /^\d+$/.test(key));
-                if (list && entries.length && entries.every(([, item]) => labelValue(item))) {
-                    for (const [, item] of entries) visit(item.value, join(prefix, string(item.label)));
-                } else if (entries.length) {
-                    for (const [key, item] of entries) {
-                        if (internal.has(key) || (skipName && key === 'name')) continue;
-                        if (key === 'sections' && Array.isArray(item)) {
-                            item.forEach((section, index) => {
-                                const scope = join(prefix, 'Section ' + (index + 1));
-                                result.push({ label: scope, value: string(section && section.name) || '(unnamed section)' });
-                                visit(section, scope, true);
-                            });
-                        } else if (containers.has(key)) visit(item, prefix);
-                        else visit(item, join(prefix, list ? String(Number(key) + 1) : fieldLabel(key)));
-                    }
-                }
-                parents.delete(value);
-            } else result.push({ label: prefix, value: string(value) });
-        };
-        if (metadata != null) visit(metadata, options.prefix || '', !!options.skipName);
-        return result;
-    }
-    function metadataDifference(value, baseline) {
-        if (Object.is(value, baseline)) return undefined;
-        if (!value || typeof value !== 'object') return value;
-        if (Array.isArray(value)) {
-            return Array.isArray(baseline) && JSON.stringify(value) === JSON.stringify(baseline) ? undefined : value;
-        }
-        const different = {};
-        for (const [key, item] of Object.entries(value)) {
-            const changed = metadataDifference(item, baseline && baseline[key]);
-            if (changed !== undefined) different[key] = changed;
-        }
-        return Object.keys(different).length ? different : undefined;
-    }
-    function metadataPages(metadata) {
-        const pages = []; let rows = [], height = 0;
-        for (const item of metadataRows(metadata)) {
-            const labels = wrap(item.label, 25), values = wrap(item.value, 85);
-            for (let offset = 0; offset < Math.max(labels.length, values.length); offset += 3) {
-                const labelLines = labels.slice(offset, offset + 3), valueLines = values.slice(offset, offset + 3);
-                const rowHeight = Math.max(0.44, Math.max(labelLines.length, valueLines.length) * 0.25 + 0.12);
-                if (height + rowHeight > 5.6 && rows.length) { pages.push(rows); rows = []; height = 0; }
-                rows.push({ label: labelLines.join('\n'), value: valueLines.join('\n'), height: rowHeight });
-                height += rowHeight;
-            }
-        }
-        if (rows.length) pages.push(rows);
-        return pages;
-    }
-    async function addMetadata(pptx, report, checkpoint) {
-        const sections = sectionsFor(report);
-        const rows = [{label: 'Generated', value: string(report.generatedAt)},
-            {label: 'Sections / molecules', value: sections.length + ' / ' + report.molecules.length},
-            ...sections.map((section, i) => ({label: 'Section ' + (i + 1), value: section.name})),
-            ...metadataRows(report.metadata)];
-        const scaleInfo = scale => {
-            const names = { 'finite-measured-display-raster': 'Measured image pixels',
-                'original-measurement-rows': 'Original measurement rows', percentile: 'p99.8',
-                'positive-maximum-fallback': 'Positive maximum (p99.8 is zero or negative)',
-                'unit-fallback': '1 (no positive intensity range)' };
-            return Object.fromEntries(Object.entries(scale || {}).map(([key, value]) =>
-                [key, ['basis', 'statisticsBasis', 'upperBasis'].includes(key) ? names[value] || value : value]));
-        };
-        if (report.intensityScale) rows.push(...metadataRows({ 'Intensity scale': scaleInfo(report.intensityScale) }));
-        // Prepared reports may include further registered molecule metadata.
-        for (let moleculeIndex = 0; moleculeIndex < report.molecules.length; moleculeIndex++) {
-            const molecule = report.molecules[moleculeIndex], scope = 'Molecule ' + (moleculeIndex + 1);
-            const common = metadataRows(molecule.metadata, { prefix: scope, skipName: true });
-            const scale = metadataRows(scaleInfo(molecule.intensityScale || {upper: molecule.upper}), { prefix: scope });
-            const sectionRows = [];
-            for (let sectionIndex = 0; sectionIndex < (molecule.sections || []).length; sectionIndex++) {
-                const section = molecule.sections[sectionIndex];
-                if (!section.metadata) continue;
-                // The molecule's common fields appear once above. Preserve
-                // source/measurement fields that differ for a given section.
-                const specific = metadataDifference(section.metadata, molecule.metadata);
-                if (specific) {
-                    const sectionScope = scope + ' / Section ' + (sectionIndex + 1);
-                    const details = metadataRows(specific, { prefix: sectionScope, skipName: true });
-                    if (details.length) sectionRows.push({ label: sectionScope, value: section.name || '(unnamed section)' }, ...details);
-                }
-            }
-            rows.push({ label: scope, value: molecule.name || molecule.key },
-                ...(molecule.subtitle ? [{label: scope + ' / Transition', value: molecule.subtitle}] : []),
-                ...common, ...scale, ...sectionRows);
-        }
-        const pages = metadataPages(rows);
-        for (let index = 0; index < pages.length; index++) {
-            await checkpoint();
-            const rows = pages[index];
-            const slide = base(pptx, report, `Project information (${index + 1}/${pages.length})`, true);
-            let y = 1.0;
-            for (const row of rows) {
-                slide.addTable([[row.label, row.value]], { x: 0.45, y, w: 12.43,
-                    colW: [2.85, 9.58], rowH: row.height, h: row.height, autoPage: false,
-                    border: { type: 'solid', color: 'D0D5DD', pt: 0.5 }, margin: [4, 7, 4, 7],
-                    fontFace: FONT, fontSize: 14, color: '17223B', fill: 'FFFFFF', valign: 'top',
-                    lang: 'ja-JP', paraSpaceAfterPt: 0 });
-                y += row.height;
-            }
-        }
     }
     async function addMatrices(pptx, report, sections, checkpoint) {
         if (!report.molecules.length || !sections.length) {
@@ -353,11 +222,12 @@
                 const cellW = 11.83 / sectionPage.length;
                 sectionPage.forEach((section, i) => {
                     const x = 0.12 + i * cellW, entry = entryFor(molecule, section);
-                    text(slide, shortLabel(section.name, Math.floor(cellW * 14), 2),
+                    text(slide, section.name,
                         {x: x + 0.05, y: 2.2, w: cellW - 0.1, h: 0.35},
                         {fontSize: 17, color: '000000', align: 'center'});
-                    const bounds = picture(slide, entry, {x: x + 0.08, y: 2.62, w: cellW - 0.16, h: 4.15}, {light: true});
-                    imageScaleBar(pptx, slide, entry, bounds);
+                    const cell = {x: x + 0.08, y: 2.62, w: cellW - 0.16, h: 4.0};
+                    const bounds = picture(slide, entry, cell, {light: true});
+                    imageScaleBar(pptx, slide, entry, bounds, cell);
                 });
                 text(slide, 'Intensity', {x: 12.02, y: 2.38, w: 1.15, h: 0.25}, {fontSize: 10, color: '000000', align: 'center'});
                 colorBar(pptx, slide, 12.12, 2.83, 0.24, molecule.upper, {height: 3.7});
@@ -406,11 +276,10 @@
         const sections = sectionsFor(report);
         await addMatrices(pptx, report, sections, checkpoint);
         await addDetails(pptx, report, sections, checkpoint);
-        await addMetadata(pptx, report, checkpoint);
         await checkpoint('write');
         const output = await pptx.write({ outputType: type, compression: true });
         assertCurrent();
         return output;
     }
-    return Object.freeze({ create, COLOR_STOPS: Object.freeze(COLOR_STOPS), metadataRows, metadataPages });
+    return Object.freeze({ create, COLOR_STOPS: Object.freeze(COLOR_STOPS) });
 });

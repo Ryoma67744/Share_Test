@@ -1794,22 +1794,33 @@ function sectionMsiCanvasMatrix(section, refW, refH, frame, kind) {
 function msiDisplayPhysicalPitch(section, key) {
     const wc = section && section.meta && section.meta.world_coords;
     const pitch = wc && wc.msi_um_per_px;
-    if (!pitch || !(pitch.x > 0) || !(pitch.y > 0)) return null;
+    if (!pitch || !Number.isFinite(pitch.x) || !(pitch.x > 0)
+        || !Number.isFinite(pitch.y) || !(pitch.y > 0)) return null;
     const g = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section, key) : null;
     if (!g) return pitch;
     const result = {};
     for (const axis of ['x','y']) {
-        const knots = g.legacy[axis];
+        const knots = g.legacy && g.legacy[axis];
         if (!knots || knots.length < 2) { result[axis] = pitch[axis]; continue; }
-        const slope = (knots[1][0]-knots[0][0])/(knots[1][1]-knots[0][1]);
-        if (!(slope > 0)) return null;
-        for (let i=2;i<knots.length;i++) {
-            const d = (knots[i][0]-knots[i-1][0])/(knots[i][1]-knots[i-1][1]);
-            // An old ordinal grid did not have one physical pitch. Do not
-            // claim a uniform scale from that ambiguous historical calibration.
-            if (Math.abs(d-slope) > Math.max(1,Math.abs(slope))*1e-8) return null;
+        if (!knots.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))) return null;
+        const first = knots[0], last = knots[knots.length - 1];
+        const slope = (last[0]-first[0])/(last[1]-first[1]);
+        if (!(slope > 0) || !Number.isFinite(slope)) return null;
+        // RAW stage coordinates are float32: adjacent differences can jitter
+        // even for a uniform scan. Check the complete axis against its endpoint
+        // line with float32 rounding tolerance, capped at 0.1% of a pixel.
+        // Real nonuniform/ordinal spacing must still have no physical scale.
+        const tolerance = Math.min(slope * 1e-3,
+            Math.max(Math.abs(first[0]), Math.abs(last[0]), slope) * 2 ** -23);
+        for (let i=1;i<knots.length;i++) {
+            const p = knots[i], previous = knots[i-1];
+            if (!(p[0] > previous[0]) || !(p[1] > previous[1])
+                || Math.abs((p[0]-first[0]) - (p[1]-first[1])*slope) > tolerance) return null;
         }
-        result[axis] = pitch[axis] * g.displayGeometry[axis].step / slope;
+        const step = g.displayGeometry && g.displayGeometry[axis] && g.displayGeometry[axis].step;
+        if (!Number.isFinite(step) || !(step > 0)) return null;
+        result[axis] = pitch[axis] * step / slope;
+        if (!Number.isFinite(result[axis])) return null;
     }
     return result;
 }

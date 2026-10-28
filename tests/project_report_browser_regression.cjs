@@ -22,7 +22,9 @@ function sharedFixture() {
   const rows = ['x,y,signal_A,signal_B'];
   for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
     const value = y * 8 + x + 1;
-    rows.push([x, y, value, value * 2].join(','));
+    // RAW float32 coordinates round an otherwise uniform 70 µm grid. That
+    // serialization error must not make its registered calibration disappear.
+    rows.push([Math.fround(10 + x * 0.07), Math.fround(10 + y * 0.07), value, value * 2].join(','));
   }
   const series = {};
   for (const [index, column] of ['signal_A', 'signal_B'].entries()) {
@@ -47,7 +49,7 @@ function sharedFixture() {
       meta: {raw: {instrument: 'PRIVATE_RAW_SENTINEL', msMethod: 'PRIVATE_METHOD_SENTINEL',
         ce: 137.875, cv: 246.625,
         source: {coneV: '351.3125', msCe: '452.6875', msmsCe: '553.8125', capillaryKv: '0.654321'}},
-        world_coords: {msi_um_per_px: {x: 50, y: 50}}},
+        world_coords: {msi_um_per_px: {x: 70, y: 70}}},
       storage_paths: {images: {}, msiSeries: series}
     }]
   }};
@@ -55,12 +57,48 @@ function sharedFixture() {
 
 async function readDeck(download) {
   const bytes = await fs.readFile(await download.path()), zip = await JSZip.loadAsync(bytes);
-  const slides = Object.keys(zip.files).filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name));
+  const slides = Object.keys(zip.files).filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name))
+    .sort((a, b) => Number(a.match(/slide(\d+)/)[1]) - Number(b.match(/slide(\d+)/)[1]));
+  const slideXml = await Promise.all(slides.map(name => zip.file(name).async('string')));
   // Inspect every XML part, including notes and relationships; a hidden text
   // field is still disclosed to a recipient who downloads the PowerPoint.
   const xmlFiles = Object.keys(zip.files).filter(name => /\.(xml|rels)$/.test(name));
   const xml = (await Promise.all(xmlFiles.map(name => zip.file(name).async('string')))).join('\n');
-  return {bytes, zip, slides, xml};
+  return {bytes, zip, slides, slideXml, xml};
+}
+
+function assertImageReportPages(deck, detailCount, context) {
+  assert.equal(deck.slides.length, detailCount + 1, context + ' contains only the matrix and molecule details');
+  assert.match(deck.slideXml[0], /<p:bg>[\s\S]*?<a:srgbClr val="000000"/, context + ' starts with a black image matrix');
+  assert.doesNotMatch(deck.slideXml[0], /<a:tbl>/, context + ' matrix has no information table');
+  for (const xml of deck.slideXml.slice(1)) {
+    assert.match(xml, /<p:bg>[\s\S]*?<a:srgbClr val="FFFFFF"/, context + ' molecule details have a white background');
+    assert.equal((xml.match(/<a:tbl>/g) || []).length, 1, context + ' detail has one editable Max/Mean table');
+    assert.match(xml, /Max Intensity/);
+    assert.match(xml, /Mean Intensity/);
+  }
+  assert.doesNotMatch(deck.xml, /Project information/, context + ' omits project information pages');
+}
+
+function assertNativeScaleBars(deck, context, label = '50 µm') {
+  const slideSize = deck.xml.match(/<p:sldSz cx="(\d+)" cy="(\d+)"/);
+  assert.ok(slideSize, context + ' declares slide dimensions');
+  for (const xml of deck.slideXml.slice(1)) {
+    // A unit in metadata alone is not a visible scale bar. Require an editable
+    // native label paired with a horizontal native rectangle on each detail.
+    const shapes = xml.match(/<p:sp>[\s\S]*?<\/p:sp>/g) || [];
+    const labels = shapes.map((shape, index) => shape.includes('<a:t>' + label + '</a:t>') ? index : -1).filter(index => index >= 0);
+    assert.equal(labels.length, 1, context + ' has a calibrated native ' + label + ' label per section image');
+    const bar = shapes[labels[0] - 1] || '';
+    assert.match(bar, /<a:prstGeom prst="rect"/, context + ' scale is a native editable bar');
+    const size = bar.match(/<a:ext cx="(\d+)" cy="(\d+)"/);
+    assert.ok(size && Number(size[1]) > Number(size[2]) && Number(size[2]) > 0,
+      context + ' scale bar has a nonzero horizontal extent');
+    const position = bar.match(/<a:off x="(\d+)" y="(\d+)"/);
+    assert.ok(position && Number(position[1]) + Number(size[1]) <= Number(slideSize[1])
+      && Number(position[2]) + Number(size[2]) <= Number(slideSize[2]), context + ' scale bar stays inside the slide');
+    assert.match(bar, /<a:solidFill><a:srgbClr val="000000"/, context + ' black scale bar is visible on the white detail page');
+  }
 }
 
 function assertNoVoltages(deck, context) {
@@ -178,8 +216,9 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
       if (includeCeCv) await checkbox.check();
     }
     function assertSharedDeck(deck, includeCeCv) {
-      assert.ok(deck.slides.length >= 4, 'Different private CE/CV conditions remain separate molecule details');
-      for (const label of ['共有PPT合成プロジェクト', '共有乳酸', '共有切片A', '公開試料メモ', '公開装置メモ', '公開解析メモ']) {
+      assertImageReportPages(deck, 2, 'Shared ' + role);
+      assertNativeScaleBars(deck, 'Shared ' + role, '100 µm');
+      for (const label of ['共有PPT合成プロジェクト', '共有乳酸', '共有切片A']) {
         assert.ok(deck.xml.includes(label), role + ' includes public registered label: ' + label);
       }
       assert.ok(deck.xml.includes('89 → 43'), role + ' retains the public precursor/product transition');
@@ -191,21 +230,16 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
       assert.match(deck.xml, /<a:tbl>/, role + ' contains editable quantitative tables');
       assert.ok(Object.keys(deck.zip.files).some(name => /^ppt\/media\/.*\.png$/.test(name)), role + ' contains numeric heatmaps');
       if (includeCeCv) {
-        for (const marker of voltageMarkers) assert.ok(deck.xml.includes(marker), 'Admin opt-in includes CV/CE: ' + marker);
+        for (const [index, xml] of deck.slideXml.slice(1).entries()) {
+          assert.ok(xml.includes('CE ' + voltageMarkers[index * 2]), 'Admin opt-in includes transition CE in the detail subtitle');
+          assert.ok(xml.includes('CV ' + voltageMarkers[index * 2 + 1]), 'Admin opt-in includes transition CV in the detail subtitle');
+        }
       } else assertNoVoltages(deck, 'Shared ' + role);
-      if (role === 'viewer') {
-        for (const marker of [...privateMarkers, ...sourceVoltageMarkers, '0.1234567', '0.654321']) {
-          assert.ok(!deck.xml.includes(marker), 'Viewer report does not disclose private metadata: ' + marker);
-        }
-      } else {
-        for (const marker of ['PRIVATE_INSTRUMENT_SENTINEL', 'PRIVATE_METHOD_SENTINEL',
-          'PRIVATE_RAW_SENTINEL', 'PRIVATE_SOURCE_SENTINEL', '0.1234567', '0.654321']) {
-          assert.ok(deck.xml.includes(marker), 'Admin retains non-voltage acquisition metadata: ' + marker);
-        }
-        if (includeCeCv) for (const marker of sourceVoltageMarkers) {
-          assert.ok(deck.xml.includes(marker), 'Admin opt-in retains RAW acquisition voltage: ' + marker);
-        }
+      for (const marker of ['公開試料メモ', '公開装置メモ', '公開解析メモ', ...privateMarkers.slice(voltageMarkers.length),
+        ...sourceVoltageMarkers, '0.654321']) {
+        assert.ok(!deck.xml.includes(marker), 'Image report omits Memo and detailed acquisition metadata: ' + marker);
       }
+      assert.equal(deck.xml.includes('0.1234567'), role === 'admin', 'Dwell remains in authorized transition subtitles only');
       assertNoSessionTokens(deck);
     }
     async function createReport(includeCeCv) {
@@ -221,6 +255,9 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
       assert.match(download.suggestedFilename(), /\.pptx$/);
       assertSharedDeck(deck, includeCeCv);
       await assertSharedUnchanged('Shared ' + role + ' CV/CE ' + (includeCeCv ? 'ON' : 'OFF'));
+      if (role === 'viewer' && process.env.PPT_REPORT_SHARED_SAMPLE_PATH) {
+        await fs.writeFile(process.env.PPT_REPORT_SHARED_SAMPLE_PATH, deck.bytes);
+      }
       console.log('Shared ' + role + ' CV/CE ' + (includeCeCv ? 'ON' : 'OFF') + ' browser regression passed (' + deck.slides.length + ' slides, ' + deck.bytes.length + ' bytes).');
     }
     if (role === 'viewer') {
@@ -368,7 +405,16 @@ async function main() {
     assert.equal(await page.locator('.project-report-progress').count(), 0, 'Cancelling does not begin generation');
     await assertMasterUnchanged('Cancelled export');
     let sampleDeck;
-    for (const includeCeCv of [false, true]) {
+    for (const [includeCeCv, calibrated] of [[false, false], [true, false], [false, true]]) {
+      if (calibrated) {
+        // This is an explicit fixture setup change, not part of exporting.
+        // Keep the new registered setting in the subsequent invariance check.
+        expected.settings = await page.evaluate(() => {
+          const section = App.project.sections[0];
+          section.meta.world_coords = {...section.meta.world_coords, msi_um_per_px:{x:50,y:50}};
+          return JSON.stringify(section.meta);
+        });
+      }
       const checkbox = await openMasterOptions();
       if (includeCeCv) await checkbox.check();
       const downloadPromise = page.waitForEvent('download', {timeout:90000});
@@ -376,11 +422,16 @@ async function main() {
       const download = await downloadPromise, deck = await readDeck(download);
       assert.match(download.suggestedFilename(), /\.pptx$/);
       assert.doesNotMatch(download.suggestedFilename(), /[\\/:*?"<>|]/);
-      assert.ok(deck.slides.length >= 3, 'Metadata, matrix and molecule detail exist');
-      for (const label of ['PPT検証','乳酸テスト','切片A','合成試料','PPT検証用の登録メモ',
-        'C3H6O3','0.1234567','MASTER_INSTRUMENT_SENTINEL','MASTER_METHOD_SENTINEL',
-        'MASTER_SOURCE_SENTINEL','MASTER_RAW_SENTINEL','0.654321']) {
-        assert.ok(deck.xml.includes(label), 'Master export preserves non-voltage metadata: ' + label);
+      assertImageReportPages(deck, 1, 'Master');
+      if (calibrated) assertNativeScaleBars(deck, 'Master 50 µm calibration');
+      else assert.doesNotMatch(deck.xml, /[µμ]m/, 'Unknown pixel pitch does not claim physical dimensions or a scale bar');
+      for (const label of ['PPT検証','乳酸テスト','切片A','C3H6O3','0.1234567']) {
+        assert.ok(deck.xml.includes(label), 'Master export preserves registered image labels: ' + label);
+      }
+      for (const label of ['合成試料','PPT検証用の登録メモ',
+        'MASTER_INSTRUMENT_SENTINEL','MASTER_METHOD_SENTINEL','MASTER_SOURCE_SENTINEL','MASTER_RAW_SENTINEL',
+        '0.654321', ...sourceVoltageMarkers]) {
+        assert.ok(!deck.xml.includes(label), 'Image report omits Memo and detailed acquisition metadata: ' + label);
       }
       assert.ok(deck.xml.includes('89 → 43'), 'Master export preserves the precursor/product transition');
       assert.ok(deck.xml.includes('>' + expected.mean + '<'), 'Original-row mean is included');
@@ -388,19 +439,21 @@ async function main() {
       assert.match(deck.xml, /<a:tbl>/, 'Statistics remain editable native tables');
       assert.ok(Object.keys(deck.zip.files).some(name => /^ppt\/media\/.*\.png$/.test(name)), 'Heatmaps are embedded');
       if (includeCeCv) {
-        for (const marker of [...voltageMarkers.slice(0, 2), ...sourceVoltageMarkers]) assert.ok(deck.xml.includes(marker), 'Opt-in includes voltage: ' + marker);
+        assert.ok(deck.slideXml[1].includes('CE ' + voltageMarkers[0]), 'Opt-in includes transition CE in the detail subtitle');
+        assert.ok(deck.slideXml[1].includes('CV ' + voltageMarkers[1]), 'Opt-in includes transition CV in the detail subtitle');
       } else assertNoVoltages(deck, 'Master default export');
       assertNoSessionTokens(deck);
       await assertMasterUnchanged('Master CV/CE ' + (includeCeCv ? 'ON' : 'OFF'));
       await page.waitForFunction(() => !document.getElementById('btn-export-ppt').disabled);
-      console.log('Master CV/CE ' + (includeCeCv ? 'ON' : 'OFF') + ' browser regression passed (' + deck.slides.length + ' slides, ' + deck.bytes.length + ' bytes).');
+      console.log('Master CV/CE ' + (includeCeCv ? 'ON' : 'OFF') + ', ' + (calibrated ? '50 µm' : 'unknown pitch')
+        + ' browser regression passed (' + deck.slides.length + ' slides, ' + deck.bytes.length + ' bytes).');
       if (!includeCeCv) sampleDeck = deck;
     }
     // Opting in is per-download; it must not become the next export's default.
     await openMasterOptions();
     await page.locator('[data-report-cancel]').click();
     await page.locator('.project-report-options').waitFor({state:'detached'});
-    assert.equal(downloadCount, 2, 'Only explicitly created reports download');
+    assert.equal(downloadCount, 3, 'Only explicitly created reports download');
     assert.deepEqual(external, [], 'Works without external connections');
     assert.deepEqual(errors, [], 'No browser exceptions');
     if (process.env.PPT_REPORT_SAMPLE_PATH) await fs.writeFile(process.env.PPT_REPORT_SAMPLE_PATH, sampleDeck.bytes);

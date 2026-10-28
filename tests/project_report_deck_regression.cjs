@@ -14,15 +14,15 @@ for (const file of ['vendor/pptxgen.min.js', 'viewer/project-report-deck.js']) {
     vm.runInContext(fs.readFileSync(path.join(root, file), 'utf8'), sandbox, { filename: file });
 }
 const deck = sandbox.ProjectReportDeck;
-function fixtureImage() {
-    const canvas = createCanvas(240, 120), ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, 240, 120);
+function fixtureImage(width = 240, height = 120) {
+    const canvas = createCanvas(width, height), ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#000000'; ctx.fillRect(0, 0, width, height);
     for (let y = 0; y < 12; y++) for (let x = 0; x < 24; x++) {
         const value = Math.max(0, 1 - Math.hypot((x - 12) / 11, (y - 6) / 5));
         ctx.fillStyle = '#' + deck.COLOR_STOPS[Math.floor(value * (deck.COLOR_STOPS.length - 1))];
-        ctx.fillRect(x * 10, y * 10, 10, 10);
+        ctx.fillRect(x * width / 24, y * height / 12, width / 24, height / 12);
     }
-    return { data: canvas.toDataURL('image/png'), width: 240, height: 120 };
+    return { data: canvas.toDataURL('image/png'), width, height };
 }
 function fixture(sectionCount = 8, moleculeCount = 5) {
     const image = fixtureImage();
@@ -54,21 +54,22 @@ async function unzip(report) {
             assert.ok(['t', 'ctr', 'b', 'just', 'dist'].includes(match[1]), 'OOXML vertical alignment must be valid: ' + match[1]);
         }
     });
-    return { bytes, zip, files, xml, all: xml.join('\n') };
+    const packageXml = (await Promise.all(Object.keys(zip.files).filter(file => /\.(?:xml|rels)$/.test(file))
+        .map(file => zip.file(file).async('string')))).join('\n');
+    return { bytes, zip, files, xml, all: xml.join('\n'), packageXml };
 }
 async function main() {
     const report = fixture(), before = JSON.stringify(report);
     const result = await unzip(report);
     assert.equal(JSON.stringify(report), before, 'Generating a report must not mutate registered project data');
-    assert.equal(result.files.length, 25, '2 matrix pages + 20 two-section detail pages + 3 information pages');
+    assert.equal(result.files.length, 22, 'Only 2 matrix pages and 20 two-section detail pages');
     assert.match(result.xml[0], /MSI matrix 1/, 'The approved black matrix opens the report without a cover');
     assert.match(result.xml[0], /<a:srgbClr val="000000"\/>/, 'Matrix background is black');
-    assert.ok(!result.xml[0].includes('Project information'), 'Information follows the MSI pages');
+    assert.doesNotMatch(result.packageXml, /Project information/, 'No project-information page or hidden text is emitted');
     assert.match(result.xml[2], /<p:bg>.*?<a:srgbClr val="FFFFFF"\/>/s, 'Detail slides have the approved white background');
-    assert.ok(result.xml[22].includes('Project information'), 'All quantitative details precede metadata');
     assert.match(result.all, /DESI 日本語 &lt;project&gt; &amp; report/);
-    assert.match(result.all, /Registered sample metadata: 日本語の情報/);
-    assert.match(result.all, /A &amp; B &lt;original&gt;/);
+    assert.doesNotMatch(result.packageXml, /Registered sample metadata: 日本語の情報|A &amp; B &lt;original&gt;/,
+        'Project metadata is absent from slides, notes and document properties');
     assert.match(result.all, /Registered layer unavailable/);
     for (const section of report.sections) assert.ok(result.all.includes(section.name), section.name + ' is retained');
     for (const molecule of report.molecules) {
@@ -76,7 +77,7 @@ async function main() {
         assert.ok(result.all.includes(molecule.subtitle), molecule.subtitle + ' is retained');
         assert.ok(result.all.includes(String(molecule.upper)), 'Shared scale is recorded');
     }
-    assert.equal(result.xml.filter(xml => xml.includes('<a:tbl>')).length, 23, 'Metadata and each detail page use native editable tables');
+    assert.equal(result.xml.filter(xml => xml.includes('<a:tbl>')).length, 20, 'Each detail page uses a native editable statistics table');
     assert.match(result.all, /<a:t>0<\/a:t>/, 'Real zero statistics are preserved');
     assert.match(result.all, /1001\.123/);
     assert.match(result.all, /1001\.1234/, 'Source maximum retains its supplied precision');
@@ -111,10 +112,29 @@ async function main() {
     assert.match(calibratedDetail, /100 µm/); assert.match(calibratedDetail, /200 µm/);
     assert.doesNotMatch(calibration.xml[0], /100 µm|200 µm/, 'No shared physical scale is attached to a matrix of differently sized images');
     const scaleBars = [...calibratedDetail.matchAll(/<p:sp>.*?<\/p:sp>/gs)].map(match => match[0])
-        .filter(xml => xml.includes('cy="22860"') && xml.includes('<a:srgbClr val="000000"'));
+        .filter(xml => xml.includes('cy="50292"') && xml.includes('<a:srgbClr val="000000"'));
     assert.equal(scaleBars.length, 2, 'Each calibrated detail image owns a physical scale bar');
     const scaleWidths = scaleBars.map(xml => Number(xml.match(/<a:ext cx="(\d+)"/)[1]));
     assert.ok(scaleWidths[1] > scaleWidths[0], 'Bar width follows each image physical field, rather than a common slide scale');
+    const barLabels = [...calibratedDetail.matchAll(/<p:sp>.*?<\/p:sp>/gs)].map(match => match[0])
+        .filter(xml => /<a:t>\d+(?:\.\d+)? (?:µm|mm)<\/a:t>/.test(xml));
+    assert.equal(barLabels.length, 2);
+    for (const label of barLabels) assert.match(label, /sz="1100"/, 'Calibrated scale labels use a readable 11pt font');
+    const calibratedImages = [...calibratedDetail.matchAll(/<p:pic>.*?<\/p:pic>/gs)].map(match => match[0]);
+    for (let i = 0; i < calibratedImages.length; i++) {
+        const picture = calibratedImages[i], imageY = Number(picture.match(/<a:off x="\d+" y="(\d+)"/)[1]);
+        const imageHeight = Number(picture.match(/<a:ext cx="\d+" cy="(\d+)"/)[1]);
+        const labelY = Number(barLabels[i].match(/<a:off x="\d+" y="(\d+)"/)[1]);
+        assert.ok(labelY > imageY + imageHeight, 'The scale label lies fully below its image on white space');
+        assert.ok(Math.abs(scaleWidths[i] / Number(picture.match(/<a:ext cx="(\d+)"/)[1])
+            - [100 / 800, 200 / 1200][i]) < 0.00001, 'Scale bar length matches its own displayed image calibration');
+    }
+    const scaleGeometry = fixture(2, 1);
+    scaleGeometry.molecules[0].sections[0].image = {...fixtureImage(80, 320), physicalWidthUm: 8000, physicalHeightUm: 32000};
+    scaleGeometry.molecules[0].sections[1].image = {...fixtureImage(320, 80), physicalWidthUm: 12000, physicalHeightUm: 3000};
+    const geometryResult = await unzip(scaleGeometry);
+    assert.match(geometryResult.xml[1], /1 mm/); assert.match(geometryResult.xml[1], /2 mm/);
+    assert.equal(geometryResult.xml[1].match(/cy="50292"/g).length, 2, 'Tall and wide images both retain their individual scale bars');
     const noCalibration = fixture(2, 1);
     noCalibration.molecules[0].sections[0].image = {...fixtureImage(), physicalWidthUm: NaN, physicalHeightUm: 100};
     assert.doesNotMatch((await unzip(noCalibration)).xml[1], /<a:t>\d+(?:\.\d+)? (?:µm|mm)<\/a:t>/,
@@ -126,14 +146,14 @@ async function main() {
     });
     longNames.molecules[0].name = '非常に長い分子名'.repeat(15) + '_MOLECULE_END';
     const longResult = await unzip(longNames), longText = longResult.all.replace(/<[^>]*>/g, '');
-    for (let i = 0; i < 3; i++) assert.ok(longText.includes('_NAME_END_' + i), 'Full long section name is retained in information pages');
+    for (let i = 0; i < 3; i++) assert.ok(longText.includes('_NAME_END_' + i), 'Full long section names remain in visible detail labels');
     assert.ok(longText.includes('_MOLECULE_END'));
-    for (const xml of longResult.xml) for (const transform of xml.matchAll(/<(?:a|p):xfrm[^>]*>.*?<\/(?:a|p):xfrm>/gs)) {
+    for (const xml of [...longResult.xml, ...geometryResult.xml]) for (const transform of xml.matchAll(/<(?:a|p):xfrm[^>]*>.*?<\/(?:a|p):xfrm>/gs)) {
         const offset = transform[0].match(/<a:off x="(-?\d+)" y="(-?\d+)"/), extent = transform[0].match(/<a:ext cx="(\d+)" cy="(\d+)"/);
         if (!offset || !extent) continue;
         const x = Number(offset[1]), y = Number(offset[2]), w = Number(extent[1]), h = Number(extent[2]);
         assert.ok(x >= 0 && y >= 0 && x + w <= 12192000 + 10 && y + h <= 6858000 + 10,
-            'Long labels stay within slide geometry');
+            'Long labels, image bounds and calibrated scale bars stay within slide geometry');
     }
     const presentation = await result.zip.file('ppt/presentation.xml').async('string');
     assert.equal((presentation.match(/<p:sldId /g) || []).length, result.files.length, 'Every page is reachable');
@@ -148,10 +168,10 @@ async function main() {
     const largeMetadata = fixture(1, 1);
     largeMetadata.metadata = Array.from({ length: 18 }, (_, i) => ({ label: `Field ${i + 1}`, value: `BEGIN${i} ${'解析情報 abc '.repeat(35)} END${i}` }));
     const metadataResult = await unzip(largeMetadata);
-    assert.ok(metadataResult.xml.filter(xml => xml.includes('Project information (')).length > 2, 'Long metadata is paginated');
+    assert.equal(metadataResult.xml.length, 2, 'Large project metadata never adds extra slides');
     for (let i = 0; i < 18; i++) {
-        assert.ok(metadataResult.all.includes(`BEGIN${i}`));
-        assert.ok(metadataResult.all.includes(`END${i}`), 'Metadata ending is not dropped');
+        assert.ok(!metadataResult.packageXml.includes(`BEGIN${i}`));
+        assert.ok(!metadataResult.packageXml.includes(`END${i}`), 'Metadata is not hidden in another PPTX part');
     }
     const sparse = fixture(2, 1);
     sparse.molecules[0].sections.pop();
@@ -187,19 +207,15 @@ async function main() {
     const integrated = await unzip(prepared);
     const integratedText = integrated.all.replace(/<[^>]*>/g, '');
     for (const value of ['Mouse kidney', '研究者 A', 'Xevo TQ', 'sample.raw', 'FULL_METADATA_VALUE',
-        'Registered kidney section', 'Pixel pitch', 'Measured image pixels', 'Original measurement rows', 'p99.8', '[M-H]-', 'MRM Function 7']) {
-        assert.ok(integratedText.includes(value), 'Integrated metadata retains ' + value);
+        'Pixel pitch', 'Measured image pixels', 'Original measurement rows', '[M-H]-', 'MRM Function 7']) {
+        assert.ok(!integrated.packageXml.includes(value), 'Metadata is omitted from every package part: ' + value);
     }
-    assert.ok(integratedText.includes('最大・平均は元測定行の統計値を使用。'), 'Scientific display/statistics note is visible');
-    const sectionMetadataRows = deck.metadataRows({ sections: [{ id: 'INTERNAL_ID', sectionId: 'INTERNAL_SECTION_ID',
-        layerKey: 'INTERNAL_LAYER_KEY', name: 'Long named section', acquisition: {instrument: 'Instrument name', scanSpeed: 100} }] });
-    assert.equal(JSON.stringify(sectionMetadataRows), JSON.stringify([
-        {label: 'Section 1', value: 'Long named section'},
-        {label: 'Section 1 / Instrument', value: 'Instrument name'},
-        {label: 'Section 1 / Scan speed', value: '100'}
-    ]), 'Section heading appears once, scientific labels are short, internal IDs are omitted');
-    assert.equal(JSON.stringify(deck.metadataRows([{ label: 'A', value: 0 }, { label: 'B', value: false }])),
-        JSON.stringify([{ label: 'A', value: '0' }, { label: 'B', value: 'false' }]), 'Legacy metadata rows retain falsy values');
+    for (const value of ['Registered kidney section', 'Registered compound', 'Q1 100 / Q3 50', 'p99.8']) {
+        assert.ok(integratedText.includes(value), 'MSI detail retains ' + value);
+    }
+    const integratedTable = integrated.xml[1].match(/<a:tbl>.*?<\/a:tbl>/s)[0];
+    assert.match(integratedTable, /<a:t>100<\/a:t>/, 'Source maximum survives removal of information pages');
+    assert.match(integratedTable, /<a:t>25<\/a:t>/, 'Source mean survives removal of information pages');
     assert.equal(JSON.stringify(deck.COLOR_STOPS), JSON.stringify(Data.COLOR_STOPS.map(color => color.slice(1))), 'Legend and rendered images use the same exact stops');
     const fallback = fixture(1, 1);
     fallback.molecules[0].intensityScale = {upperBasis: 'unit-fallback', upper: 1};
@@ -209,9 +225,10 @@ async function main() {
     acquisitions.molecules[0].metadata = { sourceFile: 'first.raw', msMethod: 'Common method', acquiredAt: 'DAY_ONE' };
     acquisitions.molecules[0].sections[0].metadata = { ...acquisitions.molecules[0].metadata };
     acquisitions.molecules[0].sections[1].metadata = { sourceFile: 'second.raw', msMethod: 'Common method', acquiredAt: 'DAY_TWO', rtStart: 1.25 };
-    const acquisitionText = (await unzip(acquisitions)).all.replace(/<[^>]*>/g, '');
-    for (const value of ['first.raw', 'second.raw', 'DAY_ONE', 'DAY_TWO', '1.25']) assert.ok(acquisitionText.includes(value), 'Source acquisition retained: ' + value);
-    assert.equal((acquisitionText.match(/Common method/g) || []).length, 1, 'Identical group metadata is printed once');
+    const acquisitionXml = (await unzip(acquisitions)).packageXml;
+    for (const value of ['first.raw', 'second.raw', 'DAY_ONE', 'DAY_TWO', 'Common method']) {
+        assert.ok(!acquisitionXml.includes(value), 'Molecule and section acquisition metadata is not exported: ' + value);
+    }
     const controller = new AbortController(); let pageProgress = 0;
     await assert.rejects(deck.create(fixture(8, 5), { type: 'nodebuffer', signal: controller.signal,
         onProgress(event) { if (event.phase === 'slides' && ++pageProgress === 3) controller.abort(); }
@@ -247,7 +264,10 @@ async function main() {
         }));
         fs.writeFileSync(approvedTarget, (await unzip(approvedSample)).bytes);
         console.log('Approved matrix/detail layout sample: ' + approvedTarget);
+        const scaleTarget = path.resolve(root, '../report-scale-geometry-sample.pptx');
+        fs.writeFileSync(scaleTarget, geometryResult.bytes);
+        console.log('Tall/wide calibrated image sample: ' + scaleTarget);
     }
-    console.log('Project report deck regression: PASS (editable PPTX, pagination, missing data, complete metadata, image geometry)');
+    console.log('Project report deck regression: PASS (MSI-only PPTX, editable statistics, omitted metadata, calibrated scale bars, image geometry)');
 }
 main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });
