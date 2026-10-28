@@ -79,10 +79,11 @@
     // Share documents contain the full method. Match the recipient-facing UI
     // at the report boundary; keep full conditions privately for grouping.
     const viewerMetadataFields = new Set(['name', 'base', 'precursor', 'product', 'polarity', 'mz', 'adduct', 'formula']);
-    function viewerMeta(key, meta, registeredBase) {
+    function viewerMeta(key, meta, registeredBase, includeCeCv = false) {
         // A public field is a scalar, never a container for arbitrary method
         // metadata (the deck's metadata writer recursively expands objects).
-        const out = Object.fromEntries(Object.entries(meta).filter(([field, value]) => viewerMetadataFields.has(field) && scalar(value)));
+        const out = Object.fromEntries(Object.entries(meta).filter(([field, value]) =>
+            (viewerMetadataFields.has(field) || includeCeCv && (field === 'ce' || field === 'cv')) && scalar(value)));
         // Legacy source labels end in _CE_CV. A registered base is already the
         // display name; never export a second, untrimmed name alongside it.
         const name = registeredBase && scalar(registeredBase) ? registeredBase : label(key, out).replace(numericSuffix, '');
@@ -97,11 +98,50 @@
         const app = getApp(), project = app && app.project;
         if (!project) throw new Error('プロジェクトを開いてから PPT レポートを作成してください。');
         const session = app.shareMode, signature = shareSignature(app, project);
-        return { shared: !!(session || project.__share), assertCurrent() {
+        return { shared: !!(session || project.__share), slug: session && session.slug, assertCurrent() {
             const current = getApp();
             if (current !== app || current.project !== project || current.shareMode !== session
                 || shareSignature(current, project) !== signature) throw staleError();
         } };
+    }
+    // A project Admin password is not a master password. Only a successful
+    // unlock_project_master response can mint this per-export authorization.
+    // Neither passwords nor server tokens are stored in the grant or report.
+    const masterAuthorizations = new WeakMap();
+    function masterAuthorizationError(message, code = 'REPORT_MASTER_AUTH_FAILED') {
+        const error = new Error(message); error.code = code; return error;
+    }
+    async function authorizeSharedExport(hooks, password) {
+        const app = hooks.getApp(), context = captureExportContext(hooks.getApp);
+        if (!context.shared || !context.slug || !String(password || '').trim()
+            || typeof hooks.unlockMaster !== 'function') {
+            throw masterAuthorizationError('共有プロジェクトのMaster passを入力してください。');
+        }
+        context.assertCurrent();
+        const raw = await hooks.unlockMaster(context.slug, String(password).trim());
+        context.assertCurrent();
+        const row = Array.isArray(raw) ? raw[0] : raw;
+        const expiresAt = row && typeof row.expires_at === 'string' ? Date.parse(row.expires_at) : NaN;
+        if (!row || typeof row.token !== 'string' || !row.token.trim() || row.role !== 'viewer'
+            || !Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
+            throw masterAuthorizationError('Master passの認証結果を確認できませんでした。');
+        }
+        const grant = Object.freeze({});
+        masterAuthorizations.set(grant, {app, context, expiresAt, claimed: false});
+        return grant;
+    }
+    function claimMasterAuthorization(grant, app) {
+        const state = grant && masterAuthorizations.get(grant);
+        if (!state || state.claimed || state.app !== app) {
+            throw masterAuthorizationError('この出力のMaster pass認証をやり直してください。');
+        }
+        const assertAuthorized = () => {
+            state.context.assertCurrent();
+            if (Date.now() >= state.expiresAt) throw masterAuthorizationError(
+                'Master passの認証期限が切れました。もう一度作成してください。', 'REPORT_MASTER_AUTH_EXPIRED');
+        };
+        assertAuthorized(); state.claimed = true;
+        return assertAuthorized;
     }
     function registeredMeta(entry, fallback) {
         const source = entry && entry.compoundMeta || fallback || {}, out = {};
@@ -157,7 +197,9 @@
         const session = app.shareMode, shareState = shareSignature(app, project);
         const shared = !!(session || project.__share);
         const viewer = shared && (!session || session.role !== 'admin');
-        const includeCeCv = !shared && options.includeCeCv === true;
+        const assertAuthorized = shared && options.includeCeCv === true && options.masterAuthorization
+            ? claimMasterAuthorization(options.masterAuthorization, app) : null;
+        const includeCeCv = options.includeCeCv === true && (!shared || !!assertAuthorized);
         const sections = (project.sections || []).slice();
         const sectionStates = sections.map(section => ({ section, panel: app.panels.get(section.id), keys: msiKeys(section) }));
         const jobs = [], groups = new Map(), voltagePairs = [];
@@ -184,7 +226,7 @@
                     voltagePairs.push([Number(meta.ce), Number(meta.cv)]);
                 const job = { state, key, entry, image: (section.images || {})[key], scientificId,
                     registeredBase: sourceMeta(entry, key).base,
-                    source: sourceSignature(state.panel, key, entry), meta: viewer ? viewerMeta(key, meta, sourceMeta(entry, key).base) : meta,
+                    source: sourceSignature(state.panel, key, entry), meta: viewer ? viewerMeta(key, meta, sourceMeta(entry, key).base, includeCeCv) : meta,
                     transform: copy(hooks.transform ? hooks.transform(section) : identity()),
                     pixelPitch: pitchValue(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px) };
                 jobs.push(job);
@@ -205,11 +247,11 @@
             const repeat = ambiguous.has(job.scientificId);
             const groupId = repeat ? JSON.stringify([job.scientificId, job.key]) : job.scientificId;
             if (!groups.has(groupId)) groups.set(groupId, { key: groupId, layerKey: job.key, name: label(job.key, job.meta),
-                subtitle: transitionSubtitle(job.meta) + (repeat && includeCeCv ? '  |  測定: ' + job.key.replace(/^MSI_/i, '') : ''),
+                subtitle: transitionSubtitle(job.meta) + (repeat && includeCeCv && !viewer ? '  |  測定: ' + job.key.replace(/^MSI_/i, '') : ''),
                 metadata: job.meta, jobs: [] });
             groups.get(groupId).jobs.push(job);
         }
-        if (!includeCeCv) {
+        if (!includeCeCv || viewer) {
             const visibleCounts = new Map(), visibleIndexes = new Map();
             for (const group of groups.values()) {
                 const visibleId = moleculeIdentity('', group.metadata);
@@ -231,6 +273,7 @@
         let completed = 0;
         function assertCurrent() {
             if (options.signal && options.signal.aborted) throw cancelledError();
+            if (assertAuthorized) assertAuthorized();
             const current = hooks.getApp();
             if (current !== app || current.project !== project || current.shareMode !== session
                 || shareSignature(current, project) !== shareState
@@ -334,7 +377,7 @@
         if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(clean)) clean = '_' + clean;
         return clean + '_report.pptx';
     }
-    function selectReportOptions(doc) {
+    function selectReportOptions(doc, options = {}) {
         return new Promise(resolve => {
             const focused = doc.activeElement;
             const overlay = doc.createElement('div');
@@ -353,28 +396,69 @@
             checkbox.id = 'project-report-include-ce-cv'; checkbox.checked = false;
             label.append(checkbox, doc.createTextNode('CV・CEを含める'));
             const help = doc.createElement('p'); help.id = 'project-report-options-help';
-            help.textContent = 'このレポートに、登録されたコーン電圧と衝突エネルギーを表示します。';
+            help.textContent = options.shared
+                ? 'CV・CEを含める場合は、今回の出力用にMaster passで認証します。'
+                : 'このレポートに、登録されたコーン電圧と衝突エネルギーを表示します。';
             help.style.cssText = 'font-size:13px;line-height:1.6;margin:12px 0 20px';
+            const passwordLabel = doc.createElement('label'); passwordLabel.hidden = true;
+            passwordLabel.style.cssText = 'margin:0 0 16px;font-size:13px';
+            passwordLabel.append(doc.createTextNode('Master pass'));
+            const password = doc.createElement('input'); password.type = 'password';
+            password.id = 'project-report-master-password'; password.autocomplete = 'current-password';
+            password.style.cssText = 'display:block;width:100%;box-sizing:border-box;margin-top:6px;padding:8px;border:1px solid #94a3b8;border-radius:4px';
+            passwordLabel.appendChild(password);
+            const status = doc.createElement('p'); status.id = 'project-report-auth-status';
+            status.setAttribute('role', 'alert'); status.style.cssText = 'font-size:13px;color:#b91c1c;margin:0 0 12px';
             const actions = doc.createElement('div'); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
             const cancel = doc.createElement('button'); cancel.type = 'button'; cancel.className = 'btn';
             cancel.setAttribute('data-report-cancel', ''); cancel.textContent = 'キャンセル';
             const create = doc.createElement('button'); create.type = 'button'; create.className = 'btn';
             create.setAttribute('data-report-create', ''); create.textContent = '作成';
+            let closed = false, busy = false;
             const close = result => {
+                if (closed) return;
+                closed = true; password.value = '';
                 overlay.remove();
                 if (focused && typeof focused.focus === 'function') focused.focus();
                 resolve(result);
             };
             cancel.addEventListener('click', () => close(null));
-            create.addEventListener('click', () => close({ includeCeCv: checkbox.checked }));
-            overlay.addEventListener('keydown', event => {
-                if (event.key === 'Escape') { event.preventDefault(); close(null); }
-                if (event.key === 'Tab') {
-                    const controls = [checkbox, cancel, create], index = controls.indexOf(doc.activeElement);
-                    event.preventDefault(); controls[(index + (event.shiftKey ? 2 : 1)) % controls.length].focus();
+            checkbox.addEventListener('change', () => {
+                passwordLabel.hidden = !(options.shared && checkbox.checked);
+                password.value = ''; status.textContent = '';
+                create.textContent = options.shared && checkbox.checked ? '認証して作成' : '作成';
+                if (!passwordLabel.hidden) password.focus();
+            });
+            create.addEventListener('click', async () => {
+                if (busy || closed) return;
+                if (!(options.shared && checkbox.checked)) { close({includeCeCv: checkbox.checked}); return; }
+                if (!password.value.trim()) { status.textContent = 'Master passを入力してください。'; password.focus(); return; }
+                busy = true; checkbox.disabled = true; create.disabled = true; password.disabled = true;
+                status.textContent = 'Master passを確認しています…';
+                try {
+                    const masterAuthorization = await options.authorizeMaster(password.value);
+                    if (!closed) close({includeCeCv: true, masterAuthorization});
+                } catch (error) {
+                    if (closed) return;
+                    status.textContent = error && error.code === 'REPORT_SOURCE_CHANGED'
+                        ? 'プロジェクトまたは共有セッションが変更されました。キャンセルして作成し直してください。'
+                        : 'Master passを確認できませんでした。パスワードと接続を確認して、もう一度お試しください。';
+                    password.value = '';
+                } finally {
+                    busy = false;
+                    if (!closed) { checkbox.disabled = false; create.disabled = false; password.disabled = false; password.focus(); }
                 }
             });
-            actions.append(cancel, create); dialog.append(title, label, help, actions); overlay.appendChild(dialog);
+            overlay.addEventListener('keydown', event => {
+                if (event.key === 'Escape') { event.preventDefault(); close(null); }
+                if (event.key === 'Enter' && doc.activeElement === password) { event.preventDefault(); create.click(); }
+                if (event.key === 'Tab') {
+                    const controls = [checkbox, ...(!passwordLabel.hidden ? [password] : []), cancel, create].filter(el => !el.disabled);
+                    const index = controls.indexOf(doc.activeElement);
+                    event.preventDefault(); controls[(index + controls.length + (event.shiftKey ? -1 : 1)) % controls.length].focus();
+                }
+            });
+            actions.append(cancel, create); dialog.append(title, label, help, passwordLabel, status, actions); overlay.appendChild(dialog);
             doc.body.appendChild(overlay); checkbox.focus();
         });
     }
@@ -424,13 +508,16 @@
             try {
                 const getApp = () => typeof App !== 'undefined' ? App : root.App;
                 const context = captureExportContext(getApp);
-                let includeCeCv = false;
-                if (!context.shared) {
-                    const selected = await selectReportOptions(doc);
-                    if (!selected) return null;
-                    context.assertCurrent();
-                    includeCeCv = selected.includeCeCv === true;
-                }
+                const selected = await selectReportOptions(doc, {shared: context.shared,
+                    authorizeMaster: async password => {
+                        context.assertCurrent();
+                        const grant = await authorizeSharedExport({getApp,
+                            unlockMaster: (slug, pw) => SupabaseClient.unlockProjectMaster(slug, pw)}, password);
+                        context.assertCurrent();
+                        return grant;
+                    }});
+                if (!selected) return null;
+                const includeCeCv = selected.includeCeCv === true;
                 context.assertCurrent();
                 const input = createAdapter({ getApp,
                     transform: section => sectionLayerViewLinear(section, 'msi'),
@@ -454,7 +541,8 @@
                     findCompoundMeta: (project, key) => findCompoundMeta(project, key),
                     formatDisplayName: key => formatDisplayName(key),
                     yieldControl: () => new Promise(resolve => setTimeout(resolve, 0)) },
-                { includeCeCv, signal: controller.signal, onProgress: event => progress && progress.update(event) });
+                { includeCeCv, masterAuthorization: selected.masterAuthorization,
+                    signal: controller.signal, onProgress: event => progress && progress.update(event) });
                 progress = openProgress(doc, () => controller.abort());
                 if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
                 const libs = root.LAZY_LIBS || {};
@@ -487,5 +575,5 @@
         activeExport = run();
         try { return await activeExport; } finally { activeExport = null; }
     }
-    return { createAdapter, captureExportContext, moleculeIdentity, safeFileName, exportCurrent };
+    return { createAdapter, captureExportContext, authorizeSharedExport, moleculeIdentity, safeFileName, exportCurrent };
 });

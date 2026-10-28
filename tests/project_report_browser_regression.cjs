@@ -10,7 +10,10 @@ const { renderOfflineConfig } = require('../offline/config.cjs');
 const root = path.resolve(__dirname, '..');
 
 const sharedSlug = 'synthetic-shared-ppt-report';
+const syntheticMasterPassword = 'synthetic-master-password';
+const syntheticMasterToken = 'synthetic-master-read-token';
 const voltageMarkers = ['137.875', '246.625', '138.875', '247.625'];
+const sourceVoltageMarkers = ['351.3125', '452.6875', '553.8125'];
 const privateMarkers = [...voltageMarkers,
   'PRIVATE_INSTRUMENT_SENTINEL', 'PRIVATE_METHOD_SENTINEL', 'PRIVATE_RAW_SENTINEL',
   'PRIVATE_SOURCE_SENTINEL', 'PRIVATE_LAYER_SENTINEL'];
@@ -42,7 +45,8 @@ function sharedFixture() {
     anatomy_palette: {}, sections: [{id: 'synthetic-server-section', client_id: 'synthetic-shared-section',
       ordinal: 1, display_name: '共有切片A',
       meta: {raw: {instrument: 'PRIVATE_RAW_SENTINEL', msMethod: 'PRIVATE_METHOD_SENTINEL',
-        ce: 137.875, cv: 246.625},
+        ce: 137.875, cv: 246.625,
+        source: {coneV: '351.3125', msCe: '452.6875', msmsCe: '553.8125', capillaryKv: '0.654321'}},
         world_coords: {msi_um_per_px: {x: 50, y: 50}}},
       storage_paths: {images: {}, msiSeries: series}
     }]
@@ -60,18 +64,19 @@ async function readDeck(download) {
 }
 
 function assertNoVoltages(deck, context) {
-  for (const marker of voltageMarkers) assert.ok(!deck.xml.includes(marker), context + ' does not disclose CV/CE value ' + marker);
+  for (const marker of [...voltageMarkers, ...sourceVoltageMarkers]) assert.ok(!deck.xml.includes(marker), context + ' does not disclose CV/CE value ' + marker);
   assert.doesNotMatch(deck.xml, /<a:t>\s*(?:CE|CV|Cone Voltage|Collision Energy)\s*<\/a:t>|\b(?:CE|CV)\s+(?:137|246)/i,
     context + ' omits CV/CE labels and subtitles');
 }
 
 function assertNoSessionTokens(deck) {
-  for (const token of ['synthetic-viewer-token', 'synthetic-admin-token', 'synthetic-test-anon-key']) {
-    assert.ok(!deck.xml.includes(token), 'session token or service key is never embedded');
+  for (const token of ['synthetic-viewer-token', 'synthetic-admin-token', 'synthetic-test-anon-key',
+    syntheticMasterPassword, syntheticMasterToken, 'synthetic-wrong-master-password']) {
+    assert.ok(!deck.xml.includes(token), 'password, session token or service key is never embedded');
   }
 }
 
-async function checkSharedReport(browser, origin, role, traffic) {
+async function checkSharedReport(browser, origin, role, traffic, auth) {
   const context = await browser.newContext({viewport: {width: 1920, height: 1080}});
   try {
     const page = await context.newPage(), errors = [], external = [];
@@ -114,48 +119,149 @@ async function checkSharedReport(browser, origin, role, traffic) {
     });
     assert.deepEqual(before.expected.map(entry => [entry.mean, entry.max]), [[32.5, 64], [65, 128]],
       'shared Storage CSV is parsed into authoritative source-row statistics');
-    const downloadPromise = page.waitForEvent('download', {timeout: 90000});
-    await page.locator('#btn-export-ppt').click();
-    assert.equal(await page.locator('.project-report-options').count(), 0, role + ' shared export has no options dialog');
-    assert.equal(await page.locator('#project-report-include-ce-cv').count(), 0, role + ' shared export has no CV/CE selection');
-    const download = await downloadPromise, deck = await readDeck(download);
-    assert.match(download.suggestedFilename(), /\.pptx$/);
-    assert.ok(deck.slides.length >= 4, 'different private CE/CV conditions remain separate molecule details');
-    for (const label of ['共有PPT合成プロジェクト', '共有乳酸', '共有切片A', '公開試料メモ', '公開装置メモ', '公開解析メモ']) {
-      assert.ok(deck.xml.includes(label), role + ' includes public registered label: ' + label);
-    }
-    assert.ok(deck.xml.includes('89 → 43'), role + ' retains the public precursor/product transition');
-    assert.ok(deck.xml.includes('C3H6O3'), role + ' retains the public molecular formula');
-    for (const entry of before.expected) {
-      assert.ok(deck.xml.includes('>' + entry.mean + '<'), role + ' retains original-row mean');
-      assert.ok(deck.xml.includes('>' + entry.max + '<'), role + ' retains original-row maximum');
-    }
-    assert.match(deck.xml, /<a:tbl>/, role + ' contains editable quantitative tables');
-    assert.ok(Object.keys(deck.zip.files).some(name => /^ppt\/media\/.*\.png$/.test(name)), role + ' contains numeric heatmaps');
-    assertNoVoltages(deck, 'shared ' + role);
-    if (role === 'viewer') {
-      for (const marker of [...privateMarkers, '0.1234567']) assert.ok(!deck.xml.includes(marker), 'viewer PPT does not disclose ' + marker);
-    } else {
-      for (const marker of ['PRIVATE_INSTRUMENT_SENTINEL', 'PRIVATE_METHOD_SENTINEL',
-        'PRIVATE_RAW_SENTINEL', 'PRIVATE_SOURCE_SENTINEL', '0.1234567']) {
-        assert.ok(deck.xml.includes(marker), 'admin PPT retains registered acquisition metadata other than CV/CE: ' + marker);
-      }
-    }
-    assertNoSessionTokens(deck);
-    const after = await page.evaluate(() => {
-      const section = App.project.sections[0], panel = App.panels.get(section.id);
-      return {projectId: App.project.id, settings: JSON.stringify(section.meta),
-        metadata: JSON.stringify(Object.values(section.msiSeries).map(entry => entry.compoundMeta)),
-        expected: Object.keys(section.msiSeries).map(key => ({key, mean: msiQuantMean(section.msiSeries[key]),
-          max: msiMaxIntensity(section.msiSeries[key]).value, blobId: section.msiSeries[key].blobId,
-          storagePath: section.msiSeries[key].storagePath, values: Array.from(panel.msiValueRasters.get(key).values)}))};
+    let downloadCount = 0;
+    page.on('download', () => downloadCount++);
+    // Track completion without replacing authentication or generation behavior.
+    await page.evaluate(() => {
+      const original = ProjectReportApp.exportCurrent;
+      ProjectReportApp.exportCurrent = function (...args) {
+        const result = original.apply(this, args);
+        window.__reportTestRun = result;
+        return result;
+      };
     });
-    assert.deepEqual(after, before, role + ' report leaves shared source values, settings and metadata unchanged');
+    async function assertSharedUnchanged(stage) {
+      const after = await page.evaluate(() => {
+        const section = App.project.sections[0], panel = App.panels.get(section.id);
+        return {projectId: App.project.id, settings: JSON.stringify(section.meta),
+          metadata: JSON.stringify(Object.values(section.msiSeries).map(entry => entry.compoundMeta)),
+          expected: Object.keys(section.msiSeries).map(key => ({key, mean: msiQuantMean(section.msiSeries[key]),
+            max: msiMaxIntensity(section.msiSeries[key]).value, blobId: section.msiSeries[key].blobId,
+            storagePath: section.msiSeries[key].storagePath, values: Array.from(panel.msiValueRasters.get(key).values)}))};
+      });
+      assert.deepEqual(after, before, stage + ' leaves shared source values, settings and metadata unchanged');
+      assert.equal(await page.evaluate(() => App.shareMode.role), role, 'PPT authentication does not change the share role');
+    }
+    async function openOptions(includeCeCv) {
+      await page.locator('#btn-export-ppt').click();
+      await page.getByRole('dialog', {name:'PPT レポートの設定', exact:true}).waitFor({state:'visible'});
+      const checkbox = page.locator('#project-report-include-ce-cv'), password = page.locator('#project-report-master-password');
+      assert.equal(await checkbox.isChecked(), false, 'Shared CV/CE starts OFF for every export');
+      assert.equal(await password.isVisible(), false, 'Master password is hidden for the default OFF option');
+      if (includeCeCv) {
+        await checkbox.check();
+        await password.waitFor({state:'visible'});
+        assert.equal(await password.getAttribute('type'), 'password', 'The master password input is masked');
+        assert.equal(await password.inputValue(), '', 'A prior password is never prefilled');
+      }
+      return password;
+    }
+    function assertSharedDeck(deck, includeCeCv) {
+      assert.ok(deck.slides.length >= 4, 'Different private CE/CV conditions remain separate molecule details');
+      for (const label of ['共有PPT合成プロジェクト', '共有乳酸', '共有切片A', '公開試料メモ', '公開装置メモ', '公開解析メモ']) {
+        assert.ok(deck.xml.includes(label), role + ' includes public registered label: ' + label);
+      }
+      assert.ok(deck.xml.includes('89 → 43'), role + ' retains the public precursor/product transition');
+      assert.ok(deck.xml.includes('C3H6O3'), role + ' retains the public molecular formula');
+      for (const entry of before.expected) {
+        assert.ok(deck.xml.includes('>' + entry.mean + '<'), role + ' retains original-row mean');
+        assert.ok(deck.xml.includes('>' + entry.max + '<'), role + ' retains original-row maximum');
+      }
+      assert.match(deck.xml, /<a:tbl>/, role + ' contains editable quantitative tables');
+      assert.ok(Object.keys(deck.zip.files).some(name => /^ppt\/media\/.*\.png$/.test(name)), role + ' contains numeric heatmaps');
+      if (includeCeCv) {
+        for (const marker of voltageMarkers) assert.ok(deck.xml.includes(marker), 'Authenticated ' + role + ' includes CV/CE: ' + marker);
+      } else assertNoVoltages(deck, 'Shared ' + role);
+      if (role === 'viewer') {
+        const excluded = privateMarkers.filter(marker => !includeCeCv || !voltageMarkers.includes(marker));
+        for (const marker of [...excluded, ...sourceVoltageMarkers, '0.1234567', '0.654321']) {
+          assert.ok(!deck.xml.includes(marker), 'Viewer master authorization does not disclose other private metadata: ' + marker);
+        }
+      } else {
+        for (const marker of ['PRIVATE_INSTRUMENT_SENTINEL', 'PRIVATE_METHOD_SENTINEL',
+          'PRIVATE_RAW_SENTINEL', 'PRIVATE_SOURCE_SENTINEL', '0.1234567', '0.654321']) {
+          assert.ok(deck.xml.includes(marker), 'Admin retains non-voltage acquisition metadata: ' + marker);
+        }
+        if (includeCeCv) for (const marker of sourceVoltageMarkers) {
+          assert.ok(deck.xml.includes(marker), 'Authenticated admin retains RAW acquisition voltage: ' + marker);
+        }
+      }
+      assertNoSessionTokens(deck);
+    }
+    async function createReport(includeCeCv) {
+      const downloadPromise = page.waitForEvent('download', {timeout:90000});
+      await page.locator('[data-report-create]').click();
+      const download = await downloadPromise, deck = await readDeck(download);
+      await page.evaluate(() => window.__reportTestRun);
+      assert.match(download.suggestedFilename(), /\.pptx$/);
+      assertSharedDeck(deck, includeCeCv);
+      await assertSharedUnchanged('Shared ' + role + ' CV/CE ' + (includeCeCv ? 'ON' : 'OFF'));
+      console.log('Shared ' + role + ' CV/CE ' + (includeCeCv ? 'ON' : 'OFF') + ' browser regression passed (' + deck.slides.length + ' slides, ' + deck.bytes.length + ' bytes).');
+    }
+    const authStart = auth.requests.length;
+    await openOptions(false);
+    await createReport(false);
+    assert.equal(auth.requests.length, authStart, 'Default shared OFF export requires no master authentication');
+
+    // An existing project-admin session is deliberately insufficient. Both
+    // roles must send the dedicated master password to the master-only RPC.
+    await openOptions(true);
+    for (const failure of ['wrong', 'network', 'missing', 'expired']) {
+      auth.mode = failure;
+      const password = page.locator('#project-report-master-password');
+      await password.fill(failure === 'wrong' ? 'synthetic-wrong-master-password' : syntheticMasterPassword);
+      const requestCount = auth.requests.length;
+      await page.locator('[data-report-create]').click();
+      await page.waitForFunction(() => {
+        const status = document.getElementById('project-report-auth-status');
+        const input = document.getElementById('project-report-master-password');
+        const create = document.querySelector('[data-report-create]');
+        return status && status.textContent.trim() && input && input.value === '' && create && !create.disabled;
+      });
+      assert.equal(auth.requests.length, requestCount + 1, role + ' authenticates through the master RPC');
+      assert.equal(await page.locator('#project-report-auth-status').getAttribute('role'), 'alert');
+      assert.equal(await page.locator('.project-report-options').count(), 1, failure + ' keeps the options dialog open for retry');
+      assert.equal(downloadCount, 1, failure + ' never downloads a report');
+      assert.equal(await page.locator('.project-report-progress').count(), 0, failure + ' does not start generation');
+    }
+    await page.locator('[data-report-cancel]').click();
+    await page.evaluate(() => window.__reportTestRun);
+    await page.locator('.project-report-options').waitFor({state:'detached'});
+    await assertSharedUnchanged('Failed and cancelled master authentication');
+
+    auth.mode = 'pending';
+    await (await openOptions(true)).fill(syntheticMasterPassword);
+    const requestPending = new Promise(resolve => { auth.onPending = resolve; });
+    await page.locator('[data-report-create]').click();
+    await requestPending;
+    assert.equal(await page.locator('[data-report-create]').isDisabled(), true, 'Create is disabled while authenticating');
+    assert.equal(await page.locator('[data-report-cancel]').isEnabled(), true, 'Cancellation remains available while authenticating');
+    await page.locator('[data-report-cancel]').click();
+    await page.locator('.project-report-options').waitFor({state:'detached'});
+    const lateResponse = page.waitForResponse(response => response.url().endsWith('/rest/v1/rpc/unlock_project_master'));
+    auth.releasePending();
+    await (await lateResponse).finished();
+    await page.evaluate(() => window.__reportTestRun);
+    assert.equal(downloadCount, 1, 'A late successful authentication after cancellation cannot download a report');
+    await assertSharedUnchanged('Cancelled pending master authentication');
+
+    auth.mode = 'success';
+    await (await openOptions(true)).fill(syntheticMasterPassword);
+    await createReport(true);
+    assert.equal(downloadCount, 2, 'Only OFF and explicitly authenticated ON exports have downloaded');
+    const afterOnRequests = auth.requests.length;
+    await openOptions(false);
+    await createReport(false);
+    assert.equal(auth.requests.length, afterOnRequests, 'The next export returns to OFF and does not reuse authentication implicitly');
+    assert.equal(downloadCount, 3, 'Three explicitly requested reports download');
+    for (const request of auth.requests.slice(authStart)) {
+      assert.equal(request.slug, sharedSlug, 'Master authorization is scoped to the current shared project');
+      assert.ok([syntheticMasterPassword, 'synthetic-wrong-master-password'].includes(request.password), 'Only synthetic credentials are used');
+    }
     assert.ok(traffic.slice(trafficStart).some(item => item.path === '/rest/v1/rpc/get_project_doc'), 'production shared document read was exercised');
     assert.ok(traffic.slice(trafficStart).some(item => item.path.startsWith('/storage/v1/object/public/')), 'production shared Storage download was exercised');
     assert.deepEqual(external, [], role + ' makes no external request');
     assert.deepEqual(errors, [], role + ' has no browser exceptions');
-    console.log('Shared ' + role + ' report browser regression passed (' + deck.slides.length + ' slides, ' + deck.bytes.length + ' bytes).');
   } finally { await context.close(); }
 }
 
@@ -163,6 +269,7 @@ async function checkSharedReport(browser, origin, role, traffic) {
 // in an isolated browser context. No account or external service is contacted.
 async function main() {
   const fixture = sharedFixture(), traffic = [], forbidden = [];
+  const auth = {mode:'success', requests:[], onPending:null, releasePending:null};
   let serveOnlineConfig = false;
   const server = createServer(async (req, res) => {
     try {
@@ -176,6 +283,29 @@ async function main() {
       }
       if (req.method === 'POST' && pathname.startsWith('/rest/v1/rpc/')) {
         const rpc = pathname.slice('/rest/v1/rpc/'.length);
+        if (rpc === 'unlock_project_master') {
+          const chunks = [];
+          for await (const chunk of req) chunks.push(chunk);
+          const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+          auth.requests.push({slug:body._slug, password:body._master_pw});
+          res.setHeader('Content-Type', 'application/json');
+          const success = () => res.end(JSON.stringify([{token:syntheticMasterToken, role:'viewer',
+            expires_at:new Date(Date.now() + 3600000).toISOString()}]));
+          if (auth.mode === 'pending') {
+            auth.releasePending = success;
+            if (auth.onPending) { auth.onPending(); auth.onPending = null; }
+            return;
+          }
+          if (auth.mode === 'network') { res.writeHead(503); res.end(JSON.stringify({code:'503', message:'Synthetic authentication service unavailable'})); return; }
+          if (auth.mode === 'missing') { res.writeHead(404); res.end(JSON.stringify({code:'PGRST202', message:'Could not find the function public.unlock_project_master in the schema cache'})); return; }
+          if (auth.mode === 'expired') {
+            res.end(JSON.stringify([{token:syntheticMasterToken, role:'viewer', expires_at:'2000-01-01T00:00:00.000Z'}])); return;
+          }
+          if (auth.mode === 'wrong' || body._master_pw !== syntheticMasterPassword || body._slug !== sharedSlug) {
+            res.writeHead(401); res.end(JSON.stringify({code:'28000', message:'unauthorized'})); return;
+          }
+          success(); return;
+        }
         const readOnly = new Set(['get_project_doc', 'list_rois', 'list_share_overlays', 'list_share_alignments', 'list_share_images']);
         if (!readOnly.has(rpc)) { forbidden.push({method: req.method, path: pathname}); res.writeHead(403); res.end('Unexpected write or RPC'); return; }
         res.setHeader('Content-Type', 'application/json');
@@ -227,7 +357,7 @@ async function main() {
         ce:137.875,cv:246.625,polarity:'-',formula:'C3H6O3',dwell:0.1234567,
         instrument:'MASTER_INSTRUMENT_SENTINEL',msMethod:'MASTER_METHOD_SENTINEL',sourceFile:'MASTER_SOURCE_SENTINEL.csv'};
       section.meta.raw = {instrument:'MASTER_RAW_SENTINEL',ce:137.875,cv:246.625,
-        msMethod:'MASTER_METHOD_SENTINEL'};
+        msMethod:'MASTER_METHOD_SENTINEL',source:{coneV:'351.3125',msCe:'452.6875',msmsCe:'553.8125',capillaryKv:'0.654321'}};
       const panel = App.panels.get(section.id);
       if (!await panel.ensureMsiLayerLoaded(key)) throw new Error('Fixture MSI failed to load');
       return {mean:msiQuantMean(ent),max:msiMaxIntensity(ent).value,source:ent.blobId,
@@ -251,6 +381,7 @@ async function main() {
       await page.getByRole('dialog', {name:'PPT レポートの設定', exact:true}).waitFor({state:'visible'});
       const checkbox = page.locator('#project-report-include-ce-cv');
       assert.equal(await checkbox.isChecked(), false, 'CV/CE starts OFF for every export');
+      assert.equal(await page.locator('#project-report-master-password').isVisible(), false, 'Local master export does not request a share master password');
       return checkbox;
     }
     // Dismissing the preflight must not start generation or remember a checked
@@ -274,7 +405,7 @@ async function main() {
       assert.ok(deck.slides.length >= 3, 'Metadata, matrix and molecule detail exist');
       for (const label of ['PPT検証','乳酸テスト','切片A','合成試料','PPT検証用の登録メモ',
         'C3H6O3','0.1234567','MASTER_INSTRUMENT_SENTINEL','MASTER_METHOD_SENTINEL',
-        'MASTER_SOURCE_SENTINEL','MASTER_RAW_SENTINEL']) {
+        'MASTER_SOURCE_SENTINEL','MASTER_RAW_SENTINEL','0.654321']) {
         assert.ok(deck.xml.includes(label), 'Master export preserves non-voltage metadata: ' + label);
       }
       assert.ok(deck.xml.includes('89 → 43'), 'Master export preserves the precursor/product transition');
@@ -283,7 +414,7 @@ async function main() {
       assert.match(deck.xml, /<a:tbl>/, 'Statistics remain editable native tables');
       assert.ok(Object.keys(deck.zip.files).some(name => /^ppt\/media\/.*\.png$/.test(name)), 'Heatmaps are embedded');
       if (includeCeCv) {
-        for (const marker of voltageMarkers.slice(0, 2)) assert.ok(deck.xml.includes(marker), 'Opt-in includes voltage: ' + marker);
+        for (const marker of [...voltageMarkers.slice(0, 2), ...sourceVoltageMarkers]) assert.ok(deck.xml.includes(marker), 'Opt-in includes voltage: ' + marker);
       } else assertNoVoltages(deck, 'Master default export');
       assertNoSessionTokens(deck);
       await assertMasterUnchanged('Master CV/CE ' + (includeCeCv ? 'ON' : 'OFF'));
@@ -301,9 +432,10 @@ async function main() {
     if (process.env.PPT_REPORT_SAMPLE_PATH) await fs.writeFile(process.env.PPT_REPORT_SAMPLE_PATH, sampleDeck.bytes);
     await page.close();
     serveOnlineConfig = true;
-    await checkSharedReport(browser, origin, 'viewer', traffic);
-    await checkSharedReport(browser, origin, 'admin', traffic);
-    assert.deepEqual(forbidden, [], 'PPT export never writes to the server or invokes a non-read-only RPC');
+    assert.equal(auth.requests.length, 0, 'Local master options do not call the shared master RPC');
+    await checkSharedReport(browser, origin, 'viewer', traffic, auth);
+    await checkSharedReport(browser, origin, 'admin', traffic, auth);
+    assert.deepEqual(forbidden, [], 'PPT export invokes only read and authentication RPCs and never writes project data');
   } finally {
     if (browser) await browser.close();
     server.closeAllConnections(); await new Promise(resolve=>server.close(resolve));
