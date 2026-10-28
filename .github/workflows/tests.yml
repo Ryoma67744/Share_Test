@@ -49,6 +49,8 @@ jobs:
         run: npx playwright install --with-deps chromium
       - name: Existing .exp browser workflows
         run: node tests/exp_editor_browser_regression.mjs
+      - name: Project PowerPoint report browser workflow
+        run: node tests/project_report_browser_regression.cjs
       - name: Build online distribution
         run: node tools/build.cjs --mode web --out dist/web
       - name: Fetch and verify pinned Windows runtime

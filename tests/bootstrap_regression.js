@@ -52,6 +52,11 @@ for(const base of ['http://127.0.0.1:8765/','https://example.github.io/Share_Tes
   }
   const lazy=viewer.match(/window\.LAZY_LIBS\s*=\s*(\{[\s\S]*?\});/);
   check(!!lazy,'missing lazy libraries');vm.runInContext('this.lazy='+lazy[1]+';',context);
-  for(const value of Object.values(context.lazy))check(new URL(value,sandbox.location).href.startsWith(base+'vendor/'),'lazy library escapes app base');
+  for(const [name,value] of Object.entries(context.lazy)) {
+    const directory=['projectReportData','projectReportDeck'].includes(name)?'viewer/':'vendor/';
+    const resolved=new URL(value,sandbox.location);
+    check(resolved.href.startsWith(base+directory),'lazy asset escapes app base: '+name);
+    check(fs.existsSync(path.resolve(root,'viewer',value)),'missing lazy asset: '+name);
+  }
 }
 console.log('Canonical three-page bootstrap regression: PASS ('+checks+' checks)');

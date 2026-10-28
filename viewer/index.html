@@ -26,12 +26,16 @@
     <script defer src="roi-media-msi.js"></script>
     <script defer src="roi-media-viewer.js"></script>
     <script defer src="roi-media-app.js"></script>
+    <script defer src="project-report-app.js"></script>
 <script>
   // Libraries not needed just to view are loaded on first use (jszip =
   // Export/Import, marked + dompurify = Help), so a recipient who only views
   // never downloads them. Injected via loadScript() and awaited at call sites.
   window.LAZY_LIBS = {
     jszip:     "../vendor/jszip.min.js",
+    pptxgen:   "../vendor/pptxgen.min.js",
+    projectReportData: "project-report-data.js",
+    projectReportDeck: "project-report-deck.js",
     marked:    "../vendor/marked.min.js",
     dompurify: "../vendor/purify.min.js"
   };
@@ -70,6 +74,7 @@ body:not(.share-mode) #app-title { cursor: pointer; }
 body.share-mode #btn-new-project,
 body.share-mode #btn-projects,
 body.share-mode #btn-import-zip,
+body.share-mode #btn-export-ppt,
 body.share-mode #btn-add-section,
 body.share-mode #btn-add-parquet,
 body.share-mode #btn-replace-parquet,
@@ -826,6 +831,7 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
             <button id="btn-new-project" class="btn">New</button>
             <button id="btn-import-zip" class="btn">Import ZIP</button>
             <button id="btn-export-zip" class="btn">Export ZIP</button>
+            <button type="button" id="btn-export-ppt" class="btn" title="このプロジェクトの登録情報と全切片・分子画像からPowerPointレポートを作成">PPTレポート</button>
             <span id="sync-status" class="sync-status" style="display:none;" title="クリックで強制再同期"></span>
             <button id="btn-publish-share" class="btn" title="Upload this project to Supabase and get a shareable URL">Publish to share</button>
             <button id="btn-share-info" class="btn" title="View the share URL and passwords from the last publish" style="display:none;">Share info</button>
@@ -27143,6 +27149,7 @@ const App = {
             });
         }
         document.getElementById('btn-export-zip').addEventListener('click', () => exportProjectAsZip());
+        document.getElementById('btn-export-ppt').addEventListener('click', () => ProjectReportApp.exportCurrent());
         const publishBtn = document.getElementById('btn-publish-share');
         if (publishBtn) publishBtn.addEventListener('click', () => publishProjectToShare());
         // Sync status indicator: clicking it offers the appropriate
