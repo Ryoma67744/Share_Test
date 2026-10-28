@@ -20,9 +20,7 @@
     }
     function number(value) {
         if (value == null || value === '' || !Number.isFinite(Number(value))) return '—';
-        const n = Number(value);
-        return n !== 0 && (Math.abs(n) >= 1e6 || Math.abs(n) < 0.001)
-            ? n.toExponential(5) : Number(n.toPrecision(7)).toString();
+        return String(Number(value));
     }
     function text(slide, value, box, options) {
         slide.addText(string(value), Object.assign({ ...box, fontFace: FONT, fontSize: 16,
@@ -41,7 +39,7 @@
         return slide;
     }
     function colorBar(pptx, slide, x, y, w, upper, options = {}) {
-        const h = options.height || 0.13;
+        const h = options.height || 3.7;
         // Interpolate the 21 shared stops for a continuous, editable legend.
         const steps = 80;
         for (let i = 0; i < steps; i++) {
@@ -50,19 +48,22 @@
             const color = [0, 2, 4].map(offset => Math.round(
                 parseInt(COLOR_STOPS[lo].slice(offset, offset + 2), 16) * (1 - t) +
                 parseInt(COLOR_STOPS[hi].slice(offset, offset + 2), 16) * t).toString(16).padStart(2, '0')).join('');
-            slide.addShape(pptx.ShapeType.rect, { x: x + i * w / steps, y, w: w / steps + 0.001,
-                h, line: { color, transparency: 100 }, fill: { color } });
+            slide.addShape(pptx.ShapeType.rect, { x, y: y + (steps - 1 - i) * h / steps, w,
+                h: h / steps + 0.001, line: { color, transparency: 100 }, fill: { color } });
         }
-        text(slide, '0', { x, y: y + h + 0.025, w: w / 2, h: 0.18 }, { fontSize: options.fontSize || 8 });
-        text(slide, number(upper), { x: x + w / 2, y: y + h + 0.025, w: w / 2, h: 0.18 },
-            { fontSize: options.fontSize || 8, align: 'right' });
+        for (let tick = 0; tick <= 4; tick++) {
+            const value = Number(upper) * tick / 4;
+            text(slide, tick === 4 ? number(upper) : Number.isFinite(value) ? String(Number(value.toPrecision(4))) : '—',
+                { x: x + w + 0.07, y: y + h * (1 - tick / 4) - 0.09, w: 0.72, h: 0.19 },
+                { fontSize: 9, color: options.color || '17223B' });
+        }
     }
-    function picture(slide, entry, box) {
+    function picture(slide, entry, box, options = {}) {
         const image = entry && entry.image;
         if (!image) {
             text(slide, 'No image\n' + string(entry && entry.missingReason || 'No registered MSI image'), box,
-                { fontSize: 11, color: 'AFAFAF', align: 'center' });
-            return;
+                { fontSize: options.fontSize || 11, color: options.light ? '667085' : 'AFAFAF', align: 'center' });
+            return null;
         }
         if (!/^data:image\/(?:png|jpeg);base64,/i.test(image.data || '') ||
             !Number.isFinite(image.width) || !Number.isFinite(image.height) || image.width <= 0 || image.height <= 0) {
@@ -70,20 +71,41 @@
         }
         const scale = Math.min(box.w / image.width, box.h / image.height);
         const w = image.width * scale, h = image.height * scale;
-        slide.addImage({ data: image.data, x: box.x + (box.w - w) / 2, y: box.y + (box.h - h) / 2,
+        const bounds = {x: box.x + (box.w - w) / 2, y: box.y + (box.h - h) / 2, w, h};
+        slide.addImage({ data: image.data, ...bounds,
             w, h, altText: string(entry.name || entry.sectionId) });
+        return bounds;
     }
     function sectionsFor(report) {
         const sections = [], seen = new Set();
-        const add = (id, name) => {
+        const add = (id, name, source = {}) => {
             id = string(id);
-            if (!seen.has(id)) { seen.add(id); sections.push({ id, name: string(name) || id }); }
+            if (!seen.has(id)) { seen.add(id); sections.push({ id, name: string(name) || id,
+                referenceImage: source.referenceImage, referenceLabel: source.referenceLabel }); }
         };
-        for (const section of report.sections || []) add(section.id, section.name);
+        for (const section of report.sections || []) add(section.id, section.name, section);
         for (const molecule of report.molecules || []) {
             for (const section of molecule.sections || []) add(section.sectionId, section.name);
         }
         return sections;
+    }
+    function imageScaleBar(pptx, slide, entry, bounds) {
+        const image = entry && entry.image;
+        if (!bounds || !image || !Number.isFinite(image.physicalWidthUm) || image.physicalWidthUm <= 0
+            || !Number.isFinite(image.physicalHeightUm) || image.physicalHeightUm <= 0) return;
+        // Every bar is calibrated to its own contained image. A common bar
+        // would be invalid when different physical fields are fitted equally.
+        const target = image.physicalWidthUm * 0.24;
+        const order = Math.pow(10, Math.floor(Math.log10(target)));
+        let length = order;
+        for (const factor of [1, 2, 5, 10]) if (factor * order <= target) length = factor * order;
+        const width = bounds.w * length / image.physicalWidthUm;
+        const x = bounds.x + bounds.w - width, y = bounds.y + bounds.h + 0.13;
+        const label = length >= 1000 ? number(length / 1000) + ' mm' : number(length) + ' µm';
+        slide.addShape(pptx.ShapeType.rect, {x, y, w: width, h: 0.025,
+            line: {color: '000000', transparency: 100}, fill: {color: '000000'}});
+        text(slide, label, {x: Math.max(bounds.x, x - 0.3), y: y - 0.14,
+            w: Math.max(width, 0.6), h: 0.13}, {fontSize: 8, color: '000000', align: 'center'});
     }
     function entryFor(molecule, section) {
         return (molecule.sections || []).find(entry => string(entry.sectionId) === section.id) ||
@@ -101,6 +123,11 @@
         }
         lines.push(line);
         return lines;
+    }
+    function shortLabel(value, capacity, maxLines = 3) {
+        const lines = wrap(value, capacity);
+        if (lines.length > maxLines) return lines.slice(0, maxLines).join('\n').replace(/.$/, '…');
+        return lines.join('\n');
     }
     const FIELD_LABELS = {
         sample: 'Sample', analysis: 'Analysis', machine: 'Instrument', instrument: 'Instrument',
@@ -184,21 +211,12 @@
         if (rows.length) pages.push(rows);
         return pages;
     }
-    function addCover(pptx, report, sections) {
-        const slide = base(pptx, report, 'DESI MSI report', true);
-        text(slide, report.projectName || '(untitled project)', { x: 0.65, y: 1.35, w: 12.0, h: 1.7 },
-            { fontSize: 36, bold: true, color: '17223B' });
-        text(slide, `${sections.length} sections     ${(report.molecules || []).length} molecules`,
-            { x: 0.68, y: 3.42, w: 11.8, h: 0.45 }, { fontSize: 23, color: '17223B' });
-        text(slide, 'Generated: ' + string(report.generatedAt), { x: 0.68, y: 4.05, w: 11.8, h: 0.55 },
-            { fontSize: 16, color: '667085' });
-        text(slide, 'Project information, section names and molecule names come from the registered project.',
-            { x: 0.68, y: 5.14, w: 11.8, h: 0.65 }, { fontSize: 15, color: '667085' });
-        if (!report.molecules.length) text(slide, 'No MSI molecules are registered in this project.',
-            { x: 0.68, y: 6.05, w: 11.8, h: 0.4 }, { color: '667085', fontSize: 16 });
-    }
     async function addMetadata(pptx, report, checkpoint) {
-        const rows = metadataRows(report.metadata);
+        const sections = sectionsFor(report);
+        const rows = [{label: 'Generated', value: string(report.generatedAt)},
+            {label: 'Sections / molecules', value: sections.length + ' / ' + report.molecules.length},
+            ...sections.map((section, i) => ({label: 'Section ' + (i + 1), value: section.name})),
+            ...metadataRows(report.metadata)];
         const scaleInfo = scale => {
             const names = { 'finite-measured-display-raster': 'Measured image pixels',
                 'original-measurement-rows': 'Original measurement rows', percentile: 'p99.8',
@@ -212,7 +230,7 @@
         for (let moleculeIndex = 0; moleculeIndex < report.molecules.length; moleculeIndex++) {
             const molecule = report.molecules[moleculeIndex], scope = 'Molecule ' + (moleculeIndex + 1);
             const common = metadataRows(molecule.metadata, { prefix: scope, skipName: true });
-            const scale = metadataRows(scaleInfo(molecule.intensityScale), { prefix: scope });
+            const scale = metadataRows(scaleInfo(molecule.intensityScale || {upper: molecule.upper}), { prefix: scope });
             const sectionRows = [];
             for (let sectionIndex = 0; sectionIndex < (molecule.sections || []).length; sectionIndex++) {
                 const section = molecule.sections[sectionIndex];
@@ -226,8 +244,9 @@
                     if (details.length) sectionRows.push({ label: sectionScope, value: section.name || '(unnamed section)' }, ...details);
                 }
             }
-            if (common.length || scale.length || sectionRows.length) rows.push(
-                { label: scope, value: molecule.name || molecule.key }, ...common, ...scale, ...sectionRows);
+            rows.push({ label: scope, value: molecule.name || molecule.key },
+                ...(molecule.subtitle ? [{label: scope + ' / Transition', value: molecule.subtitle}] : []),
+                ...common, ...scale, ...sectionRows);
         }
         const pages = metadataPages(rows);
         for (let index = 0; index < pages.length; index++) {
@@ -246,60 +265,110 @@
         }
     }
     async function addMatrices(pptx, report, sections, checkpoint) {
-        const moleculePages = chunks(report.molecules, 4), sectionPages = chunks(sections, 4);
-        const count = moleculePages.length * sectionPages.length; let page = 0;
-        for (const molecules of moleculePages) for (const sectionPage of sectionPages) {
+        if (!report.molecules.length || !sections.length) {
             await checkpoint();
-            const slide = base(pptx, report, `MSI matrix (${++page}/${count})`);
-            const left = 2.65, width = (WIDTH - left - 0.3) / sectionPage.length;
-            sectionPage.forEach((section, index) => text(slide, section.name,
-                { x: left + index * width + 0.05, y: 0.83, w: width - 0.1, h: 0.46 },
-                { fontSize: 16, align: 'center' }));
-            const top = 1.42, rowHeight = Math.min(1.36, 5.4 / molecules.length);
-            molecules.forEach((molecule, row) => {
-                const y = top + row * rowHeight;
-                text(slide, molecule.name || molecule.key, { x: 0.35, y, w: 2.14, h: 0.45 }, { fontSize: 15, bold: true });
-                text(slide, molecule.subtitle, { x: 0.35, y: y + 0.47, w: 2.14, h: 0.38 }, { fontSize: 10, color: 'C6C6C6' });
-                colorBar(pptx, slide, 0.35, y + 0.94, 2.13, molecule.upper, { height: 0.1 });
-                sectionPage.forEach((section, column) => picture(slide, entryFor(molecule, section),
-                    { x: left + column * width + 0.08, y, w: width - 0.16, h: rowHeight - 0.16 }));
-            });
+            const slide = base(pptx, report, report.projectName);
+            text(slide, 'No MSI molecules are registered in this project.',
+                {x: 0.4, y: 3.0, w: 12.4, h: 0.7}, {fontSize: 22});
+            return;
+        }
+        const sectionPages = chunks(sections, 4), moleculeBlocks = chunks(report.molecules, 8);
+        const borderColors = ['FF0000', '00D000', '00BFFF', 'FFAA00'];
+        let page = 0;
+        for (const sectionPage of sectionPages) {
+            const maxBlocks = sectionPage.length <= 2 ? 3 : sectionPage.length === 3 ? 2 : 1;
+            for (const blocks of chunks(moleculeBlocks, maxBlocks)) {
+                await checkpoint();
+                const slide = pptx.addSlide(); slide.background = {color: '000000'};
+                const blockWidth = (WIDTH - 0.16) / blocks.length;
+                const hasReference = sectionPage.some(section => !!section.referenceImage);
+                const maxRows = Math.max(...blocks.map(block => block.length));
+                const rowHeight = (6.64 - (hasReference ? 0.04 : 0)) / (maxRows + (hasReference ? 1 : 0));
+                blocks.forEach((molecules, block) => {
+                    const x = 0.08 + block * blockWidth;
+                    const labelWidth = blockWidth * (sectionPage.length <= 2 ? 0.39 : 0.3);
+                    const imageWidth = (blockWidth - labelWidth - 0.08) / sectionPage.length;
+                    const labelFont = blocks.length === 3 ? 9 : blocks.length === 2 ? 10 : 12;
+                    text(slide, report.projectName, {x: x + labelWidth, y: 0.05,
+                        w: blockWidth - labelWidth - 0.08, h: 0.22}, {fontSize: 10, bold: true, align: 'center'});
+                    sectionPage.forEach((section, column) => {
+                        const left = x + labelWidth + column * imageWidth;
+                        slide.addShape(pptx.ShapeType.rect, {x: left, y: 0.3, w: imageWidth, h: 0.31,
+                            fill: {color: '000000'}, line: {color: borderColors[sections.indexOf(section) % borderColors.length], width: 2}});
+                        text(slide, shortLabel(section.name, Math.max(12, imageWidth * 17), 2),
+                            {x: left + 0.025, y: 0.31, w: imageWidth - 0.05, h: 0.29}, {fontSize: 9, bold: true, align: 'center'});
+                    });
+                    const top = 0.66;
+                    if (hasReference) {
+                        text(slide, 'Optical / TIC', {x: x + 0.015, y: top, w: labelWidth - 0.05, h: rowHeight},
+                            {fontSize: labelFont, bold: true});
+                        sectionPage.forEach((section, column) => {
+                            if (!section.referenceImage) return;
+                            const box = {x: x + labelWidth + column * imageWidth + 0.02, y: top,
+                                w: imageWidth - 0.04, h: rowHeight - 0.03};
+                            picture(slide, {image: section.referenceImage, name: section.referenceLabel || 'Optical / TIC'}, box);
+                        });
+                    }
+                    molecules.forEach((molecule, row) => {
+                        const y = top + (row + (hasReference ? 1 : 0)) * rowHeight;
+                        const subtitle = string(molecule.subtitle).split(/\s+\|\s+/)[0];
+                        text(slide, shortLabel(molecule.name || molecule.key, Math.max(18, labelWidth * 17), 2),
+                            {x: x + 0.015, y: y + 0.02, w: labelWidth - 0.05, h: rowHeight * 0.48},
+                            {fontSize: labelFont, bold: true});
+                        text(slide, shortLabel(subtitle, Math.max(18, labelWidth * 18), 2),
+                            {x: x + 0.015, y: y + rowHeight * 0.5, w: labelWidth - 0.05, h: rowHeight * 0.45},
+                            {fontSize: labelFont - 1, color: 'D9D9D9'});
+                        sectionPage.forEach((section, column) => picture(slide, entryFor(molecule, section),
+                            {x: x + labelWidth + column * imageWidth + 0.02, y,
+                                w: imageWidth - 0.04, h: rowHeight - 0.025}, {fontSize: 7}));
+                    });
+                });
+                text(slide, 'MSI matrix ' + (++page), {x: 0.1, y: 7.32, w: 4, h: 0.13}, {fontSize: 7, color: '999999'});
+            }
         }
     }
     async function addDetails(pptx, report, sections, checkpoint) {
         for (const molecule of report.molecules) {
-            const pages = chunks(sections, 6);
+            const pages = chunks(sections, 2);
             for (let index = 0; index < pages.length; index++) {
                 await checkpoint();
                 const sectionPage = pages[index];
-                const slide = base(pptx, report, `${molecule.name || molecule.key} (${index + 1}/${pages.length})`);
-                text(slide, molecule.subtitle, { x: 0.35, y: 0.81, w: 12.5, h: 0.4 },
-                    { fontSize: 14, color: 'C6C6C6' });
-                const columns = Math.min(3, sectionPage.length), rows = Math.ceil(sectionPage.length / 3);
-                const cellW = 9.0 / columns, cellH = 5.45 / rows;
+                const slide = pptx.addSlide(); slide.background = {color: 'FFFFFF'};
+                text(slide, `${molecule.name || molecule.key}${pages.length > 1 ? ' (' + (index + 1) + '/' + pages.length + ')' : ''}`,
+                    {x: 0.12, y: 0.06, w: 13.0, h: 0.37}, {fontSize: 24, bold: true, color: '000000'});
+                text(slide, molecule.subtitle, {x: 0.12, y: 0.46, w: 12.95, h: 0.22}, {fontSize: 11, color: '333333'});
+                const tableWidth = 11.83, headerWidth = 1.55;
+                const dataWidth = (tableWidth - headerWidth) / sectionPage.length;
+                const table = [['Section', ...sectionPage.map(section => shortLabel(section.name, Math.floor(dataWidth * 13), 3))],
+                    ['Max Intensity', ...sectionPage.map(section => number(entryFor(molecule, section).max))],
+                    ['Mean Intensity', ...sectionPage.map(section => number(entryFor(molecule, section).mean))]];
+                const cells = table.map((row, rowIndex) => row.map((value, column) => ({text: value,
+                    options: {bold: column === 0 || rowIndex === 0, fontSize: rowIndex === 0 ? 11 : 13,
+                        fill: rowIndex === 0 ? 'D1DAE9' : rowIndex === 1 ? 'E9EDF4' : 'D1DAE9'}})));
+                slide.addTable(cells, {x: 0.12, y: 0.76, w: tableWidth,
+                    colW: [headerWidth, ...sectionPage.map(() => dataWidth)], rowH: [0.63, 0.36, 0.36],
+                    h: 1.35, autoPage: false, border: {type: 'solid', color: 'FFFFFF', pt: 1},
+                    margin: [2, 5, 2, 5], fontFace: FONT, fontSize: 13, color: '000000',
+                    align: 'center', valign: 'middle', lang: 'ja-JP'});
+                const cellW = 11.83 / sectionPage.length;
                 sectionPage.forEach((section, i) => {
-                    const x = 0.35 + (i % columns) * cellW, y = 1.38 + Math.floor(i / columns) * cellH;
-                    text(slide, `${i + 1}. ${section.name}`, { x, y, w: cellW - 0.16, h: 0.45 },
-                        { fontSize: 15, align: 'center' });
-                    picture(slide, entryFor(molecule, section), { x: x + 0.04, y: y + 0.53,
-                        w: cellW - 0.24, h: cellH - 0.7 });
+                    const x = 0.12 + i * cellW, entry = entryFor(molecule, section);
+                    text(slide, shortLabel(section.name, Math.floor(cellW * 14), 2),
+                        {x: x + 0.05, y: 2.2, w: cellW - 0.1, h: 0.35},
+                        {fontSize: 17, color: '000000', align: 'center'});
+                    const bounds = picture(slide, entry, {x: x + 0.08, y: 2.62, w: cellW - 0.16, h: 4.15}, {light: true});
+                    imageScaleBar(pptx, slide, entry, bounds);
                 });
-                const table = [['Section', 'Max', 'Mean']].concat(sectionPage.map((section, i) => {
-                    const entry = entryFor(molecule, section);
-                    return [String(i + 1), number(entry.max), number(entry.mean)];
-                }));
-                slide.addTable(table, { x: 9.72, y: 1.48, w: 3.2, colW: [0.7, 1.25, 1.25],
-                    rowH: 0.49, autoPage: false, border: { type: 'solid', color: '666666', pt: 0.5 },
-                    margin: [4, 3, 4, 3], fontFace: FONT, fontSize: 11, color: 'FFFFFF', fill: '000000',
-                    align: 'center', valign: 'middle', lang: 'ja-JP' });
-                text(slide, 'Intensity', { x: 9.72, y: 5.3, w: 3.2, h: 0.28 }, { fontSize: 13 });
-                colorBar(pptx, slide, 9.72, 5.67, 3.2, molecule.upper, { height: 0.16, fontSize: 10 });
+                text(slide, 'Intensity', {x: 12.02, y: 2.38, w: 1.15, h: 0.25}, {fontSize: 10, color: '000000', align: 'center'});
+                colorBar(pptx, slide, 12.12, 2.83, 0.24, molecule.upper, {height: 3.7});
                 const basis = molecule.intensityScale && molecule.intensityScale.upperBasis;
                 const scaleNote = basis === 'percentile' ? 'Shared display p99.8' :
                     basis === 'positive-maximum-fallback' ? 'Shared positive maximum (fallback)' :
                     basis === 'unit-fallback' ? 'Upper bound 1 (no positive range)' : 'Common scale for this molecule';
-                text(slide, scaleNote + '\nMissing statistics: —',
-                    { x: 9.72, y: 6.2, w: 3.2, h: 0.55 }, { fontSize: 10, color: 'B5B5B5' });
+                text(slide, scaleNote + '    Missing statistics: —',
+                    {x: 0.2, y: 7.15, w: 11.7, h: 0.17}, {fontSize: 9, color: '667085'});
+                text(slide, pptx._slides.length, {x: 12.3, y: 7.15, w: 0.7, h: 0.17},
+                    {fontSize: 9, color: '667085', align: 'right'});
             }
         }
     }
@@ -335,10 +404,9 @@
         pptx.company = 'Share_Test'; pptx.lang = 'ja-JP';
         pptx.theme = { headFontFace: FONT, bodyFontFace: FONT, lang: 'ja-JP' };
         const sections = sectionsFor(report);
-        addCover(pptx, report, sections);
-        await addMetadata(pptx, report, checkpoint);
         await addMatrices(pptx, report, sections, checkpoint);
         await addDetails(pptx, report, sections, checkpoint);
+        await addMetadata(pptx, report, checkpoint);
         await checkpoint('write');
         const output = await pptx.write({ outputType: type, compression: true });
         assertCurrent();

@@ -10,7 +10,8 @@ const { renderOfflineConfig } = require('../offline/config.cjs');
 const root = path.resolve(__dirname, '..');
 
 const sharedSlug = 'synthetic-shared-ppt-report';
-const privateMarkers = ['137.875', '246.625', '138.875', '247.625',
+const voltageMarkers = ['137.875', '246.625', '138.875', '247.625'];
+const privateMarkers = [...voltageMarkers,
   'PRIVATE_INSTRUMENT_SENTINEL', 'PRIVATE_METHOD_SENTINEL', 'PRIVATE_RAW_SENTINEL',
   'PRIVATE_SOURCE_SENTINEL', 'PRIVATE_LAYER_SENTINEL'];
 function sharedFixture() {
@@ -40,7 +41,8 @@ function sharedFixture() {
     }},
     anatomy_palette: {}, sections: [{id: 'synthetic-server-section', client_id: 'synthetic-shared-section',
       ordinal: 1, display_name: '共有切片A',
-      meta: {raw: {instrument: 'PRIVATE_RAW_SENTINEL', msMethod: 'PRIVATE_METHOD_SENTINEL'},
+      meta: {raw: {instrument: 'PRIVATE_RAW_SENTINEL', msMethod: 'PRIVATE_METHOD_SENTINEL',
+        ce: 137.875, cv: 246.625},
         world_coords: {msi_um_per_px: {x: 50, y: 50}}},
       storage_paths: {images: {}, msiSeries: series}
     }]
@@ -55,6 +57,18 @@ async function readDeck(download) {
   const xmlFiles = Object.keys(zip.files).filter(name => /\.(xml|rels)$/.test(name));
   const xml = (await Promise.all(xmlFiles.map(name => zip.file(name).async('string')))).join('\n');
   return {bytes, zip, slides, xml};
+}
+
+function assertNoVoltages(deck, context) {
+  for (const marker of voltageMarkers) assert.ok(!deck.xml.includes(marker), context + ' does not disclose CV/CE value ' + marker);
+  assert.doesNotMatch(deck.xml, /<a:t>\s*(?:CE|CV|Cone Voltage|Collision Energy)\s*<\/a:t>|\b(?:CE|CV)\s+(?:137|246)/i,
+    context + ' omits CV/CE labels and subtitles');
+}
+
+function assertNoSessionTokens(deck) {
+  for (const token of ['synthetic-viewer-token', 'synthetic-admin-token', 'synthetic-test-anon-key']) {
+    assert.ok(!deck.xml.includes(token), 'session token or service key is never embedded');
+  }
 }
 
 async function checkSharedReport(browser, origin, role, traffic) {
@@ -102,6 +116,8 @@ async function checkSharedReport(browser, origin, role, traffic) {
       'shared Storage CSV is parsed into authoritative source-row statistics');
     const downloadPromise = page.waitForEvent('download', {timeout: 90000});
     await page.locator('#btn-export-ppt').click();
+    assert.equal(await page.locator('.project-report-options').count(), 0, role + ' shared export has no options dialog');
+    assert.equal(await page.locator('#project-report-include-ce-cv').count(), 0, role + ' shared export has no CV/CE selection');
     const download = await downloadPromise, deck = await readDeck(download);
     assert.match(download.suggestedFilename(), /\.pptx$/);
     assert.ok(deck.slides.length >= 4, 'different private CE/CV conditions remain separate molecule details');
@@ -116,16 +132,16 @@ async function checkSharedReport(browser, origin, role, traffic) {
     }
     assert.match(deck.xml, /<a:tbl>/, role + ' contains editable quantitative tables');
     assert.ok(Object.keys(deck.zip.files).some(name => /^ppt\/media\/.*\.png$/.test(name)), role + ' contains numeric heatmaps');
+    assertNoVoltages(deck, 'shared ' + role);
     if (role === 'viewer') {
       for (const marker of [...privateMarkers, '0.1234567']) assert.ok(!deck.xml.includes(marker), 'viewer PPT does not disclose ' + marker);
-      assert.doesNotMatch(deck.xml, /CE 137|CV 246/, 'viewer detail subtitles omit machine conditions');
     } else {
-      for (const marker of ['137.875', '246.625', 'PRIVATE_INSTRUMENT_SENTINEL', 'PRIVATE_METHOD_SENTINEL',
-        'PRIVATE_RAW_SENTINEL', 'PRIVATE_SOURCE_SENTINEL']) {
-        assert.ok(deck.xml.includes(marker), 'admin PPT includes registered acquisition metadata: ' + marker);
+      for (const marker of ['PRIVATE_INSTRUMENT_SENTINEL', 'PRIVATE_METHOD_SENTINEL',
+        'PRIVATE_RAW_SENTINEL', 'PRIVATE_SOURCE_SENTINEL', '0.1234567']) {
+        assert.ok(deck.xml.includes(marker), 'admin PPT retains registered acquisition metadata other than CV/CE: ' + marker);
       }
     }
-    for (const token of ['synthetic-viewer-token', 'synthetic-admin-token']) assert.ok(!deck.xml.includes(token), 'session token is never embedded');
+    assertNoSessionTokens(deck);
     const after = await page.evaluate(() => {
       const section = App.project.sections[0], panel = App.panels.get(section.id);
       return {projectId: App.project.id, settings: JSON.stringify(section.meta),
@@ -207,38 +223,82 @@ async function main() {
       project.memo = {sample:'合成試料',machine:'DESI',experimentDate:'2026-10-28',freeNote:'PPT検証用の登録メモ'};
       section.displayName = '切片A';
       const key = Object.keys(section.msiSeries)[0], ent = section.msiSeries[key];
-      ent.compoundMeta = {base:'乳酸テスト',name:'乳酸テスト',precursor:89,product:43,ce:11,cv:20,polarity:'-'};
+      ent.compoundMeta = {base:'乳酸テスト',name:'乳酸テスト',precursor:89,product:43,
+        ce:137.875,cv:246.625,polarity:'-',formula:'C3H6O3',dwell:0.1234567,
+        instrument:'MASTER_INSTRUMENT_SENTINEL',msMethod:'MASTER_METHOD_SENTINEL',sourceFile:'MASTER_SOURCE_SENTINEL.csv'};
+      section.meta.raw = {instrument:'MASTER_RAW_SENTINEL',ce:137.875,cv:246.625,
+        msMethod:'MASTER_METHOD_SENTINEL'};
       const panel = App.panels.get(section.id);
       if (!await panel.ensureMsiLayerLoaded(key)) throw new Error('Fixture MSI failed to load');
       return {mean:msiQuantMean(ent),max:msiMaxIntensity(ent).value,source:ent.blobId,
-        settings:JSON.stringify(section.meta),values:Array.from(panel.msiValueRasters.get(key).values)};
+        settings:JSON.stringify(section.meta),metadata:JSON.stringify(ent.compoundMeta),
+        values:Array.from(panel.msiValueRasters.get(key).values)};
     });
     assert.equal(typeof expected.mean, 'number'); assert.equal(typeof expected.max, 'number');
-    const downloadPromise = page.waitForEvent('download', {timeout:90000});
-    await page.locator('#btn-export-ppt').click();
-    const download = await downloadPromise;
-    assert.match(download.suggestedFilename(), /\.pptx$/);
-    assert.doesNotMatch(download.suggestedFilename(), /[\\/:*?"<>|]/);
-    const bytes = await fs.readFile(await download.path()), zip = await JSZip.loadAsync(bytes);
-    const slides = Object.keys(zip.files).filter(name => /^ppt\/slides\/slide\d+\.xml$/.test(name));
-    assert.ok(slides.length >= 3, 'Metadata, matrix and molecule detail exist');
-    const xml = (await Promise.all(slides.map(name => zip.file(name).async('string')))).join('\n');
-    for (const label of ['PPT検証','乳酸テスト','切片A','合成試料','PPT検証用の登録メモ']) assert.ok(xml.includes(label), label);
-    assert.ok(xml.includes('>' + expected.mean + '<'), 'Original-row mean is included');
-    assert.ok(xml.includes('>' + expected.max + '<'), 'Original-row maximum is included');
-    assert.match(xml, /<a:tbl>/, 'Statistics remain editable native tables');
-    assert.ok(Object.keys(zip.files).some(name => /^ppt\/media\/.*\.png$/.test(name)), 'Heatmaps are embedded');
-    const after = await page.evaluate(() => {
-      const section = App.project.sections[0], key=Object.keys(section.msiSeries)[0];
-      return {source:section.msiSeries[key].blobId,settings:JSON.stringify(section.meta),
-        values:Array.from(App.panels.get(section.id).msiValueRasters.get(key).values)};
-    });
-    assert.equal(after.source, expected.source); assert.equal(after.settings, expected.settings);
-    assert.deepEqual(after.values,expected.values, 'Report generation leaves numerical data unchanged');
+    let downloadCount = 0;
+    page.on('download', () => downloadCount++);
+    async function assertMasterUnchanged(stage) {
+      const after = await page.evaluate(() => {
+        const section = App.project.sections[0], key = Object.keys(section.msiSeries)[0], ent = section.msiSeries[key];
+        return {mean:msiQuantMean(ent),max:msiMaxIntensity(ent).value,source:ent.blobId,
+          settings:JSON.stringify(section.meta),metadata:JSON.stringify(ent.compoundMeta),
+          values:Array.from(App.panels.get(section.id).msiValueRasters.get(key).values)};
+      });
+      assert.deepEqual(after, expected, stage + ' leaves numerical data, statistics and registered metadata unchanged');
+    }
+    async function openMasterOptions() {
+      await page.locator('#btn-export-ppt').click();
+      await page.getByRole('dialog', {name:'PPT レポートの設定', exact:true}).waitFor({state:'visible'});
+      const checkbox = page.locator('#project-report-include-ce-cv');
+      assert.equal(await checkbox.isChecked(), false, 'CV/CE starts OFF for every export');
+      return checkbox;
+    }
+    // Dismissing the preflight must not start generation or remember a checked
+    // value. The following successful export also catches a stuck active run.
+    await (await openMasterOptions()).check();
+    await page.locator('[data-report-cancel]').click();
+    await page.locator('.project-report-options').waitFor({state:'detached'});
+    await page.waitForFunction(() => !document.getElementById('btn-export-ppt').disabled);
+    assert.equal(downloadCount, 0, 'Cancelling the options dialog does not download a report');
+    assert.equal(await page.locator('.project-report-progress').count(), 0, 'Cancelling does not begin generation');
+    await assertMasterUnchanged('Cancelled export');
+    let sampleDeck;
+    for (const includeCeCv of [false, true]) {
+      const checkbox = await openMasterOptions();
+      if (includeCeCv) await checkbox.check();
+      const downloadPromise = page.waitForEvent('download', {timeout:90000});
+      await page.locator('[data-report-create]').click();
+      const download = await downloadPromise, deck = await readDeck(download);
+      assert.match(download.suggestedFilename(), /\.pptx$/);
+      assert.doesNotMatch(download.suggestedFilename(), /[\\/:*?"<>|]/);
+      assert.ok(deck.slides.length >= 3, 'Metadata, matrix and molecule detail exist');
+      for (const label of ['PPT検証','乳酸テスト','切片A','合成試料','PPT検証用の登録メモ',
+        'C3H6O3','0.1234567','MASTER_INSTRUMENT_SENTINEL','MASTER_METHOD_SENTINEL',
+        'MASTER_SOURCE_SENTINEL','MASTER_RAW_SENTINEL']) {
+        assert.ok(deck.xml.includes(label), 'Master export preserves non-voltage metadata: ' + label);
+      }
+      assert.ok(deck.xml.includes('89 → 43'), 'Master export preserves the precursor/product transition');
+      assert.ok(deck.xml.includes('>' + expected.mean + '<'), 'Original-row mean is included');
+      assert.ok(deck.xml.includes('>' + expected.max + '<'), 'Original-row maximum is included');
+      assert.match(deck.xml, /<a:tbl>/, 'Statistics remain editable native tables');
+      assert.ok(Object.keys(deck.zip.files).some(name => /^ppt\/media\/.*\.png$/.test(name)), 'Heatmaps are embedded');
+      if (includeCeCv) {
+        for (const marker of voltageMarkers.slice(0, 2)) assert.ok(deck.xml.includes(marker), 'Opt-in includes voltage: ' + marker);
+      } else assertNoVoltages(deck, 'Master default export');
+      assertNoSessionTokens(deck);
+      await assertMasterUnchanged('Master CV/CE ' + (includeCeCv ? 'ON' : 'OFF'));
+      await page.waitForFunction(() => !document.getElementById('btn-export-ppt').disabled);
+      console.log('Master CV/CE ' + (includeCeCv ? 'ON' : 'OFF') + ' browser regression passed (' + deck.slides.length + ' slides, ' + deck.bytes.length + ' bytes).');
+      if (!includeCeCv) sampleDeck = deck;
+    }
+    // Opting in is per-download; it must not become the next export's default.
+    await openMasterOptions();
+    await page.locator('[data-report-cancel]').click();
+    await page.locator('.project-report-options').waitFor({state:'detached'});
+    assert.equal(downloadCount, 2, 'Only explicitly created reports download');
     assert.deepEqual(external, [], 'Works without external connections');
     assert.deepEqual(errors, [], 'No browser exceptions');
-    if (process.env.PPT_REPORT_SAMPLE_PATH) await fs.writeFile(process.env.PPT_REPORT_SAMPLE_PATH, bytes);
-    console.log('Project report browser regression passed (' + slides.length + ' slides, ' + bytes.length + ' bytes).');
+    if (process.env.PPT_REPORT_SAMPLE_PATH) await fs.writeFile(process.env.PPT_REPORT_SAMPLE_PATH, sampleDeck.bytes);
     await page.close();
     serveOnlineConfig = true;
     await checkSharedReport(browser, origin, 'viewer', traffic);

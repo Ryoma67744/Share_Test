@@ -107,6 +107,26 @@ const sortedPercentile = (values, p) => {
   const anisotropic = await Data.render(native, 6, {...nativeOptions, transform: [[2, 0, 0], [0, 1, 0], [0, 0, 1]]});
   assert.equal(anisotropic.width / anisotropic.height, 3, 'supplied non-square pixel aspect is preserved');
   assert.equal(JSON.stringify(rotate), rotateBefore);
+  // Rulers follow the displayed horizontal direction after rotation. The
+  // physical distance is independent of PNG up/down-sampling and padding.
+  const calibrated = await Data.render(native, 6, {...nativeOptions, pixelPitch: {x: 25, y: 40}});
+  close(calibrated.physicalWidthUm, 75); close(calibrated.physicalHeightUm, 80);
+  const calibratedRotation = await Data.render(native, 6, {createCanvas, transform: rotate, pixelPitch: {x: 25, y: 40}});
+  close(calibratedRotation.physicalWidthUm, 80); close(calibratedRotation.physicalHeightUm, 75);
+  const angle = Math.PI / 4, diagonal = [[Math.cos(angle), -Math.sin(angle), 0], [Math.sin(angle), Math.cos(angle), 0], [0, 0, 1]];
+  const diagonalImage = await Data.render(native, 6, {...nativeOptions, transform: diagonal, pixelPitch: {x: 25, y: 40}});
+  close(diagonalImage.physicalWidthUm / diagonalImage.width, Math.hypot(25, 40) / Math.sqrt(2));
+  for (const pitch of [null, {x: 0, y: 25}, {x: Infinity, y: 25}, {x: '25', y: 25}]) {
+    assert.equal((await Data.render(native, 6, {...nativeOptions, pixelPitch: pitch})).physicalWidthUm, undefined);
+  }
+  const referenceCanvas = createCanvas(3, 2), referenceContext = referenceCanvas.getContext('2d');
+  referenceContext.fillStyle = '#ff0000'; referenceContext.fillRect(0, 0, 1, 1);
+  const optical = Data.renderReference(referenceCanvas, rotate, {createCanvas});
+  assert.equal(optical.width, 2); assert.equal(optical.height, 3);
+  const referencePixel = pixel(await decode(optical), 1, 0);
+  assert.deepEqual(referencePixel.slice(0, 3), [255, 0, 0]);
+  assert.ok(referencePixel[3] > 200, 'rotated optical pixel remains in the expected location');
+  assert.equal(Data.renderReference(null, rotate, {createCanvas}), null);
   const thin = await Data.render(raster(Array(2800).fill(1)), 1, nativeOptions);
   assert.equal(thin.width, 1400); assert.equal(thin.height, 1);
   assert.equal(pixel(await decode(thin), 0, 0)[3], 255, 'downscaled thin images retain their measured row');
@@ -118,6 +138,12 @@ const sortedPercentile = (values, p) => {
     loadEntries: async () => {events.push('load' + i); return [{sectionId: 'a', name: 'A', raster: raster([i])}];}}))};
   await Data.prepare(lazy, {...nativeOptions, onProgress: progress => events.push('render' + progress.index)});
   assert.deepEqual(events, ['load1', 'render1', 'load2', 'render2']);
+  const references = await Data.prepare({...source, molecules: [], loadSectionReferences: async () => [
+    {id: 'a', name: '切片A', referenceLabel: 'Optical', referenceImage: optical}
+  ]}, nativeOptions);
+  assert.equal(references.sections[0].referenceImage.data, optical.data);
+  assert.deepEqual(references.sections.map(section => section.id), ['a', 'b', 'missing'], 'optional references never remove or reorder sections');
+  assert.equal(references.sections[1].referenceImage, undefined);
   const empty = await Data.prepare({...source, molecules: [{key: 'empty', sections: [{sectionId: 'a', raster: raster([NaN])}]}]}, nativeOptions);
   assert.equal(empty.molecules[0].upper, 1);
   assert.equal(empty.molecules[0].percentileValue, null);
