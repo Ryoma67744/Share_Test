@@ -62,24 +62,6 @@ function assertPublicReport(snapshot) {
         'private condition fields must not survive in any serializable export metadata');
 }
 
-function masterReceipt(now = Date.now()) {
-    return { token: 'private-master-read-token', role: 'viewer', expires_at: new Date(now + 60000).toISOString() };
-}
-
-async function authorizeMaster(f, response = masterReceipt()) {
-    return report.authorizeSharedExport({ getApp: f.hooks.getApp, unlockMaster: async () => response }, 'private-master-password');
-}
-
-function assertNoViewerMethodDetails(snapshot) {
-    const text = JSON.stringify(snapshot);
-    for (const privateText of ['0.87654321', 'private-source-file', 'private-acquisition', 'private-layer-instrument',
-        'private-method-file', 'private-tune-file', 'private-calibration-file', 'private-session-token',
-        'private-master-read-token', 'private-master-password']) {
-        assert.equal(text.includes(privateText), false, privateText + ' must not leave a master-authorized viewer export');
-    }
-    assert.doesNotMatch(text, /"(?:dwell|sourceFile|msMethod|tuneMethod|calibrationFile|acquiredAt)"\s*:/);
-}
-
 const tests = [
     ['all registered sections load lazily and retain source-row statistics', async () => {
         const f = fixture(), before = JSON.stringify(f.project), input = report.createAdapter(f.hooks);
@@ -250,178 +232,117 @@ const tests = [
         assertPublicReport({ input, entries });
         assert.equal(JSON.stringify(f.project), before, 'redaction must not change the shared project');
     }],
-    ['share admins omit voltages even when requested and retain other acquisition information', async () => {
-        const f = sharedFixture('admin'), input = report.createAdapter(f.hooks, { includeCeCv: true });
-        const molecule = input.molecules[0], entries = await molecule.loadEntries();
-        assert.equal(molecule.metadata.ce, undefined);
-        assert.equal(molecule.metadata.cv, undefined);
-        assert.equal(molecule.metadata.dwell, 0.87654321);
+    ['shared admin voltage output is opt-in per report and preserves registered data', async () => {
+        const f = sharedFixture('admin'), session = f.app.shareMode;
+        const before = JSON.stringify({ project: f.project, session });
+        for (const options of [{}, { includeCeCv: false }, { includeCeCv: 'true' }]) {
+            const input = report.createAdapter(f.hooks, options), entries = await input.molecules[0].loadEntries();
+            assert.equal(input.molecules[0].metadata.ce, undefined);
+            assert.equal(input.molecules[0].metadata.cv, undefined);
+            assert.equal(entries[0].metadata.dwell, 0.87654321);
+            assert.equal(entries[0].metadata.sourceFile, 'private-source-file.txt');
+            assert.equal(input.metadata.sections[0].acquisition.instrument, 'private-acquisition-instrument');
+            assert.doesNotMatch(JSON.stringify({ input, entries }), /715\.12345|620\.98765/);
+        }
+        const selected = report.createAdapter(f.hooks, { includeCeCv: true });
+        const entries = await selected.molecules[0].loadEntries();
+        assert.equal(selected.molecules[0].metadata.ce, 715.12345);
+        assert.equal(selected.molecules[0].metadata.cv, 620.98765);
+        assert.equal(entries[0].metadata.cv, 620.98765);
+        assert.match(selected.molecules[0].subtitle, /CE 715\.12345/);
+        assert.match(selected.molecules[0].subtitle, /CV 620\.98765/);
+        assert.equal(selected.metadata.sections[0].acquisition.desi.collisionEnergy, 715.12345);
+        assert.equal(entries[0].metadata.dwell, 0.87654321);
         assert.equal(entries[0].metadata.sourceFile, 'private-source-file.txt');
-        assert.equal(input.metadata.sections[0].acquisition.instrument, 'private-acquisition-instrument');
-        assert.doesNotMatch(molecule.subtitle, /\b(?:CE|CV)\b/);
-        assert.doesNotMatch(JSON.stringify({ input, entries }), /715\.12345|620\.98765/);
-        assert.equal(JSON.stringify({ input, entries }).includes('private-session-token'), false,
-            'admin export includes acquisition metadata, never authentication credentials');
+        assert.equal(report.createAdapter(f.hooks).molecules[0].metadata.ce, undefined, 'the next report defaults to OFF');
+        assert.equal(f.app.shareMode, session);
+        assert.equal(JSON.stringify({ project: f.project, session }), before);
+        assert.equal(JSON.stringify({ selected, entries }).includes('private-session-token'), false);
     }],
-    ['fresh master verification permits shared voltages without changing the active session', async () => {
-        for (const role of ['viewer', 'admin']) {
-            const f = sharedFixture(role), session = f.app.shareMode;
-            const before = JSON.stringify({ project: f.project, session }), calls = [];
-            const grant = await report.authorizeSharedExport({ getApp: f.hooks.getApp, unlockMaster: async (slug, password) => {
-                calls.push([slug, password]);
-                return role === 'viewer' ? [masterReceipt()] : masterReceipt();
-            } }, 'private-master-password');
-            assert.deepEqual(calls, [['shared-project', 'private-master-password']]);
-            assert.ok(grant, 'successful verification returns an authorization for this export');
-            assert.doesNotMatch(JSON.stringify(grant), /private-master|private-session/);
-            const input = report.createAdapter(f.hooks, { includeCeCv: true, masterAuthorization: grant });
-            const entries = await input.molecules[0].loadEntries();
-            assert.equal(input.molecules[0].metadata.ce, 715.12345);
-            assert.equal(input.molecules[0].metadata.cv, 620.98765);
-            assert.equal(entries[0].metadata.cv, 620.98765);
-            assert.match(input.molecules[0].subtitle, /CE 715\.12345/);
-            assert.match(input.molecules[0].subtitle, /CV 620\.98765/);
-            if (role === 'viewer') {
-                assertNoViewerMethodDetails({ input, entries });
-                assert.deepEqual(input.metadata.sections[0].acquisition, {});
-            } else {
-                assert.equal(entries[0].metadata.dwell, 0.87654321);
-                assert.equal(input.metadata.sections[0].acquisition.desi.collisionEnergy, 715.12345);
-            }
-            assert.doesNotMatch(JSON.stringify({ input, entries }), /private-master-(?:password|read-token)|private-session-token/);
-            assert.equal(f.app.shareMode, session, 'PPT authorization never replaces the live viewer/admin session');
-            assert.equal(JSON.stringify({ project: f.project, session }), before);
-            assert.equal(report.createAdapter(f.hooks, { includeCeCv: true }).molecules[0].metadata.ce, undefined,
-                'a subsequent export requires its own authorization');
-        }
-    }],
-    ['master-authorized viewer keeps opaque measurement identifiers and the public metadata boundary', async () => {
+    ['ordinary shared viewers cannot enable voltages with report or obsolete authorization options', async () => {
         const f = sharedFixture();
-        for (const section of f.sections) {
-            const entry = section.msiSeries.MSI_DA;
-            delete section.msiSeries.MSI_DA;
-            section.msiSeries['MSI_private-source-file_715.12345_620.98765'] = entry;
-            section.msiSeries.MSI_private_method_file = { ...entry, compoundMeta: { ...entry.compoundMeta } };
+        const secret = 'obsolete-master-secret';
+        for (const options of [
+            { includeCeCv: true },
+            { includeCeCv: true, canIncludeCeCv: true, role: 'admin' },
+            { includeCeCv: true, masterAuthorization: true },
+            { includeCeCv: true, masterAuthorization: { token: secret, role: 'admin', expires_at: '2099-01-01T00:00:00Z' }, masterPassword: secret }
+        ]) {
+            const input = report.createAdapter(f.hooks, options), entries = await input.molecules[0].loadEntries();
+            assertPublicReport({ input, entries });
+            assert.equal(JSON.stringify({ input, entries }).includes(secret), false);
         }
-        const grant = await authorizeMaster(f);
-        const input = report.createAdapter(f.hooks, { includeCeCv: true, masterAuthorization: grant });
-        const entries = await Promise.all(input.molecules.map(molecule => molecule.loadEntries()));
-        assert.equal(input.molecules.length, 2, 'repeated registered measurements remain separate');
-        assert.ok(input.molecules.every(molecule => molecule.metadata.ce === 715.12345 && molecule.metadata.cv === 620.98765));
-        assertNoViewerMethodDetails({ input, entries });
-        for (const molecule of input.molecules) {
-            assert.doesNotMatch(molecule.key + molecule.layerKey + molecule.subtitle, /MSI_|private[_-]/);
+        assert.equal(report.authorizeSharedExport, undefined, 'PPT export no longer exposes an extra master-password flow');
+    }],
+    ['CV and CE selection is available only for local projects or the existing shared admin role', async () => {
+        const local = fixture();
+        assert.equal(report.captureExportContext(local.hooks.getApp).canIncludeCeCv, true);
+        const admin = sharedFixture('admin');
+        assert.equal(report.captureExportContext(admin.hooks.getApp).canIncludeCeCv, true);
+        delete admin.project.__share;
+        assert.equal(report.captureExportContext(admin.hooks.getApp).canIncludeCeCv, true, 'shareMode admin is the existing login authority');
+        for (const configure of [
+            f => {},
+            f => { f.app.shareMode.role = 'owner'; },
+            f => { f.app.shareMode.role = 'Admin'; },
+            f => { delete f.app.shareMode.role; },
+            f => { f.app.shareMode = null; }
+        ]) {
+            const f = sharedFixture(); configure(f);
+            assert.equal(report.captureExportContext(f.hooks.getApp).canIncludeCeCv, false);
+            const input = report.createAdapter(f.hooks, { includeCeCv: true, canIncludeCeCv: true, masterAuthorization: {} });
+            assertPublicReport({ input, entries: await input.molecules[0].loadEntries() });
         }
     }],
-    ['shared authorization cannot be replaced by a boolean or a copied token-shaped object', async () => {
-        const f = sharedFixture('admin'), grant = await authorizeMaster(f);
-        for (const forged of [true, {}, masterReceipt(), { ...grant }]) {
-            assert.throws(() => report.createAdapter(f.hooks, { includeCeCv: true, masterAuthorization: forged }),
-                { code: 'REPORT_MASTER_AUTH_FAILED' });
-        }
-        assert.equal(report.createAdapter(f.hooks, { masterAuthorization: grant }).molecules[0].metadata.ce, undefined,
-            'successful verification does not implicitly opt in to voltage output');
-    }],
-    ['master authorization can be claimed by only one export', async () => {
-        const f = sharedFixture(), grant = await authorizeMaster(f);
-        const input = report.createAdapter(f.hooks, { includeCeCv: true, masterAuthorization: grant });
-        assert.equal(input.molecules[0].metadata.ce, 715.12345);
-        assert.throws(() => report.createAdapter(f.hooks, { includeCeCv: true, masterAuthorization: grant }),
-            { code: 'REPORT_MASTER_AUTH_FAILED' }, 'the next export must verify the master password again');
-        input.assertCurrent();
-        assert.ok((await input.molecules[0].loadEntries()).every(entry => entry.raster),
-            'rejecting grant reuse must not invalidate the export that originally claimed it');
-        const fresh = await authorizeMaster(f);
-        assert.equal(report.createAdapter(f.hooks, { includeCeCv: true, masterAuthorization: fresh }).molecules[0].metadata.ce, 715.12345);
-    }],
-    ['master verification rejects failed or malformed authentication responses', async () => {
-        const now = Date.now();
-        const responses = [null, false, {}, [], { ...masterReceipt(now), token: '' },
-            { ...masterReceipt(now), token: '  ' }, { ...masterReceipt(now), token: 123 },
-            { ...masterReceipt(now), token: null }, { ...masterReceipt(now), role: 'admin' },
-            { ...masterReceipt(now), role: undefined }, { ...masterReceipt(now), expires_at: null },
-            { ...masterReceipt(now), expires_at: now + 60000 },
-            { ...masterReceipt(now), expires_at: 'not-a-date' },
-            { ...masterReceipt(now), expires_at: new Date(now - 1).toISOString() }];
-        for (const response of responses) {
-            const f = sharedFixture(), before = JSON.stringify({ project: f.project, session: f.app.shareMode });
-            await assert.rejects(authorizeMaster(f, response), Error);
-            assert.equal(JSON.stringify({ project: f.project, session: f.app.shareMode }), before);
-            assert.equal(f.calls.length, 0, 'failed authentication must not start loading data');
-        }
-        for (const message of ['wrong master password', 'network unavailable']) {
-            const f = sharedFixture();
-            await assert.rejects(report.authorizeSharedExport({ getApp: f.hooks.getApp,
-                unlockMaster: async () => { throw new Error(message); } }, 'private-master-password'), Error);
-            assert.equal(report.createAdapter(f.hooks, { includeCeCv: true }).molecules[0].metadata.ce, undefined);
-        }
-    }],
-    ['master verification discards responses after project or shared-session changes', async () => {
-        const changes = [
+    ['shared admin selected output rejects project, role and session changes', async () => {
+        for (const [name, change] of [
             ['project', f => { f.app.project = { ...f.project }; }],
             ['session', f => { f.app.shareMode = { ...f.app.shareMode }; }],
-            ['role', f => { f.app.shareMode.role = 'admin'; }],
+            ['role', f => { f.app.shareMode.role = 'viewer'; }],
             ['token', f => { f.app.shareMode.token = 'renewed-token'; }],
             ['slug', f => { f.app.shareMode.slug = 'other-project'; }],
             ['expiry', f => { f.app.shareMode.expiresAt = new Date(Date.now() + 100000).toISOString(); }],
             ['shared flag', f => { f.project.__share = false; }]
-        ];
-        for (const [name, change] of changes) {
-            const f = sharedFixture(); let resolve;
-            const pending = report.authorizeSharedExport({ getApp: f.hooks.getApp,
-                unlockMaster: () => new Promise(done => { resolve = done; }) }, 'private-master-password');
-            assert.equal(typeof resolve, 'function');
-            change(f); resolve(masterReceipt());
-            await assert.rejects(pending, { code: 'REPORT_SOURCE_CHANGED' }, name);
-            assert.equal(f.calls.length, 0);
-        }
-    }],
-    ['master authorization is bound to its original app, project and session', async () => {
-        for (const change of [
-            f => { f.app.project = { ...f.project }; },
-            f => { f.app.shareMode = { ...f.app.shareMode }; },
-            f => { f.app.shareMode.role = 'admin'; },
-            f => { f.app.shareMode.token = 'renewed-token'; },
-            f => { f.app.shareMode.slug = 'other-project'; },
-            f => { f.app.shareMode.expiresAt = new Date(Date.now() + 100000).toISOString(); },
-            f => { f.project.__share = false; }
         ]) {
-            const f = sharedFixture(), grant = await authorizeMaster(f);
+            const f = sharedFixture('admin'), context = report.captureExportContext(f.hooks.getApp);
+            const input = report.createAdapter(f.hooks, { includeCeCv: true });
             change(f);
-            assert.throws(() => report.createAdapter(f.hooks, { includeCeCv: true, masterAuthorization: grant }), Error);
-            assert.equal(f.calls.length, 0);
+            assert.throws(context.assertCurrent, { code: 'REPORT_SOURCE_CHANGED' }, name);
+            assert.throws(input.assertCurrent, { code: 'REPORT_SOURCE_CHANGED' }, name);
+            await assert.rejects(input.molecules[0].loadEntries(), { code: 'REPORT_SOURCE_CHANGED' }, name);
+            assert.equal(f.calls.length, 0, 'stale admin output is rejected before loading: ' + name);
         }
-        const original = sharedFixture(), other = sharedFixture(), grant = await authorizeMaster(original);
-        assert.throws(() => report.createAdapter(other.hooks, { includeCeCv: true, masterAuthorization: grant }), Error,
-            'identical slug and token strings do not permit a grant to move to another app/project');
-        const replacedApp = { ...original.app };
-        assert.throws(() => report.createAdapter({ ...original.hooks, getApp: () => replacedApp },
-            { includeCeCv: true, masterAuthorization: grant }), Error);
+        for (const change of [
+            f => { f.app.shareMode.role = 'viewer'; },
+            f => { f.app.shareMode = { ...f.app.shareMode }; }
+        ]) {
+            const f = sharedFixture('admin'), panel = f.app.panels.get('left'), load = panel.ensureMsiLayerLoaded;
+            panel.ensureMsiLayerLoaded = async function (key) { await load.call(this, key); change(f); return true; };
+            const input = report.createAdapter(f.hooks, { includeCeCv: true });
+            await assert.rejects(input.molecules[0].loadEntries(), { code: 'REPORT_SOURCE_CHANGED' });
+            assert.equal(f.calls.length, 1, 'a role/session change during loading stops before the second section');
+        }
     }],
-    ['master authorization expires at the boundary and during numeric loading', async () => {
+    ['shared admin selected output checks declared session expiry before and during generation', async () => {
         const originalNow = Date.now; let now = Date.parse('2026-10-28T12:00:00Z');
         Date.now = () => now;
         try {
-            const expired = sharedFixture();
-            await assert.rejects(authorizeMaster(expired, { ...masterReceipt(now), expires_at: new Date(now).toISOString() }), Error);
-            const delayed = sharedFixture(), delayedReceipt = masterReceipt(now);
-            await assert.rejects(report.authorizeSharedExport({ getApp: delayed.hooks.getApp,
-                unlockMaster: async () => { now += 60000; return delayedReceipt; } }, 'private-master-password'),
-            { code: 'REPORT_MASTER_AUTH_FAILED' }, 'a response that expires while verification is pending cannot authorize output');
-            const beforeStart = sharedFixture(), grant = await authorizeMaster(beforeStart);
-            now += 60000;
-            assert.throws(() => report.createAdapter(beforeStart.hooks, { includeCeCv: true, masterAuthorization: grant }),
-                { code: 'REPORT_MASTER_AUTH_EXPIRED' });
-            assert.equal(beforeStart.calls.length, 0);
-
-            const f = sharedFixture(), duringGrant = await authorizeMaster(f);
-            const input = report.createAdapter(f.hooks, { includeCeCv: true, masterAuthorization: duringGrant });
+            const legacy = sharedFixture('admin');
+            assert.equal(report.createAdapter(legacy.hooks, { includeCeCv: true }).molecules[0].metadata.ce, 715.12345,
+                'legacy sessions without an expiry field retain the existing admin capability');
+            for (const expiresAt of ['not-a-date', new Date(now - 1).toISOString(), new Date(now).toISOString()]) {
+                const f = sharedFixture('admin'); f.app.shareMode.expiresAt = expiresAt;
+                assert.throws(() => report.createAdapter(f.hooks, { includeCeCv: true }), { code: 'REPORT_SOURCE_CHANGED' });
+                assert.equal(f.calls.length, 0);
+            }
+            const f = sharedFixture('admin'); f.app.shareMode.expiresAt = new Date(now + 60000).toISOString();
+            const input = report.createAdapter(f.hooks, { includeCeCv: true });
             input.assertCurrent();
             const panel = f.app.panels.get('left'), load = panel.ensureMsiLayerLoaded;
             panel.ensureMsiLayerLoaded = async function (key) { await load.call(this, key); now += 60000; return true; };
-            await assert.rejects(input.molecules[0].loadEntries(), { code: 'REPORT_MASTER_AUTH_EXPIRED' });
-            assert.throws(input.assertCurrent, { code: 'REPORT_MASTER_AUTH_EXPIRED' });
-            assert.equal(f.calls.length, 1, 'expired authorization stops before the next section loads');
+            await assert.rejects(input.molecules[0].loadEntries(), { code: 'REPORT_SOURCE_CHANGED' });
+            assert.throws(input.assertCurrent, { code: 'REPORT_SOURCE_CHANGED' });
+            assert.equal(f.calls.length, 1, 'expired admin access stops before the next section loads');
         } finally { Date.now = originalNow; }
     }],
     ['master voltage output is opt-in for each report and keeps source data unchanged', async () => {
@@ -477,7 +398,7 @@ const tests = [
                 });
             }
             const before = JSON.stringify(f.project);
-            const input = report.createAdapter(f.hooks, { includeCeCv: shared }), entries = await input.molecules[0].loadEntries();
+            const input = report.createAdapter(f.hooks, { includeCeCv: false }), entries = await input.molecules[0].loadEntries();
             assert.doesNotMatch(JSON.stringify({ input, entries }), /715\.12345|620\.98765|915\.4321/);
             assert.equal(input.projectName, 'Study');
             assert.equal(input.molecules[0].name, 'Dopamine');

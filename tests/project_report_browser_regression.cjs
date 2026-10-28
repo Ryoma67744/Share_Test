@@ -10,8 +10,8 @@ const { renderOfflineConfig } = require('../offline/config.cjs');
 const root = path.resolve(__dirname, '..');
 
 const sharedSlug = 'synthetic-shared-ppt-report';
-const syntheticMasterPassword = 'synthetic-master-password';
-const syntheticMasterToken = 'synthetic-master-read-token';
+const syntheticAdminPassword = 'synthetic-project-admin-password';
+const syntheticViewerPassword = 'synthetic-project-viewer-password';
 const voltageMarkers = ['137.875', '246.625', '138.875', '247.625'];
 const sourceVoltageMarkers = ['351.3125', '452.6875', '553.8125'];
 const privateMarkers = [...voltageMarkers,
@@ -71,12 +71,12 @@ function assertNoVoltages(deck, context) {
 
 function assertNoSessionTokens(deck) {
   for (const token of ['synthetic-viewer-token', 'synthetic-admin-token', 'synthetic-test-anon-key',
-    syntheticMasterPassword, syntheticMasterToken, 'synthetic-wrong-master-password']) {
+    syntheticAdminPassword, syntheticViewerPassword]) {
     assert.ok(!deck.xml.includes(token), 'password, session token or service key is never embedded');
   }
 }
 
-async function checkSharedReport(browser, origin, role, traffic, auth) {
+async function checkSharedReport(browser, origin, role, traffic, logins) {
   const context = await browser.newContext({viewport: {width: 1920, height: 1080}});
   try {
     const page = await context.newPage(), errors = [], external = [];
@@ -86,19 +86,46 @@ async function checkSharedReport(browser, origin, role, traffic, auth) {
       if (route.request().url().startsWith(origin + '/') || /^(blob|data):/.test(route.request().url())) return route.continue();
       external.push(route.request().url()); return route.abort();
     });
-    // A deliberately synthetic session exercises the production shared-view
-    // bootstrap and hydration without passwords, accounts, or token services.
-    await page.addInitScript(({slug, sessionRole}) => sessionStorage.setItem('desi:share:' + slug,
-      JSON.stringify({slug, role: sessionRole, token: 'synthetic-' + sessionRole + '-token',
-        expiresAt: new Date(Date.now() + 3600000).toISOString(), isPublic: false})), {slug: sharedSlug, sessionRole: role});
-    const trafficStart = traffic.length;
+    // Both paths start as viewers. The admin case must use the real Admin
+    // button, unlock_project RPC, session cache and reload before exporting.
+    await page.addInitScript(({slug}) => {
+      const key = 'desi:share:' + slug;
+      if (!sessionStorage.getItem(key)) sessionStorage.setItem(key,
+        JSON.stringify({slug, role:'viewer', token:'synthetic-viewer-token',
+          expiresAt:new Date(Date.now() + 3600000).toISOString(), isPublic:false}));
+    }, {slug:sharedSlug});
+    const trafficStart = traffic.length, loginStart = logins.length;
     await page.goto(origin + '/viewer/#share=' + sharedSlug);
-    await page.waitForFunction(expectedRole => typeof App !== 'undefined' && !App.offline
-      && App.project && App.project.__share && App.shareMode && App.shareMode.role === expectedRole
-      && App.panels.size === 1, role, {timeout: 60000});
-    await page.waitForFunction(() => typeof SharePreview !== 'undefined' && SharePreview.isOpen(), undefined, {timeout: 30000});
-    await page.locator('[data-preview-close]').click();
-    await page.locator('#btn-export-ppt').waitFor({state: 'visible'});
+    async function waitForSharedRole(expectedRole) {
+      await page.waitForFunction(expected => typeof App !== 'undefined' && !App.offline
+        && App.project && App.project.__share && App.shareMode && App.shareMode.role === expected
+        && App.panels.size === 1, expectedRole, {timeout:60000});
+      await page.waitForFunction(() => typeof SharePreview !== 'undefined' && SharePreview.isOpen(), undefined, {timeout:30000});
+      await page.locator('[data-preview-close]').click();
+      await page.locator('#btn-export-ppt').waitFor({state:'visible'});
+    }
+    await waitForSharedRole('viewer');
+    if (role === 'admin') {
+      await page.locator('#btn-share-admin-login').click();
+      await page.getByLabel('Admin password', {exact:true}).fill(syntheticViewerPassword);
+      await page.locator('[data-modal-ok]').click();
+      await page.getByText('Admin password ではありません (viewer pass を入力したようです)', {exact:true}).waitFor({state:'visible'});
+      assert.equal(await page.evaluate(() => App.shareMode.role), 'viewer', 'A viewer password cannot elevate the session');
+      assert.equal(await page.evaluate(slug => JSON.parse(sessionStorage.getItem('desi:share:' + slug)).role, sharedSlug), 'viewer',
+        'Rejected elevation does not replace the cached viewer session');
+      await page.locator('#btn-share-admin-login').click();
+      await page.getByLabel('Admin password', {exact:true}).fill(syntheticAdminPassword);
+      const reload = page.waitForEvent('load');
+      await page.locator('[data-modal-ok]').click();
+      await reload;
+      await waitForSharedRole('admin');
+      assert.equal(await page.evaluate(slug => JSON.parse(sessionStorage.getItem('desi:share:' + slug)).role, sharedSlug), 'admin',
+        'The production Admin login persists its session across reload');
+      assert.equal(logins.length, loginStart + 2, 'Viewer-password rejection and Admin login use unlock_project');
+      assert.deepEqual(logins.slice(loginStart).map(login => login.password), [syntheticViewerPassword, syntheticAdminPassword]);
+      for (const login of logins.slice(loginStart)) assert.equal(login.slug, sharedSlug, 'Admin login targets the current shared project');
+    }
+    const loginCountBeforeExport = logins.length;
     assert.equal(await page.locator('body').evaluate(el => el.classList.contains('share-admin')), role === 'admin');
     const ceVisibility = await page.locator('#method-table th[data-sort-key="ce"]').evaluate(el => getComputedStyle(el).display);
     assert.equal(ceVisibility === 'none', role === 'viewer', 'screen measurement-condition visibility matches the session role');
@@ -140,21 +167,15 @@ async function checkSharedReport(browser, origin, role, traffic, auth) {
             storagePath: section.msiSeries[key].storagePath, values: Array.from(panel.msiValueRasters.get(key).values)}))};
       });
       assert.deepEqual(after, before, stage + ' leaves shared source values, settings and metadata unchanged');
-      assert.equal(await page.evaluate(() => App.shareMode.role), role, 'PPT authentication does not change the share role');
+      assert.equal(await page.evaluate(() => App.shareMode.role), role, 'PPT export does not change the share role');
     }
     async function openOptions(includeCeCv) {
       await page.locator('#btn-export-ppt').click();
       await page.getByRole('dialog', {name:'PPT レポートの設定', exact:true}).waitFor({state:'visible'});
-      const checkbox = page.locator('#project-report-include-ce-cv'), password = page.locator('#project-report-master-password');
-      assert.equal(await checkbox.isChecked(), false, 'Shared CV/CE starts OFF for every export');
-      assert.equal(await password.isVisible(), false, 'Master password is hidden for the default OFF option');
-      if (includeCeCv) {
-        await checkbox.check();
-        await password.waitFor({state:'visible'});
-        assert.equal(await password.getAttribute('type'), 'password', 'The master password input is masked');
-        assert.equal(await password.inputValue(), '', 'A prior password is never prefilled');
-      }
-      return password;
+      const checkbox = page.locator('#project-report-include-ce-cv');
+      assert.equal(await checkbox.isChecked(), false, 'Shared Admin CV/CE starts OFF for every export');
+      assert.equal(await page.locator('#project-report-master-password').count(), 0, 'Existing Admin login needs no extra master-password input');
+      if (includeCeCv) await checkbox.check();
     }
     function assertSharedDeck(deck, includeCeCv) {
       assert.ok(deck.slides.length >= 4, 'Different private CE/CV conditions remain separate molecule details');
@@ -170,12 +191,11 @@ async function checkSharedReport(browser, origin, role, traffic, auth) {
       assert.match(deck.xml, /<a:tbl>/, role + ' contains editable quantitative tables');
       assert.ok(Object.keys(deck.zip.files).some(name => /^ppt\/media\/.*\.png$/.test(name)), role + ' contains numeric heatmaps');
       if (includeCeCv) {
-        for (const marker of voltageMarkers) assert.ok(deck.xml.includes(marker), 'Authenticated ' + role + ' includes CV/CE: ' + marker);
+        for (const marker of voltageMarkers) assert.ok(deck.xml.includes(marker), 'Admin opt-in includes CV/CE: ' + marker);
       } else assertNoVoltages(deck, 'Shared ' + role);
       if (role === 'viewer') {
-        const excluded = privateMarkers.filter(marker => !includeCeCv || !voltageMarkers.includes(marker));
-        for (const marker of [...excluded, ...sourceVoltageMarkers, '0.1234567', '0.654321']) {
-          assert.ok(!deck.xml.includes(marker), 'Viewer master authorization does not disclose other private metadata: ' + marker);
+        for (const marker of [...privateMarkers, ...sourceVoltageMarkers, '0.1234567', '0.654321']) {
+          assert.ok(!deck.xml.includes(marker), 'Viewer report does not disclose private metadata: ' + marker);
         }
       } else {
         for (const marker of ['PRIVATE_INSTRUMENT_SENTINEL', 'PRIVATE_METHOD_SENTINEL',
@@ -183,14 +203,19 @@ async function checkSharedReport(browser, origin, role, traffic, auth) {
           assert.ok(deck.xml.includes(marker), 'Admin retains non-voltage acquisition metadata: ' + marker);
         }
         if (includeCeCv) for (const marker of sourceVoltageMarkers) {
-          assert.ok(deck.xml.includes(marker), 'Authenticated admin retains RAW acquisition voltage: ' + marker);
+          assert.ok(deck.xml.includes(marker), 'Admin opt-in retains RAW acquisition voltage: ' + marker);
         }
       }
       assertNoSessionTokens(deck);
     }
     async function createReport(includeCeCv) {
       const downloadPromise = page.waitForEvent('download', {timeout:90000});
-      await page.locator('[data-report-create]').click();
+      await page.locator(role === 'viewer' ? '#btn-export-ppt' : '[data-report-create]').click();
+      if (role === 'viewer') {
+        assert.equal(await page.locator('.project-report-options').count(), 0, 'Viewer exports directly without a settings dialog');
+        assert.equal(await page.locator('#project-report-include-ce-cv').count(), 0, 'Viewer is never offered a CV/CE setting');
+        assert.equal(await page.locator('#project-report-master-password').count(), 0, 'Viewer is never offered extra authentication');
+      }
       const download = await downloadPromise, deck = await readDeck(download);
       await page.evaluate(() => window.__reportTestRun);
       assert.match(download.suggestedFilename(), /\.pptx$/);
@@ -198,66 +223,24 @@ async function checkSharedReport(browser, origin, role, traffic, auth) {
       await assertSharedUnchanged('Shared ' + role + ' CV/CE ' + (includeCeCv ? 'ON' : 'OFF'));
       console.log('Shared ' + role + ' CV/CE ' + (includeCeCv ? 'ON' : 'OFF') + ' browser regression passed (' + deck.slides.length + ' slides, ' + deck.bytes.length + ' bytes).');
     }
-    const authStart = auth.requests.length;
-    await openOptions(false);
-    await createReport(false);
-    assert.equal(auth.requests.length, authStart, 'Default shared OFF export requires no master authentication');
-
-    // An existing project-admin session is deliberately insufficient. Both
-    // roles must send the dedicated master password to the master-only RPC.
-    await openOptions(true);
-    for (const failure of ['wrong', 'network', 'missing', 'expired']) {
-      auth.mode = failure;
-      const password = page.locator('#project-report-master-password');
-      await password.fill(failure === 'wrong' ? 'synthetic-wrong-master-password' : syntheticMasterPassword);
-      const requestCount = auth.requests.length;
-      await page.locator('[data-report-create]').click();
-      await page.waitForFunction(() => {
-        const status = document.getElementById('project-report-auth-status');
-        const input = document.getElementById('project-report-master-password');
-        const create = document.querySelector('[data-report-create]');
-        return status && status.textContent.trim() && input && input.value === '' && create && !create.disabled;
-      });
-      assert.equal(auth.requests.length, requestCount + 1, role + ' authenticates through the master RPC');
-      assert.equal(await page.locator('#project-report-auth-status').getAttribute('role'), 'alert');
-      assert.equal(await page.locator('.project-report-options').count(), 1, failure + ' keeps the options dialog open for retry');
-      assert.equal(downloadCount, 1, failure + ' never downloads a report');
-      assert.equal(await page.locator('.project-report-progress').count(), 0, failure + ' does not start generation');
+    if (role === 'viewer') {
+      await createReport(false);
+      assert.equal(downloadCount, 1, 'The viewer downloads directly without a settings step');
+    } else {
+      await openOptions(true);
+      await page.locator('[data-report-cancel]').click();
+      await page.evaluate(() => window.__reportTestRun);
+      await page.locator('.project-report-options').waitFor({state:'detached'});
+      assert.equal(downloadCount, 0, 'Cancelling Admin settings does not download a report');
+      await assertSharedUnchanged('Cancelled Admin export');
+      for (const includeCeCv of [false, true, false]) {
+        await openOptions(includeCeCv);
+        await createReport(includeCeCv);
+      }
+      assert.equal(downloadCount, 3, 'Admin OFF, ON and next-default-OFF exports download only when requested');
     }
-    await page.locator('[data-report-cancel]').click();
-    await page.evaluate(() => window.__reportTestRun);
-    await page.locator('.project-report-options').waitFor({state:'detached'});
-    await assertSharedUnchanged('Failed and cancelled master authentication');
-
-    auth.mode = 'pending';
-    await (await openOptions(true)).fill(syntheticMasterPassword);
-    const requestPending = new Promise(resolve => { auth.onPending = resolve; });
-    await page.locator('[data-report-create]').click();
-    await requestPending;
-    assert.equal(await page.locator('[data-report-create]').isDisabled(), true, 'Create is disabled while authenticating');
-    assert.equal(await page.locator('[data-report-cancel]').isEnabled(), true, 'Cancellation remains available while authenticating');
-    await page.locator('[data-report-cancel]').click();
-    await page.locator('.project-report-options').waitFor({state:'detached'});
-    const lateResponse = page.waitForResponse(response => response.url().endsWith('/rest/v1/rpc/unlock_project_master'));
-    auth.releasePending();
-    await (await lateResponse).finished();
-    await page.evaluate(() => window.__reportTestRun);
-    assert.equal(downloadCount, 1, 'A late successful authentication after cancellation cannot download a report');
-    await assertSharedUnchanged('Cancelled pending master authentication');
-
-    auth.mode = 'success';
-    await (await openOptions(true)).fill(syntheticMasterPassword);
-    await createReport(true);
-    assert.equal(downloadCount, 2, 'Only OFF and explicitly authenticated ON exports have downloaded');
-    const afterOnRequests = auth.requests.length;
-    await openOptions(false);
-    await createReport(false);
-    assert.equal(auth.requests.length, afterOnRequests, 'The next export returns to OFF and does not reuse authentication implicitly');
-    assert.equal(downloadCount, 3, 'Three explicitly requested reports download');
-    for (const request of auth.requests.slice(authStart)) {
-      assert.equal(request.slug, sharedSlug, 'Master authorization is scoped to the current shared project');
-      assert.ok([syntheticMasterPassword, 'synthetic-wrong-master-password'].includes(request.password), 'Only synthetic credentials are used');
-    }
+    assert.equal(logins.length, loginCountBeforeExport, 'PPT export never asks for another Admin or master password');
+    assert.ok(!traffic.slice(trafficStart).some(item => item.path === '/rest/v1/rpc/unlock_project_master'), 'Shared PPT never invokes master authentication');
     assert.ok(traffic.slice(trafficStart).some(item => item.path === '/rest/v1/rpc/get_project_doc'), 'production shared document read was exercised');
     assert.ok(traffic.slice(trafficStart).some(item => item.path.startsWith('/storage/v1/object/public/')), 'production shared Storage download was exercised');
     assert.deepEqual(external, [], role + ' makes no external request');
@@ -269,7 +252,7 @@ async function checkSharedReport(browser, origin, role, traffic, auth) {
 // in an isolated browser context. No account or external service is contacted.
 async function main() {
   const fixture = sharedFixture(), traffic = [], forbidden = [];
-  const auth = {mode:'success', requests:[], onPending:null, releasePending:null};
+  const logins = [];
   let serveOnlineConfig = false;
   const server = createServer(async (req, res) => {
     try {
@@ -283,28 +266,19 @@ async function main() {
       }
       if (req.method === 'POST' && pathname.startsWith('/rest/v1/rpc/')) {
         const rpc = pathname.slice('/rest/v1/rpc/'.length);
-        if (rpc === 'unlock_project_master') {
+        if (rpc === 'unlock_project') {
           const chunks = [];
           for await (const chunk of req) chunks.push(chunk);
           const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-          auth.requests.push({slug:body._slug, password:body._master_pw});
+          logins.push({slug:body.p_slug, password:body.p_password});
           res.setHeader('Content-Type', 'application/json');
-          const success = () => res.end(JSON.stringify([{token:syntheticMasterToken, role:'viewer',
-            expires_at:new Date(Date.now() + 3600000).toISOString()}]));
-          if (auth.mode === 'pending') {
-            auth.releasePending = success;
-            if (auth.onPending) { auth.onPending(); auth.onPending = null; }
-            return;
+          const role = body.p_password === syntheticAdminPassword ? 'admin'
+            : body.p_password === syntheticViewerPassword ? 'viewer' : null;
+          if (!role || body.p_slug !== sharedSlug) {
+            res.writeHead(401); res.end(JSON.stringify({code:'28P01', message:'invalid credentials'})); return;
           }
-          if (auth.mode === 'network') { res.writeHead(503); res.end(JSON.stringify({code:'503', message:'Synthetic authentication service unavailable'})); return; }
-          if (auth.mode === 'missing') { res.writeHead(404); res.end(JSON.stringify({code:'PGRST202', message:'Could not find the function public.unlock_project_master in the schema cache'})); return; }
-          if (auth.mode === 'expired') {
-            res.end(JSON.stringify([{token:syntheticMasterToken, role:'viewer', expires_at:'2000-01-01T00:00:00.000Z'}])); return;
-          }
-          if (auth.mode === 'wrong' || body._master_pw !== syntheticMasterPassword || body._slug !== sharedSlug) {
-            res.writeHead(401); res.end(JSON.stringify({code:'28000', message:'unauthorized'})); return;
-          }
-          success(); return;
+          res.end(JSON.stringify([{token:'synthetic-' + role + '-token', role,
+            expires_at:new Date(Date.now() + 3600000).toISOString()}])); return;
         }
         const readOnly = new Set(['get_project_doc', 'list_rois', 'list_share_overlays', 'list_share_alignments', 'list_share_images']);
         if (!readOnly.has(rpc)) { forbidden.push({method: req.method, path: pathname}); res.writeHead(403); res.end('Unexpected write or RPC'); return; }
@@ -432,9 +406,10 @@ async function main() {
     if (process.env.PPT_REPORT_SAMPLE_PATH) await fs.writeFile(process.env.PPT_REPORT_SAMPLE_PATH, sampleDeck.bytes);
     await page.close();
     serveOnlineConfig = true;
-    assert.equal(auth.requests.length, 0, 'Local master options do not call the shared master RPC');
-    await checkSharedReport(browser, origin, 'viewer', traffic, auth);
-    await checkSharedReport(browser, origin, 'admin', traffic, auth);
+    assert.equal(logins.length, 0, 'Local master options do not authenticate again');
+    await checkSharedReport(browser, origin, 'viewer', traffic, logins);
+    await checkSharedReport(browser, origin, 'admin', traffic, logins);
+    assert.ok(!traffic.some(item => item.path === '/rest/v1/rpc/unlock_project_master'), 'No PPT path invokes the master authentication RPC');
     assert.deepEqual(forbidden, [], 'PPT export invokes only read and authentication RPCs and never writes project data');
   } finally {
     if (browser) await browser.close();
