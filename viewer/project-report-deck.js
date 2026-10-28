@@ -112,9 +112,9 @@
         scanSpeed: 'Scan speed', msMethod: 'MS method', rtStart: 'RT start', rtEnd: 'RT end',
         polarity: 'Polarity', precursor: 'Precursor m/z', product: 'Product m/z',
         ce: 'Collision energy', cv: 'Cone voltage', mz: 'm/z', adduct: 'Adduct',
-        percentile: 'Color upper percentile (%)', basis: 'Display scale basis',
-        statisticsBasis: 'Statistics basis', percentileValue: 'Measured percentile value',
-        sampleCount: 'Measured display pixel count', upper: 'Color upper bound', upperBasis: 'Upper bound source'
+        percentile: 'Percentile (%)', basis: 'Image scale',
+        statisticsBasis: 'Statistics', percentileValue: 'p99.8 value',
+        sampleCount: 'Measured pixels', upper: 'Upper limit', upperBasis: 'Upper limit source'
     };
     function fieldLabel(key) {
         const label = FIELD_LABELS[key] || string(key).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/_/g, ' ');
@@ -129,6 +129,7 @@
         const containers = new Set(['acquisition', 'raw', 'metadata']);
         const join = (prefix, label) => [prefix, label].filter(Boolean).join(' / ');
         const visit = (value, prefix, skipName = false) => {
+            if (value == null || value === '') return;
             if (value && typeof value === 'object') {
                 if (parents.has(value)) { result.push({ label: prefix, value: '[Circular reference]' }); return; }
                 parents.add(value);
@@ -148,7 +149,7 @@
                         } else if (containers.has(key)) visit(item, prefix);
                         else visit(item, join(prefix, list ? String(Number(key) + 1) : fieldLabel(key)));
                     }
-                } else result.push({ label: prefix, value: Array.isArray(value) ? '[]' : '{}' });
+                }
                 parents.delete(value);
             } else result.push({ label: prefix, value: string(value) });
         };
@@ -198,12 +199,20 @@
     }
     async function addMetadata(pptx, report, checkpoint) {
         const rows = metadataRows(report.metadata);
-        if (report.intensityScale) rows.push(...metadataRows({ 'Intensity scale': report.intensityScale }));
+        const scaleInfo = scale => {
+            const names = { 'finite-measured-display-raster': 'Measured image pixels',
+                'original-measurement-rows': 'Original measurement rows', percentile: 'p99.8',
+                'positive-maximum-fallback': 'Positive maximum (p99.8 is zero or negative)',
+                'unit-fallback': '1 (no positive intensity range)' };
+            return Object.fromEntries(Object.entries(scale || {}).map(([key, value]) =>
+                [key, ['basis', 'statisticsBasis', 'upperBasis'].includes(key) ? names[value] || value : value]));
+        };
+        if (report.intensityScale) rows.push(...metadataRows({ 'Intensity scale': scaleInfo(report.intensityScale) }));
         // Prepared reports may include further registered molecule metadata.
         for (let moleculeIndex = 0; moleculeIndex < report.molecules.length; moleculeIndex++) {
             const molecule = report.molecules[moleculeIndex], scope = 'Molecule ' + (moleculeIndex + 1);
             const common = metadataRows(molecule.metadata, { prefix: scope, skipName: true });
-            const scale = metadataRows(molecule.intensityScale, { prefix: scope });
+            const scale = metadataRows(scaleInfo(molecule.intensityScale), { prefix: scope });
             const sectionRows = [];
             for (let sectionIndex = 0; sectionIndex < (molecule.sections || []).length; sectionIndex++) {
                 const section = molecule.sections[sectionIndex];

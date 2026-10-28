@@ -135,7 +135,7 @@ async function main() {
     const integrated = await unzip(prepared);
     const integratedText = integrated.all.replace(/<[^>]*>/g, '');
     for (const value of ['Mouse kidney', '研究者 A', 'Xevo TQ', 'sample.raw', 'FULL_METADATA_VALUE',
-        'Registered kidney section', 'Pixel pitch', 'finite-measured-display-raster', 'original-measurement-rows', 'p99.8', '[M-H]-', 'MRM Function 7']) {
+        'Registered kidney section', 'Pixel pitch', 'Measured image pixels', 'Original measurement rows', 'p99.8', '[M-H]-', 'MRM Function 7']) {
         assert.ok(integratedText.includes(value), 'Integrated metadata retains ' + value);
     }
     assert.ok(integratedText.includes('最大・平均は元測定行の統計値を使用。'), 'Scientific display/statistics note is visible');
