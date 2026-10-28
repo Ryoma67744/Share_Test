@@ -53,9 +53,11 @@ Send to collaborators (URL and viewer pw on separate channels)
 
 ## PowerPoint report
 
-Open a local project and select **PPTレポート** in the viewer toolbar to download a `.pptx`. This works in both online and offline editions; it is unavailable in shared-link viewing mode.
+Open a project and select **PPTレポート** beside **Export ZIP** in the viewer toolbar to download a `.pptx`. This works for local projects in both online and offline editions, and in shared-link views without an Admin login.
 
 The report uses registered project information, Memo, section names, molecule names and acquisition conditions. It includes metadata, section-by-molecule image matrices, and detailed molecule images with editable Max/Mean tables. Large collections are paginated. All project sections and molecules are included regardless of display visibility or Method filters. ROI statistical charts are not included.
+
+Public and viewer share access includes the published Memo, molecule and section names, precursor/product values and other viewable information. Reports omit CE/CV, detailed instrument acquisition conditions and source filenames for those roles. Master/admin reports continue to include this registered measurement information.
 
 Images use a common display-raster p99.8 upper limit across sections with the same molecule and measurement conditions, with a black/blue/purple/red/yellow palette. Saved rotation and reflection are retained. Viewer Range, palette, Otsu removal and zoom do not affect this report. Physical scale bars are omitted.
 
@@ -392,7 +394,7 @@ The Memo panel at the bottom right of the viewer:
 
 Values auto-save to IndexedDB (~400 ms debounce). On Publish they're also written to the server's `projects.meta.memo`.
 
-> The Method (MRM) table's **Precursor / Fragment / CE / CV** columns are **admin-only**. Visitors entering with the regular viewer password don't see them; only those who unlock with the admin password do.
+> The Method (MRM) table's **Precursor / Fragment** columns are visible to regular viewers. **CE / CV** remain **admin-only** and are hidden from visitors using the regular viewer password.
 
 > **Colormap dropdown**: The toolbar's **Colormap** picker (Plasma / Viridis / Inferno / Hot / Jet / Grayscale) sets the MSI heatmap palette. Your choice is stored in `project.meta.colormap` and ships with Publish to share, so recipients open with the colour you picked. Recipients see the same dropdown and can override locally (kept in sessionStorage for that tab only).
 
@@ -502,7 +504,7 @@ Use the header's **Import ZIP**:
 
 - Export ZIP is for **local backup and offline distribution** (no share URL is generated)
 - Recipients use the viewer's **Import ZIP** to load it back into IndexedDB
-- The receiving viewer cannot re-publish or re-export from share mode (those buttons are hidden)
+- Share viewers can save locally with **Export ZIP / PPTレポート**. They cannot re-publish with **Publish to share** (that button is hidden in share mode)
 - ZIP is fully self-contained — nothing depends on Supabase being reachable
 
 ### 9-8. Size guidance

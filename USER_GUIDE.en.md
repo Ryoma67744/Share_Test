@@ -19,6 +19,7 @@ Master-side operations (creating projects, registering layers, publishing, etc.)
 8. [Editing the Memo](#8-editing-the-memo)
 9. [Preview overlay (image grid)](#9-preview-overlay-image-grid)
 10. [Export ZIP for local download](#10-export-zip-for-local-download)
+10-report. [PowerPoint report](#powerpoint-report)
 11. [What gets saved vs discarded](#11-what-gets-saved-vs-discarded)
 12. [Keyboard shortcuts](#12-keyboard-shortcuts)
 
@@ -47,7 +48,7 @@ Master-side operations (creating projects, registering layers, publishing, etc.)
 
 The session expires after **12 hours**. Closing the tab is fine — re-opening the URL with the same password logs you back in.
 
-> The same URL also accepts an **admin password** set by the publisher. Opening with the admin password unlocks the additional Method (MRM) columns (Precursor / Fragment / CE / CV); a regular viewer password keeps those four columns hidden.
+> Use **🔑 Admin** in the top bar and enter the publisher's **admin password** to unlock the additional Method (MRM) columns **CE / CV**. **Precursor / Fragment** are also visible with a regular viewer password.
 
 ---
 
@@ -55,7 +56,7 @@ The session expires after **12 hours**. Closing the tab is fine — re-opening t
 
 <div style="border:1px solid #475569;border-radius:6px;overflow:hidden;font-size:11px;margin:10px 0;background:#fff;">
   <div style="background:#1e293b;color:#fff;padding:6px 10px;font-weight:600;letter-spacing:0.02em;">
-    Top Bar &nbsp;—&nbsp; 🔒 Share view / Free / Compound / Export ZIP / Help
+    Top Bar &nbsp;—&nbsp; 🔒 Share view / Free / Compound / Export ZIP / PPTレポート / Help
   </div>
   <div style="display:grid;grid-template-columns:170px 1fr 220px;">
     <div style="background:#f8fafc;padding:8px;border-right:1px solid #cbd5e1;">
@@ -106,7 +107,7 @@ The session expires after **12 hours**. Closing the tab is fine — re-opening t
 
 | Region | Role |
 | --- | --- |
-| Top Bar | View mode toggle (Free / Compound), Preview, Export ZIP, 🔑 Admin, Help |
+| Top Bar | View mode toggle (Free / Compound), Preview, Export ZIP, PPTレポート, 🔑 Admin, Help |
 | ROI LIST | Project-wide ROI list. Show toggle, draw new, draw on extra section |
 | Sections Grid | Section panels. Click to activate (blue outline); drag to pan; wheel to zoom |
 | Method (MRM) | MSI layer table for the active section. Click / ↑↓ keys to switch |
@@ -280,14 +281,14 @@ The **Method (MRM)** table at the bottom-left lists every MSI layer in the activ
 | Column | Meaning | Visible when |
 | --- | --- | --- |
 | Compound | Compound name | Always |
-| Precursor | Precursor m/z | **Admin only** |
-| Fragment | Fragment (product) m/z | **Admin only** |
+| Precursor | Precursor m/z | Always |
+| Fragment | Fragment (product) m/z | Always |
 | CE | Collision Energy | **Admin only** |
 | CV | Collision Voltage / Compensation Voltage | **Admin only** |
 | Mean | Mean of valid original rows for this section and molecule | Always (`—` when unavailable) |
 | Max | Maximum of valid original rows for this section and molecule | Always (`—` when unavailable) |
 
-> Viewers opening with the regular viewer password do **not** see the Precursor / Fragment / CE / CV columns. Those are MS-instrument parameters and are revealed only when the URL is opened with the admin password.
+> Regular viewers can see **Precursor / Fragment**. **CE / CV** are visible only in the admin view, opened with the admin password.
 
 Clicking a row:
 - **Compound mode** focuses that compound across every section (handy for cross-section comparison)
@@ -465,6 +466,18 @@ Each CSV has a `.source-cells.json` sidecar recording source row IDs, coordinate
 - Recipients **cannot re-upload or publish** from share mode (those buttons are hidden)
 
 > Current v2 and supported legacy v1 ZIPs can be imported. Still older per-compound `msi_<layerKey>__` ZIPs are unsupported. Without original sources, precision and missing-state information already lost in old exports cannot be recovered from PNGs or derived CSVs.
+
+---
+
+## PowerPoint report
+
+Select **PPTレポート** beside **Export ZIP** at the top of the shared view to download the current project as a `.pptx`. **No Admin login is required.**
+
+The report uses the published Memo, molecule and section names, precursor/product values and other viewable information. It includes an overview, section-by-molecule image matrices, and detailed molecule images with editable Max/Mean tables. Public and viewer reports omit CE/CV, detailed instrument acquisition conditions and source filenames. Admin reports include this registered measurement information.
+
+All project sections and molecules are included regardless of section visibility or Method filters, with additional pages for large collections. Images use a common display-raster p99.8 upper limit across sections with the same molecule and measurement conditions, using a black/blue/purple/red/yellow palette. Saved rotation and reflection are retained. Viewer Range, palette, Otsu removal and zoom do not affect the report. Physical scale bars are omitted.
+
+Max/Mean use original measurement-row statistics. Display p99.8 uses raster representatives, including the display's averaging of duplicate coordinates. Missing sources or images are marked as unavailable rather than measured zero. **ROI statistical charts are not included.** Generation shows progress and supports cancellation.
 
 ---
 

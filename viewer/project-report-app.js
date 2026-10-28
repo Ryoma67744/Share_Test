@@ -16,6 +16,25 @@
         'channelIndex', 'rtStart', 'rtEnd']);
     // Names alone do not identify an MRM transition or its acquisition conditions.
     const conditionFields = ['precursor', 'product', 'ce', 'cv', 'polarity', 'mz', 'adduct', 'formula', 'dwell'];
+    // Share documents contain the full method. Match the recipient-facing UI
+    // at the report boundary; keep full conditions privately for grouping.
+    const viewerMetadataFields = new Set(['name', 'base', 'precursor', 'product', 'polarity', 'mz', 'adduct', 'formula']);
+    function viewerMeta(key, meta, registeredBase) {
+        // A public field is a scalar, never a container for arbitrary method
+        // metadata (the deck's metadata writer recursively expands objects).
+        const scalar = value => typeof value === 'string' || typeof value === 'number' && Number.isFinite(value);
+        const out = Object.fromEntries(Object.entries(meta).filter(([field, value]) => viewerMetadataFields.has(field) && scalar(value)));
+        // Legacy source labels end in _CE_CV. A registered base is already the
+        // display name; never export a second, untrimmed name alongside it.
+        const numericSuffix = /_[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?_[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
+        const name = registeredBase && scalar(registeredBase) ? registeredBase : label(key, out).replace(numericSuffix, '');
+        out.name = out.base = String(name);
+        return out;
+    }
+    function shareSignature(app, project) {
+        const session = app.shareMode || {};
+        return JSON.stringify([!!project.__share, !!app.shareMode, session.role, session.slug, session.token, session.expiresAt]);
+    }
     function registeredMeta(entry, fallback) {
         const source = entry && entry.compoundMeta || fallback || {}, out = {};
         for (const key of metadataFields) if (source[key] != null && source[key] !== '') out[key] = copy(source[key]);
@@ -23,6 +42,9 @@
     }
     function conditionValue(key, value) {
         if (value == null || value === '') return null;
+        // JSON snapshots turn non-finite numbers into null. Treat them as
+        // missing consistently when comparing the live source with a snapshot.
+        if (typeof value === 'number' && !Number.isFinite(value)) return null;
         if (numericConditions.has(key) && Number.isFinite(Number(value))) return Number(value);
         return String(value);
     }
@@ -64,12 +86,14 @@
     function createAdapter(hooks, options = {}) {
         const app = hooks.getApp(), project = app && app.project;
         if (!project) throw new Error('プロジェクトを開いてから PPT レポートを作成してください。');
-        if (app.shareMode || project.__share) throw new Error('PPT レポートは管理画面でプロジェクトを開いて作成してください。');
+        const session = app.shareMode, shareState = shareSignature(app, project);
+        const viewer = !!(session || project.__share) && (!session || session.role !== 'admin');
         const sections = (project.sections || []).slice();
         const sectionStates = sections.map(section => ({ section, panel: app.panels.get(section.id), keys: msiKeys(section) }));
         const jobs = [], groups = new Map();
+        const sourceMeta = (entry, key) => entry && entry.compoundMeta || (hooks.findCompoundMeta && hooks.findCompoundMeta(project, key)) || {};
         const liveMeta = (entry, key) => {
-            const meta = entry && entry.compoundMeta || (hooks.findCompoundMeta && hooks.findCompoundMeta(project, key)) || {};
+            const meta = sourceMeta(entry, key);
             return !meta.base && !meta.name && hooks.formatDisplayName ? { ...meta, base: hooks.formatDisplayName(key) } : meta;
         };
         for (const state of sectionStates) {
@@ -87,7 +111,7 @@
                 if (sourceFile && !meta.sourceFile) meta.sourceFile = sourceFile;
                 const scientificId = moleculeIdentity(key, meta);
                 const job = { state, key, entry, image: (section.images || {})[key], scientificId,
-                    source: sourceSignature(state.panel, key, entry), meta,
+                    source: sourceSignature(state.panel, key, entry), meta: viewer ? viewerMeta(key, meta, sourceMeta(entry, key).base) : meta,
                     transform: copy(hooks.transform ? hooks.transform(section) : identity()),
                     pixelPitch: copy(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px) };
                 jobs.push(job);
@@ -107,15 +131,35 @@
             const repeat = ambiguous.has(job.scientificId);
             const groupId = repeat ? JSON.stringify([job.scientificId, job.key]) : job.scientificId;
             if (!groups.has(groupId)) groups.set(groupId, { key: groupId, layerKey: job.key, name: label(job.key, job.meta),
-                subtitle: transitionSubtitle(job.meta) + (repeat ? '  |  測定: ' + job.key.replace(/^MSI_/i, '') : ''),
+                subtitle: transitionSubtitle(job.meta) + (repeat && !viewer ? '  |  測定: ' + job.key.replace(/^MSI_/i, '') : ''),
                 metadata: job.meta, jobs: [] });
             groups.get(groupId).jobs.push(job);
+        }
+        if (viewer) {
+            const visibleCounts = new Map(), visibleIndexes = new Map();
+            for (const group of groups.values()) {
+                const visibleId = moleculeIdentity('', group.metadata);
+                visibleCounts.set(visibleId, (visibleCounts.get(visibleId) || 0) + 1);
+            }
+            let index = 0;
+            for (const group of groups.values()) {
+                // The scientific key embeds hidden conditions and the layer
+                // key can embed filenames. Neither belongs in the report.
+                group.key = group.layerKey = 'molecule-' + (++index);
+                const visibleId = moleculeIdentity('', group.metadata);
+                if (visibleCounts.get(visibleId) > 1) {
+                    const measurement = (visibleIndexes.get(visibleId) || 0) + 1;
+                    visibleIndexes.set(visibleId, measurement);
+                    group.subtitle += (group.subtitle ? '  |  ' : '') + '測定 ' + measurement;
+                }
+            }
         }
         let completed = 0;
         function assertCurrent() {
             if (options.signal && options.signal.aborted) throw cancelledError();
             const current = hooks.getApp();
-            if (current !== app || current.project !== project || current.shareMode || project.__share
+            if (current !== app || current.project !== project || current.shareMode !== session
+                || shareSignature(current, project) !== shareState
                 || (project.sections || []).length !== sections.length) throw staleError();
             for (let i = 0; i < sectionStates.length; i++) {
                 const state = sectionStates[i];
@@ -174,7 +218,7 @@
         }
         metadata.sections = sections.map(section => ({ sectionId: section.id,
             name: section.displayName || ('Section ' + (section.ordinal || '')),
-            acquisition: copy(section.meta && section.meta.raw || {}),
+            acquisition: viewer ? {} : copy(section.meta && section.meta.raw || {}),
             pixelPitch: copy(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px || null) }));
         const input = { projectName: project.displayName || 'Project', generatedAt: options.generatedAt || new Date().toISOString(),
             metadata, sections: metadata.sections.map(section => ({ id: section.sectionId, name: section.name })),

@@ -19,7 +19,7 @@ function fixture() {
         focusCompoundKey: 'MSI_other', msiScaleMode: 'relative', selectedSectionIds: ['left'] };
     for (const section of sections) {
         const panel = { section, project, visibleLayers: new Set(), msiValueRasters: new Map(),
-            _msiLoadIdentity(key) { const e = section.msiSeries[key] || {}; return JSON.stringify([e.blobId, e.sourceRevision]); },
+            _msiLoadIdentity(key) { const e = section.msiSeries[key] || {}; return JSON.stringify([e.blobId, e.sourceUrl, e.sourceRevision]); },
             async ensureMsiLayerLoaded(key) {
                 calls.push([section.id, key]);
                 this.msiValueRasters.set(key, { W: 2, H: 1, values: new Float64Array([20, 100]) });
@@ -32,6 +32,34 @@ function fixture() {
         mean: entry => entry.quantVersion === 'msi-source-rows-v1' ? entry.rawMean : null,
         max: entry => ({ value: entry.quantVersion === 'msi-source-rows-v1' ? entry.rawTrueMax : null }) };
     return { app, project, sections, calls, hooks, transform, makeEntry };
+}
+
+function sharedFixture(role = 'viewer') {
+    const f = fixture();
+    f.project.__share = true;
+    f.app.shareMode = { role, slug: 'shared-project', token: 'private-session-token', isPublic: role !== 'admin' };
+    for (const section of f.sections) {
+        Object.assign(section.meta.raw, { instrument: 'private-acquisition-instrument',
+            desi: { coneVoltage: 620.98765, collisionEnergy: 715.12345, nested: { note: 'private-acquisition-note' } } });
+        Object.assign(section.msiSeries.MSI_DA.compoundMeta, {
+            base: 'Dopamine', name: 'Dopamine_715.12345_620.98765', ce: 715.12345, cv: 620.98765,
+            dwell: 0.87654321, sourceFile: 'private-source-file.txt', instrument: 'private-layer-instrument',
+            acquiredAt: 'private-acquisition-date', msMethod: 'private-method-file', tuneMethod: 'private-tune-file',
+            calibrationFile: 'private-calibration-file', mz: 154.0868, adduct: '[M+H]+', formula: 'C8H11NO2'
+        });
+    }
+    return f;
+}
+
+function assertPublicReport(snapshot) {
+    const text = JSON.stringify(snapshot);
+    for (const privateText of ['715.12345', '620.98765', '0.87654321', 'private-source-file',
+        'private-acquisition', 'private-layer-instrument', 'private-method-file', 'private-tune-file',
+        'private-calibration-file', 'private-session-token']) {
+        assert.equal(text.includes(privateText), false, privateText + ' must not leave the viewer adapter');
+    }
+    assert.doesNotMatch(text, /"(?:ce|cv|dwell|sourceFile|msMethod|tuneMethod|calibrationFile|acquiredAt)"\s*:/,
+        'private condition fields must not survive in any serializable export metadata');
 }
 
 const tests = [
@@ -174,11 +202,215 @@ const tests = [
         const failed = fixture(); failed.app.panels.get('left').ensureMsiLayerLoaded = async () => { throw new Error('missing'); };
         assert.ok((await report.createAdapter(failed.hooks).molecules[0].loadEntries())[0].missingReason);
     }],
-    ['shared projects are rejected and filename is portable', async () => {
-        const f = fixture(); f.app.shareMode = { role: 'viewer' };
-        assert.throws(() => report.createAdapter(f.hooks), /管理画面/);
-        f.app.shareMode = null; f.project.__share = true;
-        assert.throws(() => report.createAdapter(f.hooks), /管理画面/);
+    ['shared viewers export public names, transitions, Memo, pitch and numeric statistics', async () => {
+        const f = sharedFixture(), before = JSON.stringify(f.project), input = report.createAdapter(f.hooks);
+        assert.equal(input.projectName, '測定プロジェクト');
+        assert.equal(input.molecules.length, 1);
+        const molecule = input.molecules[0];
+        assert.equal(molecule.name, 'Dopamine');
+        assert.equal(molecule.metadata.base, 'Dopamine');
+        assert.equal(molecule.metadata.name, 'Dopamine', 'exported aliases must use the registered public base name');
+        assert.equal(molecule.metadata.precursor, 154.1);
+        assert.equal(molecule.metadata.product, 137.1);
+        assert.equal(molecule.metadata.polarity, '+');
+        assert.equal(molecule.metadata.mz, 154.0868);
+        assert.equal(molecule.metadata.adduct, '[M+H]+');
+        assert.equal(molecule.metadata.formula, 'C8H11NO2');
+        assert.match(molecule.subtitle, /154\.1 → 137\.1/);
+        assert.doesNotMatch(molecule.subtitle, /\b(?:CE|CV|Dwell)\b/);
+        assert.equal(input.metadata.sample, '試料');
+        assert.deepEqual(input.metadata.sampleTypes, ['脳']);
+        assert.equal(input.metadata.experimentDate, '2026-10-28');
+        assert.equal(input.metadata.machine, 'DESI');
+        assert.equal(input.metadata.freeNote, '解析メモ');
+        assert.equal(input.metadata.derivatization, 'registered derivatization');
+        assert.deepEqual(input.metadata.sections[0].pixelPitch, { x: 50, y: 75 });
+        const entries = await molecule.loadEntries();
+        assert.deepEqual(entries[0].pixelPitch, { x: 50, y: 75 });
+        assert.deepEqual(entries[0].stats, { mean: 140 / 3, max: 100, n: 3 });
+        assert.ok(entries.every(entry => entry.raster));
+        assertPublicReport({ input, entries });
+        assert.equal(JSON.stringify(f.project), before, 'redaction must not change the shared project');
+    }],
+    ['share admins retain registered acquisition and measurement conditions', async () => {
+        const f = sharedFixture('admin'), input = report.createAdapter(f.hooks);
+        const molecule = input.molecules[0], entries = await molecule.loadEntries();
+        assert.equal(molecule.metadata.ce, 715.12345);
+        assert.equal(molecule.metadata.cv, 620.98765);
+        assert.equal(molecule.metadata.dwell, 0.87654321);
+        assert.equal(entries[0].metadata.sourceFile, 'private-source-file.txt');
+        assert.equal(input.metadata.sections[0].acquisition.instrument, 'private-acquisition-instrument');
+        assert.match(molecule.subtitle, /CE 715\.12345/);
+        assert.match(molecule.subtitle, /CV 620\.98765/);
+        assert.equal(JSON.stringify({ input, entries }).includes('private-session-token'), false,
+            'admin export includes acquisition metadata, never authentication credentials');
+    }],
+    ['project-only shared flags and unknown roles use viewer output', async () => {
+        for (const configure of [
+            f => { f.app.shareMode = null; },
+            f => { delete f.project.__share; },
+            f => { f.app.shareMode.role = 'owner'; },
+            f => { delete f.app.shareMode.role; }
+        ]) {
+            const f = sharedFixture(); configure(f);
+            const input = report.createAdapter(f.hooks);
+            const entries = await input.molecules[0].loadEntries();
+            assert.equal(entries.length, 2);
+            assertPublicReport({ input, entries });
+        }
+    }],
+    ['hidden CE and CV still distinguish viewer groups without leaking identity values', async () => {
+        const f = sharedFixture();
+        f.sections[1].msiSeries.MSI_DA.compoundMeta.ce = 915.4321;
+        f.sections[0].msiSeries.MSI_secret_key_CV_920_987 = f.makeEntry('private-replicate', {
+            ...f.sections[0].msiSeries.MSI_DA.compoundMeta, cv: 920.7654 });
+        const input = report.createAdapter(f.hooks);
+        assert.equal(input.molecules.length, 3, 'redaction cannot merge distinct acquired conditions');
+        const allEntries = [];
+        for (const molecule of input.molecules) {
+            const entries = await molecule.loadEntries();
+            assert.equal(entries.filter(entry => entry.raster).length, 1);
+            assert.equal(entries.filter(entry => entry.missingReason).length, 1);
+            allEntries.push(entries);
+        }
+        assert.equal(new Set(input.molecules.map(molecule => molecule.key)).size, 3);
+        assert.equal(new Set(input.molecules.map(molecule => molecule.subtitle)).size, 3,
+            'publicly identical transitions need distinguishable safe measurement labels');
+        assert.deepEqual(input.molecules.map(molecule => molecule.subtitle.match(/測定 (\d+)/)?.[1]), ['1', '2', '3']);
+        const exported = JSON.stringify({ input, allEntries });
+        assertPublicReport({ input, allEntries });
+        for (const privateText of ['915.4321', '920.7654', 'secret_key_CV_920_987', 'MSI_DA']) {
+            assert.equal(exported.includes(privateText), false, 'internal grouping/key data must not reveal ' + privateText);
+        }
+    }],
+    ['viewer repeated transitions use safe labels instead of raw source keys', async () => {
+        const f = sharedFixture();
+        f.sections[0].msiSeries.MSI_private_duplicate_key_715_620 = f.makeEntry('duplicate',
+            { ...f.sections[0].msiSeries.MSI_DA.compoundMeta });
+        const input = report.createAdapter(f.hooks);
+        assert.equal(input.molecules.length, 2);
+        const entries = await Promise.all(input.molecules.map(molecule => molecule.loadEntries()));
+        assert.equal(entries.flat().filter(entry => entry.raster).length, 3, 'all acquired measurements survive');
+        assertPublicReport({ input, entries });
+        assert.equal(JSON.stringify({ input, entries }).includes('private_duplicate_key_715_620'), false);
+    }],
+    ['viewer raw-key fallbacks strip parameter suffixes before serialization', async () => {
+        for (const withFormatter of [false, true]) {
+            const f = sharedFixture();
+            if (withFormatter) f.hooks.formatDisplayName = key => key.replace(/^MSI_/i, '');
+            for (const section of f.sections) {
+                const entry = section.msiSeries.MSI_DA;
+                delete entry.compoundMeta;
+                section.msiSeries = { MSI_Dopamine_15_20: entry };
+            }
+            const input = report.createAdapter(f.hooks), entries = await input.molecules[0].loadEntries();
+            assert.equal(input.molecules.length, 1);
+            assert.equal(input.molecules[0].name, 'Dopamine');
+            assert.equal(JSON.stringify({ input, entries }).includes('Dopamine_15_20'), false);
+            assertPublicReport({ input, entries });
+            assert.deepEqual(f.calls, [['left', 'MSI_Dopamine_15_20'], ['right', 'MSI_Dopamine_15_20']],
+                'public names must not rewrite the actual source lookup key');
+        }
+    }],
+    ['viewer fallback names remove signed decimal and exponent condition suffixes', async () => {
+        for (const suffix of ['15.5_-20.25', '+1.5e1_-2.0E+1', '.5_-.25', '-15._+20.']) {
+            for (const useNameMetadata of [false, true]) {
+                const f = sharedFixture(), key = 'MSI_Dopamine_' + suffix;
+                f.hooks.formatDisplayName = rawKey => rawKey.replace(/^MSI_/i, '');
+                for (const section of f.sections) {
+                    const entry = section.msiSeries.MSI_DA;
+                    entry.compoundMeta = useNameMetadata ? { name: 'Dopamine_' + suffix,
+                        precursor: 154.1, product: 137.1, ce: 15.5, cv: -20.25 } : null;
+                    section.msiSeries = { [key]: entry };
+                }
+                const input = report.createAdapter(f.hooks), entries = await input.molecules[0].loadEntries();
+                assert.equal(input.molecules.length, 1);
+                assert.equal(input.molecules[0].name, 'Dopamine', suffix);
+                assert.equal(input.molecules[0].metadata.name, 'Dopamine', suffix);
+                assert.equal(input.molecules[0].metadata.base, 'Dopamine', suffix);
+                assert.equal(JSON.stringify({ input, entries }).includes('Dopamine_' + suffix), false,
+                    'suffix must not survive in report names, metadata, keys or subtitles: ' + suffix);
+                assertPublicReport({ input, entries });
+                assert.deepEqual(f.calls, [['left', key], ['right', key]]);
+            }
+        }
+        const explicit = sharedFixture();
+        for (const section of explicit.sections) section.msiSeries.MSI_DA.compoundMeta.base = 'Registered_name_34_1';
+        const input = report.createAdapter(explicit.hooks);
+        assert.equal(input.molecules[0].name, 'Registered_name_34_1', 'an explicit public base is not a guessed CE/CV suffix');
+    }],
+    ['public metadata rejects nested method containers and nonfinite scalar values', async () => {
+        const f = sharedFixture();
+        for (const section of f.sections) Object.assign(section.msiSeries.MSI_DA.compoundMeta, {
+            precursor: 0, product: ['nested-private-product', { ce: 715.12345 }],
+            polarity: true, mz: Infinity,
+            adduct: { value: '[M+H]+', sourceFile: 'nested-private-source-file' },
+            formula: { value: 'C8H11NO2', method: { cv: 620.98765, note: 'nested-private-method-note' } }
+        });
+        const input = report.createAdapter(f.hooks), entries = await input.molecules[0].loadEntries();
+        for (const metadata of [input.molecules[0].metadata, ...entries.map(entry => entry.metadata)]) {
+            assert.equal(metadata.precursor, 0, 'finite scalar zero is public data, not missing');
+            assert.equal(metadata.base, 'Dopamine');
+            for (const field of ['product', 'polarity', 'mz', 'adduct', 'formula']) {
+                assert.equal(Object.hasOwn(metadata, field), false, field + ' must be a string or finite number');
+            }
+        }
+        const text = JSON.stringify({ input, entries });
+        assert.equal(text.includes('nested-private'), false, 'recursive deck metadata cannot reach private nested containers');
+        assert.equal(text.includes('[object Object]'), false);
+        assertPublicReport({ input, entries });
+
+        const malformedName = sharedFixture();
+        for (const section of malformedName.sections) Object.assign(section.msiSeries.MSI_DA.compoundMeta, {
+            base: { label: 'nested-private-base', method: { ce: 715.12345 } },
+            name: ['nested-private-name', { cv: 620.98765 }]
+        });
+        const safe = report.createAdapter(malformedName.hooks), safeEntries = await safe.molecules[0].loadEntries();
+        assert.equal(safe.molecules[0].name, 'DA', 'non-scalar aliases fall back to the public layer name');
+        assert.equal(JSON.stringify({ safe, safeEntries }).includes('nested-private'), false);
+        assertPublicReport({ safe, safeEntries });
+    }],
+    ['share role, token, slug, session identity and shared flag changes invalidate exports', async () => {
+        const changes = [
+            ['role', f => { f.app.shareMode.role = 'admin'; }],
+            ['token', f => { f.app.shareMode.token = 'new-token'; }],
+            ['slug', f => { f.app.shareMode.slug = 'other-project'; }],
+            ['session', f => { f.app.shareMode = { ...f.app.shareMode }; }],
+            ['exit share', f => { f.app.shareMode = null; }],
+            ['shared flag', f => { f.project.__share = false; }]
+        ];
+        for (const [name, change] of changes) {
+            const f = sharedFixture(), input = report.createAdapter(f.hooks);
+            change(f);
+            assert.throws(input.assertCurrent, { code: 'REPORT_SOURCE_CHANGED' }, name);
+            await assert.rejects(input.molecules[0].loadEntries(), { code: 'REPORT_SOURCE_CHANGED' }, name);
+            assert.equal(f.calls.length, 0, 'stale access is rejected before source loading: ' + name);
+        }
+    }],
+    ['access changes during source loading abort before output is returned', async () => {
+        const f = sharedFixture('admin'), panel = f.app.panels.get('left'), load = panel.ensureMsiLayerLoaded;
+        panel.ensureMsiLayerLoaded = async function (key) {
+            await load.call(this, key);
+            f.app.shareMode.role = 'viewer';
+            return true;
+        };
+        const input = report.createAdapter(f.hooks);
+        await assert.rejects(input.molecules[0].loadEntries(), { code: 'REPORT_SOURCE_CHANGED' });
+        assert.equal(f.calls.length, 1, 'the second section is not loaded after admin access changes');
+    }],
+    ['sourceUrl-only shared layers use numeric loading and detect URL replacement', async () => {
+        const f = sharedFixture();
+        for (const section of f.sections) Object.assign(section.msiSeries.MSI_DA,
+            { blobId: null, kind: 'parquet', sourceUrl: 'https://storage.example/' + section.id + '.parquet' });
+        const input = report.createAdapter(f.hooks), entries = await input.molecules[0].loadEntries();
+        assert.deepEqual(f.calls, [['left', 'MSI_DA'], ['right', 'MSI_DA']]);
+        assert.ok(entries.every(entry => entry.raster && !entry.missingReason));
+        assert.deepEqual(entries[0].stats, { mean: 140 / 3, max: 100, n: 3 });
+        assert.equal(JSON.stringify({ input, entries }).includes('https://storage.example/'), false);
+        f.sections[0].msiSeries.MSI_DA.sourceUrl = 'https://storage.example/replaced.parquet';
+        assert.throws(input.assertCurrent, { code: 'REPORT_SOURCE_CHANGED' });
+    }],
+    ['report filename is portable', async () => {
         assert.equal(report.safeFileName('../測定:<project>?'), '.._測定__project___report.pptx');
         assert.equal(report.safeFileName('CON'), '_CON_report.pptx');
         assert.equal(report.safeFileName('...'), 'Project_report.pptx');

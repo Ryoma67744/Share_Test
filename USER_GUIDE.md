@@ -19,6 +19,7 @@
 8. [Memo の編集](#8-memo-の編集)
 9. [Preview overlay (画像グリッド)](#9-preview-overlay-画像グリッド)
 10. [Export ZIP で手元に保存](#10-export-zip-で手元に保存)
+10-report. [PPTレポート](#pptレポート)
 11. [保存されること・破棄されること](#11-保存されること破棄されること)
 12. [キーボードショートカット](#12-キーボードショートカット)
 
@@ -45,7 +46,7 @@
 3. **Unlock** を押すとプロジェクトが読み込まれる
 4. ヘッダ右に 🔒 **Share view** バッジが付き、編集系ボタンは自動的に隠れる
 
-> 同じ URL でも、提供者が設定した **admin password** で開くと管理者ビューになります。管理者ビューでは Method (MRM) テーブルの Precursor / Fragment / CE / CV まで表示されます。通常の viewer password ではこれら 4 列は隠れます。
+> 上部の **🔑 Admin** から提供者が設定した **admin password** を入力すると管理者ビューになり、Method (MRM) テーブルの **CE / CV** も表示されます。**Precursor / Fragment** は通常の viewer password でも表示されます。
 
 セッションは **12 時間** で失効します。タブを閉じても再度 URL を開けば同じパスワードでログインし直せます。
 
@@ -55,7 +56,7 @@
 
 <div style="border:1px solid #475569;border-radius:6px;overflow:hidden;font-size:11px;margin:10px 0;background:#fff;">
   <div style="background:#1e293b;color:#fff;padding:6px 10px;font-weight:600;letter-spacing:0.02em;">
-    Top Bar &nbsp;—&nbsp; 🔒 Share view / Free / Compound / Export ZIP / Help
+    Top Bar &nbsp;—&nbsp; 🔒 Share view / Free / Compound / Export ZIP / PPTレポート / Help
   </div>
   <div style="display:grid;grid-template-columns:170px 1fr 220px;">
     <div style="background:#f8fafc;padding:8px;border-right:1px solid #cbd5e1;">
@@ -106,7 +107,7 @@
 
 | 領域 | 役割 |
 | --- | --- |
-| Top Bar | 表示モード切替 (Free / Compound)・Preview・Export ZIP・🔑 Admin・Help |
+| Top Bar | 表示モード切替 (Free / Compound)・Preview・Export ZIP・PPTレポート・🔑 Admin・Help |
 | ROI LIST | 全切片共通の ROI 一覧。表示トグル・新規描画・各 ROI への追加描画 |
 | Sections Grid | 切片パネル。クリックでアクティブ (青枠) 化、ドラッグでパン、ホイールでズーム |
 | Method (MRM) | アクティブ切片の MSI レイヤー一覧。クリック / ↑↓ キーで切替 |
@@ -285,14 +286,14 @@ ROI LIST ヘッダの **「ROIのみ」** チェックを ON にすると、**�
 | 列 | 意味 | 表示条件 |
 | --- | --- | --- |
 | Compound | 化合物名 | 常に表示 |
-| Precursor | プリカーサ m/z | **管理者のみ** |
-| Fragment | フラグメント (プロダクト) m/z | **管理者のみ** |
+| Precursor | プリカーサ m/z | 常に表示 |
+| Fragment | フラグメント (プロダクト) m/z | 常に表示 |
 | CE | Collision Energy | **管理者のみ** |
 | CV | Collision Voltage / Compensation Voltage | **管理者のみ** |
 | Mean | 切片・分子の有効な元測定行の平均 | 常に表示 (未算出は `—`) |
 | Max | 切片・分子の有効な元測定行の最大値 | 常に表示 (未算出は `—`) |
 
-> 通常の viewer password で開いた閲覧者には Precursor / Fragment / CE / CV の 4 列は **表示されません**。これらは MS の機械パラメタなので、管理者ビュー (admin password で開いた場合) でのみ参照できます。
+> 通常の viewer password でも **Precursor / Fragment** を参照できます。**CE / CV** は管理者ビュー (admin password で開いた場合) でのみ表示されます。
 
 行をクリックすると:
 - **Compound モード** … 全切片で同じ化合物がフォーカス表示される (切片間比較に便利)
@@ -470,6 +471,18 @@ MSI レイヤーが表示されていて、提供者側で **MSI pixel size (μm
 - 受け手側からの **再アップロード / Publish は不可**(共有モードでは該当ボタン非表示)
 
 > 現行の v2 と対応する旧 v1 ZIP を読み込めます。さらに古い化合物ごとの `msi_<layerKey>__` 形式は非対応です。元ソースがない古い ZIP は、失われた精度や欠測状態を PNG／派生 CSV から復元できません。
+
+---
+
+## PPTレポート
+
+共有ビュー上部の **Export ZIP** 横にある **PPTレポート** を押すと、閲覧中のプロジェクトを `.pptx` でダウンロードできます。**Adminログインは不要**です。
+
+公開Memo、分子名、切片名、precursor/productなどの閲覧可能な情報を使い、概要、切片×分子の画像一覧、分子ごとの画像と編集可能な最大・平均強度表を作成します。公開ビュー／viewer権限のレポートには、CE/CV、詳細な装置取得条件、ソースファイル名を含めません。admin権限ではこれらの登録済み測定情報も含めます。
+
+画面の切片非表示やMethodフィルターにかかわらず、プロジェクト内の全切片・全分子が対象です。枚数が多い場合はページを分割します。画像は同じ分子・測定条件の全切片で共通の表示用p99.8を上限とし、黒→青→紫→赤→黄で表示します。登録された回転・反転を反映し、画面のRange、色、Otsu背景除去、ズームは適用しません。物理スケールバーは付けません。
+
+最大・平均強度は元測定行の統計値を使います。表示用p99.8は画像ラスタから計算するため、同一座標の重複測定を平均する表示処理の影響を受けます。画像や元データを取得できない場合は欠測として記載し、ゼロで補いません。**ROI別の統計グラフは含みません**。作成中は進捗が表示され、中止できます。
 
 ---
 
