@@ -161,6 +161,48 @@
     return COLORS[low].map((v, i) => Math.round(v * (1 - f) + COLORS[high][i] * f));
   }
 
+  function physicalDimensions(g, pitch) {
+    if (!pitch || ![pitch.x, pitch.y].every(v => Number.isFinite(v) && v > 0)) return {};
+    const m = g.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    // A horizontal ruler measures distance along the displayed horizontal
+    // axis. Invert the display affine before applying the calibrated pitches;
+    // this also handles rotations, reflections and non-square source pixels.
+    const horizontal = Math.hypot(m[1][1] * pitch.x / det, m[1][0] * pitch.y / det);
+    const vertical = Math.hypot(m[0][1] * pitch.x / det, m[0][0] * pitch.y / det);
+    const physicalWidthUm = g.width / g.scale * horizontal;
+    const physicalHeightUm = g.height / g.scale * vertical;
+    return [physicalWidthUm, physicalHeightUm].every(v => Number.isFinite(v) && v > 0)
+      ? {physicalWidthUm, physicalHeightUm} : {};
+  }
+
+  // Optical/TIC references are already loaded image assets, never screen
+  // captures with controls or annotation text. Keep their native colour and
+  // use the same registered orientation as their corresponding image layer.
+  function renderReference(source, transform, options) {
+    const o = options || {}, w = source && (source.naturalWidth || source.width),
+      h = source && (source.naturalHeight || source.height);
+    if (!(w > 0 && h > 0)) return null;
+    const m = affine(transform);
+    const worldWidth = Math.abs(m[0][0]) * w + Math.abs(m[0][1]) * h;
+    const worldHeight = Math.abs(m[1][0]) * w + Math.abs(m[1][1]) * h;
+    const scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(worldWidth, worldHeight));
+    if (![worldWidth, worldHeight, scale].every(v => Number.isFinite(v) && v > 0)) return null;
+    const width = Math.max(1, Math.ceil(worldWidth * scale)), height = Math.max(1, Math.ceil(worldHeight * scale));
+    const makeCanvas = o.createCanvas || ((cw, ch) => {
+      const canvas = document.createElement('canvas'); canvas.width = cw; canvas.height = ch; return canvas;
+    });
+    const canvas = makeCanvas(width, height); canvas.width = width; canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.setTransform(m[0][0] * scale, m[1][0] * scale, m[0][1] * scale, m[1][1] * scale,
+      width / 2 - (m[0][0] * w + m[0][1] * h) * scale / 2,
+      height / 2 - (m[1][0] * w + m[1][1] * h) * scale / 2);
+    ctx.drawImage(source, 0, 0);
+    return {data: canvas.toDataURL('image/png'), width, height};
+  }
+
   async function render(raster, upper, options) {
     const o = options || {}, g = geometry(raster, o.transform, o.maxDimension, o.nearestUpscale !== false);
     const makeCanvas = o.createCanvas || ((w, h) => {
@@ -191,7 +233,8 @@
     }
     if (o.assertCurrent) o.assertCurrent();
     ctx.putImageData(pixels, 0, 0);
-    return {data: canvas.toDataURL('image/png'), width: g.width, height: g.height};
+    return {data: canvas.toDataURL('image/png'), width: g.width, height: g.height,
+      ...physicalDimensions(g, o.pixelPitch)};
   }
 
   async function prepare(input, options) {
@@ -257,7 +300,7 @@
         assertCurrent();
         const entry = state.entry, stats = statistics(entry.stats);
         const image = state.count ? await render(entry.raster, upper, {
-          createCanvas: o.createCanvas, transform: entry.transform, assertCurrent,
+          createCanvas: o.createCanvas, transform: entry.transform, pixelPitch: entry.pixelPitch, assertCurrent,
           nearestUpscale: o.nearestUpscale !== false
         }) : null;
         molecule.sections.push({sectionId: entry.sectionId, name: text(entry.name), ...stats,
@@ -270,9 +313,20 @@
       await yieldTask();
     }
     assertCurrent();
+    if (typeof input.loadSectionReferences === 'function') {
+      const references = await input.loadSectionReferences();
+      assertCurrent();
+      // References are optional. Preserve every registered section and its
+      // order even when only some of them have a loaded optical/TIC image.
+      if (Array.isArray(references)) result.sections = result.sections.map(section => {
+        const reference = references.find(item => item.id === section.id);
+        return reference && reference.referenceImage ? {...section,
+          referenceImage: reference.referenceImage, referenceLabel: reference.referenceLabel} : section;
+      });
+    }
     return result;
   }
 
-  return Object.freeze({prepare, render, geometry, percentile, statistics, colorAt,
+  return Object.freeze({prepare, render, renderReference, geometry, percentile, statistics, colorAt,
     validateRaster, COLOR_STOPS, MAX_SAMPLES, MAX_IMAGE_DIMENSION, TARGET_IMAGE_DIMENSION, PERCENTILE});
 });

@@ -8,6 +8,7 @@
     const identity = () => [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
     const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
     const finite = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
+    const pitchValue = pitch => pitch && finite(pitch.x) > 0 && finite(pitch.y) > 0 ? { x: pitch.x, y: pitch.y } : null;
     const label = (key, meta) => String(meta.base || meta.name || key.replace(/^MSI_/i, ''));
     const metadataFields = ['name', 'base', 'precursor', 'product', 'ce', 'cv', 'polarity', 'mz', 'adduct',
         'formula', 'dwell', 'functionIndex', 'channelIndex', 'rtStart', 'rtEnd', 'instrument', 'acquiredAt',
@@ -16,17 +17,74 @@
         'channelIndex', 'rtStart', 'rtEnd']);
     // Names alone do not identify an MRM transition or its acquisition conditions.
     const conditionFields = ['precursor', 'product', 'ce', 'cv', 'polarity', 'mz', 'adduct', 'formula', 'dwell'];
+    const scalar = value => typeof value === 'string' || typeof value === 'number' && Number.isFinite(value);
+    const numericText = '[+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:e[+-]?\\d+)?';
+    const numericSuffix = new RegExp('_(' + numericText + ')_(' + numericText + ')(\\.[a-z][a-z0-9.]{0,12})?$', 'i');
+    // CE is also the cholesteryl-ester lipid class. Its registered carbon:
+    // double-bond notation is a molecule name, not a collision-energy label.
+    const ceVoltageLabel = 'CE(?!\\s*\\(?\\s*\\d{1,3}:\\d{1,2}\\b)';
+    const voltageLabel = '(?:collision[ _-]*(?:energy|voltage|potential)|cone[ _-]*(?:voltage|potential)|collision|cone|' + ceVoltageLabel + '|CV|コーン電圧|衝突エネルギー)';
+    const voltageValue = new RegExp('(^|[^a-z0-9])\\(?' + voltageLabel + '\\)?(?:\\s*\\((?:eV|V)\\))?[ _:=／/\\-]*(' + numericText + ')(?:\\s*(?:eV|volts?|V))?', 'gi');
+    const voltageMarker = new RegExp('(^|[^a-z0-9])' + voltageLabel + '(?=$|[^a-z])', 'i');
+    function voltageField(key) {
+        const k = String(key).toLowerCase().replace(/[^a-z0-9\u3040-\u30ff\u4e00-\u9fff]/g, '');
+        return /^(?:ce|cv)(?:value|voltage|energy|setting|settings|ev|v|volts)?$/.test(k)
+            || /^(?:msce|msmsce)$/.test(k)
+            || /^(?:cone|collision)(?:ev|v|volts?)?$/.test(k)
+            || /^(?:(?:ms|msms)(?:mode)?)?(?:cone(?:voltage|potential)|collision(?:energy|voltage|potential))/.test(k)
+            || /^(?:コーン電圧|衝突エネルギー)/.test(k);
+    }
+    function voltageFreeText(value, pairs, stripUnknownSuffix = false) {
+        const lines = String(value).split(/\r?\n/).map(line => {
+            let text = line.replace(voltageValue, '$1');
+            // An unparsed labelled method expression must not leave its value
+            // behind. Other note lines still remain useful in the report.
+            if (voltageMarker.test(text)) return '';
+            text = text.replace(numericSuffix, (whole, ce, cv, extension) =>
+                stripUnknownSuffix || pairs.some(pair => Number(ce) === pair[0] && Number(cv) === pair[1]) ? (extension || '') : whole);
+            return text.replace(/^[\s,;|_]+|[\s,;|_]+$/g, '').replace(/[ \t]{2,}/g, ' ').trim();
+        });
+        return lines.filter(Boolean).join('\n');
+    }
+    function withoutVoltages(value, pairs, field) {
+        if (typeof value === 'string') return voltageFreeText(value, pairs, /^(?:sourceFile|fileName|filename)$/i.test(field || ''));
+        if (value == null || typeof value !== 'object') return value;
+        if (Array.isArray(value)) {
+            if (typeof value[0] === 'string' && voltageField(value[0])) return undefined;
+            return value.map(item => withoutVoltages(item, pairs)).filter(item => item !== undefined);
+        }
+        // Label/value method records need to disappear as a unit; removing
+        // only their label would expose an unlabeled voltage in the deck.
+        const hasRecordValue = Object.keys(value).some(key => /^(?:value|values|setting|settings|voltage|energy|amount)$/i.test(key));
+        if (Object.entries(value).some(([key, item]) => /^(?:label|parameter|param|name|key|field|displayname)$/i.test(key)
+            && (!/^name$/i.test(key) || hasRecordValue)
+            && typeof item === 'string' && voltageField(item))) return undefined;
+        const out = {};
+        for (const [key, item] of Object.entries(value)) {
+            if (voltageField(key) || voltageMarker.test(key)) continue;
+            const clean = withoutVoltages(item, pairs, key);
+            if (clean !== undefined && clean !== '') out[key] = clean;
+        }
+        return out;
+    }
+    function voltageFreeMeta(key, meta, registeredBase, pairs) {
+        const out = withoutVoltages(meta, pairs) || {};
+        const explicitBase = scalar(registeredBase) && registeredBase !== '';
+        const registeredName = explicitBase ? registeredBase : meta.name;
+        const name = scalar(registeredName) && /^CE$/i.test(String(registeredName).trim()) ? String(registeredName)
+            : voltageFreeText(explicitBase ? registeredBase : label(key, out), pairs, !explicitBase) || 'Molecule';
+        out.name = out.base = name;
+        return out;
+    }
     // Share documents contain the full method. Match the recipient-facing UI
     // at the report boundary; keep full conditions privately for grouping.
     const viewerMetadataFields = new Set(['name', 'base', 'precursor', 'product', 'polarity', 'mz', 'adduct', 'formula']);
     function viewerMeta(key, meta, registeredBase) {
         // A public field is a scalar, never a container for arbitrary method
         // metadata (the deck's metadata writer recursively expands objects).
-        const scalar = value => typeof value === 'string' || typeof value === 'number' && Number.isFinite(value);
         const out = Object.fromEntries(Object.entries(meta).filter(([field, value]) => viewerMetadataFields.has(field) && scalar(value)));
         // Legacy source labels end in _CE_CV. A registered base is already the
         // display name; never export a second, untrimmed name alongside it.
-        const numericSuffix = /_[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?_[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i;
         const name = registeredBase && scalar(registeredBase) ? registeredBase : label(key, out).replace(numericSuffix, '');
         out.name = out.base = String(name);
         return out;
@@ -34,6 +92,17 @@
     function shareSignature(app, project) {
         const session = app.shareMode || {};
         return JSON.stringify([!!project.__share, !!app.shareMode, session.role, session.slug, session.token, session.expiresAt]);
+    }
+    function captureExportContext(getApp) {
+        const app = getApp(), project = app && app.project;
+        if (!project) throw new Error('プロジェクトを開いてから PPT レポートを作成してください。');
+        const session = app.shareMode, signature = shareSignature(app, project);
+        const shared = !!(session || project.__share);
+        return { shared, canIncludeCeCv: !shared || !!(session && session.role === 'admin'), assertCurrent() {
+            const current = getApp();
+            if (current !== app || current.project !== project || current.shareMode !== session
+                || shareSignature(current, project) !== signature) throw staleError();
+        } };
     }
     function registeredMeta(entry, fallback) {
         const source = entry && entry.compoundMeta || fallback || {}, out = {};
@@ -87,10 +156,14 @@
         const app = hooks.getApp(), project = app && app.project;
         if (!project) throw new Error('プロジェクトを開いてから PPT レポートを作成してください。');
         const session = app.shareMode, shareState = shareSignature(app, project);
-        const viewer = !!(session || project.__share) && (!session || session.role !== 'admin');
+        const shared = !!(session || project.__share);
+        const viewer = shared && (!session || session.role !== 'admin');
+        // Use the existing shared Admin login. Ordinary shared viewers cannot
+        // opt in, even if a caller passes includeCeCv or old auth options.
+        const includeCeCv = !viewer && options.includeCeCv === true;
         const sections = (project.sections || []).slice();
         const sectionStates = sections.map(section => ({ section, panel: app.panels.get(section.id), keys: msiKeys(section) }));
-        const jobs = [], groups = new Map();
+        const jobs = [], groups = new Map(), voltagePairs = [];
         const sourceMeta = (entry, key) => entry && entry.compoundMeta || (hooks.findCompoundMeta && hooks.findCompoundMeta(project, key)) || {};
         const liveMeta = (entry, key) => {
             const meta = sourceMeta(entry, key);
@@ -110,14 +183,18 @@
                 const sourceFile = entry && ((section.msiFiles || {})[entry.sourceFileId] || {}).filename || entry && entry.filename;
                 if (sourceFile && !meta.sourceFile) meta.sourceFile = sourceFile;
                 const scientificId = moleculeIdentity(key, meta);
+                if (meta.ce != null && meta.cv != null && Number.isFinite(Number(meta.ce)) && Number.isFinite(Number(meta.cv)))
+                    voltagePairs.push([Number(meta.ce), Number(meta.cv)]);
                 const job = { state, key, entry, image: (section.images || {})[key], scientificId,
+                    registeredBase: sourceMeta(entry, key).base,
                     source: sourceSignature(state.panel, key, entry), meta: viewer ? viewerMeta(key, meta, sourceMeta(entry, key).base) : meta,
                     transform: copy(hooks.transform ? hooks.transform(section) : identity()),
-                    pixelPitch: copy(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px) };
+                    pixelPitch: pitchValue(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px) };
                 jobs.push(job);
             }
         }
         if (!jobs.length) throw new Error('このプロジェクトには MSI レイヤーが登録されていません。');
+        if (!includeCeCv) for (const job of jobs) job.meta = voltageFreeMeta(job.key, job.meta, job.registeredBase, voltagePairs);
         const counts = new Map(), ambiguous = new Set();
         for (const job of jobs) {
             const key = JSON.stringify([job.scientificId, job.state.section.id]);
@@ -131,11 +208,11 @@
             const repeat = ambiguous.has(job.scientificId);
             const groupId = repeat ? JSON.stringify([job.scientificId, job.key]) : job.scientificId;
             if (!groups.has(groupId)) groups.set(groupId, { key: groupId, layerKey: job.key, name: label(job.key, job.meta),
-                subtitle: transitionSubtitle(job.meta) + (repeat && !viewer ? '  |  測定: ' + job.key.replace(/^MSI_/i, '') : ''),
+                subtitle: transitionSubtitle(job.meta) + (repeat && includeCeCv ? '  |  測定: ' + job.key.replace(/^MSI_/i, '') : ''),
                 metadata: job.meta, jobs: [] });
             groups.get(groupId).jobs.push(job);
         }
-        if (viewer) {
+        if (!includeCeCv) {
             const visibleCounts = new Map(), visibleIndexes = new Map();
             for (const group of groups.values()) {
                 const visibleId = moleculeIdentity('', group.metadata);
@@ -157,6 +234,10 @@
         let completed = 0;
         function assertCurrent() {
             if (options.signal && options.signal.aborted) throw cancelledError();
+            if (shared && includeCeCv && session.expiresAt != null) {
+                const expiresAt = Date.parse(session.expiresAt);
+                if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) throw staleError();
+            }
             const current = hooks.getApp();
             if (current !== app || current.project !== project || current.shareMode !== session
                 || shareSignature(current, project) !== shareState
@@ -177,7 +258,7 @@
         async function loadJob(job) {
             assertCurrent();
             const { section, panel } = job.state;
-            const result = { sectionId: section.id, name: section.displayName || ('Section ' + (section.ordinal || '')),
+            const result = { sectionId: section.id, name: sectionName(section),
                 transform: copy(job.transform), pixelPitch: copy(job.pixelPitch), metadata: copy(job.meta),
                 stats: { mean: null, max: null, n: null } };
             if (!job.entry || (!job.entry.blobId && !job.entry.sourceUrl)) {
@@ -198,6 +279,7 @@
                     result.missingReason = '元の数値データを読み込めませんでした。';
                 } else {
                     result.raster = { W: raster.W, H: raster.H, values: raster.values };
+                    result.pixelPitch = pitchValue(hooks.pixelPitch ? hooks.pixelPitch(section, job.key) : job.pixelPitch);
                     const maximum = hooks.max ? hooks.max(job.entry) : null;
                     result.stats = { mean: finite(hooks.mean ? hooks.mean(job.entry) : null),
                         max: finite(maximum && typeof maximum === 'object' ? maximum.value : maximum),
@@ -213,14 +295,18 @@
         }
         const memo = project.memo || {};
         const metadata = {};
+        const cleanOutput = value => includeCeCv ? copy(value) : withoutVoltages(value, voltagePairs);
+        function sectionName(section) {
+            return cleanOutput(section.displayName || ('Section ' + (section.ordinal || ''))) || 'Section ' + (section.ordinal || '');
+        }
         for (const key of ['sample', 'sampleTypes', 'experimentDate', 'machine', 'freeNote', 'matrix', 'derivatization']) {
-            if (memo[key] != null && memo[key] !== '') metadata[key] = copy(memo[key]);
+            if (memo[key] != null && memo[key] !== '') metadata[key] = cleanOutput(memo[key]);
         }
         metadata.sections = sections.map(section => ({ sectionId: section.id,
-            name: section.displayName || ('Section ' + (section.ordinal || '')),
-            acquisition: viewer ? {} : copy(section.meta && section.meta.raw || {}),
-            pixelPitch: copy(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px || null) }));
-        const input = { projectName: project.displayName || 'Project', generatedAt: options.generatedAt || new Date().toISOString(),
+            name: sectionName(section),
+            acquisition: viewer ? {} : cleanOutput(section.meta && section.meta.raw || {}),
+            pixelPitch: pitchValue(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px) }));
+        const input = { projectName: cleanOutput(project.displayName || 'Project') || 'Project', generatedAt: options.generatedAt || new Date().toISOString(),
             metadata, sections: metadata.sections.map(section => ({ id: section.sectionId, name: section.name })),
             molecules: Array.from(groups.values(), group => ({ key: group.key, layerKey: group.layerKey, name: group.name,
                 subtitle: group.subtitle, metadata: copy(group.metadata), async loadEntries() {
@@ -229,11 +315,22 @@
                     for (const section of sections) {
                         const job = group.jobs.find(item => item.state.section === section);
                         if (job) entries.push(await loadJob(job));
-                        else entries.push({ sectionId: section.id, name: section.displayName || ('Section ' + (section.ordinal || '')),
+                        else entries.push({ sectionId: section.id, name: sectionName(section),
                             stats: { mean: null, max: null, n: null }, missingReason: 'この分子・測定条件は切片に登録されていません。' });
                     }
                     return entries;
-                } })), assertCurrent };
+                } })), assertCurrent, async loadSectionReferences() {
+                    const references = [];
+                    if (!hooks.referenceImage) return references;
+                    for (const state of sectionStates) {
+                        assertCurrent();
+                        const result = await hooks.referenceImage(state.section, state.panel);
+                        assertCurrent();
+                        if (result && result.referenceImage) references.push({ id: state.section.id, name: sectionName(state.section),
+                            referenceImage: result.referenceImage, referenceLabel: result.referenceLabel === 'Optical' ? 'Optical' : 'TIC' });
+                    }
+                    return references;
+                } };
         assertCurrent();
         return input;
     }
@@ -243,6 +340,50 @@
         if (!clean) clean = 'Project';
         if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(clean)) clean = '_' + clean;
         return clean + '_report.pptx';
+    }
+    function selectReportOptions(doc) {
+        return new Promise(resolve => {
+            const focused = doc.activeElement;
+            const overlay = doc.createElement('div');
+            overlay.className = 'project-report-options';
+            overlay.style.cssText = 'position:fixed;inset:0;z-index:12000;background:#0008;display:flex;align-items:center;justify-content:center;padding:20px';
+            const dialog = doc.createElement('div');
+            dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
+            dialog.setAttribute('aria-label', 'PPT レポートの設定');
+            dialog.setAttribute('aria-describedby', 'project-report-options-help');
+            dialog.style.cssText = 'background:white;color:#1e293b;border-radius:10px;padding:24px;width:min(480px,100%);box-shadow:0 12px 40px #0005';
+            const title = doc.createElement('h2'); title.textContent = 'PPT レポートの設定';
+            title.style.cssText = 'font-size:18px;font-weight:600;margin:0 0 16px';
+            const label = doc.createElement('label');
+            label.style.cssText = 'display:flex;align-items:center;gap:8px;font-weight:600';
+            const checkbox = doc.createElement('input'); checkbox.type = 'checkbox';
+            checkbox.id = 'project-report-include-ce-cv'; checkbox.checked = false;
+            label.append(checkbox, doc.createTextNode('CV・CEを含める'));
+            const help = doc.createElement('p'); help.id = 'project-report-options-help';
+            help.textContent = 'このレポートに、登録されたコーン電圧と衝突エネルギーを表示します。';
+            help.style.cssText = 'font-size:13px;line-height:1.6;margin:12px 0 20px';
+            const actions = doc.createElement('div'); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
+            const cancel = doc.createElement('button'); cancel.type = 'button'; cancel.className = 'btn';
+            cancel.setAttribute('data-report-cancel', ''); cancel.textContent = 'キャンセル';
+            const create = doc.createElement('button'); create.type = 'button'; create.className = 'btn';
+            create.setAttribute('data-report-create', ''); create.textContent = '作成';
+            const close = result => {
+                overlay.remove();
+                if (focused && typeof focused.focus === 'function') focused.focus();
+                resolve(result);
+            };
+            cancel.addEventListener('click', () => close(null));
+            create.addEventListener('click', () => close({ includeCeCv: checkbox.checked }));
+            overlay.addEventListener('keydown', event => {
+                if (event.key === 'Escape') { event.preventDefault(); close(null); }
+                if (event.key === 'Tab') {
+                    const controls = [checkbox, cancel, create], index = controls.indexOf(doc.activeElement);
+                    event.preventDefault(); controls[(index + (event.shiftKey ? 2 : 1)) % controls.length].focus();
+                }
+            });
+            actions.append(cancel, create); dialog.append(title, label, help, actions); overlay.appendChild(dialog);
+            doc.body.appendChild(overlay); checkbox.focus();
+        });
     }
     function openProgress(doc, cancel) {
         const overlay = doc.createElement('div');
@@ -288,13 +429,39 @@
             const button = doc.getElementById('btn-export-ppt');
             let progress = null;
             try {
-                const input = createAdapter({ getApp: () => typeof App !== 'undefined' ? App : root.App,
+                const getApp = () => typeof App !== 'undefined' ? App : root.App;
+                const context = captureExportContext(getApp);
+                let includeCeCv = false;
+                if (context.canIncludeCeCv) {
+                    const selected = await selectReportOptions(doc);
+                    if (!selected) return null;
+                    context.assertCurrent();
+                    includeCeCv = selected.includeCeCv === true;
+                }
+                context.assertCurrent();
+                const input = createAdapter({ getApp,
                     transform: section => sectionLayerViewLinear(section, 'msi'),
+                    pixelPitch: (section, key) => msiLayerSourceGeometry(section, key)?.legacy?.confirmed === false
+                        ? null : msiDisplayPhysicalPitch(section, key),
+                    referenceImage: async (section, panel) => {
+                        if (!panel || !panel.imageSources) return null;
+                        const loaded = image => image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0;
+                        const opticalKey = Object.keys(section.images || {}).find(key => /^HE_STAIN/i.test(key)
+                            && key !== 'HE_STAIN_TIC' && loaded(panel.imageSources[key]));
+                        const source = opticalKey ? panel.imageSources[opticalKey] : panel.imageSources.HE_STAIN_TIC;
+                        if (!loaded(source)) return null;
+                        try {
+                            const referenceImage = await root.ProjectReportData.renderReference(source,
+                                sectionLayerViewLinear(section, opticalKey ? 'he' : 'msi'),
+                                { createCanvas: () => doc.createElement('canvas') });
+                            return { referenceImage, referenceLabel: opticalKey ? 'Optical' : 'TIC' };
+                        } catch (_) { return null; }
+                    },
                     mean: entry => msiQuantMean(entry), max: entry => msiMaxIntensity(entry),
                     findCompoundMeta: (project, key) => findCompoundMeta(project, key),
                     formatDisplayName: key => formatDisplayName(key),
                     yieldControl: () => new Promise(resolve => setTimeout(resolve, 0)) },
-                { signal: controller.signal, onProgress: event => progress && progress.update(event) });
+                { includeCeCv, signal: controller.signal, onProgress: event => progress && progress.update(event) });
                 progress = openProgress(doc, () => controller.abort());
                 if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
                 const libs = root.LAZY_LIBS || {};
@@ -327,5 +494,5 @@
         activeExport = run();
         try { return await activeExport; } finally { activeExport = null; }
     }
-    return { createAdapter, moleculeIdentity, safeFileName, exportCurrent };
+    return { createAdapter, captureExportContext, moleculeIdentity, safeFileName, exportCurrent };
 });
