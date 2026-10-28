@@ -144,6 +144,18 @@
       "source": "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/LICENSE",
       "sourceSha256": "334dd6820e2eaeab2064e7c59001b810566728a28a41a7c1dbf69bbee17d0936",
       "sha256": "334dd6820e2eaeab2064e7c59001b810566728a28a41a7c1dbf69bbee17d0936"
+    },
+    {
+      "file": "vendor/pptxgen.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/pptxgenjs@4.0.1/dist/pptxgen.min.js",
+      "sourceSha256": "097f0b92e15035a72bba72b59ef1ece62ab45ec6075ac85fe0e2d80d3f59b8e3",
+      "sha256": "f012ebe73a4b818d1b4ac1e9002389cec31b09a879342289c05dbefbbef01e2a"
+    },
+    {
+      "file": "vendor/LICENSE-pptxgenjs.txt",
+      "source": "https://cdn.jsdelivr.net/npm/pptxgenjs@4.0.1/LICENSE",
+      "sourceSha256": "7a2bfe96150786ed1908b8e63f98ebab88875c1e79e28faff6649e0f11f77e52",
+      "sha256": "7a2bfe96150786ed1908b8e63f98ebab88875c1e79e28faff6649e0f11f77e52"
     }
   ],
   "runtime": {

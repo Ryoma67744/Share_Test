@@ -15,6 +15,7 @@ const VIEWER_FILES = [
   'fixed-colors.js', 'index.html', 'roi-cursor.svg', 'roi-media-app.js',
   'roi-media-model.js', 'roi-media-msi.js', 'roi-media-service.js',
   'roi-media-viewer.css', 'roi-media-viewer.js', 'section-visibility.js',
+  'project-report-app.js', 'project-report-data.js', 'project-report-deck.js',
 ].map(file => 'viewer/' + file);
 const MRM_FILES = ['exp-core.mjs', 'exp-editor.mjs', 'exp-editor.css', 'exp-library-import.mjs']
   .map(file => 'mrm/' + file);

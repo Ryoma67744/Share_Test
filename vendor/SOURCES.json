@@ -177,6 +177,24 @@
       "version": "2.117.3",
       "source_sha256": "334dd6820e2eaeab2064e7c59001b810566728a28a41a7c1dbf69bbee17d0936",
       "packaged_sha256": "334dd6820e2eaeab2064e7c59001b810566728a28a41a7c1dbf69bbee17d0936"
+    },
+    {
+      "file": "vendor/pptxgen.min.js",
+      "source": "https://cdn.jsdelivr.net/npm/pptxgenjs@4.0.1/dist/pptxgen.min.js",
+      "source_sha256": "097f0b92e15035a72bba72b59ef1ece62ab45ec6075ac85fe0e2d80d3f59b8e3",
+      "packaged_sha256": "f012ebe73a4b818d1b4ac1e9002389cec31b09a879342289c05dbefbbef01e2a",
+      "sha256": "f012ebe73a4b818d1b4ac1e9002389cec31b09a879342289c05dbefbbef01e2a",
+      "modifications": [
+        "Removed optional sourceMappingURL comment.",
+        "Fixed table nonvisual shape IDs to use the slide object index + 2, matching text/image IDs and preventing collisions that force PowerPoint repair. Original table formula was tableCounter * slideNumber + 1."
+      ]
+    },
+    {
+      "file": "vendor/LICENSE-pptxgenjs.txt",
+      "source": "https://cdn.jsdelivr.net/npm/pptxgenjs@4.0.1/LICENSE",
+      "source_sha256": "7a2bfe96150786ed1908b8e63f98ebab88875c1e79e28faff6649e0f11f77e52",
+      "packaged_sha256": "7a2bfe96150786ed1908b8e63f98ebab88875c1e79e28faff6649e0f11f77e52",
+      "sha256": "7a2bfe96150786ed1908b8e63f98ebab88875c1e79e28faff6649e0f11f77e52"
     }
   ]
 }

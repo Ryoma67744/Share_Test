@@ -16,6 +16,7 @@ This guide is for the **master / admin** publishing data with DESI Data Share. I
 8. [Filling in the Memo](#8-filling-in-the-memo)
 9. [Renaming sections / compounds](#9-renaming-sections--compounds)
 10. [Export ZIP — local backup & distribution](#10-export-zip--local-backup--distribution)
+10-report. [PowerPoint report](#powerpoint-report)
 10-bis. [Preview — see what the recipient sees, before publishing](#10-bis-preview--see-what-the-recipient-sees-before-publishing)
 10-ter. [Overlays (multi-molecule colour composites)](#10-ter-overlays-multi-molecule-colour-composites)
 10-quater. [Range defaults (about blown-out highlights)](#10-quater-range-defaults-about-blown-out-highlights)
@@ -49,6 +50,16 @@ Send to collaborators (URL and viewer pw on separate channels)
 ```
 
 ---
+
+## PowerPoint report
+
+Open a local project and select **PPTレポート** in the viewer toolbar to download a `.pptx`. This works in both online and offline editions; it is unavailable in shared-link viewing mode.
+
+The report uses registered project information, Memo, section names, molecule names and acquisition conditions. It includes metadata, section-by-molecule image matrices, and detailed molecule images with editable Max/Mean tables. Large collections are paginated. All project sections and molecules are included regardless of display visibility or Method filters. ROI statistical charts are not included.
+
+Images use a common display-raster p99.8 upper limit across sections with the same molecule and measurement conditions, with a black/blue/purple/red/yellow palette. Saved rotation and reflection are retained. Viewer Range, palette, Otsu removal and zoom do not affect this report. Physical scale bars are omitted.
+
+Max/Mean use the application's original measurement-row statistics, never values reconstructed from an image. Display p99.8 uses raster representatives, including the display's averaging of duplicate coordinates. Missing sources or images are shown as unavailable, not measured zero. Generation shows progress and supports cancellation without rewriting registered information or original files.
 
 ## 2. Opening a project
 
