@@ -60,9 +60,11 @@
 
 ## PPTレポート
 
-プロジェクトを開き、上部の **PPTレポート** を押すと `.pptx` をダウンロードできます。オンライン版・オフライン版のローカルプロジェクトが対象です。共有URLの閲覧画面では使いません。
+プロジェクトを開き、上部の **Export ZIP** 横にある **PPTレポート** を押すと `.pptx` をダウンロードできます。オンライン版・オフライン版のローカルプロジェクトに加え、共有URLの閲覧画面でもAdminログインなしで利用できます。
 
 登録済みのプロジェクト名、Memo、切片名、分子名、測定条件を使い、概要、切片×分子の画像一覧、分子ごとの画像・最大強度・平均強度をまとめます。切片や分子が多い場合はページを分割します。画面の切片非表示やMethodフィルターにかかわらず、プロジェクト全体を出力します。文字と強度表はPowerPointで編集できます。
+
+共有先の公開ビュー／viewer権限では、公開Memo、分子名、切片名、precursor/productなどの閲覧可能な情報を出力します。CE/CV、詳細な装置取得条件、ソースファイル名は含めません。master／admin権限では、これらの登録済み測定情報も従来どおり含めます。
 
 画像は同じ分子・測定条件の全切片で共通の表示用p99.8を上限とし、黒→青→紫→赤→黄で表示します。登録された回転・反転を反映します。画面のRange、色、Otsu背景除去、ズームはレポートの配色・集計に適用しません。物理スケールバーは付けません。
 
@@ -394,7 +396,7 @@ Master が各 MSI の Range スライダー (Toolbar の Range 入力 or 歯車 
 
 入力値は IndexedDB に約 400ms で自動保存。Publish 時にサーバの `projects.meta.memo` にも送られます。
 
-> Method (MRM) テーブルの **Precursor / Fragment / CE / CV** は **管理者のみ表示** (admin password で開いた閲覧者にも見える)。通常の viewer pw だけで開いた閲覧者には隠されます。
+> Method (MRM) テーブルの **Precursor / Fragment** は通常の閲覧者にも表示されます。**CE / CV** は **管理者のみ表示** (admin password で開いた閲覧者にも見える) で、通常の viewer pw だけで開いた閲覧者には隠されます。
 
 > **Colormap dropdown**: ツールバー右側の **Colormap** で MSI ヒートマップの色 (Plasma / Viridis / Inferno / Hot / Jet / Grayscale) を選べます。Master の選択は `project.meta.colormap` に保存され、Publish to share 経由で recipient の初期表示色になります。recipient 側でも同じ dropdown が見え、自分のタブだけで色を変えられます (sessionStorage)。
 
@@ -507,7 +509,7 @@ ROI の保存形状はルート JSON の `polysBySection` と座標系情報に�
 
 - Export ZIP は **手元保存と他者への配布専用**(共有 URL は生成されない)
 - 受け手は viewer の **Import ZIP** から取り込めば同等のビューアで閲覧可能
-- 受け手側は Publish to share / Export 操作を **再度行えない**(共有モードでは該当ボタン非表示)
+- 共有モードでも **Export ZIP / PPTレポート** で手元に保存できます。**Publish to share** による再公開はできません (共有モードではボタン非表示)
 - ZIP は self-contained。サーバ不要で完結
 
 ### 9-8. サイズ目安
