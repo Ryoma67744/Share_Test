@@ -18642,6 +18642,7 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
             },
             receipt:async receipt=>{
                 const patch=await ProjectStorage.recordPublishReceipt(project.id,receipt);
+                if(!patch.applied){_publishStatus(project,meta.slug,'conflict');throw Object.assign(new Error('共有への公開は完了しましたが、このローカル版は削除・更新されています。共有版を別コピーで取得して比較してください。'),{code:'PUBLISH_RECEIPT_LOCAL_CONFLICT'});}
                 const adopted=_adoptPublishPatch(project,patch);
                 if(patch.applied)_publishStatus(project,meta.slug,adopted?(project.__publishPending?'local-saved':'synced'):'conflict');
             },
