@@ -1957,6 +1957,8 @@ async function renderList() {
                     await ProjectStorage.patchProject(localId, current => {
                         if (current.displayName !== cur) throw new Error('別のタブで改名されています。最新の名前を確認してください。');
                         current.displayName = name;
+                        current.publishEditEpoch = (current.publishEditEpoch || 0) + 1;
+                        if (current.shareInfo && current.shareInfo.slug) current.__publishPending = true;
                     });
                 }
                 catch (e) { alert('改名に失敗しました: ' + (e && e.message || e)); return; }

@@ -80,6 +80,18 @@ async function main(){
  const latest=await a.getProject('new');await a.patchProject('new',p=>{p.displayName='Rename';});
  await assert.rejects(()=>a.deleteProject('new',{expectedRevision:latest.storageRevision}),{code:'LOCAL_PROJECT_CONFLICT'});
  await assert.rejects(()=>a.patchProject('new',async p=>{}),/synchronous/);assert.equal((await a.getProject('new')).displayName,'Rename');
+ // The actual manager rename advances the scientific edit epoch, so a late
+ // receipt cannot mark a newer local name as published.
+ const managerHtml=fs.readFileSync(require.resolve('../index.html'),'utf8');
+ const renameStart=managerHtml.indexOf('await ProjectStorage.patchProject(localId, current => {');
+ const renameEnd=managerHtml.indexOf('                    });',renameStart)+23;
+ const renamed=project('rename-pending');renamed.shareInfo={slug:'name-share',serverRevision:1};renamed.publishEditEpoch=1;
+ await a.putProject(renamed,{createOnly:true});
+ await vm.runInNewContext('(async()=>{'+managerHtml.slice(renameStart,renameEnd)+'})()', {ProjectStorage:a,localId:renamed.id,cur:renamed.displayName,name:'Updated name'});
+ const nameReceipt={slug:'name-share',baseServerRevision:1,serverRevision:2,publishedEditEpoch:1,jobId:'old-name'};
+ await a.recordPublishReceipt(renamed.id,nameReceipt);
+ assert.equal((await a.getProject(renamed.id)).__publishPending,true);
+ assert.equal((await a.getProject(renamed.id)).publishEditEpoch,2);
  // Production manager list keeps every local ID, never adopts a same-name slug.
  const html=fs.readFileSync(require.resolve('../index.html'),'utf8');
  const start=html.indexOf('async function buildRows()'),end=html.indexOf('\nfunction rowHtml',start);
