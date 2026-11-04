@@ -185,6 +185,7 @@
                 if (receipt.publishedAt) project.shareInfo.lastSyncedAt = receipt.publishedAt;
                 if (!project.shareInfo.publishedAt && receipt.publishedAt) project.shareInfo.publishedAt = receipt.publishedAt;
                 if ((project.publishEditEpoch || 0) === receipt.publishedEditEpoch) delete project.__publishPending;
+                else project.__publishPending = true;
             });
         }
         async function listRecoveries() {

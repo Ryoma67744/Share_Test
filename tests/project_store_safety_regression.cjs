@@ -81,7 +81,14 @@ async function main(){
  assert.equal((await a.recordPublishReceipt(relink.id,firstReceipt)).applied,true);
  const relinked=await a.getProject(relink.id);assert.equal(relinked.shareInfo.slug,'new-slug');assert.equal(relinked.shareInfo.viewerPassword,undefined);assert.equal(relinked.shareInfo.uploadedPaths,undefined);
  const first=project('first-publish');await a.putProject(first,{createOnly:true});assert.equal((await a.recordPublishReceipt(first.id,firstReceipt)).applied,false,'late receipts cannot implicitly select a share target');
- await a.patchProject(first.id,p=>{p.shareInfo={pendingPublish:{jobId:'create-new',slug:'new-slug',previousSlug:null,baseServerRevision:0,create:true}};});assert.equal((await a.recordPublishReceipt(first.id,firstReceipt)).applied,true);
+ await a.patchProject(first.id,p=>{p.shareInfo={pendingPublish:{jobId:'create-new',slug:'new-slug',previousSlug:null,baseServerRevision:0,create:true}};});
+ const editedDuringFirst=await a.getProject(first.id);editedDuringFirst.publishEditEpoch=1;editedDuringFirst.displayName='Edited during first upload';
+ assert.equal(editedDuringFirst.__publishPending,undefined,'first publication has not assigned a share slug yet');
+ await a.putProject(editedDuringFirst);
+ assert.equal((await a.recordPublishReceipt(first.id,firstReceipt)).applied,true);
+ const firstAfterReceipt=await a.getProject(first.id);
+ assert.equal(firstAfterReceipt.displayName,'Edited during first upload');
+ assert.equal(firstAfterReceipt.__publishPending,true,'first receipt must mark later edits pending even when no dirty flag existed');
  // Strict CAS applies to delete too; narrow updates cannot overwrite an entire stale object.
  const latest=await a.getProject('new');await a.patchProject('new',p=>{p.displayName='Rename';});
  await assert.rejects(()=>a.deleteProject('new',{expectedRevision:latest.storageRevision}),{code:'LOCAL_PROJECT_CONFLICT'});
