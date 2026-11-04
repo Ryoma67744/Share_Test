@@ -10,6 +10,32 @@ permissions:
   contents: read
 
 jobs:
+  publish-concurrency:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: fixture-only
+          POSTGRES_DB: share_test_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d share_test_ci"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+      - name: Publish with concurrent database sessions
+        env:
+          DATABASE_URL: postgres://postgres:fixture-only@127.0.0.1:5432/share_test_ci
+        run: node tests/publish_postgres_concurrency.cjs
   test:
     strategy:
       fail-fast: false
@@ -51,6 +77,12 @@ jobs:
         run: node tests/exp_editor_browser_regression.mjs
       - name: Project PowerPoint report browser workflow
         run: node tests/project_report_browser_regression.cjs
+      - name: Local persistence and recovery across browser tabs
+        run: node tests/project_store_safety_browser_regression.cjs
+      - name: Archive import ownership and crash recovery
+        run: node tests/archive_browser_regression.cjs
+      - name: Publish snapshots and local receipts in the real viewer
+        run: node tests/publish_browser_regression.cjs
       - name: Build online distribution
         run: node tools/build.cjs --mode web --out dist/web
       - name: Fetch and verify pinned Windows runtime

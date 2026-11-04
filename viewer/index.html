@@ -3,6 +3,7 @@
 <head>
 <script src="../runtime-config.js"></script>
 <script src="../app-runtime.js"></script>
+<script src="../project-store-safety.js"></script>
 <script src="../offline/offline.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -26,6 +27,7 @@
     <script defer src="roi-media-msi.js"></script>
     <script defer src="roi-media-viewer.js"></script>
     <script defer src="roi-media-app.js"></script>
+    <script defer src="project-archive.js"></script>
     <script defer src="project-report-app.js"></script>
 <script>
   // Libraries not needed just to view are loaded on first use (jszip =
@@ -477,11 +479,6 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
 #share-preview-overlay .preview-header-right {
     display:flex; align-items:flex-start; gap:14px; flex-shrink:0;
 }
-#share-preview-overlay .preview-headerbar { display:flex; align-items:center; gap:6px; }
-#share-preview-overlay .preview-headerbar .bar {
-    display:inline-block; height:3px; background:#0f172a; box-shadow:0 0 0 1px #fff;
-}
-#share-preview-overlay .preview-headerbar .label { font-size:12px; font-weight:600; color:#0f172a; }
 #share-preview-overlay .preview-close {
     appearance:none; border:1px solid #cbd5e1; background:#fff; color:#475569;
     width:32px; height:32px; border-radius:4px; cursor:pointer; font-size:18px; line-height:1;
@@ -1136,6 +1133,7 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
 <div id="toast-host" class="toast-host"></div>
 
 <script src="section-visibility.js"></script>
+<script src="publish-safety.js"></script>
 <script src="alignment-session.js"></script>
 <script src="alignment-workspace.js"></script>
 <script src="../offline/local-mrm.js"></script>
@@ -1533,13 +1531,11 @@ function buildCompoundTitle(focusKey, project, role) {
 // scalebar reads in the same units users already see in the main view.
 function pickPreviewScalebarLength(umPerPx, targetPx) {
     if (!Number.isFinite(umPerPx) || umPerPx <= 0) return null;
-    const NICE = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
     const wantUm = targetPx * umPerPx;
-    let chosen = NICE[0];
-    for (const v of NICE) {
-        if (v <= wantUm) chosen = v;
-    }
-    return chosen;
+    if (!Number.isFinite(wantUm) || !(wantUm > 0)) return null;
+    const unit = 10 ** Math.floor(Math.log10(wantUm)), mantissa = wantUm / unit;
+    const chosen = unit * (mantissa >= 5 ? 5 : mantissa >= 2 ? 2 : 1);
+    return chosen > 0 && Number.isFinite(chosen) ? chosen : null;
 }
 
 // Format `section.meta.world_coords.msi_um_per_px` into a short label like
@@ -1551,11 +1547,10 @@ function pickPreviewScalebarLength(umPerPx, targetPx) {
 // callers can fall back to displayName-only.
 function formatPixelPitchLabel(sec) {
     const wc = sec && sec.meta && sec.meta.world_coords;
-    const um = wc && wc.msi_um_per_px;
+    const um = normalizeMsiPhysicalPitch(wc && wc.msi_um_per_px);
     if (!um) return '';
-    const x = Number(um.x), y = Number(um.y);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || x <= 0 || y <= 0) return '';
-    const fmt = v => Number.isInteger(v) ? String(v) : v.toFixed(1);
+    const { x, y } = um;
+    const fmt = v => String(Number(v.toPrecision(6)));
     return fmt(x) + '×' + fmt(y) + ' μm/px';
 }
 
@@ -1791,21 +1786,91 @@ function sectionMsiCanvasMatrix(section, refW, refH, frame, kind) {
     T[0][2] += frame.width/2; T[1][2] += frame.height/2;
     return T;
 }
-function msiDisplayPhysicalPitch(section, key) {
+// Display-only state belongs to a project/role, never to a globally named MRM.
+// Deliberately stays in memory: opening a project does not migrate or save data.
+function msiDisplayContextKey(app) {
+    const project = app && app.project;
+    if (!project || !project.id) return null;
+    const share = app.shareMode;
+    return JSON.stringify(share || project.__share
+        ? ['share', (share && share.slug) || project.id, (share && share.role) || 'viewer']
+        : ['local', project.id]);
+}
+function msiDisplayMeasurementSignature(project, key) {
+    return JSON.stringify((project.sections || []).filter(sec => sec.msiSeries && sec.msiSeries[key])
+        .map(sec => {
+            const e = sec.msiSeries[key];
+            return [sec.id, msiSourceReference(e), e.sourceReference ? null : (e.storagePath || e.sourceUrl || e.blobId),
+                e.kind || '', e.sourceRevision || '',
+                e.sheet || '', e.func || 1, e.channel, e.col_x || e.x, e.col_y || e.y,
+                e.col_v || e.v, e.colIdx, e.compound_index, e.v_index,
+                e.annotation, e.data_start_row, e.dataStartLine, e.snap];
+        }).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+}
+function ensureMsiDisplayContext(app, key) {
+    const contextKey = msiDisplayContextKey(app);
+    if (!contextKey) return;
+    const contexts = app._msiDisplayContexts || (app._msiDisplayContexts = new Map());
+    if (app._msiDisplayContextKey !== contextKey) {
+        const previous = contexts.get(app._msiDisplayContextKey);
+        if (previous) previous.mode = app.msiScaleMode;
+        let state = contexts.get(contextKey);
+        if (!state) {
+            state = { windows: app._msiDisplayContextKey ? {} : (app.msiUserWindow || {}),
+                mode: app._msiDisplayContextKey ? 'same' : (app.msiScaleMode || 'same'), signatures: {} };
+            contexts.set(contextKey, state);
+        }
+        app._msiDisplayContextKey = contextKey;
+        app.msiUserWindow = state.windows;
+        app.msiScaleMode = state.mode;
+        const select = typeof document !== 'undefined' && document.getElementById('msi-scale-mode');
+        if (select) select.value = state.mode;
+    }
+    if (key) {
+        const state = contexts.get(contextKey), signature = msiDisplayMeasurementSignature(app.project, key);
+        if (state.signatures[key] !== undefined && state.signatures[key] !== signature) delete state.windows[key];
+        state.signatures[key] = signature;
+    }
+}
+function normalizeMsiPhysicalPitch(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const number = v => {
+        if (typeof v === 'string') {
+            v = v.trim();
+            if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(v)) return null;
+            v = Number(v);
+        }
+        return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+    };
+    const x = number(value.x), y = number(value.y);
+    return x !== null && y !== null ? { x, y } : null;
+}
+// Physical distance and legacy ROI correspondence are separate contracts.
+// Invalid intensity can invalidate an old ROI basis without changing distance.
+function resolveMsiPhysicalCalibration(section, key) {
     const wc = section && section.meta && section.meta.world_coords;
-    const pitch = wc && wc.msi_um_per_px;
-    if (!pitch || !Number.isFinite(pitch.x) || !(pitch.x > 0)
-        || !Number.isFinite(pitch.y) || !(pitch.y > 0)) return null;
+    const pitch = normalizeMsiPhysicalPitch(wc && wc.msi_um_per_px);
+    const result = (status, displayPitch, reason, sourceRef) => ({ status, displayPitch,
+        unit: 'um/display-pixel', registeredPitch: pitch, reason,
+        evidence: { basis: 'registered-legacy-pixel', sourceRef: sourceRef || null } });
+    if (!pitch) return result('unknown', null, 'missing-or-invalid-calibration');
+    const ent = section && section.msiSeries && section.msiSeries[key];
     const g = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section, key) : null;
-    if (!g) return pitch;
-    const result = {};
+    if (!g) return ent && ['raw','parquet','txt','txt-analyte','xlsx'].includes(ent.kind)
+        ? result('pending', null, 'source-geometry-not-loaded')
+        : result('known', pitch, null);
+    if (ent && g.sourceRef && typeof msiSourceReference === 'function'
+        && g.sourceRef !== msiSourceReference(ent)) return result('conflict', null, 'source-changed', g.sourceRef);
+    const displayPitch = {};
     for (const axis of ['x','y']) {
         const knots = g.legacy && g.legacy[axis];
-        if (!knots || knots.length < 2) { result[axis] = pitch[axis]; continue; }
-        if (!knots.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))) return null;
+        if (!Array.isArray(knots) || !knots.length
+            || !knots.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite)))
+            return result('unknown', null, 'invalid-coordinate-axis', g.sourceRef);
+        if (knots.length === 1) { displayPitch[axis] = pitch[axis]; continue; }
         const first = knots[0], last = knots[knots.length - 1];
         const slope = (last[0]-first[0])/(last[1]-first[1]);
-        if (!(slope > 0) || !Number.isFinite(slope)) return null;
+        if (!(slope > 0) || !Number.isFinite(slope)) return result('unknown', null, 'invalid-coordinate-axis', g.sourceRef);
         // RAW stage coordinates are float32: adjacent differences can jitter
         // even for a uniform scan. Check the complete axis against its endpoint
         // line with float32 rounding tolerance, capped at 0.1% of a pixel.
@@ -1815,14 +1880,27 @@ function msiDisplayPhysicalPitch(section, key) {
         for (let i=1;i<knots.length;i++) {
             const p = knots[i], previous = knots[i-1];
             if (!(p[0] > previous[0]) || !(p[1] > previous[1])
-                || Math.abs((p[0]-first[0]) - (p[1]-first[1])*slope) > tolerance) return null;
+                || Math.abs((p[0]-first[0]) - (p[1]-first[1])*slope) > tolerance)
+                return result('unknown', null, 'nonuniform-coordinate-axis', g.sourceRef);
         }
         const step = g.displayGeometry && g.displayGeometry[axis] && g.displayGeometry[axis].step;
-        if (!Number.isFinite(step) || !(step > 0)) return null;
-        result[axis] = pitch[axis] * step / slope;
-        if (!Number.isFinite(result[axis])) return null;
+        if (!Number.isFinite(step) || !(step > 0)) return result('unknown', null, 'invalid-display-grid', g.sourceRef);
+        displayPitch[axis] = pitch[axis] * step / slope;
+        if (!Number.isFinite(displayPitch[axis]) || !(displayPitch[axis] > 0))
+            return result('unknown', null, 'invalid-display-grid', g.sourceRef);
     }
-    return result;
+    return result('known', displayPitch, null, g.sourceRef);
+}
+function msiDisplayPhysicalPitch(section, key) {
+    return resolveMsiPhysicalCalibration(section, key).displayPitch;
+}
+function msiCalibrationMessage(calibration) {
+    return ({ 'missing-or-invalid-calibration': 'スケール未確定: 正しい X/Y 校正値がありません',
+        'source-geometry-not-loaded': 'スケール確認中: MSI 原本の読み込みを待っています',
+        'source-changed': 'スケール未確定: 校正と原本の対応を確認してください',
+        'invalid-coordinate-axis': 'スケール未確定: 原本の座標を確認できません',
+        'nonuniform-coordinate-axis': 'スケール未確定: 旧画素から一様な距離へ換算できません',
+        'invalid-display-grid': 'スケール未確定: 画像の距離変換を確認できません' })[calibration.reason] || '';
 }
 function displayHorizontalUmPerPixel(matrix, pitch) {
     if (!pitch || !(pitch.x > 0) || !(pitch.y > 0)) return null;
@@ -2741,28 +2819,26 @@ const ProjectStorage = (() => {
     //     これが無いと、開くたびに 280 MB のフッタを 0.7〜1.4 GB のオブジェクトへ
     //     展開し直すことになる。いずれも追加のみで、既存ストアには触れないので
     //     古いバージョンのデータベースもそのまま昇格できる。
-    const DB_VERSION = 4;
+    // v5: fenced CAS writes, recovery drafts and original-file job pins.
+    const DB_VERSION = 5;
+
+    let safeStore = null;
+    function storeSafety() {
+        if (!safeStore) safeStore = ProjectStoreSafety.create({
+            transaction: tx,
+            indexRowFor, uid, nowIso: () => new Date().toISOString(),
+            prepare: record => { if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) detachOfflineProject(record); },
+            onConflict: error => { if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('project-storage-conflict', {detail: error})); }
+        });
+        return safeStore;
+    }
     let dbPromise = null;
 
     function open() {
         if (dbPromise) return dbPromise;
         dbPromise = new Promise((resolve, reject) => {
             const req = indexedDB.open(DB_NAME, DB_VERSION);
-            req.onupgradeneeded = (e) => {
-                const db = req.result;
-                if (!db.objectStoreNames.contains('projects')) db.createObjectStore('projects', { keyPath: 'id' });
-                if (!db.objectStoreNames.contains('blobs')) db.createObjectStore('blobs', { keyPath: 'id' });
-                // Tiny per-project summary row so the pickers / manager list
-                // never have to deserialize whole projects. Left EMPTY here on
-                // purpose: listProjects() backfills it lazily from the real
-                // records, which also repairs a database written by an older
-                // build that did not maintain it.
-                if (!db.objectStoreNames.contains('project_index')) db.createObjectStore('project_index', { keyPath: 'id' });
-                // parquet のフッタ索引。キーは blobId。中身は型付き配列が主なので
-                // 構造化クローンは安い (実データで約 17 MB)。壊れていたり版が
-                // 古かったりしたら黙って捨てて作り直すだけなので、移行処理は不要。
-                if (!db.objectStoreNames.contains('pq_index')) db.createObjectStore('pq_index', { keyPath: 'id' });
-            };
+            req.onupgradeneeded = () => { ProjectStoreSafety.upgrade(req.result); };
             // Another tab holding the old version blocks the upgrade. Without
             // this the page just hangs on a promise that never settles.
             req.onblocked = () => {
@@ -2799,6 +2875,7 @@ const ProjectStorage = (() => {
         return {
             __summary: true,
             id: project.id,
+            storageRevision: project.storageRevision == null ? 0 : project.storageRevision,
             displayName: project.displayName || '(untitled)',
             updatedAt: project.updatedAt || '',
             createdAt: project.createdAt || '',
@@ -2861,7 +2938,7 @@ const ProjectStorage = (() => {
             // 列を足しても件数は合ったままなので、これが無いと古いインデックスが
             // 永久に使われ続ける。
             if ((idx || []).length === (keys || []).length
-                && (idx || []).every(r => r && typeof r.sectionCount === 'number')) return sortRows(idx || []);
+                && (idx || []).every(r => r && typeof r.sectionCount === 'number' && Number.isSafeInteger(r.storageRevision))) return sortRows(idx || []);
         } catch (e) {
             console.warn('project_index read failed; falling back to a full scan', e);
         }
@@ -2885,81 +2962,16 @@ const ProjectStorage = (() => {
         return sortRows(rows);
     }
 
-    async function getProject(id) {
-        if (!id) return null;
-        const t = await tx(['projects'], 'readonly');
-        return await pr(t.objectStore('projects').get(id)) || null;
+    async function getProject(id, options) {
+        return storeSafety().getProject(id, options);
     }
 
     async function putProject(project, options) {
-        // Guard: a summary row from listProjects() is not a project. Writing
-        // one here would replace a whole project with a stub (its sections and
-        // msiSeries would be gone). Fail loudly instead.
-        if (project && project.__summary) {
-            throw new Error('putProject: refusing to write a listProjects() summary row as a project (id=' + project.id + ')');
-        }
-        const rec = Object.assign({}, project, { updatedAt: nowIso() });
-        if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) detachOfflineProject(rec);
-        // Never persist the read-only collaborator overlay (`_collab`): it is a
-        // transient, in-memory-only view of viewer-authored server ROIs. Stripping
-        // here — the single write choke point — keeps it out of IndexedDB (and thus
-        // out of any future publish) no matter which mutation triggered the save.
-        if (Array.isArray(rec.rois) && rec.rois.some(r => r && r._collab)) {
-            rec.rois = rec.rois.filter(r => !(r && r._collab));
-        }
-        // The summary row is written in the SAME transaction as the record, so
-        // the two can never disagree (a separate write could be lost to a
-        // crash between them).
-        const t = await tx(['projects', 'project_index'], 'readwrite');
-        const done = txDone(t);
-        try {
-            const projects = t.objectStore('projects');
-            if (options && options.createOnly) {
-                // Read/write transactions on this store serialize across tabs.
-                // Choose the recovery ID and insert in the SAME transaction so
-                // concurrent ZIP imports can never replace an existing project.
-                while (await pr(projects.get(rec.id))) rec.id = uid('proj');
-                await pr(projects.add(rec));
-            } else {
-                await pr(projects.put(rec));
-            }
-            await pr(t.objectStore('project_index').put(indexRowFor(rec)));
-            await done;   // ★ コミットまで待つ。ここを省くと容量超過で消えても成功に見える
-        } catch (e) {
-            try { t.abort(); } catch (_) {}
-            await done.catch(() => {});
-            throw e;
-        }
-        // Expose a collision fallback only after both records have committed.
-        if (options && options.createOnly) project.id = rec.id;
-        return rec;
+        return storeSafety().putProject(project, options);
     }
 
-    async function deleteProject(id) {
-        const proj = await getProject(id);
-        const blobIds = collectBlobIds(proj);
-        const t = await tx(['projects', 'blobs', 'project_index'], 'readwrite');
-        const done = txDone(t);
-        await pr(t.objectStore('projects').delete(id));
-        await pr(t.objectStore('project_index').delete(id));
-        // An original can be shared by several attachments/projects. Reclaim
-        // only blobs no remaining project references, in this same transaction.
-        const stillUsed = new Set();
-        await new Promise((resolve, reject) => {
-            const req = t.objectStore('projects').openCursor();
-            req.onsuccess = (e) => {
-                const c = e.target.result;
-                if (!c) { resolve(); return; }
-                for (const bid of collectBlobIds(c.value)) stillUsed.add(bid);
-                c.continue();
-            };
-            req.onerror = () => reject(req.error);
-        });
-        for (const bid of blobIds) {
-            if (stillUsed.has(bid)) continue;
-            try { await pr(t.objectStore('blobs').delete(bid)); } catch (_) {}
-        }
-        await done;
+    async function deleteProject(id, options) {
+        return storeSafety().deleteProject(id, options);
     }
 
     function collectBlobIds(project) {
@@ -2985,15 +2997,9 @@ const ProjectStorage = (() => {
     }
 
     async function putBlob(rec) {
-        // rec: { id, blob, mime, filename }
-        const t = await tx(['blobs'], 'readwrite');
-        const done = txDone(t);
-        await pr(t.objectStore('blobs').put(rec));
-        // ★ ここが今回のバグの本体。commit を待たずに返すと、836 MB の blob が
-        //   容量超過でロールバックされても「保存できた」ことになる。
-        await done;
-        return rec.id;
+        return storeSafety().putBlob(rec);
     }
+    const renameBlob = (...args) => storeSafety().renameBlob(...args);
 
     async function getBlob(id) {
         if (!id) return null;
@@ -3001,12 +3007,8 @@ const ProjectStorage = (() => {
         return await pr(t.objectStore('blobs').get(id)) || null;
     }
 
-    async function deleteBlob(id) {
-        if (!id) return;
-        const t = await tx(['blobs'], 'readwrite');
-        const done = txDone(t);
-        await pr(t.objectStore('blobs').delete(id));
-        await done;
+    async function deleteBlob(id, options) {
+        return storeSafety().deleteBlob(id, options);
     }
 
     // ---- parquet フッタ索引 (pq_index) --------------------------------------
@@ -3042,31 +3044,22 @@ const ProjectStorage = (() => {
     // this reclaims IndexedDB filled by previous share sessions WITHOUT touching
     // the user's own (persisted) master projects' blobs.
     async function pruneShareOrphans() {
-        const used = new Set();
-        try {
-            // One cursor pass. This used to call listProjects() (which
-            // deserialized every project) and then getProject() for each one
-            // (deserializing every project a SECOND time).
-            const t = await tx(['projects'], 'readonly');
-            await new Promise((resolve, reject) => {
-                const req = t.objectStore('projects').openCursor();
-                req.onsuccess = (e) => {
-                    const c = e.target.result;
-                    if (!c) { resolve(); return; }
-                    for (const id of collectBlobIds(c.value)) used.add(id);
-                    c.continue();
-                };
-                req.onerror = () => reject(req.error);
-            });
-        } catch (e) { return; }   // on any error, do nothing (never risk data loss)
-        const t = await tx(['blobs'], 'readwrite');
-        const done = txDone(t);
-        const all = await pr(t.objectStore('blobs').getAllKeys());
-        for (const k of all) if (!used.has(k)) await pr(t.objectStore('blobs').delete(k));
-        await done;
+        return storeSafety().pruneShareOrphans();
     }
 
-    return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, deleteBlob, pruneShareOrphans,
+    const patchProject = (...args) => storeSafety().patchProject(...args);
+    const recordPublishReceipt = (...args) => storeSafety().recordPublishReceipt(...args);
+    const listRecoveries = (...args) => storeSafety().listRecoveries(...args);
+    const restoreRecovery = (...args) => storeSafety().restoreRecovery(...args);
+    const discardRecovery = (...args) => storeSafety().discardRecovery(...args);
+    const releaseProject = (...args) => storeSafety().releaseProject(...args);
+    const pinBlobs = (...args) => storeSafety().pinBlobs(...args);
+    const releaseBlobPins = (...args) => storeSafety().releaseBlobPins(...args);
+    const putArchiveJob = (...args) => storeSafety().putArchiveJob(...args);
+    const getArchiveJobs = (...args) => storeSafety().getArchiveJobs(...args);
+    const deleteArchiveJob = (...args) => storeSafety().deleteArchiveJob(...args);
+    return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, renameBlob, deleteBlob, pruneShareOrphans,
+             patchProject, recordPublishReceipt, listRecoveries, restoreRecovery, discardRecovery, releaseProject, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
              getPqIndex, putPqIndex, deletePqIndex };
 })();
 
@@ -3962,6 +3955,7 @@ function createMsiSourceGeometry(rows, ent, legacyColumns) {
             }
         }
     }
+    if (ent && ent.archiveGeometryUnconfirmed) legacyReason = 'archive-source-variant-unconfirmed';
     return {sourceRef:msiSourceReference(ent),displayGeometry:grid.displayGeometry,
         legacy:{W:legacy.W,H:legacy.H,confirmed:!legacyReason,reason:legacyReason,
             x:pairs('x'),y:pairs('y')}};
@@ -8944,8 +8938,14 @@ class SectionPanel {
     // pan-zoom and resize.
     updateScaleBar() {
         const bar = this.dom && this.dom.scalebar; if (!bar) return;
-        const wc = this.section.meta && this.section.meta.world_coords;
-        const um = msiDisplayPhysicalPitch(this.section, this._pickRefMsiKey());
+        const calibration = resolveMsiPhysicalCalibration(this.section, this._pickRefMsiKey());
+        const um = calibration.displayPitch;
+        const message = msiCalibrationMessage(calibration);
+        bar.title = message;
+        if (bar.dataset) bar.dataset.calibrationStatus = calibration.status;
+        if (this.dom.label) this.dom.label.title = [
+            '登録された取得ピッチ。画像のスケールは原本の座標との対応確認後に表示します。',
+            message, 'master のみ: ダブルクリックで section 名を変更'].filter(Boolean).join('\n');
         // 寸法だけ要るので、読み込み済みでなくても ent の記録から取れる
         // (遅延読み込み中にスケールバーが消えないようにする)。
         const msiKey = this._pickRefMsiKey();
@@ -9503,6 +9503,7 @@ class SectionPanel {
     applyRangeRaw(edge, rawValue) {
         const key = this.effectiveActiveMsiKey();
         if (!key) return;
+        ensureMsiDisplayContext(App, key);
         const v = parseFloat(rawValue);
         if (!Number.isFinite(v)) return;
         // Per-MRM display window override (raw units). Only the edited edge is
@@ -9535,6 +9536,7 @@ class SectionPanel {
     resetRange() {
         const key = this.effectiveActiveMsiKey();
         if (!key) return;
+        ensureMsiDisplayContext(App, key);
         if (App.msiUserWindow) delete App.msiUserWindow[key];
         for (const p of App.panels.values()) {
             try {
@@ -10421,10 +10423,7 @@ class SectionPanel {
                     for (const [, ent] of Object.entries(this.section.msiSeries || {})) {
                         if (ent && ent.sourceFileId === fid) ent.filename = finalName;
                     }
-                    const rec = await ProjectStorage.getBlob(cur.blobId);
-                    if (rec) await ProjectStorage.putBlob({
-                        id: cur.blobId, blob: rec.blob, mime: rec.mime, filename: finalName,
-                    });
+                    await ProjectStorage.renameBlob(cur.blobId, finalName);
                     this.populateThumbnails();
                     App.queueSave();
                     showToast('リネーム: ' + finalName);
@@ -10559,6 +10558,7 @@ class SectionPanel {
             blobId,
             filename: finalName,
             sourceFileId: opts.sourceFileId || null,
+            archiveProvenance: def.archiveProvenance || ProjectArchive.registeredSource(),
             compoundMeta: opts.compoundMeta || null,
             bakeMode: def.bakeMode || inheritedBake,
         });
@@ -11216,6 +11216,7 @@ async function renderAnalysisChart(gen) {
         const reasons = {
             'source-unavailable': '元データを読み込めません',
             'legacy-roi-source-ambiguous': '旧ROIがどの元データに対応するか確定できません',
+            'archive-source-variant-unconfirmed': '旧ZIPの異なる保存版を保持しています。旧ROIと位置合わせの対応は未確認です',
             'legacy-coordinate-unconfirmed': '元座標に欠測・不正値があり、旧ROIの座標対応を確認できません。元のROIは保持しています',
             'legacy-value-axis-unconfirmed': '旧描画時の測定行を確認できず、旧ROIの座標対応は未確定です',
             'legacy-render-quant-axis-mismatch': '旧描画と旧定量で座標軸が異なるため、旧ROIを安全に対応付けできません。元のROIは保持しています',
@@ -12163,6 +12164,7 @@ function _msiCellSig(e) {
     const d = e.diag;
     return (Array.isArray(e.rawRange) ? e.rawRange.join(',') : '')
         + '|' + e.rawMean + '|' + e.rawTrueMax + '|' + e.statMax + '|' + e.quantVersion
+        + '|' + JSON.stringify(e.archiveProvenance || null)
         // diag は表のバッジ。出す/出さないを決める項目だけ見る (diagBadgeHtml と同じ)。
         + '|' + (d ? [d.clippedHigh, d.dupCells, d.dupRows, d.nPixels,
                       d.gridFallback && d.gridFallback.x, d.gridFallback && d.gridFallback.y,
@@ -12790,6 +12792,8 @@ function renderMethodTable() {
             ? '<span class="eval-badge target" title="この測定像を評価するためにプレビューを開きました">評価対象</span>'
             : (isEvalPending ? '<span class="eval-badge pending" title="実測棚卸しで未処理 — この測定PJで一緒に評価できます">要評価</span>' : '');
         const diagBadge = diagBadgeHtml(ent.diag);
+        const archiveBadge = ent.archiveProvenance && ent.archiveProvenance.basis === 'legacy-derived-csv'
+            ? ' <span style="color:#925c00;font-size:10px" title="旧ZIPの派生CSVから計算した参考値です。元の空欄と測定ゼロを識別できない場合があります。">旧CSV参考値 / Legacy CSV</span>' : '';
 
         const markerColor = ent.markerColor || '';
         const markerSwatchStyle = markerColor
@@ -12801,7 +12805,7 @@ function renderMethodTable() {
             '<td class="px-1 py-1 border-b border-gray-100 text-center" data-cell="marker">' +
                 '<button type="button" class="marker-swatch" aria-haspopup="dialog" style="' + markerSwatchStyle + '"></button>' +
             '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + diagBadge + '</td>' +
+            '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + diagBadge + archiveBadge + '</td>' +
             // ノンターゲットは m/z・アダクト・分子式 + 強度 (Mean/Max)。
             // MRM 固有の Fragment/CE/CV と、MRM ライブラリ登録用のチェックは出さない。
             (nonTarget
@@ -14980,9 +14984,9 @@ const Wizards = {
         if (!panel || !panel.section) return null;
         const sec = panel.section;
         const wc = (sec.meta && sec.meta.world_coords) || {};
-        const cur = wc.msi_um_per_px || {};
-        const x0 = Number.isFinite(cur.x) ? cur.x : '';
-        const y0 = Number.isFinite(cur.y) ? cur.y : '';
+        const cur = normalizeMsiPhysicalPitch(wc.msi_um_per_px);
+        const x0 = cur ? cur.x : '';
+        const y0 = cur ? cur.y : '';
         const html = `
             <h2>MSI pixel size (μm/px)</h2>
             <p style="font-size:11px;color:#475569;margin-bottom:8px;">
@@ -15008,13 +15012,13 @@ const Wizards = {
         const card = openModal._card;
         const err = card.querySelector('[data-err]');
         card._collect = () => {
-            const x = parseFloat(card.querySelector('[name="x"]').value);
-            const y = parseFloat(card.querySelector('[name="y"]').value);
-            if (!Number.isFinite(x) || x <= 0 || !Number.isFinite(y) || y <= 0) {
+            const pitch = normalizeMsiPhysicalPitch({ x: card.querySelector('[name="x"]').value,
+                y: card.querySelector('[name="y"]').value });
+            if (!pitch) {
                 err.textContent = 'X / Y には正の数値を入力してください';
                 return null;
             }
-            return { x, y };
+            return pitch;
         };
         const result = await p;
         if (!result) return null;
@@ -15146,7 +15150,7 @@ const Wizards = {
             st.autoAligned = bySrc.autoAligned || null;
         };
         const state = loadStateFor(layerKey);
-        const msiUm = sec.meta.world_coords.msi_um_per_px || { x: 50, y: 50 };
+        const msiUm = normalizeMsiPhysicalPitch(sec.meta.world_coords.msi_um_per_px) || { x: 50, y: 50 };
         state.msi_um_x = Number.isFinite(msiUm.x) ? msiUm.x : 50;
         state.msi_um_y = Number.isFinite(msiUm.y) ? msiUm.y : 50;
 
@@ -16493,7 +16497,7 @@ const Wizards = {
                 } else {
                     // Finish prior writes, then persist a detached project snapshot.
                     // A failed write never exposes draft settings to autosave/publish.
-                    if (App._flushSave) await App._flushSave();
+                    if (App._flushSave && await App._flushSave() === false) throw new Error('先の編集を保存できませんでした');
                     if (!stillOpen()) return;
                     const savedSection = Object.assign({},realSec,{meta:clone(realSec.meta || {})});
                     applySectionAlignment(savedSection,payload);
@@ -16502,6 +16506,7 @@ const Wizards = {
                     });
                     if (savedProject.shareInfo && savedProject.shareInfo.slug) savedProject.__publishPending = true;
                     await ProjectStorage.putProject(savedProject);
+                    if (baseProject.storageRevision === savedProject.storageRevision - 1) baseProject.storageRevision = savedProject.storageRevision;
                     if (!stillOpen()) return;
                     applySectionAlignment(realSec,payload);
                     // Normal synchronization starts only after local Save succeeded.
@@ -17470,6 +17475,8 @@ function storageExtOf(name) {
 // blob の中身は登録後に変わらないので、後から食い違うことがない)。
 function storagePathForEnt(ent, project) {
     if (!ent) return '';
+    const receiptPath=ent.blobId&&project?.shareInfo?.blobPaths?.[ent.blobId]?.path;
+    if(receiptPath)return receiptPath;
     if (ent.storagePath) return ent.storagePath;
     const slug = project && project.shareInfo && project.shareInfo.slug;
     if (!slug || !ent.blobId) return '';
@@ -17510,7 +17517,7 @@ async function ensureLocalBlob(ent, project) {
             await ProjectStorage.putBlob({
                 id: ent.blobId, blob, mime,
                 filename: ent.filename || path.split('/').pop(),
-            });
+            }).catch(error => { if (error.code !== 'BLOB_ID_EXISTS') throw error; });
             const back = await ProjectStorage.getBlob(ent.blobId);
             if (!back || !back.blob) throw new Error('IndexedDB へ保存できませんでした (容量不足の可能性)');
             console.info('[repair] Storage からソースを復元しました:', path);
@@ -17728,9 +17735,11 @@ function buildOneCsvTable(group, roiPairs, project, otsuMode) {
             headers.push(header);
             columnArrays.push(order.map(i => msiCsvCellText(col.sourceCells && col.sourceCells[i], col.values[i])));
             metadata.columns.push({ header, layerKey, sourceFrame: matrix.sourceFrame || null,
+                inputProvenance: ProjectArchive.provenance(ent.archiveProvenance),
                 sourceRowIds: order.map(i => matrix.rowIds ? matrix.rowIds[i] : i),
                 cells: order.map(i => msiCellMetadata(col.sourceCells && col.sourceCells[i])) });
             compounds.push({ layerKey, vHeader: header, sourceFileId: ent.sourceFileId || null,
+                archiveProvenance: ProjectArchive.provenance(ent.archiveProvenance),
                 kind: ent.kind || 'xlsx', compoundMeta: ent.compoundMeta || meta || null, bakeMode: ent.bakeMode || null });
         }
     }
@@ -17770,7 +17779,7 @@ function buildOneCsvTable(group, roiPairs, project, otsuMode) {
 // Build the per-sample combined CSV group(s) for a section (one per pixel-grid;
 // usually a single group). Parses each source once; memory stays bounded to one
 // sample. Returns [{ csvText, rowCount, compounds:[...] }].
-async function buildSampleCsvGroups(sec, project, otsuMode) {
+async function buildSampleCsvGroups(sec, project, otsuMode, snapshotStorage) {
     const series = sec.msiSeries || {};
     const layerKeys = sortMethodKeys(
         Object.keys(series).filter(k => /^MSI_/i.test(k)),
@@ -17796,7 +17805,7 @@ async function buildSampleCsvGroups(sec, project, otsuMode) {
         //   展開してから失敗する。ソースは parquet 本体を ZIP に同梱するので
         //   (exportProjectAsZip の Source/)、データが失われることはない。
         if (grp.repr && grp.repr.kind === 'parquet') continue;
-        const rec = await ProjectStorage.getBlob(grp.blobId);
+        const rec = await (snapshotStorage || ProjectStorage).getBlob(grp.blobId);
         if (!rec || !rec.blob) throw new Error('MSI original source is unavailable for CSV export: ' + (grp.repr.filename || grp.blobId));
         const m = await extractSourceMatrixForExport(await rec.blob.arrayBuffer(), grp.repr, grp.entries);
         if (m && m.positions.length) parsed.push({ matrix: m, entries: grp.entries });
@@ -17887,13 +17896,17 @@ function roiMediaRegistryFromDoc(doc) {
 async function exportProjectAsZip() {
     if (_exportInProgress) { showToast('Export already running'); return; }
     _exportInProgress = true;
-    let progress = null;
+    let progress = null, exportSession = null;
     try {
         const otsuMode = 'none';
         try { await loadScript(LAZY_LIBS.jszip); } catch (e) { alert('JSZip の読み込みに失敗しました'); return; }
         if (typeof JSZip === 'undefined') { alert('JSZip not loaded'); return; }
-        const project = App.project;
-        if (!project) return;
+        if (!App.project) return;
+        const exportDisplaySettings = {otsuBgRemove: !!App.otsuBgRemove, otsuStrength: App.otsuStrength, otsuManualThreshold: App.otsuManualThreshold};
+        exportSession = await ProjectArchive.beginExport(App.project, ProjectStorage, {
+            currentProject: () => App.project, readMedia: item => roiMediaReadOriginal(item)
+        });
+        const project = exportSession.project, snapshotStorage = exportSession.storage;
         freezeMsiSourceReferences(project);
         const roiMedia = roiMediaForTransport(project);
         const zip = new JSZip();
@@ -17924,7 +17937,8 @@ async function exportProjectAsZip() {
             format: 'desi_data_share_v2',
             bgRemoved: null,
             sourceContract: 'msi-source-rows-v1',
-            displaySettings: { otsuBgRemove: !!App.otsuBgRemove, otsuStrength: App.otsuStrength, otsuManualThreshold: App.otsuManualThreshold },
+            archiveContract: {version: 1, completeness: 'registered-snapshot', provenanceVersion: 1},
+            displaySettings: exportDisplaySettings,
             id: project.id,
             displayName: project.displayName,
             anatomyPalette: project.anatomyPalette || DEFAULT_ANATOMY_PALETTE,
@@ -17966,13 +17980,8 @@ async function exportProjectAsZip() {
 
             // HE/IF: full original (+ MSI-aligned PNG when a transform exists).
             for (const [layerKey, ent] of Object.entries(sec.images || {})) {
-                const rec = await ProjectStorage.getBlob(ent.blobId);
-                if (!rec || !rec.blob) {
-                    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
-                        throw new Error('このPCに HE/IF 原本がありません: ' + (ent.filename || layerKey) + '。原本を再登録してから Export ZIP を実行してください。');
-                    }
-                    tick(); tick(); continue;
-                }
+                const rec = await snapshotStorage.getBlob(ent.blobId);
+                if (!rec || !rec.blob) throw new Error('Required HE/IF original unavailable: ' + (ent.filename || layerKey));
                 const fname = ent.filename || (layerKey + '.tif');
                 // One copy per unique content: reuse the path for identical
                 // images (same whole slide on many sections) instead of
@@ -18003,7 +18012,8 @@ async function exportProjectAsZip() {
                         imgRec.alignedPath = alignedPath;
                         imgRec.alignedFrame = { w: baked.w, h: baked.h };
                     }
-                } catch (e) { console.warn('[export] aligned bake failed', sec.id, layerKey, e); }
+                } catch (e) { throw new Error('Aligned PNG export failed: ' + (ent.filename || layerKey) + ': ' + e.message); }
+                exportSession.assertCurrent();
                 secEntry.images[layerKey] = imgRec;
                 tick(); await _yieldUi();
             }
@@ -18022,7 +18032,7 @@ async function exportProjectAsZip() {
                 if (!frec.blobId) throw new Error('MSI source is unavailable: ' + (frec.filename || fid));
                 let sourcePath = bundledSrcPaths.get(frec.blobId);
                 if (!sourcePath) {
-                    const rec = await ProjectStorage.getBlob(frec.blobId);
+                    const rec = await snapshotStorage.getBlob(frec.blobId);
                     if (!rec || !rec.blob) throw new Error('MSI original source is unavailable: ' + (frec.filename || fid));
                     const fallback = frec.kind === 'raw' ? 'source.raw.zip' : frec.kind === 'parquet' ? 'source.parquet' : frec.kind === 'txt' ? 'source.txt' : 'source.xlsx';
                     sourcePath = 'Source/' + frec.blobId + '__' + sanitizeStorageKeySegment(frec.filename || fallback);
@@ -18045,6 +18055,7 @@ async function exportProjectAsZip() {
                 secEntry.parquetSeries[k] = {
                     sourceFileId: ent.sourceFileId || null, colIdx: ent.colIdx,
                     annotation: ent.annotation, filename: ent.filename,
+                    archiveProvenance: ProjectArchive.provenance(ent.archiveProvenance),
                     compoundMeta: ent.compoundMeta || null,
                     statMax: ent.statMax, rasterW: ent.rasterW, rasterH: ent.rasterH,
                     rawRange: ent.rawRange, rawMean: ent.rawMean,
@@ -18061,6 +18072,7 @@ async function exportProjectAsZip() {
                 secEntry.rawSeries[k] = {
                     sourceFileId: ent.sourceFileId || null,
                     func: ent.func, channel: ent.channel, filename: ent.filename,
+                    archiveProvenance: ProjectArchive.provenance(ent.archiveProvenance),
                     compoundMeta: ent.compoundMeta || null,
                     rasterW: ent.rasterW, rasterH: ent.rasterH,
                     rawRange: ent.rawRange, rawMean: ent.rawMean,
@@ -18071,7 +18083,7 @@ async function exportProjectAsZip() {
 
             // Data/: per-sample combined CSV(s).
             try {
-                const groups = await buildSampleCsvGroups(sec, project, otsuMode);
+                const groups = await buildSampleCsvGroups(sec, project, otsuMode, snapshotStorage);
                 const bgTag = '';
                 groups.forEach((g, idx) => {
                     const suffix = idx > 0 ? ('__' + (idx + 1)) : '';
@@ -18097,7 +18109,7 @@ async function exportProjectAsZip() {
             const identity = item.blobId || ('storage:' + item.storagePath);
             let sourcePath = mediaPaths.get(identity);
             if (!sourcePath) {
-                const original = await roiMediaReadOriginal(item);
+                const original = await exportSession.readMedia(item);
                 sourcePath = 'ROI_Media/' + sanitizeStorageKeySegment(item.id) + '__'
                     + sanitizeStorageKeySegment(item.filename || 'image.bin');
                 zip.file(sourcePath, original.blob);
@@ -18114,9 +18126,12 @@ async function exportProjectAsZip() {
             tick(); await _yieldUi();
         }
 
+        exportSession.assertCurrent();
+        ProjectArchive.verifyExport(zip, manifest);
         zip.file(projSafe + '.json', JSON.stringify(manifest, null, 2));
         const blob = await zip.generateAsync({ type: 'blob' });
         const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        exportSession.assertCurrent();
         downloadAsFile(blob, projSafe + '_' + ts + '.zip');
         showToast('Export ready');
     } catch (e) {
@@ -18124,7 +18139,8 @@ async function exportProjectAsZip() {
         alert('Export に失敗しました: ' + (e && e.message ? e.message : e));
     } finally {
         if (progress) { try { progress.close(); } catch (_) {} }
-        _exportInProgress = false;
+        try { if (exportSession) await exportSession.close(); }
+        finally { _exportInProgress = false; }
     }
 }
 
@@ -18569,597 +18585,117 @@ function _publishSizeError(task, size) {
 // もう一方を待たせる。以前は _autoPublishInflight が auto 対 auto しか
 // 見ておらず、化合物を表示するたびに走る auto-publish (loadMsiLayer の
 // queueSave 経由) が手動 publish と衝突しうる状態だった。
-let _publishGate = null;   // Promise | null
-
+let _publishGate = null;
+const _publishContexts = new Map();
+function _publishContext(project, slug) {
+    const key = JSON.stringify([project.id, slug || (project.shareInfo && project.shareInfo.slug) || '']);
+    if (!_publishContexts.has(key)) _publishContexts.set(key, {timer:0,inflight:false,paused:false,state:'local-saved'});
+    return _publishContexts.get(key);
+}
+function _publishStatus(project, slug, state, a, b) {
+    _publishContext(project, slug).state = state;
+    if (App.project === project && (!project.shareInfo || project.shareInfo.slug === slug)) App._setSyncStatus(state,a,b);
+}
+function _adoptPublishPatch(project, patch) {
+    if (!patch || !patch.applied || !patch.project || (project.storageRevision || 0) !== patch.previousStorageRevision) return false;
+    project.storageRevision = patch.storageRevision;
+    project.shareInfo = JSON.parse(JSON.stringify(patch.project.shareInfo || {}));
+    if (patch.project.__publishPending || (project.publishEditEpoch || 0) !== (patch.project.publishEditEpoch || 0)) project.__publishPending = true; else delete project.__publishPending;
+    if (App.project === project) App._publishDirty = !!project.__publishPending;
+    return true;
+}
 async function _publishCore(project, meta, masterPw, opts) {
-    let releaseGate;
-    _publishGate = new Promise(r => { releaseGate = r; });
-    try {
-        return await _publishCoreInner(project, meta, masterPw, opts);
-    } finally {
-        _publishGate = null;
-        try { releaseGate(); } catch (e) {}
-    }
+    while (_publishGate) await _publishGate;
+    let release; const gate = new Promise(resolve => { release=resolve; }); _publishGate=gate;
+    try { return await _publishCoreInner(project,meta,masterPw,opts); }
+    finally { if (_publishGate===gate) _publishGate=null; release(); }
 }
-
 async function _publishCoreInner(project, meta, masterPw, opts) {
-    opts = opts || {};
-    freezeMsiSourceReferences(project);
-    // Snapshot before any await: edits made during an upload belong to the next
-    // publish and must never become references to originals not uploaded yet.
-    const roiMediaSnapshot = roiMediaForTransport(project);
-    const roiMediaPayload = { version: 1, items: [] };
-    const silent = !!opts.silent;
-    const onProgress = opts.onProgress || (() => {});
-    const forceFull = !!opts.forceFullUpload || !!(project.shareInfo && project.shareInfo.forceFullUpload);
-
+    opts=opts||{};
     if (!SupabaseClient.configured()) throw new Error('supabase_not_configured');
-    const sess = await SupabaseClient.requestPublishSession(masterPw, meta.slug);
-    // let: 1 時間の TTL が大きなファイルの送信中に切れたら取り直す (下の 401/403)。
-    let publishToken = sess && sess.token;
-    if (!publishToken) throw new Error('publish session token failed');
-
-    // Set of full Storage paths already on the server. New paths encountered
-    // during this publish are added so the next call skips them.
-    const uploadedPaths = forceFull
-        ? new Set()
-        : new Set((project.shareInfo && project.shareInfo.uploadedPaths) || []);
-
-    // ---- Stage A: enumerate every (section, key, ent) into pendingTasks
-    // and group by Storage path so a single source file shared by N MSI
-    // keys collapses to ONE upload at most. uploadedPaths is NOT consulted
-    // here — Stage B will verify cached paths still exist on Storage.
-    const pathTasks = new Map(); // path -> Task[]
-    const sectionsPayload = [];
-    // ★ パスは blobId だけで決める。切片 ID を含めていた頃は、1 本の parquet を
-    //   共有する切片が 4 枚あると「同じ 836 MB を 4 本の別パスへ」送っていた
-    //   (受信側も ref.path で重複排除するので 4 回ダウンロードしていた)。
-    //   blobId は uid('blob') で一意なので、これだけで 1 blob = 1 オブジェクトになる。
-    //
-    //   ファイル名ではなく拡張子だけを付けるのは、rename (:5953-5977) が
-    //   同じ blobId のまま filename を書き換えるため。名前をパスに入れると
-    //   リネームのたびにキャッシュが外れて 836 MB を上げ直すことになる。
-    //   rename は拡張子を継承する仕様なので、拡張子なら安定する。
-    //   拡張子は blobId ごとに最初に見たものを採用する (切片ごとに rename すると
-    //   同じ blobId でも ent.filename が食い違いうるため)。
-    //   (規則そのものは storageExtOf / storagePathForEnt に置いてある。
-    //    blob 復旧 (ensureLocalBlob) が同じパスを組み立てられる必要があるため。)
-    const extByBlob = new Map();
-    const enqueue = (sec, storage, kindFolder, slot, k, ent) => {
-        if (!ent) return;
-        const filename = (ent.filename) || (k + '.bin');
-        // ★ blobId を持たないレイヤー = Storage から直接読んでいるもの
-        //   (取り込んだ parquet)。既にサーバに在るのでアップロードは要らないが、
-        //   **参照は必ず書かなければならない**。ここで捨てていた頃は、取り込んだ
-        //   プロジェクトを再 publish した時点で parquet のレイヤーが公開内容から
-        //   丸ごと消えていた (storage_paths は切片ごと置き換えられるため)。
-        const noUpload = !ent.blobId;
-        if (noUpload && !ent.storagePath) return;
-        if (!noUpload && !extByBlob.has(ent.blobId)) extByBlob.set(ent.blobId, storageExtOf(filename));
-        // Supabase は非 ASCII キーを InvalidKey で弾くので、パスに載せるのは
-        // blobId (英数字と _ のみ) と正規化した拡張子だけにする。元のファイル名は
-        // task.filename → ref.filename として表示・ダウンロード名に残る。
-        const path = noUpload
-            ? ent.storagePath
-            : `${meta.slug}/blobs/${ent.blobId}${extByBlob.get(ent.blobId)}`;
-        const task = { blobId: ent.blobId || null, noUpload, kindFolder, slot, key: k, ent, sectionId: sec.id, storage, path, filename };
-        let bucket = pathTasks.get(path);
-        if (!bucket) { bucket = []; pathTasks.set(path, bucket); }
-        bucket.push(task);
-    };
-    for (const sec of project.sections) {
-        const storage = { images: {}, msiSeries: {} };
-        for (const [k, ent] of Object.entries(sec.images || {})) enqueue(sec, storage, 'images', 'images', k, ent);
-        for (const [k, ent] of Object.entries(sec.msiSeries || {})) enqueue(sec, storage, 'msi', 'msiSeries', k, ent);
-        sectionsPayload.push({
-            id: sec.id,
-            ordinal: sec.ordinal || 0,
-            displayName: sec.displayName || ('Section ' + (sec.ordinal || '')),
-            // Project-wide molecule overlays ride along in section.meta because
-            // upsert_project_doc only round-trips project.meta.memo, whereas
-            // section.meta is persisted verbatim.
-            // ★ 共有先が作った重ね合わせ (_server / _local) は載せない。
-            //   サーバ側の share_overlays が正で、publish で入れ替える
-            //   sections.meta.overlays は master の定義だけを持つ
-            //   (混ぜると、master が再 publish するたびに共有先のセットが
-            //    master の定義として焼き直されて増えていく)。
-            //   同じ理由で __alignMaster (共有先が控えている master の位置合わせ)
-            //   も載せない。共有先の控えであって、共有ドキュメントの中身ではない。
-            meta: (() => {
-                const m = Object.assign({}, sec.meta || {}, {
-                    overlays: (project.overlays || []).filter(o => !isViewerOverlay(o)),
+    if (!ProjectStorage.recordPublishReceipt || !ProjectStorage.pinBlobs) throw new Error('保存機能を更新してから再読み込みしてください。');
+    let progress=null,cancelled=false; const abort=new AbortController();
+    const context=_publishContext(project,meta.slug);
+    const ensureRunning=()=>{if(cancelled){const e=new Error('publish_cancelled');e.cancelled=true;throw e;}};
+    try {
+        return await PublishSafety.run(project,meta,{
+            freezeSources:freezeMsiSourceReferences,media:roiMediaForTransport,publicPhoto:roiMediaPublicItem,
+            imageIdentity:alignmentImageIdentity,viewerOverlay:isViewerOverlay,encodeRoi:encodeRoiPolygon,
+            url:slug=>location.origin+location.pathname+'#share='+encodeURIComponent(slug),
+            state:(slug,id)=>SupabaseClient.getPublishStateV2(masterPw,slug,id),
+            session:job=>SupabaseClient.requestPublishSessionV2(masterPw,job),
+            commit:args=>SupabaseClient.publishProjectDocV2(Object.assign({_master_pw:masterPw},args)),
+            blob:id=>ProjectStorage.getBlob(id),exists:path=>SupabaseClient.headObject('atlases',path),
+            remoteBlob:async path=>{const r=await fetch(SupabaseClient.publicUrl('atlases',path),{signal:abort.signal});if(!r.ok)throw new Error('原本を取得できません: '+path);return r.blob();},
+            pin:(jobId,ids,projectId)=>ProjectStorage.pinBlobs(jobId,ids,{projectId}),
+            release:jobId=>ProjectStorage.releaseBlobPins(jobId),
+            intent:async intent=>{
+                const patch=await ProjectStorage.patchProject(project.id,current=>{
+                    const info=current.shareInfo||{};
+                    if ((info.slug||null)!==intent.sourceSlug && !(info.slug===intent.slug && info.pendingPublish?.jobId===intent.jobId)) throw new Error('公開先が変更されたため中止しました。');
+                    if (info.pendingPublish && info.pendingPublish.jobId!==intent.jobId && info.pendingPublish.jobId!==intent.replacesJobId)
+                        throw new Error('別の公開処理が進行中です。完了後に再試行してください。');
+                    current.shareInfo=Object.assign({},info,{pendingPublish:intent});
                 });
-                delete m.__alignMaster;
-                return m;
-            })(),
-            storagePaths: storage,
-        });
-    }
-    for (const item of roiMediaSnapshot.items) {
-        const filename = item.filename || 'image.bin';
-        const noUpload = !item.blobId;
-        // A previous successful upload remains authoritative for this binary.
-        // Model.replace removes storagePath when the photograph is replaced.
-        const sameProjectPath = item.storagePath && item.storagePath.startsWith(meta.slug + '/') ? item.storagePath : null;
-        const path = sameProjectPath || (noUpload ? null
-            : `${meta.slug}/roi-media/${sanitizeStorageKeySegment(item.id)}/r${item.revision || 1}/${sanitizeStorageKeySegment(item.blobId)}${storageExtOf(filename)}`);
-        if (!path) throw new Error('ROI写真の原本がありません: ' + (item.title || filename));
-        const publicItem = roiMediaPublicItem(item, path);
-        roiMediaPayload.items.push(publicItem);
-        const task = { blobId: item.blobId || null, noUpload, kindFolder: 'roi-media', slot: 'roiMedia',
-            key: 'ROI写真:' + (item.title || filename), ent: item, path, filename, publicItem };
-        if (!pathTasks.has(path)) pathTasks.set(path, []);
-        pathTasks.get(path).push(task);
-    }
-
-    // Helper: write the upload ref into every task that shares this path,
-    // so dedupe at upload time still produces a complete sectionsPayload.
-    const writeRefToTasks = (path, ref) => {
-        const tasks = pathTasks.get(path) || [];
-        for (const t of tasks) {
-            if (t.slot === 'roiMedia') {
-                t.publicItem.storagePath = ref.path;
-                t.publicItem.mime = ref.mime || t.ent.mime;
-            } else if (t.slot === 'msiSeries') {
-                const out = Object.assign({}, t.ent, ref);
-                // 受け手は自分の環境で URL を組み立て直すので、こちらの
-                // sourceUrl / storagePath は載せない (別オリジンの URL が
-                // 公開ドキュメントに残るだけで、誰も読まない)。
-                delete out.sourceUrl;
-                delete out.storagePath;
-                t.storage[t.slot][t.key] = out;
-            } else t.storage[t.slot][t.key] = Object.assign({},ref,{
-                alignmentImageReference:alignmentImageIdentity(t.ent)});
-        }
-    };
-
-    // 今回のパス集合に無いキャッシュ項目を落とす。削除したレイヤーのパスや、
-    // 旧スキーム (slug/<切片ID>/...) のパスがいつまでも残って肥大するのを防ぐ。
-    for (const p of [...uploadedPaths]) if (!pathTasks.has(p)) uploadedPaths.delete(p);
-
-    // ---- Stage B: HEAD-verify what is already on Storage. The cache claims
-    // some paths are up there, but real-world drift (manual deletes, bucket
-    // migrations) can leave the DB pointing at missing objects. Drop those
-    // from the cache so they get re-uploaded in Stage C, instead of
-    // silently writing dead paths into the DB payload.
-    //
-    // ★ 対象はキャッシュ掲載分だけでなく**全パス**にする。パスは blobId で
-    //   決まり中身は不変なので、既に在るものを上げ直す意味は無い。そして何より、
-    //   ローカルの blob が失われたレイヤーでも「サーバに在る」と確かめられれば
-    //   参照を書けるので、**公開内容からレイヤーが消えなくなる**。以前は
-    //   キャッシュに載っていないパスは無条件にアップロードへ回り、blob が
-    //   無ければ黙って storage_paths から落ちていた (共有先で「No data」)。
-    //   forceFullUpload (救済用の全再送) のときは検証を飛ばして必ず送り直す。
-    //   ただしアップロードできない参照専用 (noUpload) だけは常に検証する。
-    const candidatePaths = [];
-    for (const [path, tasks] of pathTasks.entries()) {
-        if (!forceFull || tasks.every(t => t.noUpload)) candidatePaths.push(path);
-    }
-    if (candidatePaths.length) {
-        await runWithConcurrency(candidatePaths, 8, async (path) => {
-            const ok = await SupabaseClient.headObject('atlases', path);
-            if (ok) {
-                uploadedPaths.add(path);
-                // Object exists — record the ref straight from cached metadata
-                // and skip the network upload for this path.
-                const tasks = pathTasks.get(path) || [];
-                if (!tasks.length) return;
-                const sample = tasks[0];
-                const ref = { path, mime: (sample.ent && sample.ent.mime), filename: sample.filename };
-                writeRefToTasks(path, ref);
-            } else {
-                // Cache lied — drop and let Stage C re-upload from IDB.
-                uploadedPaths.delete(path);
-            }
-        });
-    }
-
-    // ---- Stage C: upload every path that wasn't successfully verified in
-    // Stage B. uploadTasks holds one representative task per remaining
-    // path; uploadOne writes the resulting ref to ALL tasks sharing that
-    // path so the sectionsPayload ends up fully populated.
-    const uploadTasks = [];
-    for (const [path, tasks] of pathTasks.entries()) {
-        if (uploadedPaths.has(path)) continue; // verified in Stage B
-        if (!tasks.length) continue;
-        uploadTasks.push(tasks[0]);
-    }
-
-    // ソースがこの端末にも Storage にも無いレイヤー (Stage B で「サーバに在る」と
-    // 確かめられず、ローカルの blob も消えている)。参照を書けないので、このまま
-    // 公開すると storage_paths から落ちて共有先で「No data」になる。
-    const skippedNoBlob = [];
-
-    // ---- Stage C-0: サイズを先に測る。
-    // 以前は uploadOne の中で totalBytes を足していたので、分母がアップロードの
-    // 進行中に増えていき「x MB / y MB」が意味を成していなかった。ここで確定させる。
-    // blob が消えているタスクもここで落とすので、モーダルの分母が実際に送る本数と
-    // 一致する。ProjectStorage.getBlob は IDB のレコードを返すだけで、Blob は
-    // 参照なので size を読むのはタダ (836 MB を読み込んだりはしない)。
-    const sizeByPath = new Map();
-    const liveTasks = [];
-    const missingRoiMedia = [];
-    await runWithConcurrency(uploadTasks, 8, async (t) => {
-        let rec = null;
-        try { rec = await ProjectStorage.getBlob(t.blobId); }
-        catch (e) { console.warn('publish: getBlob failed', t.blobId, e); }
-        if (!rec || !rec.blob) {
-            if (t.slot === 'roiMedia') missingRoiMedia.push(t.key);
-            const names = (pathTasks.get(t.path) || [t]).map(x => x.key).filter(Boolean);
-            skippedNoBlob.push(...(names.length ? names : [t.path]));
-            return;
-        }
-        sizeByPath.set(t.path, rec.blob.size || 0);   // rec 自体は持たない
-        liveTasks.push(t);
-    });
-    if (missingRoiMedia.length) {
-        throw new Error('ROI写真の原本を確認できないため公開を中止しました: ' + missingRoiMedia.join(', '));
-    }
-    const totalBytes = [...sizeByPath.values()].reduce((a, b) => a + b, 0);
-
-    let progress = null;
-    const uploadAbort = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-    let cancelled = false;
-    if (!silent && liveTasks.length) {
-        progress = openPublishProgressModal(liveTasks.length, {
-            subtitle: '合計 ' + fmtBytesMB(totalBytes) + ' を送ります。'
-                    + '中断してもサーバ上の公開内容は変わりません。',
-            cancelLabel: '中断',
-        });
-        progress.setCancelHandler(() => {
-            cancelled = true;
-            if (uploadAbort) uploadAbort.abort();
-        });
-    }
-    let doneCount = 0;
-    let doneBytes = 0;                  // 完了したファイルの合計
-    const liveBytes = new Map();        // path -> 進行中ファイルの現時点バイト数
-    let lastPaint = 0;
-    // 進捗は path ごとに「進行中 (liveBytes) か完了済 (doneBytes) のどちらか一方」
-    // にしか入らないので二重計上しない。xhr の progress は毎秒何十回も来るため
-    // 150ms に間引く。
-    const paint = (force) => {
-        if (!progress) return;
-        const now = Date.now();
-        if (!force && now - lastPaint < 150) return;
-        lastPaint = now;
-        let cur = doneBytes;
-        for (const v of liveBytes.values()) cur += v;
-        progress.update(doneCount, liveTasks.length, cur, totalBytes);
-    };
-    const uploadOne = async (task) => {
-        const blob = await ProjectStorage.getBlob(task.blobId);
-        if (!blob || !blob.blob) {
-            if (task.slot === 'roiMedia') throw new Error('ROI写真の原本が失われました: ' + task.key);
-            return;      // Stage C-0 で拾い済み (保険)
-        }
-        const size = sizeByPath.get(task.path) || 0;
-        let lastErr = null;
-        try {
-            for (let attempt = 0; attempt < 3; attempt++) {
-                if (cancelled) { const e = new Error('upload aborted'); e.aborted = true; throw e; }
-                liveBytes.set(task.path, 0);   // 再試行は 0 から数え直す
-                try {
-                    await SupabaseClient.uploadBlob('atlases', task.path, blob.blob,
-                        blob.mime || (task.ent && task.ent.mime), publishToken, {
-                            signal: uploadAbort && uploadAbort.signal,
-                            onProgress: (loaded) => { liveBytes.set(task.path, Math.min(loaded, size)); paint(false); },
-                            // 本文を送り切ったあとはサーバ側の書き込み待ち。100% のまま
-                            // 数秒止まって見えるので、その旨を出せるようにしておく。
-                            onSent: () => { liveBytes.set(task.path, size); paint(true); },
-                        });
-                    lastErr = null; break;
-                } catch (e) {
-                    lastErr = e;
-                    // 中断は即抜ける (リトライすると中断が 3 倍待たされる)。
-                    if (cancelled || (e && e.aborted)) throw e;
-                    // 413 は決定論的なので再試行しても無駄。分かる言葉に置き換える。
-                    if (e && e.status === 413) throw _publishSizeError(task, size);
-                    // publish トークンの TTL は 1 時間。大きなファイルを上げている
-                    // 途中で切れると 401/403 になるので、取り直して 1 回やり直す。
-                    if (e && (e.status === 401 || e.status === 403) && attempt < 2) {
-                        try {
-                            const s2 = await SupabaseClient.requestPublishSession(masterPw, meta.slug);
-                            if (s2 && s2.token) publishToken = s2.token;
-                        } catch (e2) { console.warn('publish token refresh failed', e2); }
-                    }
-                    if (attempt < 2) await new Promise(r => setTimeout(r, 800 * Math.pow(2, attempt)));
-                }
-            }
-        } finally {
-            liveBytes.delete(task.path);   // 成功・失敗どちらでも必ず外す
-        }
-        if (lastErr) throw lastErr;
-        const ref = { path: task.path, mime: blob.mime || (task.ent && task.ent.mime), filename: task.filename };
-        writeRefToTasks(task.path, ref);
-        uploadedPaths.add(task.path);
-        doneCount++; doneBytes += size;
-        paint(true);
-        onProgress(doneCount, liveTasks.length);
-    };
-    try {
-        await runWithConcurrency(liveTasks, 4, uploadOne);
-    } catch (e) {
-        if (progress) { try { progress.close(); } catch (e2) {} progress = null; }
-        if (cancelled || (e && e.aborted)) {
-            // ★ 自動同期を止める。queueSave は _doSave 経由で
-            //   _scheduleAutoPublish を呼ぶので、これが無いと 5 秒後に
-            //   いま中断したアップロードが黙って再開してしまう。
-            //   次に手動で Publish するまで止めたままにする。
-            try { App._autoPublishPausedSlug = meta.slug; } catch (e2) {}
-            // 途中まで上げたオブジェクトは残す。次回の publish が Stage B の
-            // HEAD 検証で拾って再利用するので、再開が安く済む。
-            try {
-                project.shareInfo = project.shareInfo || {};
-                project.shareInfo.uploadedPaths = [...uploadedPaths];
-                App.queueSave();
-            } catch (e2) {}
-            const err = new Error('publish_cancelled');
-            err.cancelled = true;
-            throw err;
-        }
+                if(!patch.applied)throw new Error('ローカルプロジェクトが削除されたため公開を中止しました。');
+                _adoptPublishPatch(project,patch);
+            },
+            receipt:async receipt=>{
+                const patch=await ProjectStorage.recordPublishReceipt(project.id,receipt);
+                if(!patch.applied){_publishStatus(project,meta.slug,'conflict');throw Object.assign(new Error('共有への公開は完了しましたが、このローカル版は削除・更新されています。共有版を別コピーで取得して比較してください。'),{code:'PUBLISH_RECEIPT_LOCAL_CONFLICT'});}
+                const adopted=_adoptPublishPatch(project,patch);
+                if(patch.applied)_publishStatus(project,meta.slug,adopted?(project.__publishPending?'local-saved':'synced'):'conflict');
+            },
+            start:(count,bytes)=>{
+                if(!opts.silent&&count){progress=openPublishProgressModal(count,{subtitle:'合計 '+fmtBytesMB(bytes)+'。原本は上書きせず新しい保存先へ送ります。',cancelLabel:'中断'});
+                    progress.setCancelHandler(()=>{cancelled=true;context.paused=true;abort.abort();});}
+            },
+            upload:(path,blob,mime,token)=>SupabaseClient.uploadBlob('atlases',path,blob,mime,token,{signal:abort.signal}),
+            progress:(done,total)=>{if(progress)progress.update(done,total);if(opts.onProgress)opts.onProgress(done,total);},
+            assertActive:ensureRunning,close:()=>{if(progress)progress.close();progress=null;},
+        },{forceFullUpload:!!opts.forceFullUpload||!!project.shareInfo?.forceFullUpload});
+    } catch(e) {
+        if(cancelled){e.cancelled=true;}
+        if(e.code==='PGRST202'||/publish_protocol_upgrade_required/i.test(e.message||''))
+            e.userMessage='公開APIの更新が必要です。管理者が supabase/publish_safety_v2.sql を適用した後、アプリを再読み込みしてください。旧APIへの再送は行いません。';
         throw e;
-    }
-    // ★ progress.close() はここでは呼ばない。この後の upsert_project_doc が
-    //   5560 エントリぶんの JSON (数 MB) を送るので、モーダルを消すと
-    //   「また固まった」ように見える。RPC の finally でまとめて閉じる。
-    // ★ ソースを 1 つでも欠いたまま黙って公開しない。
-    //   upsert_project_doc は storage_paths を**切片ごと丸ごと置き換える**ので、
-    //   参照を書けなかったレイヤーはサーバの公開内容から消える。以前はトーストを
-    //   出すだけで公開を続けていたため、ローカルの blob を失った端末で 1 回
-    //   同期しただけで、共有先から見えていたレイヤーが消えていた。
-    if (skippedNoBlob.length) {
-        const uniq = [...new Set(skippedNoBlob)];
-        const head = uniq.slice(0, 5).map(k => String(k).replace(/^MSI_/, '')).join(', ');
-        console.warn('publish: source missing locally AND on Storage →', uniq);
-        const msg = uniq.length + ' 件のレイヤーは、この端末にもサーバにもソースがありません: '
-            + head + (uniq.length > 5 ? ' …' : '')
-            + '。このまま公開すると、これらは共有先から見えなくなります。';
-        if (silent) {
-            // 自動同期は勝手に公開内容を削らない。手動 publish の判断に委ねる。
-            const err = new Error('missing_sources');
-            err.userMessage = msg + ' 手動で「Publish to share」を実行して内容を確認してください。';
-            throw err;
-        }
-        if (progress) { try { progress.close(); } catch (e2) {} progress = null; }
-        if (!confirm(msg + '\n\nOK: このまま公開する\nキャンセル: 中止する (サーバの公開内容は変わりません)')) {
-            const err = new Error('publish_cancelled');
-            err.cancelled = true;
-            throw err;
-        }
-    }
-    if (progress) progress.setNote('アップロード完了。サーバへ反映しています…');
-
-    // If its ROI or section was deleted while bytes were uploading, do not
-    // commit a now-dangling attachment reference into the shared document.
-    try {
-        roiMediaForTransport(Object.assign({}, project, {
-            meta: Object.assign({}, project.meta || {}, { roiMedia: roiMediaSnapshot }),
-        }));
-    } catch (e) {
-        if (progress) { try { progress.close(); } catch (_) {} progress = null; }
-        throw e;
-    }
-
-    // Exclude the read-only collaborator overlay (`_collab`): those ROIs are
-    // authored by viewers and live authoritatively on the server. Master
-    // publishes only its own ROIs; upsert_project_doc preserves the viewer
-    // rows (share_locks.sql:420), so they neither disappear nor duplicate.
-    const roisPayload = (project.rois || []).filter(r => !r._collab).flatMap(r => {
-        const polys = r.polysBySection || {};
-        return Object.entries(polys).map(([sectionId, polyMsi]) => ({
-            sectionId,
-            colorKey: r.colorKey || 'default',
-            name: r.name || '',
-            polyMsi: encodeRoiPolygon(r, sectionId),
-            createdBy: 'master',
-            version: r.version || 1,
-        }));
-    });
-
-    const args = {
-        _master_pw: masterPw,
-        _slug: meta.slug,
-        _display_name: project.displayName || meta.slug,
-        // Project-level view settings travel with project meta so recipients open
-        // with the master's chosen presentation on first load. Every key here has
-        // a reader on the hydrate side (_hydrateSharedProject / _openProjectCore);
-        // they were being lost for two different reasons — colormap was sent but
-        // upsert_project_doc only stored `memo`, and the other three were never
-        // put on the payload at all. Booleans/numbers are sent explicitly rather
-        // than `|| null` so that master turning a setting OFF propagates as OFF
-        // (the SQL strips nulls, which would otherwise mean "keep the old value").
-        _meta: {
-            anatomyPalette: project.anatomyPalette || {},
-            memo: project.memo || {},
-            // Explicit empty registry clears the last removed attachment too.
-            roiMedia: roiMediaPayload,
-            colormap: (project.meta && project.meta.colormap) || null,
-            msiSmoothing: (project.meta && project.meta.msiSmoothing === 'linear') ? 'linear' : 'none',
-            otsuBgRemove: !!(project.meta && project.meta.otsuBgRemove),
-            otsuStrength: (project.meta && Number.isFinite(project.meta.otsuStrength))
-                ? project.meta.otsuStrength : 0,
-        },
-        _viewer_pw: meta.viewerPassword,
-        _admin_pw: meta.adminPassword || null,
-        _sections: sectionsPayload,
-        _rois: roisPayload,
-        _is_public: !!meta.isPublic,
-    };
-    let result;
-    try {
-        try {
-            result = await SupabaseClient.upsertProjectDoc(args);
-        } catch (e) {
-            const errMsg = String((e && (e.message || e.details || e.hint)) || '');
-            const isMissingFn = (e && e.code === 'PGRST202')
-                || /Could not find the function/i.test(errMsg);
-            if (!isMissingFn) throw e;
-            if (args._is_public) {
-                throw new Error(
-                    'Public 共有を使うには Supabase の SQL を最新版に更新してください。' +
-                    'Supabase SQL Editor で supabase/share_locks.sql の最新版を実行 (再適用) してください。'
-                );
-            }
-            console.warn('upsert_project_doc(_is_public) not found — retrying with the 8-arg signature. ' +
-                'Apply supabase/share_locks.sql (the latest revision) in Supabase to enable public-link sharing.');
-            const fallbackArgs = Object.assign({}, args);
-            delete fallbackArgs._is_public;
-            result = await SupabaseClient.upsertProjectDoc(fallbackArgs);
-        }
-    } finally {
-        // アップロード完了からここまでモーダルを出したままにしている
-        // (数千化合物だと RPC 本体だけで数 MB あり、無表示だと固まって見えるため)。
-        if (progress) { try { progress.close(); } catch (e2) {} progress = null; }
-    }
-    if (!result || result.ok !== true) {
-        throw new Error(result && result.reason ? result.reason : 'upsert_failed');
-    }
-
-    for (const original of roiMediaSnapshot.items) {
-        const current = ((project.meta && project.meta.roiMedia && project.meta.roiMedia.items) || [])
-            .find(item => item.id === original.id);
-        const published = roiMediaPayload.items.find(item => item.id === original.id);
-        if (current && published && (current.revision || 1) === original.revision
-            && (current.blobId || null) === (original.blobId || null)) {
-            current.storagePath = published.storagePath;
-        }
-    }
-
-    const url = `${location.origin}${location.pathname}#share=${encodeURIComponent(meta.slug)}`;
-    // Merge into existing shareInfo so we keep publishedAt unless this is
-    // the first publish. uploadedPaths + lastSyncedAt drive the
-    // skip-already-uploaded path and the conflict detection respectively.
-    // Drop the legacy uploadedBlobIds (was blobId-keyed; broke when slug
-    // or section IDs changed) and the one-shot forceFullUpload flag.
-    const prev = project.shareInfo || {};
-    project.shareInfo = Object.assign({}, prev, {
-        slug: meta.slug,
-        isPublic: !!meta.isPublic,
-        viewerPassword: meta.isPublic ? null : meta.viewerPassword,
-        adminPassword: meta.adminPassword || null,
-        url,
-        publishedAt: prev.publishedAt || nowIso(),
-        lastSyncedAt: nowIso(),
-        uploadedPaths: [...uploadedPaths],
-    });
-    delete project.shareInfo.uploadedBlobIds;
-    delete project.shareInfo.forceFullUpload;
-    return result;
+    } finally {if(progress)progress.close();}
 }
-
+async function _comparePublishedProject(project, slug, masterPw) {
+    const raw=await SupabaseClient.unlockProjectMaster(slug,masterPw),session=Array.isArray(raw)?raw[0]:raw;
+    if(!session||!session.token)throw new Error('共有版を確認する認証を取得できませんでした。');
+    const doc=await SupabaseClient.fetchProjectDoc(session.token);
+    const groups=await Promise.all((doc.sections||[]).map(section=>SupabaseClient.listRois(session.token,section.id)));
+    doc.rois=groups.flatMap(rows=>rows||[]);
+    const local=PublishSafety.summary(project),remote=PublishSafety.summary(doc);
+    const labels={sections:'切片',sources:'測定ソース',molecules:'分子レイヤー',images:'HE/IF画像',rois:'ROI（切片ごと）'};
+    const rows=Object.keys(labels).map(key=>'<tr><th>'+labels[key]+'</th><td>'+local[key]+'</td><td>'+remote[key]+'</td></tr>').join('');
+    const memoEqual=JSON.stringify(project.memo||{})===JSON.stringify(doc.meta?.project_meta?.memo||{});
+    const p=openModal('<h2>ローカル版と共有版の比較</h2><p>元のローカル版は保持します。件数が同じでも内容の一致は保証しません。</p>'+
+        '<table><thead><tr><th></th><th>ローカル</th><th>共有</th></tr></thead><tbody>'+rows+'</tbody></table>'+
+        '<p>Memo: '+(memoEqual?'同じ記録':'差があります')+'</p><p>共有の公開版: '+(Number.isSafeInteger(doc.publish_revision)?doc.publish_revision:'未確認')+'</p>'+
+        '<form><div class="modal-actions"><button type="button" data-modal-cancel>閉じる</button><button type="submit" data-modal-ok>共有版を別コピーで取得</button></div></form>');
+    openModal._card._collect=()=>true;
+    if(await p){const id=await App._importProjectFromServer(slug);if(id&&App.project===project)await App.openProject(id);}
+}
 async function publishProjectToShare() {
-    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
-        showToast('オフライン版では公開・同期を行いません。Export ZIP で保存してください。');
-        return;
-    }
-    const project = App.project;
-    if (!project) { showToast('プロジェクトを開いてから実行してください'); return; }
-    if (!SupabaseClient.configured()) {
-        // ★ 「未設定」と言い切らない。部品を読み込めなかっただけのときに
-        //   設定を疑わせるのは誤誘導 (設定は正しい)。
-        //   未設定側だけは README への案内を足したいので、その場で見分ける
-        //   (mrm.html:472 と同じやり方)。
-        const libMissing = (typeof supabase === 'undefined' || !supabase.createClient);
-        alert(libMissing
-            ? serverUnavailableReason()
-            : 'Supabase が未設定です。supabase/README.md を見て URL / anon key を埋め込んでください。');
-        return;
-    }
-    const meta = await openPublishMetaModal(project);
-    if (!meta) return;
-
-    // ★ 初回 publish のときだけ、その slug がサーバで空いているか確かめる。
-    //   upsert_project_doc は slug が主キーなので、埋まっている slug へ送ると
-    //   **別のプロジェクトを丸ごと上書きする**。再 publish (既に slug を持って
-    //   いる) は自分自身に当たるだけなので聞かない。
-    //   getProjectPublicState は anon の列限定 SELECT で、失敗しても null を
-    //   返すだけ (通信不良で publish を止めはしない)。
-    if (!(project.shareInfo && project.shareInfo.slug)) {
-        let taken = null;
-        try { taken = await SupabaseClient.getProjectPublicState(meta.slug); }
-        catch (e) { console.warn('slug の重複確認に失敗 (続行します)', e); }
-        if (taken) {
-            const nm = taken.display_name || meta.slug;
-            if (!confirm('slug "' + meta.slug + '" は既にサーバで使われています'
-                + '（プロジェクト名: ' + nm + '）。\n'
-                + 'このまま続けると、そのプロジェクトを上書きします。\n\n'
-                + 'OK: 上書きする / キャンセル: 中止して slug を変える')) return;
-        }
-    }
-
-    // master pw: reuse the cached value when available; otherwise prompt.
-    let masterPw = _readCachedMasterPw();
-    if (!masterPw) {
-        masterPw = (prompt('Master password を入力してください') || '').trim();
-        if (!masterPw) return;
-    }
-
-    // 自動同期が走っている最中に手動 publish を重ねると、同じオブジェクトへの
-    // 二重アップロードと RPC の競合になる。予約済みの自動同期は取り消し、
-    // 実行中のものは終わるまで待つ。
-    if (App._autoPublishTimer) { clearTimeout(App._autoPublishTimer); App._autoPublishTimer = 0; }
-    if (_publishGate) {
-        showToast('自動同期の完了を待っています…', 4000);
-        try { await _publishGate; } catch (e) {}
-    }
-    // 手動 publish は「今アップロードしてよい」という明示の意思表示なので、
-    // 前回の中断で止めていた自動同期をここで解除する。
-    App._autoPublishPausedSlug = null;
-
-    showToast('Supabase へアップロード中...', 1800);
-    const epochAtStart = App._publishEpoch || 0;
-    try {
-        await _publishCore(project, meta, masterPw, { silent: false });
-        _saveCachedMasterPw(masterPw);
-        // Robustly persist the slug write-back. A silent putProject failure here
-        // is what leaves the local record without shareInfo.slug, which the
-        // manager then shows as a Local + Server-only duplicate. Use the
-        // retrying save path, verify the slug landed in IDB, and surface a
-        // warning if it didn't.
-        try { await App.queueSave(0); await App._flushSave(); } catch (e) { console.warn('flushSave shareInfo failed', e); }
-        try {
-            const wantSlug = project.shareInfo && project.shareInfo.slug;
-            let idb = await ProjectStorage.getProject(project.id);
-            if (!(idb && idb.shareInfo && idb.shareInfo.slug === wantSlug)) {
-                await ProjectStorage.putProject(project);   // direct fallback write
-                idb = await ProjectStorage.getProject(project.id);
-            }
-            if (wantSlug && !(idb && idb.shareInfo && idb.shareInfo.slug === wantSlug)) {
-                alert('公開は成功しましたが、共有情報(slug)のローカル保存が確認できませんでした。\nページを再読み込みし「サーバから一覧取得」を実行すると、一覧は自動的に1件へ統合されます。');
-            }
-        } catch (e) { console.warn('persist/verify shareInfo failed', e); }
-        App.refreshShareInfoButton();
-        // 手動 publish で送り終えたので、直前の queueSave(0) が立てた
-        // _publishDirty と、それが仕込んだ 5 秒タイマーを取り消す。
-        // 放置すると同じ内容をもう 1 回 auto-publish してしまう。
-        // ただし ★ アップロード中に入った編集は別。ペイロードはアップロードの
-        // 前に固めているので、その後の編集はまだサーバに無い。世代が動いて
-        // いたら立てたままにして、5 秒タイマーもそのまま生かす。
-        // (直前の queueSave(0) 自体も世代を進めるので、それを基準に取る)
-        if ((App._publishEpoch || 0) === epochAtStart + 1) {
-            App._publishDirty = false;
-            delete project.__publishPending;
-            if (App._autoPublishTimer) { clearTimeout(App._autoPublishTimer); App._autoPublishTimer = 0; }
-        }
-        if (App._setSyncStatus) App._setSyncStatus(App._publishDirty ? 'local-saved' : 'synced');
-        await openShareInfoModal(project.shareInfo, { titleSuccess: true });
-    } catch (e) {
-        // 中断はエラーではない。サーバ上の公開内容は一切変わっていない
-        // (upsert_project_doc を呼ぶ前に抜けている)。
-        if (e && e.cancelled) {
-            showToast('アップロードを中断しました。サーバの公開内容は変わっていません。'
-                + '自動同期は次に「Publish to share」を押すまで止めます', 9000);
-            return;
-        }
-        console.error('publish failed', e);
-        const msg = String((e && (e.message || e.details)) || e);
-        if (/unauthorized|28000/i.test(msg)) {
-            alert('Master password が違います');
-        } else {
-            alert('Publish に失敗しました: ' + msg);
-        }
-    }
+    if(typeof window!=='undefined'&&window.DESI_OFFLINE===true){showToast('オフライン版では公開・同期を行いません。');return;}
+    const project=App.project;if(!project){showToast('プロジェクトを開いてください。');return;}
+    if(!SupabaseClient.configured()){alert(serverUnavailableReason()||'サーバに接続できません。');return;}
+    const meta=await openPublishMetaModal(project);if(!meta)return;
+    let masterPw=_readCachedMasterPw();if(!masterPw)masterPw=(prompt('Master password を入力してください')||'').trim();if(!masterPw)return;
+    const ctx=_publishContext(project,meta.slug);if(ctx.timer){clearTimeout(ctx.timer);ctx.timer=0;}ctx.paused=false;ctx.inflight=true;
+    try{
+        if(App.project===project&&await App._flushSave()===false)return;
+        const receipt=await _publishCore(project,meta,masterPw,{silent:false});_saveCachedMasterPw(masterPw);
+        if(App.project===project){App.refreshShareInfoButton();await openShareInfoModal(Object.assign({},project.shareInfo,receipt),{titleSuccess:true});}
+    }catch(e){
+        if(e.cancelled){showToast('公開を中断しました。原本とローカルの編集は保持されています。');return;}
+        if(e.code==='40001'||e.code==='PUBLISH_BASELINE_UNKNOWN'){
+            _publishStatus(project,meta.slug,'conflict');
+            try{await _comparePublishedProject(project,meta.slug,masterPw);}catch(c){alert(c.message||String(c));}
+        }else{_publishStatus(project,meta.slug,'error',e.userMessage||e.message);alert(e.userMessage||e.message||String(e));}
+    }finally{ctx.inflight=false;if(App.project===project&&project.__publishPending)App._scheduleAutoPublish();}
 }
 
 // 表示名から slug を作れなかったときの代替。
@@ -19193,13 +18729,15 @@ async function openPublishMetaModal(project) {
     // project was already published, default to (and lock) shareInfo.slug; only
     // a first-time publish lets the user choose the slug.
     const existingSlug = (project.shareInfo && project.shareInfo.slug) || '';
+    const retrySettings=project.shareInfo?.pendingPublish?.settings;
+    const selectedSlug=retrySettings?.slug||existingSlug||guess;
     const html = `
         <h2>Publish to share</h2>
         <form>
           <label>Project slug (URL identifier)
-            <input type="text" name="slug" value="${safe(existingSlug || guess)}" pattern="[A-Za-z0-9_-]+" required${existingSlug ? ' readonly title="既存の共有 slug を維持し、同じプロジェクトを更新します（改名もここで反映）。変更すると別プロジェクトになります。"' : ''}>
+            <input type="text" name="slug" value="${safe(selectedSlug)}" pattern="[A-Za-z0-9_-]+" required${existingSlug ? ' readonly title="既存の共有 slug を維持し、同じプロジェクトを更新します（改名もここで反映）。変更すると別プロジェクトになります。"' : ''}>
           </label>
-          ${existingSlug ? '<p style="font-size:11px;color:#475569;margin-top:2px;">※ 再 publish: 既存の slug を維持して同じプロジェクトを更新します（改名もここで反映）。</p>' : ''}
+          ${existingSlug ? '<label><input type="checkbox" data-new-slug> 別の共有URLへ新規公開する（現在の共有版は保持）</label>' : ''}
           ${(!existingSlug && !fromName) ? '<p style="font-size:11px;color:#b45309;margin-top:2px;">※ プロジェクト名に英数字が無いため slug を自動生成しました。分かりやすい名前に変えられます（英数字 / _ / -）。</p>' : ''}
           <label style="display:flex;align-items:center;gap:6px;margin-top:6px;">
             <input type="checkbox" data-is-public name="is_public">
@@ -19212,7 +18750,7 @@ async function openPublishMetaModal(project) {
             <input type="password" name="admin_pw" minlength="4" placeholder="admin パスワード (一覧取得・取り込み用)">
           </label>
           <p style="font-size:11px;color:#475569;">
-            ※ 同じ slug で再 publish するとサーバ側のプロジェクトは丸ごと上書きされます (公開フラグも含む)。<br>
+            ※ 同じ slug の公開版が変わっていた場合は更新を止め、比較を案内します。<br>
             ※ 公開リンクは share URL を知っている人なら誰でも閲覧できます。<br>
             ※ Admin password で開いた閲覧者は Method (MRM) の CE / CV まで見えます。Viewer password / 公開リンクだと CE / CV は隠れます (Precursor / Fragment は誰でも見えます)。
           </p>
@@ -19224,6 +18762,8 @@ async function openPublishMetaModal(project) {
         </form>`;
     const p = openModal(html);
     const card = openModal._card;
+    const forkCb=card.querySelector('[data-new-slug]'),slugInput=card.querySelector('[name="slug"]');
+    if(forkCb){forkCb.checked=!!retrySettings&&selectedSlug!==existingSlug;const sync=()=>{slugInput.readOnly=!forkCb.checked;if(!forkCb.checked)slugInput.value=existingSlug;};forkCb.addEventListener('change',sync);sync();}
     const publicCb = card.querySelector('[data-is-public]');
     const viewerPwRow = card.querySelector('[data-viewer-pw-row]');
     const viewerPwInp = card.querySelector('[name="viewer_pw"]');
@@ -19234,6 +18774,10 @@ async function openPublishMetaModal(project) {
         viewerPwInp.required = !on;
         viewerPwInp.disabled = on;
     };
+    const defaults=retrySettings||project.shareInfo||{};
+    if(publicCb)publicCb.checked=!!defaults.isPublic;
+    if(viewerPwInp)viewerPwInp.value=defaults.viewerPassword||'';
+    card.querySelector('[name="admin_pw"]').value=defaults.adminPassword||'';
     if (publicCb) publicCb.addEventListener('change', syncPublicState);
     syncPublicState();
     card._collect = () => {
@@ -20081,10 +19625,6 @@ const SharePreview = {
                     <button type="button" class="preview-admin-login" data-admin-login title="Admin password でログイン">🔑 Admin</button>
                 </div>
                 <div class="preview-header-right">
-                    <div class="preview-headerbar">
-                        <span class="bar" data-headerbar-bar></span>
-                        <span class="label" data-headerbar-label></span>
-                    </div>
                     <button type="button" class="preview-close" title="Close preview" data-preview-close>×</button>
                 </div>
             </div>
@@ -20341,7 +19881,6 @@ const SharePreview = {
         this._renderMethodHighlight(focusKey);
         this._renderImageGrid(project, focusKey);
         this._renderStatsTable(project, focusKey);
-        this._renderHeaderScalebar(project);
         this._refreshRangeInputs(project, focusKey);
         // 単一化合物 ⇄ 重ね合わせ の切り替えで右端の見せ方が変わる (グラデーション
         // ⇄ 分子=色の凡例)。open() と配色変更でしか描き直していなかったので、
@@ -20509,6 +20048,7 @@ const SharePreview = {
             if (!focusKey) return;
             const v = parseFloat(raw);
             if (!Number.isFinite(v)) return;
+            ensureMsiDisplayContext(App, focusKey);
             App.msiUserWindow = App.msiUserWindow || {};
             const cur = Object.assign({}, App.msiUserWindow[focusKey] || {});
             if (edge === 'min') cur.min = v; else cur.max = v;
@@ -21094,9 +20634,9 @@ const SharePreview = {
         const eff = baseUmPerPx / Math.max(scale * fit, 1e-6);
         const chosen = pickPreviewScalebarLength(eff, 100);
         if (!chosen) { bar.style.display = 'none'; return; }
-        const px = Math.max(40, Math.min(200, chosen / eff));
+        const px = chosen / eff;
         const labelText = chosen >= 1000 ? (chosen / 1000) + ' mm' : chosen + ' μm';
-        bar.querySelector('.bar').style.width = px.toFixed(1) + 'px';
+        bar.querySelector('.bar').style.width = px + 'px';
         bar.querySelector('.label').textContent = labelText;
         bar.style.display = '';
     },
@@ -21240,7 +20780,9 @@ const SharePreview = {
         const cellsFor = (extract) => sections.map(sec => {
             const ent = (sec.msiSeries || {})[focusKey];
             const v = ent ? extract(ent) : NaN;
-            return `<td>${formatScientific(Number(v))}</td>`;
+            const quality = ent && ent.archiveProvenance && ent.archiveProvenance.basis === 'legacy-derived-csv'
+                ? '<br><small style="color:#925c00">旧CSV参考値 / Legacy CSV</small>' : '';
+            return `<td>${formatScientific(Number(v))}${quality}</td>`;
         }).join('');
         body.innerHTML =
             // ?? NaN: cellsFor は Number(v) を通すので null をそのまま渡すと 0 と
@@ -21249,28 +20791,6 @@ const SharePreview = {
             `<tr><th>Avg Intensity</th>${cellsFor(ent => msiQuantMean(ent))}</tr>`;
     },
 
-    _renderHeaderScalebar(project) {
-        const barEl = this.overlay.querySelector('[data-headerbar-bar]');
-        const labelEl = this.overlay.querySelector('[data-headerbar-label]');
-        if (!barEl || !labelEl) return;
-        let umPerPx = null;
-        for (const sec of project.sections || []) {
-            const wc = sec.meta && sec.meta.world_coords;
-            if (wc && wc.msi_um_per_px && Number.isFinite(wc.msi_um_per_px.x)) {
-                umPerPx = wc.msi_um_per_px.x;
-                break;
-            }
-        }
-        const chosen = pickPreviewScalebarLength(umPerPx, 140);
-        if (!chosen) {
-            barEl.style.width = '0';
-            labelEl.textContent = '';
-            return;
-        }
-        const px = chosen / umPerPx;
-        barEl.style.width = Math.max(40, Math.min(220, px)) + 'px';
-        labelEl.textContent = chosen >= 1000 ? (chosen / 1000) + ' mm' : chosen + ' μm';
-    },
 };
 
 // ---------------------------------------------------------------------------
@@ -21425,26 +20945,14 @@ async function openProjectsManagerModal() {
 
     const renderList = async (serverRows) => {
         const local = await ProjectStorage.listProjects();
-        const localBySlug = new Map();
-        const localOnly = [];
-        for (const lp of local) {
-            const slug = lp.shareInfo && lp.shareInfo.slug;
-            if (slug) localBySlug.set(slug, lp);
-            else localOnly.push(lp);
-        }
-        const rows = [];
-        for (const lp of localOnly) rows.push({ kind: 'local-only', local: lp });
-        for (const lp of localBySlug.values()) rows.push({ kind: 'local+server-maybe', local: lp });
-        if (Array.isArray(serverRows)) {
-            for (const sp of serverRows) {
-                if (localBySlug.has(sp.slug)) {
-                    const r = rows.find(x => x.local && x.local.shareInfo && x.local.shareInfo.slug === sp.slug);
-                    if (r) { r.kind = 'local+server'; r.server = sp; }
-                } else {
-                    rows.push({ kind: 'server-only', server: sp });
-                }
-            }
-        }
+        const serverBySlug = new Map((serverRows || []).map(row => [row.slug, row]));
+        const linked = new Set();
+        const rows = local.map(lp => {
+            const slug = lp.shareInfo && lp.shareInfo.slug, server = slug && serverBySlug.get(slug);
+            if (slug) linked.add(slug);
+            return {kind:server ? 'local+server' : slug ? 'local+server-maybe' : 'local-only', local:lp, ...(server ? {server} : {})};
+        });
+        for (const server of serverBySlug.values()) if (!linked.has(server.slug)) rows.push({kind:'server-only',server});
         rows.sort((a, b) => {
             const ta = (a.local && a.local.createdAt) || (a.server && (a.server.updated_at || a.server.created_at)) || '';
             const tb = (b.local && b.local.createdAt) || (b.server && (b.server.updated_at || b.server.created_at)) || '';
@@ -21469,13 +20977,13 @@ async function openProjectsManagerModal() {
                 : (r.kind === 'local+server'
                     ? '<span style="background:#dcfce7;color:#166534;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">Local + Server</span>'
                     : '<span style="background:#dbeafe;color:#1d4ed8;padding:1px 6px;border-radius:9999px;font-size:10px;margin-left:6px;">Local</span>');
-            const idAttr = r.local ? `data-local-id="${safe(r.local.id)}"` : '';
+            const idAttr = r.local ? `data-local-id="${safe(r.local.id)}" data-storage-revision="${r.local.storageRevision}"` : '';
             const slugAttr = slug ? `data-slug="${safe(slug)}"` : '';
             const urlAttr = url ? `data-url="${safe(url)}"` : '';
             return `
                 <div class="proj-row" style="border:1px solid #e5e7eb;border-radius:6px;padding:8px;margin-bottom:6px;background:#fff;" ${idAttr} ${slugAttr} ${urlAttr}>
                   <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;flex-wrap:wrap;">
-                    <div style="font-weight:600;color:#0f172a;">${safe(name)} ${badge}</div>
+                    <div style="font-weight:600;color:#0f172a;">${safe(name)} ${badge} <small>${safe(r.local ? r.local.id : '')}</small></div>
                     <div style="display:flex;gap:4px;">
                       ${r.local ? `<button type="button" class="btn" data-action="open-local">Open</button>` : ''}
                       ${(!r.local && r.server) ? `<button type="button" class="btn" data-action="open-server">Open</button>` : ''}
@@ -21520,7 +21028,8 @@ async function openProjectsManagerModal() {
             click('delete-local', async () => {
                 if (!localId) return;
                 if (!confirm('ローカルからこのプロジェクトを削除しますか? (サーバ側は残ります)')) return;
-                await ProjectStorage.deleteProject(localId);
+                try { await ProjectStorage.deleteProject(localId, {expectedRevision:Number(row.getAttribute('data-storage-revision'))}); }
+                catch (error) { showToast(error.message || String(error)); return; }
                 if (App.project && App.project.id === localId) {
                     App.project = null;
                     App.renderEmpty();
@@ -21566,46 +21075,46 @@ async function openProjectsManagerModal() {
     return p;
 }
 
-async function importZipFile(file) {
+async function importZipFile(file, options = {}) {
+    const importController = !options.signal && typeof AbortController === 'function' ? new AbortController() : null;
+    options = {...options, signal: options.signal || (importController && importController.signal)};
     const offline = typeof window !== 'undefined' && window.DESI_OFFLINE === true;
     await loadScript(LAZY_LIBS.jszip);
-    const zip = await JSZip.loadAsync(file);
+    let zip = await JSZip.loadAsync(file, {checkCRC32: true});
     // Find the project doc — root-level *.json with format=desi_data_share_v1.
     // The exporter now names the root JSON after the project, so we scan
     // instead of expecting a fixed 'project.json'.
     const rootJsonPaths = Object.keys(zip.files).filter(p => /^[^/]+\.json$/i.test(p));
-    let projDocPath = null;
+    let projectDocCount = 0;
     let projDoc = null;
     for (const p of rootJsonPaths) {
         try {
             const candidate = JSON.parse(await zip.file(p).async('string'));
             if (candidate && (candidate.format === 'desi_data_share_v1' || candidate.format === 'desi_data_share_v2')) {
-                projDocPath = p;
+                projectDocCount++;
                 projDoc = candidate;
-                break;
             }
         } catch (e) {}
     }
     if (!projDoc) throw new Error('Project JSON (format=desi_data_share_v1/v2) not found in ZIP root');
+    if (projectDocCount !== 1) throw new Error('ZIP に複数のプロジェクト定義があります / Multiple project manifests in ZIP');
 
-    // Detect old-style ZIPs (project.json + per-layer msi_<layerKey>__ paths)
-    // and refuse with a clear message — the new format uses msi__<filename>.
-    if (projDocPath === 'project.json') {
-        const firstAtlasPath = Object.keys(zip.files).find(p => /sections\/[^/]+\/atlas\.json$/.test(p));
-        if (firstAtlasPath) {
-            try {
-                const firstAtlas = JSON.parse(await zip.file(firstAtlasPath).async('string'));
-                const sample = Object.values(firstAtlas.msiSeries || {})[0];
-                const samplePath = sample && sample.path || '';
-                if (samplePath.startsWith('data/msi_') && !samplePath.startsWith('data/msi__')) {
-                    throw new Error('旧形式の ZIP は非対応です。最新版で再 Export してください。');
-                }
-            } catch (e) {
-                if (/旧形式/.test(e.message || '')) throw e;
-            }
-        }
-    }
-
+    const prepared = await ProjectArchive.prepareImport(zip, projDoc, options);
+    zip = prepared.zip; projDoc = prepared.doc;
+    const review = options.review || (typeof openModal === 'function' ? counts => openModal(
+        '<h2>ZIP の復元 / Restore ZIP</h2><p style="white-space:pre-line">' + ProjectArchive.summary(counts)
+        + '</p><p>旧CSVは補正せず復元します。来歴のないデータを原本確認済みとは扱いません。</p>'
+        + '<button class="btn" data-modal-cancel>キャンセル / Cancel</button> '
+        + '<button class="btn" data-modal-ok>復元 / Restore</button>') : null);
+    if (review && !await review(prepared.counts)) return null;
+    const importProgress = typeof openPublishProgressModal === 'function' ? openPublishProgressModal(prepared.requiredPaths.length || 1, {
+        title: 'ZIP を復元中 / Restoring ZIP', subtitle: '原本を保存しています。中断時はこの復元で作成した一時ファイルを回収します。',
+        cancelLabel: importController ? '中断 / Cancel' : null
+    }) : null;
+    if (importProgress && importProgress.setCancelHandler && importController) importProgress.setCancelHandler(() => importController.abort());
+    const progressCallback = options.onProgress;
+    options.onProgress = count => { if (importProgress) importProgress.update(count, prepared.requiredPaths.length || 1); if (progressCallback) progressCallback(count); };
+    try { return await ProjectArchive.withImport(ProjectStorage, async archiveStorage => {
     // Reuse an available archive ID on offline recovery so the separately
     // backed-up MRM usage history still points at its original local project.
     // A second import remains a separate project and never replaces existing data.
@@ -21670,7 +21179,7 @@ async function importZipFile(file) {
             }
             const blob = await f.async('blob');
             const blobId = uid('blob');
-            await ProjectStorage.putBlob({
+            await archiveStorage.putBlob({
                 id: blobId, blob,
                 mime: mimeHint || guessMimeFromPath(relPath),
                 filename: fnameHint || (relPath.split('/').pop() || ''),
@@ -21711,6 +21220,7 @@ async function importZipFile(file) {
                         filename: fname,
                         sourceFileId: cmp.sourceFileId || null,
                         compoundMeta: cmp.compoundMeta || null,
+                        archiveProvenance: ProjectArchive.provenance(cmp.archiveProvenance, 'legacy-derived-csv'),
                         // この経路は msiSeries を直接組むので addMsiLayer の
                         // inheritedBake を通らない。ZIP に記録された設定を復元する
                         // (無ければ undefined = 既定の robust)。
@@ -21739,6 +21249,7 @@ async function importZipFile(file) {
                     colIdx: p.colIdx, annotation: p.annotation,
                     filename: p.filename, sourceFileId: p.sourceFileId || null,
                     compoundMeta: p.compoundMeta || null,
+                    archiveProvenance: ProjectArchive.provenance(p.archiveProvenance, 'legacy-v2-file'),
                     statMax: p.statMax, rasterW: p.rasterW, rasterH: p.rasterH,
                     rawRange: p.rawRange, rawMean: p.rawMean,
                     rawTrueMax: p.rawTrueMax, rawDispMax: p.rawDispMax,
@@ -21756,6 +21267,7 @@ async function importZipFile(file) {
                     func: r.func, channel: r.channel,
                     filename: r.filename, sourceFileId: r.sourceFileId || null,
                     compoundMeta: r.compoundMeta || null,
+                    archiveProvenance: ProjectArchive.provenance(r.archiveProvenance, 'legacy-v2-file'),
                     rasterW: r.rasterW, rasterH: r.rasterH,
                     rawRange: r.rawRange, rawMean: r.rawMean,
                     rawTrueMax: r.rawTrueMax, rawDispMax: r.rawDispMax,
@@ -21818,7 +21330,7 @@ async function importZipFile(file) {
                 }
                 const blob = await f.async('blob');
                 const blobId = uid('blob');
-                await ProjectStorage.putBlob({
+                await archiveStorage.putBlob({
                     id: blobId,
                     blob,
                     mime: mimeHint || guessMimeFromPath(relPath),
@@ -21899,7 +21411,7 @@ async function importZipFile(file) {
             if (!blobId) {
                 const blob = await zip.file(item.sourcePath).async('blob');
                 blobId = uid('blob');
-                await ProjectStorage.putBlob({ id: blobId, blob, mime: item.mime || blob.type,
+                await archiveStorage.putBlob({ id: blobId, blob, mime: item.mime || blob.type,
                     filename: item.filename || item.sourcePath.split('/').pop() });
                 mediaByPath.set(item.sourcePath, blobId);
             }
@@ -21915,9 +21427,12 @@ async function importZipFile(file) {
     if (offline) {
         detachOfflineProject(newProject);
     }
-    await ProjectStorage.putProject(newProject, { createOnly: true });
+    await archiveStorage.putProject(newProject, { createOnly: true });
     await App.openProject(newProject.id);
-    showToast('Imported: ' + newProject.displayName);
+    showToast('Imported: ' + newProject.displayName + '\n' + ProjectArchive.summary(prepared.counts), 10000);
+    return newProject;
+    }, options);
+    } finally { if (importProgress) importProgress.close(); }
 }
 
 // =============================================================
@@ -22567,13 +22082,13 @@ const SupabaseClient = (() => {
         heartbeatRoiLock(token) { return rpc('heartbeat_roi_lock', { _token: token }); },
         releaseRoiLock(token) { return rpc('release_roi_lock', { _token: token }); },
         // Master publish ---------------------------------------
-        upsertProjectDoc(args) { return rpc('upsert_project_doc', args); },
+        publishProjectDocV2(args) { return rpc('publish_project_doc_v2', args); },
+        getPublishStateV2(masterPw,slug,requestId) { return rpc('get_publish_state_v2',{_master_pw:masterPw,_slug:slug,_request_id:requestId||null}); },
+        requestPublishSessionV2(masterPw,job) { return rpc('request_publish_session_v2',{_master_pw:masterPw,_slug:job.slug,
+            _request_id:job.jobId,_expected_revision:job.baseServerRevision,_create_only:job.create}); },
         // Master multi-project listing -------------------------
         listProjects(ownerPw) { return rpc('list_projects', { _owner_password: ownerPw }); },
         // Master-side publish session token (Phase 1) ----------
-        requestPublishSession(masterPw, slug) {
-            return rpc('request_publish_session', { _master_pw: masterPw, _slug: slug });
-        },
         // MRM library (master-pw gated) ------------------------
         listMrmLibrary(masterPw) { return rpc('list_mrm_library', { _master_pw: masterPw }); },
         // One transactional upsert per selected Method-table row: compound +
@@ -22636,7 +22151,7 @@ const SupabaseClient = (() => {
                 xhr.setRequestHeader('Authorization', 'Bearer ' + SUPABASE_ANON_KEY);
                 xhr.setRequestHeader('apikey', SUPABASE_ANON_KEY);
                 xhr.setRequestHeader('Content-Type', contentType || (blob && blob.type) || 'application/octet-stream');
-                xhr.setRequestHeader('x-upsert', 'true');
+                xhr.setRequestHeader('x-upsert', 'false');
                 if (publishToken) xhr.setRequestHeader('x-publish-token', publishToken);
                 if (o.shareToken) xhr.setRequestHeader('x-share-token', o.shareToken);
                 if (xhr.upload) {
@@ -23453,6 +22968,7 @@ const App = {
     // Effective display window. 'same' = shared [0, in-scope common max]; else
     // the section's own range. A user min/max override wins per edge.
     getMsiWindow(key, rawRange, dispMax) {
+        ensureMsiDisplayContext(this, key);
         this.msiUserWindow = this.msiUserWindow || {};
         const u = this.msiUserWindow[key] || null;
         // Per-section raw range (= how this layer's PNG was baked).
@@ -23577,6 +23093,7 @@ const App = {
     },
     // Switch MSI intensity scale ('same' | 'individual') and repaint everything.
     setMsiScaleMode(mode) {
+        ensureMsiDisplayContext(this);
         const next = (mode === 'individual') ? 'individual' : 'same';
         if (this.msiScaleMode === next) return;
         this.msiScaleMode = next;
@@ -23837,6 +23354,7 @@ const App = {
     async init() {
         if (this.offline) setupOfflineViewer();
         await ProjectStorage.open();
+        await ProjectArchive.recoverImports(ProjectStorage);
         // Ask the browser to keep our IDB out of its automatic eviction
         // pool. The Promise resolves to true / false depending on the
         // origin's eligibility — both are fine, we just want to opt in
@@ -23982,6 +23500,9 @@ const App = {
             }
             return;
         }
+
+        const recoveryUi = ProjectStoreSafety.mountRecoveryUi(ProjectStorage, {projectUrl:id=>'index.html?project='+encodeURIComponent(id),onRestored: () => this.refreshProjectPicker()});
+        window.addEventListener('project-storage-conflict', () => recoveryUi.notify());
 
         // The picker is populated by openProject() below (it ends with
         // refreshProjectPicker so the <select> shows the opened project).
@@ -24360,58 +23881,15 @@ const App = {
         catch (e) { alert('project doc 取得失敗: ' + (e.message || e)); return null; }
         if (!doc) { alert('project doc が空です'); return null; }
 
-        // Same-slug Local project? Ask BEFORE downloading — but delete AFTER.
-        //
-        // ★ This branch used to be unreachable: listProjects() projected
-        //   shareInfo away, so the find() never matched. Now that the summary
-        //   carries shareInfo it fires for real, which makes the ORDER matter:
-        //   the original code deleted the local project (and every one of its
-        //   blobs) and only then started downloading the replacement.
-        //   _buildLocalProjectFromDoc treats every blob download failure as
-        //   non-fatal, so a dropped connection or an IDB quota error partway
-        //   through 1390 layers would leave a stub and no way back.
-        //   Build and save the replacement FIRST, drop the old copy LAST, and
-        //   only when every layer actually arrived.
-        let existing = null;
-        try {
-            existing = (await ProjectStorage.listProjects())
-                .find(p => p && p.shareInfo && p.shareInfo.slug === slug) || null;
-        } catch (e) { console.warn('listProjects during import failed', e); }
-        if (existing) {
-            // Name the LOCAL project, not the slug — that is how the user
-            // recognises it. And be honest about what the doc cannot carry.
-            const ok = confirm(
-                'Local に "' + (existing.displayName || slug) + '" (slug: ' + slug + ') が既にあります。\n' +
-                'サーバの内容で取り込み直しますか? (Cancel: 中止)\n\n' +
-                '取り込みが完全に成功したら、いまのローカル版は削除されます。\n' +
-                '引き継がれないもの:\n' +
-                '  ・未 publish の編集 / 切片 / レイヤー\n' +
-                '  ・共有パスワード (viewer / admin) — 次の publish で入れ直しになります\n' +
-                '  ・配色・平滑化・背景除去などの表示設定\n' +
-                '  ・管理画面のフォルダ内の位置 (新しい ID になるため)'
-            );
-            if (!ok) return null;
-        }
-
+        // Import into a new local ID. Existing local edits and originals are retained.
         const project = await this._buildLocalProjectFromDoc(slug, doc, session);
         if (!project) return null;
         const importFailures = project.__importFailures || 0;
         delete project.__importFailures;          // 永続化するレコードには残さない
-        try { await ProjectStorage.putProject(project); }
+        try { await ProjectStorage.putProject(project, {createOnly:true}); }
         catch (e) { alert('IDB 保存失敗: ' + (e.message || e)); return null; }
 
-        // ここまで来て初めて古いローカル版を消せる。1 枚でも落ちていたら消さない。
-        if (existing) {
-            if (importFailures) {
-                alert('取り込みは完了しましたが ' + importFailures + ' 件のレイヤーを'
-                    + 'ダウンロードできませんでした。\n'
-                    + '安全のため、いまのローカル版 "' + (existing.displayName || slug) + '" は残しています。\n'
-                    + '取り込んだ方に問題がなければ、管理画面から手動で削除してください。');
-            } else {
-                try { await ProjectStorage.deleteProject(existing.id); }
-                catch (e) { console.warn('delete superseded local project failed', e); }
-            }
-        }
+        if (importFailures) alert('別コピーを取り込みましたが ' + importFailures + ' 件の原本を取得できませんでした。既存のローカル版は保持しています。');
         return project.id;
     },
 
@@ -24457,7 +23935,10 @@ const App = {
             // the new master must re-enter them at next publish.
             shareInfo: {
                 slug,
-                isPublic: false,
+                isPublic: !!doc.is_public,
+                serverRevision: Number.isSafeInteger(doc.publish_revision) && doc.publish_revision >= 0 ? doc.publish_revision : null,
+                blobPaths: {},
+                lastSyncedAt: doc.updated_at || null,
                 viewerPassword: null,
                 adminPassword: null,
                 url: location.origin + location.pathname.replace(/[^/]+$/, '') + 'index.html#share=' + encodeURIComponent(slug),
@@ -24514,6 +23995,7 @@ const App = {
             const id = uid('blob');
             await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() });
             const rec = { id, mime };
+            project.shareInfo.blobPaths[id] = {path:ref.path,mime,size:blob.size};
             importedByPath.set(ref.path, rec);
             return rec;
         };
@@ -24569,6 +24051,16 @@ const App = {
                 }
             }
         }
+        // Preserve file-level originals even when no selected layer references them.
+        for (let i=0;i<project.sections.length;i++) {
+            const sec=project.sections[i],sp=doc.sections[i].storage_paths||doc.sections[i].storagePaths||{};
+            for (const [fid,ref] of Object.entries(sp.msiFiles||{})) {
+                try {
+                    if(ref.kind==='parquet') sec.msiFiles[fid]={...ref,blobId:null,storagePath:ref.path,sourceUrl:SupabaseClient.publicUrl('atlases',ref.path)};
+                    else {const {id}=await ensureImported(ref);sec.msiFiles[fid]={...ref,blobId:id,storagePath:ref.path};}
+                } catch(e) {failed.push({kind:'source',key:fid,path:ref.path,error:e});}
+            }
+        }
         // Originals must be present before this becomes a local master copy.
         // A failed photograph download aborts import; it never replaces an
         // existing local project with incomplete attachment metadata.
@@ -24584,7 +24076,7 @@ const App = {
         }
         // 呼び出し側が「部分的にしか取り込めなかった」を判断できるようにする。
         // これが 0 でない限り、置き換え対象のローカル版を消してはいけない。
-        if (failed.length) project.__importFailures = failed.length;
+        if (failed.length) { project.__importFailures = failed.length; project.shareInfo.serverRevision=null; }
         if (failed.length) {
             const summary = failed.length + ' 件のレイヤーをダウンロードできませんでした (' +
                 failed.slice(0, 3).map(f => f.kind + ':' + f.key).join(', ') +
@@ -24617,7 +24109,7 @@ const App = {
                 return Object.assign({}, r, { polysBySection: polys, serverIdsBySection: sids,
                     geometryBySection: remapRoiGeometry(r.geometryBySection, uuidToClient) });
             });
-        } catch (e) { console.warn('import ROI fetch failed', e); }
+        } catch (e) { project.shareInfo.serverRevision=null; project.__importFailures=(project.__importFailures||0)+1; console.warn('import ROI fetch failed', e); }
 
         if (project.meta.roiMedia.items.length) roiMediaForTransport(project);
         return project;
@@ -24759,9 +24251,16 @@ const App = {
             const sp = (doc.sections[i] && doc.sections[i].storage_paths) || (doc.sections[i] && doc.sections[i].storagePaths) || {};
             for (const [key, ref] of Object.entries(sp.images || {}))    dlTasks.push({ kind: 'image', sec, key, ref });
             for (const [key, ref] of Object.entries(sp.msiSeries || {})) dlTasks.push({ kind: 'msi', sec, key, ref });
+            for (const [key, ref] of Object.entries(sp.msiFiles || {})) dlTasks.push({ kind: 'source', sec, key, ref });
         }
         const runDlTask = async ({ kind, sec, key, ref }) => {
             try {
+                if(kind==='source') {
+                    const source={...ref,blobId:null,storagePath:ref.path,sourceUrl:SupabaseClient.publicUrl('atlases',ref.path)};
+                    sec.msiFiles[key]=source;
+                    if(ref.kind!=='parquet'){const {id,mime}=await ensureBlob(ref);source.blobId=id;source.mime=mime;}
+                    return;
+                }
                 // ★ parquet はダウンロードしない。
                 //   1 本のファイルに全切片 × 全化合物が入っていて 836 MB あるが、
                 //   列指向なので 1 化合物あたり実際に要るのは数百 KB。Storage の
@@ -24824,6 +24323,7 @@ const App = {
         } catch (e) { console.warn('share ROI fetch failed', e); }
 
         this.project = project;
+        ensureMsiDisplayContext(this);
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         parquetReleaseAll();               // worker が抱えている parquet 索引も返す
         // Restore the project-level colormap before the first render so the
@@ -25119,8 +24619,9 @@ const App = {
         // project.__publishPending から復元するので、ここで消しても失われない。
         this._publishDirty = false;
         if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
-        const project = await ProjectStorage.getProject(id);
+        const project = await ProjectStorage.getProject(id, {activate:true});
         if (!project) {
+            await ProjectStorage.releaseProject();
             this.project = null;
             this.activeSectionId = null;
             this.activeRoiId = null;
@@ -25132,6 +24633,7 @@ const App = {
             return;
         }
         this.project = project;
+        ensureMsiDisplayContext(this);
         // 前回のセッションで公開しきれなかった編集があればここで拾い直す。
         if (this.offline) {
             detachOfflineProject(project);
@@ -25139,6 +24641,7 @@ const App = {
             document.body.classList.remove('share-mode', 'share-admin');
         }
         this._publishDirty = !!project.__publishPending;
+        this._publishEpoch = project.publishEditEpoch || 0;
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         parquetReleaseAll();               // worker が抱えている parquet 索引も返す
         if (!this.project.anatomyPalette || this.project.anatomyPalette === DEFAULT_ANATOMY_PALETTE) {
@@ -25219,6 +24722,7 @@ const App = {
         await this.refreshProjectPicker();
         this.refreshShareInfoButton();
         this.renderAnalysis();
+        this._scheduleAutoPublish();
         // Reset the METHOD (MRM) list to the top on every project open/switch.
         // #method-body is a persistent scroll container (only its <tbody> is
         // re-filled by renderMethodTable), so without this the previously-open
@@ -25248,8 +24752,13 @@ const App = {
             this._setSyncStatus('hidden');
             return;
         }
-        if (has) this._setSyncStatus('synced');
-        else this._setSyncStatus('hidden');
+        const project=this.project,slug=project.shareInfo?.slug;
+        if(!slug){this._setSyncStatus('hidden');return;}
+        const context=_publishContext(project,slug);
+        if(context.inflight){this._setSyncStatus('uploading');return;}
+        try{PublishSafety.baseline(project,slug);}catch(e){this._setSyncStatus('needs-baseline');return;}
+        if(['conflict','error','needs-master-pw','needs-share-pw','no-server'].includes(context.state))this._setSyncStatus(context.state);
+        else this._setSyncStatus(project.__publishPending||context.paused?'local-saved':'synced');
     },
 
     async createNewProject(meta) {
@@ -25274,7 +24783,7 @@ const App = {
             }),
             createdAt: nowIso(),
         };
-        await ProjectStorage.putProject(project);
+        await ProjectStorage.putProject(project, {createOnly:true});
         await this.openProject(project.id);
         return project.id;
     },
@@ -25291,12 +24800,13 @@ const App = {
             try { await this._saveInflight; } catch (e) { console.warn('save before delete failed', e); }
         }
         const id = this.project.id;
+        try { await ProjectStorage.deleteProject(id, {expectedRevision:this.project.storageRevision}); await ProjectStorage.releaseProject(); }
+        catch (error) { this._showSaveError(error.message || String(error), 'delete'); return; }
         this.project = null;
         _roiRawGridCache.clear();
         parquetReleaseAll();
         this.panels.forEach(p => p.destroy());
         this.panels.clear();
-        await ProjectStorage.deleteProject(id);
         localStorage.removeItem('desi:lastProjectId');
         if (this.offline) this._syncOfflineProjectUrl(null);
         await this.refreshProjectPicker();
@@ -25494,6 +25004,7 @@ const App = {
                         blobId,
                         colIdx: f.colIdx,
                         annotation: label,
+                        archiveProvenance: ProjectArchive.registeredSource(),
                         filename: mainFile.name || 'data.parquet',
                         sourceFileId,
                         compoundMeta: f.meta,
@@ -26552,7 +26063,8 @@ const App = {
         this._publishDirty = true;
         // 世代番号。真偽値だと「元から true のまま編集が入った」が区別できず、
         // アップロード中の編集を取りこぼす。
-        this._publishEpoch = (this._publishEpoch || 0) + 1;
+        this.project.publishEditEpoch = (this.project.publishEditEpoch || 0) + 1;
+        this._publishEpoch = this.project.publishEditEpoch;
         // A write already in flight may have cloned the project before this
         // edit. Keep a revision so it cannot satisfy this save request.
         this._saveRevision = (this._saveRevision || 0) + 1;
@@ -26650,7 +26162,7 @@ const App = {
                         lastErr = e;
                         const isQuota = e && (e.name === 'QuotaExceededError'
                             || /quota/i.test(String(e.message || e)));
-                        if (isQuota) break;
+                        if (isQuota || (e && e.code === 'LOCAL_PROJECT_CONFLICT')) break;
                         if (attempt < 2) await new Promise(r => setTimeout(r, 400 * Math.pow(2, attempt)));
                     }
                 }
@@ -26803,137 +26315,33 @@ const App = {
     // batches up ROI / slider edits so we only push to Supabase when
     // the user actually pauses.
     _scheduleAutoPublish() {
-        if (this.offline) return;
-        if (this.shareMode) return;                       // share recipient view: no master access
-        if (!this.project || this.project.__share) return;
-        if (!this.project.shareInfo || !this.project.shareInfo.slug) return;  // never published yet
-        // アップロードを中断したプロジェクトは、次に手動で Publish するまで
-        // 自動同期しない。中断した直後に自動で再開したら中断の意味が無い。
-        if (this._autoPublishPausedSlug === this.project.shareInfo.slug) return;
-        // ★ 内容依存のガード。従来のガードは 4 つとも構造的 (共有モードか /
-        //   slug があるか) で、「そもそも共有へ送るべき変更があったか」を
-        //   一切見ていなかった。そのため化合物を 1 つ表示しただけで走る派生
-        //   統計の保存でも 5 秒後に数 MB の RPC が飛んでいた。
-        //   _publishDirty は queueSave (= 実編集) でだけ立つ。
-        if (!this._publishDirty) return;
-        if (this._autoPublishTimer) clearTimeout(this._autoPublishTimer);
-        this._autoPublishTimer = setTimeout(() => {
-            this._autoPublishTimer = 0;
-            this.autoPublishProject().catch(e => console.warn('autoPublish error', e));
-        }, 5000);
+        const project=this.project;
+        if(this.offline||this.shareMode||!project||project.__share||!project.shareInfo?.slug||!project.__publishPending)return;
+        const ctx=_publishContext(project);if(ctx.paused||ctx.inflight)return;
+        if(project.shareInfo.pendingPublish && project.shareInfo.pendingPublish.slug!==project.shareInfo.slug){_publishStatus(project,project.shareInfo.slug,'error','別URLへの公開が未完了です。Publish to share から再試行してください。');return;}
+        try{PublishSafety.baseline(project,project.shareInfo.slug);}catch(e){_publishStatus(project,project.shareInfo.slug,'needs-baseline');return;}
+        if(ctx.timer)clearTimeout(ctx.timer);
+        ctx.timer=setTimeout(()=>{ctx.timer=0;if(this.project===project)this.autoPublishProject().catch(e=>console.warn('auto publish',e));},5000);
     },
-
     async autoPublishProject() {
-        if (this.offline) return;
-        const project = this.project;
-        if (!project || project.__share) return;
-        if (!project.shareInfo || !project.shareInfo.slug) return;
-        // ★ 黙って止まらない。
-        //   ここを無言で return していたので、supabase-js を読み込めていない
-        //   端末では**自動 publish が何もせず**、同期インジケータは
-        //   「💾 Local 保存中」のまま止まり続けた。利用者は「そのうち同期
-        //   される」と思ったまま、実際には 1 度も公開されない。
-        //   「master pw 期限切れ」には状態があるのに、こちらには無かった。
-        if (!SupabaseClient.configured()) { this._setSyncStatus('no-server'); return; }
-
-        // ★ 取り込んだプロジェクトは共有パスワードを引き継がない
-        //   (_buildLocalProjectFromDoc が viewerPassword/adminPassword を null で
-        //   作る)。このまま送っても upsert_project_doc が
-        //   viewer_password_required を返すだけなので、通信する前に止めて
-        //   「1 回 Publish to share を押してほしい」を状態で伝える。
-        //   ここが無いと、編集のたびに "⚠ Sync 失敗" が出て原因が分からない。
-        if (!project.shareInfo.isPublic && !project.shareInfo.viewerPassword) {
-            this._setSyncStatus('needs-share-pw');
-            return;
-        }
-
-        const masterPw = _readCachedMasterPw();
-        if (!masterPw) {
-            this._setSyncStatus('needs-master-pw');
-            return;
-        }
-
-        if (this._autoPublishInflight) return;
-        // 手動 publish が走っている間は割り込まない。5 秒後にもう一度試す。
-        // ★ _scheduleAutoPublish は _publishDirty で弾くので、ユーザーが明示的に
-        //   「強制再同期」した場合 (変更が無いのに送りたい場合) は印を立ててから
-        //   仕込み直す。立てないと再スケジュールが黙って捨てられる。
-        if (_publishGate) { this._publishDirty = true; this._scheduleAutoPublish(); return; }
-        this._autoPublishInflight = true;
-        try {
-            // Conflict detection: server's projects.updated_at vs our
-            // local lastSyncedAt. If server is newer, another PC pushed
-            // changes we don't have — bail before overwriting them.
-            if (await this._serverIsNewerThanLocal(project)) {
-                this._setSyncStatus('conflict');
-                return;
-            }
-
-            this._setSyncStatus('uploading', 0, 0);
-            // アップロード中に入った編集を取りこぼさないための基準 (世代番号)。
-            const epochAtStart = this._publishEpoch || 0;
-            const meta = {
-                slug: project.shareInfo.slug,
-                isPublic: !!project.shareInfo.isPublic,
-                viewerPassword: project.shareInfo.viewerPassword,
-                adminPassword: project.shareInfo.adminPassword,
-            };
-            await _publishCore(project, meta, masterPw, {
-                silent: true,
-                onProgress: (done, total) => this._setSyncStatus('uploading', done, total),
-            });
-            // 送り終えたのでフラグを降ろす。失敗した場合は立てたままにして
-            // 次の保存で再挑戦させる (catch 側では触らない)。
-            // ★ アップロード中に入った編集まで「送った」ことにしないこと。
-            //   ペイロードは _publishCore に入る前のスナップショットなので、
-            //   その後の編集はまだサーバに無い。世代が動いていたら立てたままにする。
-            if ((this._publishEpoch || 0) === epochAtStart) {
-                this._publishDirty = false;
-                delete project.__publishPending;
-            }
-            try { await ProjectStorage.putProject(project); } catch (e) {}
-            this._setSyncStatus(this._publishDirty ? 'local-saved' : 'synced');
-        } catch (e) {
-            console.warn('auto-publish failed', e);
-            // userMessage は「利用者が読んで次の一手が分かる」文面 (missing_sources など)。
-            const msg = String((e && (e.userMessage || e.message || e.details)) || e);
-            if (/unauthorized|28000/i.test(msg)) {
-                // master pw rejected — drop the cache so the next attempt
-                // will re-prompt rather than silently failing again.
-                try { sessionStorage.removeItem('desi:masterPw'); } catch (_) {}
-                this._setSyncStatus('needs-master-pw');
-            } else {
-                this._setSyncStatus('error', msg);
-            }
-        } finally {
-            this._autoPublishInflight = false;
-        }
-    },
-
-    // Compare server projects.updated_at against the project's locally-
-    // remembered lastSyncedAt. Returns true when the server has a newer
-    // row, signalling that another PC pushed since this one last synced.
-    async _serverIsNewerThanLocal(project) {
-        if (this.offline) return false;
-        const localIso = project.shareInfo && project.shareInfo.lastSyncedAt;
-        if (!localIso) return false;              // no baseline yet → allow first sync
-        try {
-            const c = SupabaseClient._rawClient();
-            if (!c) return false;                 // Supabase not configured → nothing to conflict with
-            const { data, error } = await c.from('projects')
-                .select('updated_at')
-                .eq('slug', project.shareInfo.slug)
-                .maybeSingle();
-            // Fail SAFE: if we can't confirm the server is NOT newer (network
-            // error / unreadable), assume it might be and skip the overwrite
-            // rather than clobbering another PC's push. (Previously returned
-            // false here, which silently overwrote peers on flaky networks.)
-            if (error) return true;
-            if (!data || !data.updated_at) return false;   // no server row → nothing to overwrite
-            // 1.5 s slop so the row write our own publish triggered
-            // doesn't get classified as "newer than local".
-            return new Date(data.updated_at).getTime() > new Date(localIso).getTime() + 1500;
-        } catch (e) { return true; }              // network throw → fail safe (don't overwrite)
+        const project=this.project;
+        if(this.offline||this.shareMode||!project||project.__share||!project.shareInfo?.slug)return;
+        const slug=project.shareInfo.slug,ctx=_publishContext(project,slug);if(ctx.inflight||ctx.paused)return;
+        try{PublishSafety.baseline(project,slug);}catch(e){_publishStatus(project,slug,'needs-baseline');return;}
+        if(!SupabaseClient.configured()){_publishStatus(project,slug,'no-server');return;}
+        if(!project.shareInfo.isPublic&&!project.shareInfo.viewerPassword){_publishStatus(project,slug,'needs-share-pw');return;}
+        const masterPw=_readCachedMasterPw();if(!masterPw){_publishStatus(project,slug,'needs-master-pw');return;}
+        ctx.inflight=true;
+        try{
+            _publishStatus(project,slug,'uploading',0,0);
+            await _publishCore(project,{slug,isPublic:!!project.shareInfo.isPublic,viewerPassword:project.shareInfo.viewerPassword,
+                adminPassword:project.shareInfo.adminPassword},masterPw,{silent:true,onProgress:(a,b)=>_publishStatus(project,slug,'uploading',a,b)});
+        }catch(e){
+            const message=e.userMessage||e.message||String(e);
+            if(e.code==='40001'||e.code==='PUBLISH_BASELINE_UNKNOWN')_publishStatus(project,slug,'conflict');
+            else if(e.code==='28000'||/unauthorized/i.test(message))_publishStatus(project,slug,'needs-master-pw');
+            else _publishStatus(project,slug,'error',message);
+        }finally{ctx.inflight=false;if(this.project===project&&project.__publishPending&&ctx.state==='local-saved')this._scheduleAutoPublish();}
     },
 
     // Update the in-page sync indicator. State machine:
@@ -26974,7 +26382,8 @@ const App = {
                 text = '✓ Synced (' + String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0') + ')';
                 break;
             }
-            case 'conflict':        text = '⚠ サーバが新しい'; break;
+            case 'conflict':        text = '⚠ 公開版の比較が必要'; break;
+            case 'needs-baseline':  text = '公開版が未確認'; break;
             case 'needs-master-pw': text = '🔑 Master pw 期限切れ'; break;
             // 取り込んだプロジェクト: viewer / admin パスワードが引き継がれて
             // いないので、1 回だけ手動 publish で設定してもらう必要がある。
@@ -27043,35 +26452,10 @@ const App = {
             showToast(serverUnavailableReason() || 'サーバに接続できません', 5200);
             return;
         }
-        if (state === 'conflict') {
-            const choice = prompt(
-                '別 PC が新しいバージョンを publish しています。\n' +
-                '1: サーバの最新を取り込む (推奨、ローカル未 publish 編集は失われます)\n' +
-                '2: ローカルでサーバを上書き (別 PC の編集が失われます)\n' +
-                'キャンセル: 何もしない\n\n' +
-                '番号を入力してください (1 / 2):',
-                ''
-            );
-            if (choice === '1') {
-                // Re-import the project from server, which deletes the
-                // local copy and downloads a fresh master record.
-                const slug = this.project && this.project.shareInfo && this.project.shareInfo.slug;
-                if (!slug) return;
-                const newId = await this._importProjectFromServer(slug);
-                if (newId) {
-                    history.replaceState({}, '', location.pathname + '?project=' + encodeURIComponent(newId));
-                    await this.openProject(newId);
-                }
-            } else if (choice === '2') {
-                // Force overwrite by zero-ing the lastSyncedAt baseline
-                // so the server-newer check passes on the next attempt.
-                if (this.project && this.project.shareInfo) {
-                    this.project.shareInfo.lastSyncedAt = nowIso();
-                    try { await ProjectStorage.putProject(this.project); } catch (e) {}
-                }
-                this._publishDirty = true;   // 明示的な上書き指示。内容ガードを通す
-                this.autoPublishProject().catch(e => console.warn('overwrite failed', e));
-            }
+        if (state === 'conflict' || state === 'needs-baseline') {
+            const project=this.project,slug=project&&project.shareInfo&&project.shareInfo.slug;if(!slug)return;
+            let pw=_readCachedMasterPw();if(!pw)pw=(prompt('Master password を入力してください')||'').trim();if(!pw)return;
+            try{await _comparePublishedProject(project,slug,pw);}catch(e){alert(e.message||String(e));}
             return;
         }
     },
@@ -27403,6 +26787,12 @@ const App = {
                 this.queueSave();
             });
         }
+        window.addEventListener('pagehide', event => {
+            // The unload save is best-effort; uncertain completion retains a durable
+            // session snapshot for explicit recovery after the tab has closed.
+            if (!event.persisted && !this.saveTimer && !this._saveInflight && !this._derivedDirty
+                && this._savedRevision === (this._saveRevision || 0)) ProjectStorage.releaseProject().catch(() => {});
+        });
         window.addEventListener('beforeunload', () => {
             if (this.saveTimer) {
                 clearTimeout(this.saveTimer);

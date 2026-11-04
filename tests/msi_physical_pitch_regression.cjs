@@ -6,7 +6,8 @@ const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, '../viewer/index.html'), 'utf8');
 const context = vm.createContext({});
 for (const name of ['buildMsiGrid', 'buildLegacyMsiGrid', 'msiSourceReference',
-    'createMsiSourceGeometry', 'msiDisplayPhysicalPitch']) {
+    'createMsiSourceGeometry', 'normalizeMsiPhysicalPitch', 'resolveMsiPhysicalCalibration',
+    'msiDisplayPhysicalPitch', 'formatPixelPitchLabel', 'pickPreviewScalebarLength']) {
     const start = html.indexOf('function ' + name + '(');
     assert.ok(start >= 0, name);
     vm.runInContext(html.slice(start, html.indexOf('\n}', start) + 2), context);
@@ -34,6 +35,31 @@ assert.deepEqual(plain(raw.value), {x: 70, y: 70}, 'Float32 rounding keeps the r
 assert.equal(raw.value.x * raw.geometry.displayGeometry.W, 5110, 'Image extent includes the complete edge pixels');
 assert.equal(raw.value.y * raw.geometry.displayGeometry.H, 3780);
 assert.equal(JSON.stringify(rows), before, 'Scale calculation does not modify source coordinates or intensities');
+for (const value of ['70', ' 70.0 ', '7e1', '+70']) {
+    assert.deepEqual(plain(pitch(rows, value, '7e1').value), {x:70,y:70});
+    assert.equal(context.formatPixelPitchLabel(section(value,'7e1')), '70×70 μm/px');
+}
+for (const value of ['', ' ', true, [], ['70'], '70 µm', '70abc', '0x46', '-70', '0', 'Infinity']) {
+    assert.equal(pitch(rows,value,70).value,null,'Reject invalid calibration '+JSON.stringify(value));
+    assert.equal(context.formatPixelPitchLabel(section(value,70)),'');
+}
+assert.equal(context.formatPixelPitchLabel(section(.01,.02)), '0.01×0.02 μm/px');
+// Invalid intensity can break old ROI correspondence without breaking scale.
+const invalidValue = rows.map((r,i)=>({...r,v:i===0?NaN:1}));
+const independent = pitch(invalidValue,70,70);
+assert.deepEqual(plain(independent.value),{x:70,y:70});
+independent.geometry.legacy.confirmed=false;
+context.msiLayerSourceGeometry=()=>independent.geometry;
+assert.deepEqual(plain(context.msiDisplayPhysicalPitch(section('70','70'))),{x:70,y:70});
+const stale=section(70,70);stale.msiSeries={MSI_test:{kind:'txt',blobId:'replacement'}};
+assert.equal(context.resolveMsiPhysicalCalibration(stale,'MSI_test').status,'conflict');
+context.msiLayerSourceGeometry=()=>null;
+assert.equal(context.resolveMsiPhysicalCalibration(stale,'MSI_test').status,'pending');
+// Choosing a length may change the label; clamping its drawn width may not.
+for(const umPerPx of [.0001,.01,.3,70,1e5]) {
+    const length=context.pickPreviewScalebarLength(umPerPx,100);
+    assert.ok(length/umPerPx>=20 && length/umPerPx<=100.000001);
+}
 
 const sparse = [];
 for (const y of [0, 1, 2]) for (const x of [0, 1, 3]) {

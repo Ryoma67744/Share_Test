@@ -253,7 +253,17 @@ function testFailedHealIsRetriedOnTheNextFetch() {
   })();
 }
 
+function testSameSlugCopiesKeepIndependentPlacement() {
+  const rows=[...rowsOnRegisteringPc,{kind:'local+server',local:{id:'second-copy',displayName:'Copy',shareInfo:{slug:'medaka-test-a1b2'}}}];
+  const tree={children:[{type:'project',slug:'medaka-test-a1b2',localId:'proj_k3f9x'},{type:'project',slug:'medaka-test-a1b2',localId:'second-copy'}]};
+  const c=makeContext(tree),idx=c._indexRows(rows);
+  assert.equal(idx.rowForNode(tree.children[1]).local.id,'second-copy');
+  assert.notEqual(c._rowKey(rows[0]),c._rowKey(rows[1]));
+  assert.equal(c._reconcileTree(idx.rowForNode).folded,0);
+  assert.equal(tree.children.length,2);
+}
 async function main() {
+  testSameSlugCopiesKeepIndependentPlacement();
   testLocalIdOnlyNodeIsUnresolvableElsewhere();
   testRegisteringPcHealsTheTree();
   testDuplicateNodesFoldByTreeOrder();

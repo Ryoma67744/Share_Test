@@ -235,6 +235,9 @@
                 const scaleNote = basis === 'percentile' ? 'Shared display p99.8' :
                     basis === 'positive-maximum-fallback' ? 'Shared positive maximum (fallback)' :
                     basis === 'unit-fallback' ? 'Upper bound 1 (no positive range)' : 'Common scale for this molecule';
+                const qualityNotes = [...new Set(sectionPage.map(section => entryFor(molecule, section).qualityNote).filter(Boolean))];
+                if (qualityNotes.length) text(slide, qualityNotes.join(' / '),
+                    {x: 0.2, y: 6.94, w: 11.7, h: 0.17}, {fontSize: 8, color: '7A4B00'});
                 text(slide, scaleNote + '    Missing statistics: —',
                     {x: 0.2, y: 7.15, w: 11.7, h: 0.17}, {fontSize: 9, color: '667085'});
                 text(slide, pptx._slides.length, {x: 12.3, y: 7.15, w: 0.7, h: 0.17},

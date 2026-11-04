@@ -3,6 +3,7 @@
 <head>
 <script src="runtime-config.js"></script>
 <script src="app-runtime.js"></script>
+<script src="project-store-safety.js"></script>
 <script src="offline/offline.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -141,23 +142,25 @@ const ProjectStorage = (() => {
     // v3: added the `project_index` store.
     // v4: added the `pq_index` store (parquet footer index; viewer only writes it).
     // MUST match viewer/index.html.
-    const DB_VERSION = 4;
+    // v5: fenced CAS writes, recovery drafts and original-file job pins.
+    const DB_VERSION = 5;
+
+    let safeStore = null;
+    function storeSafety() {
+        if (!safeStore) safeStore = ProjectStoreSafety.create({
+            transaction: async (names, mode) => (await open()).transaction(names, mode),
+            indexRowFor, uid, nowIso: () => new Date().toISOString(),
+
+            onConflict: error => { if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent('project-storage-conflict', {detail: error})); }
+        });
+        return safeStore;
+    }
     let dbPromise = null;
     function open() {
         if (dbPromise) return dbPromise;
         dbPromise = new Promise((resolve, reject) => {
             const req = indexedDB.open(DB_NAME, DB_VERSION);
-            req.onupgradeneeded = (e) => {
-                const db = e.target.result;
-                if (!db.objectStoreNames.contains('projects')) db.createObjectStore('projects', { keyPath: 'id' });
-                if (!db.objectStoreNames.contains('blobs'))    db.createObjectStore('blobs',    { keyPath: 'id' });
-                // Small per-project summary rows; see listSummaries(). Left
-                // empty here — it is backfilled lazily on first read.
-                if (!db.objectStoreNames.contains('project_index')) db.createObjectStore('project_index', { keyPath: 'id' });
-                // Created here too so this page can open the database at v4
-                // without racing the viewer. This page never reads or writes it.
-                if (!db.objectStoreNames.contains('pq_index')) db.createObjectStore('pq_index', { keyPath: 'id' });
-            };
+            req.onupgradeneeded = () => { ProjectStoreSafety.upgrade(req.result); };
             req.onblocked = () => {
                 try { alert('別のタブでこのアプリが開いています。\nそのタブを閉じるか再読み込みしてください (データベースの更新待ちです)。'); } catch (e) {}
             };
@@ -176,6 +179,7 @@ const ProjectStorage = (() => {
         return {
             __summary: true,
             id: project.id,
+            storageRevision: project.storageRevision == null ? 0 : project.storageRevision,
             displayName: project.displayName || '(untitled)',
             updatedAt: project.updatedAt || '',
             createdAt: project.createdAt || '',
@@ -202,7 +206,7 @@ const ProjectStorage = (() => {
             // 列を足したときに古いインデックスが使われ続けるのを防ぐ (件数は
             // 合ったままなので、これが無いと永久に埋め直されない)。
             if ((idx || []).length === (keys || []).length
-                && (idx || []).every(r => r && typeof r.sectionCount === 'number')) return idx || [];
+                && (idx || []).every(r => r && typeof r.sectionCount === 'number' && Number.isSafeInteger(r.storageRevision))) return idx || [];
         } catch (e) {
             console.warn('project_index read failed; falling back to a full scan', e);
         }
@@ -246,57 +250,27 @@ const ProjectStorage = (() => {
             tx.onerror = () => reject(tx.error);
         });
     }
-    async function getProject(id) {
-        const db = await open();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction('projects', 'readonly');
-            const req = tx.objectStore('projects').get(id);
-            req.onsuccess = () => resolve(req.result);
-            req.onerror = () => reject(req.error);
-        });
+    async function getProject(id, options) {
+        return storeSafety().getProject(id, options);
     }
-    async function putProject(project) {
-        // A summary row from listSummaries() is not a project; writing one
-        // here would replace a whole project with a stub.
-        if (project && project.__summary) {
-            throw new Error('putProject: refusing to write a listSummaries() row as a project (id=' + project.id + ')');
-        }
-        const db = await open();
-        return new Promise((resolve, reject) => {
-            // Summary written in the SAME transaction so the two cannot drift.
-            const tx = db.transaction(['projects', 'project_index'], 'readwrite');
-            tx.objectStore('projects').put(project);
-            tx.objectStore('project_index').put(indexRowFor(project));
-            tx.oncomplete = () => resolve();
-            tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
-            tx.onerror = () => reject(tx.error);
-        });
+    async function putProject(project, options) {
+        return storeSafety().putProject(project, options);
     }
-    async function deleteProject(id) {
-        const db = await open();
-        return new Promise((resolve, reject) => {
-            const tx = db.transaction(['projects', 'project_index', 'blobs'], 'readwrite');
-            const owned = new Set(), usedElsewhere = new Set();
-            const cursor = tx.objectStore('projects').openCursor();
-            cursor.onsuccess = (e) => {
-                const row = e.target.result;
-                if (row) {
-                    const target = row.value && row.value.id === id ? owned : usedElsewhere;
-                    for (const blobId of collectProjectBlobIds(row.value)) target.add(blobId);
-                    row.continue();
-                    return;
-                }
-                tx.objectStore('projects').delete(id);
-                tx.objectStore('project_index').delete(id);
-                for (const blobId of owned) if (!usedElsewhere.has(blobId)) tx.objectStore('blobs').delete(blobId);
-            };
-            cursor.onerror = () => reject(cursor.error);
-            tx.oncomplete = () => resolve();
-            tx.onabort = () => reject(tx.error || new Error('IndexedDB transaction aborted'));
-            tx.onerror = () => reject(tx.error);
-        });
+    async function deleteProject(id, options) {
+        return storeSafety().deleteProject(id, options);
     }
-    return { open, listProjects, listSummaries, getProject, putProject, deleteProject };
+    const patchProject = (...args) => storeSafety().patchProject(...args);
+    const recordPublishReceipt = (...args) => storeSafety().recordPublishReceipt(...args);
+    const listRecoveries = (...args) => storeSafety().listRecoveries(...args);
+    const restoreRecovery = (...args) => storeSafety().restoreRecovery(...args);
+    const discardRecovery = (...args) => storeSafety().discardRecovery(...args);
+    const releaseProject = (...args) => storeSafety().releaseProject(...args);
+    const pinBlobs = (...args) => storeSafety().pinBlobs(...args);
+    const releaseBlobPins = (...args) => storeSafety().releaseBlobPins(...args);
+    const putArchiveJob = (...args) => storeSafety().putArchiveJob(...args);
+    const getArchiveJobs = (...args) => storeSafety().getArchiveJobs(...args);
+    const deleteArchiveJob = (...args) => storeSafety().deleteArchiveJob(...args);
+    return { open, listProjects, listSummaries, getProject, putProject, deleteProject, patchProject, recordPublishReceipt, listRecoveries, restoreRecovery, discardRecovery, releaseProject, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob };
 })();
 
 // ===========================================================================
@@ -351,9 +325,6 @@ const SupabaseClient = (() => {
         // writes (insert / update / delete) via the policy at
         // share_locks.sql §4. Used here to wipe orphan storage objects
         // after delete_project_doc removes the projects row.
-        requestPublishSession(masterPw, slug) {
-            return rpc('request_publish_session', { _master_pw: masterPw, _slug: slug });
-        },
         // Direct Storage REST DELETE so we can attach the x-publish-token
         // header (supabase-js's storage.remove() doesn't expose per-call
         // headers). Wrapping fetch lets us reuse the same publish_session
@@ -424,8 +395,6 @@ async function deleteServerProjectWithMedia(masterPw, slug) {
     if (typeof slug !== 'string' || !slug || /[/\\\u0000-\u001f\u007f]/.test(slug)) {
         throw new Error('対象プロジェクトが不正です');
     }
-    const publish = await SupabaseClient.requestPublishSession(masterPw, slug);
-    if (!publish || !publish.token) throw new Error('画像削除用の認証を取得できないため削除を中止しました');
     let registry;
     try {
         const raw = await SupabaseClient.unlockProjectMaster(slug, masterPw);
@@ -446,11 +415,8 @@ async function deleteServerProjectWithMedia(masterPw, slug) {
             failed++;
         }
     }
-    for (const path of registry.paths) {
-        try { await SupabaseClient.deleteStorageObject('atlases', path, publish.token); deleted++; }
-        catch (e) { console.warn('storage delete failed for', path, e); failed++; }
-    }
-    return { deleted, failed, retained: registry.retained.size };
+    // Only administrator reference-aware GC may remove immutable originals.
+    return { deleted:0, failed, retained:registry.paths.size+registry.retained.size };
 }
 
 // ===========================================================================
@@ -1124,10 +1090,10 @@ async function treeMoveProject(slug, localId) {
     //   {localId} だけのノードに手が届かず、やはり幽霊が残る。行そのものへ
     //   解決できるかで判定し、形の違う同一プロジェクトのノードも回収する。
     const idx = _indexRows(await buildRows());
-    const target = (slug && idx.bySlug.get(slug)) || (localId && idx.byLocal.get(localId)) || null;
+    const target = (localId && idx.byLocal.get(localId)) || (slug && idx.bySlug.get(slug)) || null;
     const targetKey = target ? _rowKey(target) : '';
     const isSameProject = (n) => {
-        if ((slug && n.slug === slug) || (localId && n.localId === localId)) return true;
+        if (localId && n.localId) return n.localId === localId;
         if (!targetKey) return false;
         const r = idx.rowForNode(n);
         return !!r && _rowKey(r) === targetKey;
@@ -1180,27 +1146,26 @@ function _buildProjectResolver(rows) {
 }
 
 // ---- row identity (shared by the list renderer, the tree reconciler and 移動) ----
-// A row's identity is its published slug; a never-published local project falls
-// back to its browser-local id.
+// A local ID identifies a preserved copy; a slug identifies only server-only rows.
 function _rowSlug(r) {
     if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) return '';
     return (r && r.local && r.local.shareInfo && r.local.shareInfo.slug) || (r && r.server && r.server.slug) || '';
 }
 function _rowKey(r) {
     const s = _rowSlug(r);
-    return s ? ('s:' + s) : ('l:' + (r && r.local ? r.local.id : ''));
+    return r && r.local ? ('l:' + r.local.id) : ('s:' + s);
 }
 function _indexRows(rows) {
     const bySlug = new Map(), byLocal = new Map();
     for (const r of (rows || [])) {
         const s = _rowSlug(r);
         const lid = r.local ? r.local.id : '';
-        if (s) bySlug.set(s, r);
+        if (s && !bySlug.has(s)) bySlug.set(s, r);
         if (lid) byLocal.set(lid, r);
     }
     const rowForNode = (n) => {
-        if (n.slug && bySlug.has(n.slug)) return bySlug.get(n.slug);
         if (n.localId && byLocal.has(n.localId)) return byLocal.get(n.localId);
+        if (n.slug && bySlug.has(n.slug)) return bySlug.get(n.slug);
         return null;
     };
     return { bySlug, byLocal, rowForNode };
@@ -1512,7 +1477,7 @@ async function createLocalProjectFromForm(data) {
         }),
         createdAt: new Date().toISOString(),
     };
-    await ProjectStorage.putProject(project);
+    await ProjectStorage.putProject(project, {createOnly:true});
     return project;
 }
 
@@ -1669,65 +1634,17 @@ async function buildRows() {
     const local = await ProjectStorage.listSummaries();
     // A downloaded project's old share metadata must never select a cloud route.
     if (window.DESI_OFFLINE === true) return local.map(lp => ({ kind: 'local-only', local: Object.assign({}, lp, { shareInfo: null }) }));
-    const localBySlug = new Map();
-    const localOnly = [];
-    for (const lp of local) {
+    // Every local ID is a separate preserved copy, even when slugs match.
+    // Display-name similarity is not proof of shared project identity.
+    const serverBySlug = new Map((serverRowsCache || []).map(row => [row.slug, row]));
+    const linked = new Set();
+    const rows = local.map(lp => {
         const slug = lp.shareInfo && lp.shareInfo.slug;
-        if (slug) localBySlug.set(slug, lp);
-        else localOnly.push(lp);
-    }
-    const rows = [];
-    for (const lp of localOnly) rows.push({ kind: 'local-only', local: lp });
-    for (const lp of localBySlug.values()) rows.push({ kind: 'local+server-maybe', local: lp });
-    if (Array.isArray(serverRowsCache)) {
-        for (const sp of serverRowsCache) {
-            if (localBySlug.has(sp.slug)) {
-                const r = rows.find(x => x.local && x.local.shareInfo && x.local.shareInfo.slug === sp.slug);
-                if (r) { r.kind = 'local+server'; r.server = sp; }
-            } else {
-                // Self-heal legacy/orphaned duplicates: if EXACTLY ONE slug-less
-                // local shares this server row's display name, adopt the slug
-                // onto it (write back to IDB) so the manager shows a single
-                // "Local + Server" row instead of "Local" + "Server only".
-                // Ambiguous (0 or >1 same-name) matches are left as server-only.
-                // ★ 中身の無いローカル記録には slug を渡さない。渡すと空の抜け殻が
-                //   "Local + Server" を名乗り、主ボタンが「Open」(= ローカルの空を
-                //   開く) に変わって、サーバにある本体へ手が届かなくなる。
-                //   sectionCount が無い (古いサマリ行) ときは従来どおり通す。
-                const nm = String(sp.display_name || '').trim().toLowerCase();
-                const cands = nm ? localOnly.filter(lp => String(lp.displayName || '').trim().toLowerCase() === nm
-                                                       && lp.sectionCount !== 0) : [];
-                if (cands.length === 1) {
-                    const lp = cands[0];
-                    const prev = lp.shareInfo || {};
-                    const nextShare = Object.assign({}, prev, {
-                        slug: sp.slug,
-                        url: prev.url || new URL('viewer/index.html#share=' + encodeURIComponent(sp.slug), location.href).href,
-                    });
-                    // lp is a SUMMARY row. Load the real record, adopt the slug
-                    // there, and write that back — writing lp itself would
-                    // replace the project with a stub. (putProject also refuses
-                    // summary rows, so this is belt and braces.)
-                    try {
-                        const full = await ProjectStorage.getProject(lp.id);
-                        if (full) {
-                            full.shareInfo = Object.assign({}, full.shareInfo || {}, nextShare);
-                            await ProjectStorage.putProject(full);
-                        }
-                    } catch (e) { console.warn('reconcile putProject failed', e); }
-                    lp.shareInfo = nextShare;   // keep this render's row consistent
-                    localBySlug.set(sp.slug, lp);
-                    const row = rows.find(x => x.kind === 'local-only' && x.local === lp);
-                    if (row) { row.kind = 'local+server'; row.server = sp; }
-                    else rows.push({ kind: 'local+server', local: lp, server: sp });
-                    const idx = localOnly.indexOf(lp);
-                    if (idx >= 0) localOnly.splice(idx, 1);
-                } else {
-                    rows.push({ kind: 'server-only', server: sp });
-                }
-            }
-        }
-    }
+        const server = slug && serverBySlug.get(slug);
+        if (slug) linked.add(slug);
+        return {kind: server ? 'local+server' : slug ? 'local+server-maybe' : 'local-only', local: lp, ...(server ? {server} : {})};
+    });
+    for (const server of serverBySlug.values()) if (!linked.has(server.slug)) rows.push({kind:'server-only', server});
     rows.sort((a, b) => {
         const ta = (a.local && a.local.createdAt) || (a.server && (a.server.updated_at || a.server.created_at)) || '';
         const tb = (b.local && b.local.createdAt) || (b.server && (b.server.updated_at || b.server.created_at)) || '';
@@ -1758,11 +1675,11 @@ function rowHtml(r) {
         : '';
     const localId = r.local ? r.local.id : '';
     return `
-        <div class="card p-3 proj-row" data-local-id="${safe(localId)}" data-slug="${safe(slug)}" data-url="${safe(url)}">
+        <div class="card p-3 proj-row" data-local-id="${safe(localId)}" data-storage-revision="${r.local ? r.local.storageRevision : ''}" data-slug="${safe(slug)}" data-url="${safe(url)}">
           <div class="flex items-center justify-between gap-3 flex-wrap">
             <div class="flex items-center gap-2 min-w-0">
               <div class="font-semibold truncate">${safe(name)}</div>
-              ${badge}${emptyBadge}
+              ${badge}${emptyBadge}<span class="text-xs text-gray-500" title="Browser-local copy ID">${safe(localId)}</span>
             </div>
             <div class="flex gap-2">
               ${r.local
@@ -1975,7 +1892,8 @@ async function renderList() {
         click('delete-local', async () => {
             if (!localId) return;
             if (!confirm(window.DESI_OFFLINE === true ? 'このブラウザーからプロジェクトを削除しますか? 必要なデータは先に Export ZIP でバックアップしてください。' : 'ローカルからこのプロジェクトを削除しますか? (サーバに publish 済みなら、サーバ側のデータは残ります)')) return;
-            await ProjectStorage.deleteProject(localId);
+            try { await ProjectStorage.deleteProject(localId, {expectedRevision:Number(row.getAttribute('data-storage-revision'))}); }
+            catch (e) { alert(e.message || String(e)); }
             await renderList();
         });
         click('delete-server', async () => {
@@ -2012,7 +1930,7 @@ async function renderList() {
                 }
                 let msg = '削除しました (DB: ok, storage objects: ' + deleted + ' 件)';
                 if (failed) msg += ' / 失敗: ' + failed + ' 件 (orphan blob として残ります)';
-                if (retained) msg += ' / 他プロジェクトの画像: ' + retained + ' 件は保持しました';
+                if (retained) msg += ' / 原本 ' + retained + ' 件は保持しました (管理者の保管整理対象)';
                 showToast(msg, 3600);
                 await renderList();
             } catch (e) {
@@ -2035,8 +1953,14 @@ async function renderList() {
                 const cur = proj.displayName || '';
                 const name = (prompt('プロジェクト名を変更', cur) || '').trim();
                 if (!name || name === cur) return;
-                proj.displayName = name;
-                try { await ProjectStorage.putProject(proj); }
+                try {
+                    await ProjectStorage.patchProject(localId, current => {
+                        if (current.displayName !== cur) throw new Error('別のタブで改名されています。最新の名前を確認してください。');
+                        current.displayName = name;
+                        current.publishEditEpoch = (current.publishEditEpoch || 0) + 1;
+                        if (current.shareInfo && current.shareInfo.slug) current.__publishPending = true;
+                    });
+                }
                 catch (e) { alert('改名に失敗しました: ' + (e && e.message || e)); return; }
                 await renderList();
                 // Auto-refresh any shared folder whose listing includes this
@@ -2260,6 +2184,8 @@ async function init() {
     // refuses to dismiss until a valid password is entered, so anything
     // below this line only runs once the user is authenticated.
     await requireMasterUnlock();
+    const recoveryUi = ProjectStoreSafety.mountRecoveryUi(ProjectStorage, {projectUrl:id=>'viewer/index.html?project='+encodeURIComponent(id),onRestored: () => renderList()});
+    window.addEventListener('project-storage-conflict', () => recoveryUi.notify());
     document.getElementById('btn-new').addEventListener('click', async () => {
         const data = await openNewProjectFormModal();
         if (!data) return;

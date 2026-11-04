@@ -333,7 +333,7 @@ ROI LIST ヘッダの **「ROIのみ」** チェックを ON にすると、**�
 
 > **Range の自動上限と白飛び**: 外れ値クリップが ON の自動 Range は、**p99.9 (99.9 パーセンタイル)** を基準にします。上限を超える位置は同じ上限色になりますが、件数は値の同順位や標本数に依存し、常にちょうど 0.1% になるわけではありません。暗く感じたら Range の上限を手で下げてください。手入力が優先され、`Reset` で自動に戻ります。**切片選択や Preview の開閉で手動 Range は削除されません**。
 
-> **Range の初期値は Master から継承**: 各 MSI の Range (vmin/vmax) スライダーは、Master が公開時に設定した値が自動的に初期値として読み込まれます。閲覧者側で自由に変更できますが、リロードすると再び Master の値に戻ります。Master が後から Range を再調整して再公開すれば、次回の閲覧時にその新しい値が初期値となります。
+> **Range はプロジェクトごとの一時設定**: Master の手動 Range は公開初期値として保存されません。再ロード時は元データから計算した自動値に戻ります。同じタブで A → B → A と切り替えると A の手動 Range と Same / Individual を戻しますが、B には適用しません。共有 URL・閲覧者/Admin の設定も分離し、別の測定へ置換された MSI は自動値に戻ります。
 
 > **Range は同じ化合物の全切片で「同じ窓・同じ幅」に揃う**: ある切片で Range の min か max を変えると、**同じ MRM (化合物) を表示している全切片**の min/max が同じ値に揃います (幅も同じになります)。歯車 ⚙ の Intensity range から変えても同様です。別の化合物には影響しません。これにより複数切片を同一スケールで比較できます。
 
@@ -384,7 +384,9 @@ ROI LIST ヘッダの **「ROIのみ」** チェックを ON にすると、**�
 
 ## 7-tris. MSI スケールバー
 
-MSI レイヤーが表示されていて、提供者側で **MSI pixel size (μm/px)** が設定されている切片では、メイン canvas の **左下にスケールバー** が出ます。
+MSI レイヤーが表示され、登録された **MSI pixel size (μm/px)** と原本座標から物理縮尺を確認できる場合、メイン canvas の **左下にスケールバー** が出ます。読み込み中・校正不足・不均一な旧座標などで縮尺を確認できない場合は省きます。画素サイズラベルは登録値であり、バーを表示できることの保証ではありません。
+
+過去に数値文字列で保存された校正値（例: `"70"`）も読み取りますが、原本・ROI・位置合わせの保存値は変更しません。通常画面・個別 Preview・PPT は同じ物理校正の判定を使います。Preview 右上の共通バーは使用せず、画像ごとの縮尺で表示します。
 
 <div style="display:inline-block;background:rgba(255,255,255,0.88);padding:4px 8px;border-radius:4px;font-size:11px;font-weight:600;color:#0f172a;box-shadow:0 1px 3px rgba(0,0,0,0.25);margin:6px 0;">
   <span style="display:inline-block;height:4px;width:80px;background:#0f172a;box-shadow:0 0 0 1px #fff;vertical-align:middle;margin-right:6px;"></span>200 μm

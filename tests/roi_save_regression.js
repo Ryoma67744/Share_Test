@@ -60,6 +60,7 @@ async function main() {
       return value ? structuredClone(value) : null;
     },
     async deleteProject(id) { deletes++; stored.delete(id); },
+    async releaseProject() {},
   };
   const appStart = html.indexOf('const App = {');
   const appEnd = html.indexOf('\n};', appStart);
@@ -85,6 +86,7 @@ async function main() {
   loadFixedColors(context);
   vm.runInContext([
     defaultPaletteSource(),
+    ...['msiDisplayContextKey','msiDisplayMeasurementSignature','ensureMsiDisplayContext','msiSourceReference'].map(standalone),
     standalone('pickUnusedColorKey'),
     standalone('storeRoiPaletteColor'),
     standalone('roiFixedColorEditable'),

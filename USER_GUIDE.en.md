@@ -328,7 +328,7 @@ Three groups in each section's toolbar:
 
 > **Automatic Range and highlights**: with outlier clipping on, automatic Range uses **p99.9 (the 99.9th percentile)** as its upper reference. Values above the ceiling share the upper colour. The number of saturated positions depends on sample size and ties; it is not always exactly 0.1%. Lower the ceiling manually if the image is too dark. Manual values take priority; `Reset` restores automatic Range. **Changing displayed sections or opening/closing Preview does not delete manual Range.**
 
-> **Range initial values are inherited from the master**: the per-MSI Range slider (vmin/vmax) loads with the value the master set at publish time. Viewers can still adjust freely, but the change is local — reloading restores the master's value. If the master later re-tunes Range and re-publishes, the new value becomes the next-load initial.
+> **Range is temporary and scoped to a project**: the master's manual Range is not saved as a published default. Reloading restores automatic values calculated from the source data. Switching A → B → A within the same tab restores A's Range and Same / Individual mode without applying them to B. Shared URLs and viewer/admin contexts are separate. Replacing a measurement restores its automatic Range.
 
 > **Range stays the same window — same width — across sections of one compound**: changing the Range min or max on one section snaps the min/max of **every section showing the same MRM (compound)** to the same values (so the widths match too). Editing via the gear ⚙ Intensity range does the same. Other compounds are unaffected. This lets you compare several sections on one identical scale.
 
@@ -379,7 +379,9 @@ Click the **gear ⚙** at the right edge of any layer chip to open a per-layer p
 
 ## 7-tris. MSI scale bar
 
-When an MSI layer is visible AND the publisher has set **MSI pixel size (μm/px)**, the main canvas shows a **scale bar at the bottom-left**.
+When an MSI layer is visible and its registered **MSI pixel size (μm/px)** can be resolved against source coordinates, the main canvas shows a **scale bar at the bottom-left**. It is omitted while geometry is loading or calibration/nonuniform legacy coordinates cannot establish a physical scale. The pixel-pitch label shows registered values; it does not guarantee a drawable scale bar.
+
+Legacy numeric strings such as `"70"` are accepted without rewriting source data, ROIs or alignment. The main image, individual Preview images and PPT use the same calibration decision. Preview uses per-image bars instead of an unrelated common header bar.
 
 <div style="display:inline-block;background:rgba(255,255,255,0.88);padding:4px 8px;border-radius:4px;font-size:11px;font-weight:600;color:#0f172a;box-shadow:0 1px 3px rgba(0,0,0,0.25);margin:6px 0;">
   <span style="display:inline-block;height:4px;width:80px;background:#0f172a;box-shadow:0 0 0 1px #fff;vertical-align:middle;margin-right:6px;"></span>200 μm

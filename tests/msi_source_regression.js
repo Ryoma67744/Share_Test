@@ -35,7 +35,7 @@ const names = [
   'buildMsiGrid', 'buildLegacyMsiGrid', 'msiSourceReference', 'createMsiSourceGeometry',
   'msiAxisInterpolate', 'pointInPolygon', 'roiContainsSourcePoint', 'msiValidRoiGeometry', 'msiRoiGeometryMeta',
 ];
-const ctx = vm.createContext({
+const ctx = vm.createContext({ProjectArchive: require('../viewer/project-archive.js'),
   console, TextDecoder, TextEncoder, Uint8Array, Int32Array, Float32Array,
   Float64Array, ArrayBuffer, Blob, Response, DecompressionStream, XLSX, Promise, Object, Math, JSON, BigInt,
   Number, String, Map, Set, Array, Error,
@@ -250,7 +250,7 @@ async function testOriginalZipBytes() {
           throw new Error('unexpected ZIP read type');
         } }; } };
     }
-    file(name, data) { files.set(name, data); return this; }
+    file(name, data) { if (arguments.length === 1) return files.has(name) ? {} : null; files.set(name, data); return this; }
     async generateAsync() { return new Blob(['fixture']); }
   }
   const ent = { kind: 'txt', blobId: 'b', sourceFileId: 'f', filename: 'test.txt', sourceReference: 'stable-source' };
@@ -264,6 +264,7 @@ async function testOriginalZipBytes() {
     showToast: () => {}, alert: message => { throw new Error(message); },
     downloadAsFile: () => {},
   });
+  require('./archive_test_support.cjs').install(ctx);
   await ctx.exportProjectAsZip();
   const original = files.get('Source/b__test.txt');
   assert.ok(original instanceof Blob);
@@ -279,6 +280,7 @@ async function testOriginalZipBytes() {
     ProjectStorage: { putBlob: async rec => importedBlobs.set(rec.id, rec.blob), putProject: async project => { importedProject = project; } },
   });
   ctx.App.openProject = async () => {};
+  require('./archive_test_support.cjs').install(ctx);
   await ctx.importZipFile(new Blob(['fixture']));
   assert.ok(importedProject);
   const restored = importedProject.sections[0].msiSeries.MSI_A;

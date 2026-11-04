@@ -22,82 +22,11 @@ function productionFunction(name) {
 // rejects duplicate keys, and abort rolls back BOTH stores. Production
 // putProject/pr/txDone/indexRowFor below perform all recovery-ID decisions.
 function transactionalStore(projects) {
-  const summaries = new Map(), operations = [];
-  let tail = Promise.resolve();
-  const storage = { summaries, operations, failNextCommit: false };
-  storage.tx = async (names, mode) => {
-    assert.equal(mode, 'readwrite');
-    assert.deepEqual(Array.from(names), ['projects', 'project_index']);
-    const previous = tail;
-    let release;
-    tail = new Promise(resolve => { release = resolve; });
-    await previous;
-    const original = { projects, project_index: summaries };
-    const draft = Object.fromEntries(names.map(name => [name, new Map(
-      Array.from(original[name], ([key, value]) => [key, clone(value)]))]));
-    let finished = false, commitTimer;
-    const t = {
-      error: null,
-      abort() {
-        if (finished) return;
-        finished = true;
-        clearImmediate(commitTimer);
-        t.error = t.error || Object.assign(new Error('transaction aborted'), { name: 'AbortError' });
-        if (t.onabort) t.onabort();
-        release();
-      },
-      objectStore(name) {
-        assert.ok(draft[name]);
-        const request = (op, key, value) => {
-          assert.equal(finished, false, 'request belongs to an active transaction');
-          clearImmediate(commitTimer);
-          const req = {};
-          setImmediate(() => {
-            if (finished) return;
-            try {
-              operations.push({ store: name, op, key });
-              if (op === 'get') req.result = draft[name].has(key) ? clone(draft[name].get(key)) : undefined;
-              else {
-                if (op === 'add' && draft[name].has(key)) {
-                  throw Object.assign(new Error('duplicate key'), { name: 'ConstraintError' });
-                }
-                draft[name].set(key, clone(value));
-                req.result = key;
-              }
-              req.onsuccess();
-              commitTimer = setImmediate(() => {
-                if (storage.failNextCommit) {
-                  storage.failNextCommit = false;
-                  t.error = Object.assign(new Error('quota exhausted at commit'), { name: 'QuotaExceededError' });
-                  t.abort();
-                  return;
-                }
-                finished = true;
-                for (const name of names) {
-                  original[name].clear();
-                  for (const [key, value] of draft[name]) original[name].set(key, clone(value));
-                }
-                if (t.oncomplete) t.oncomplete();
-                release();
-              });
-            } catch (error) {
-              req.error = error;
-              if (req.onerror) req.onerror();
-              t.error = error;
-              t.abort();
-            }
-          });
-          return req;
-        };
-        return { get: key => request('get', key),
-          add: value => request('add', value.id, value),
-          put: value => request('put', value.id, value) };
-      },
-    };
-    return t;
-  };
+  const storage = require('./helpers/memory-idb.cjs')({projects});
+  storage.tx = storage.transaction; storage.summaries = storage.stores.project_index;
   return storage;
 }
+
 class MemoryZip {
   constructor() { this.files = {}; }
   file(name, value) {
@@ -155,7 +84,7 @@ function context(offline, includeOriginals = false) {
   const blobs = new Map(includeOriginals ? Object.entries(originals).map(([id, blob]) => [id, { blob, mime: blob.type }]) : []);
   const projects = new Map();
   const storage = transactionalStore(projects);
-  const ctx = vm.createContext({ console, Blob, Map, Set, Promise, RoiMediaModel,
+  const ctx = vm.createContext({ console, Blob, Map, Set, Promise, RoiMediaModel, structuredClone,
     window: { DESI_OFFLINE: offline }, fetch: noNetwork, SupabaseClient: { publicUrl: noNetwork, rpc: noNetwork },
     loadScript: async () => {}, LAZY_LIBS: { jszip: 'local-jszip' }, JSZip: MemoryZip,
     uid: prefix => prefix + '-' + (++sequence), nowIso: () => '2026-10-09T00:00:00Z',
@@ -173,11 +102,15 @@ function context(offline, includeOriginals = false) {
       otsuBgRemove: true, otsuStrength: 0.35, otsuManualThreshold: 1.25 },
     blobs, projects, storage, tx: storage.tx,
   });
+  require('./archive_test_support.cjs').install(ctx);
   vm.runInContext('let _exportInProgress = false;\n' + [
     'detachOfflineProject', 'sanitizeStorageKeySegment', 'guessMimeFromPath', 'remapRoiGeometry',
     'roiMediaForTransport', 'roiMediaReadOriginal', 'roiMediaPublicItem', 'exportProjectAsZip', 'importZipFile',
     'isViewerOverlay', 'indexRowFor', 'pr', 'txDone', 'putProject',
   ].map(productionFunction).join('\n'), ctx);
+  const safety = require('../project-store-safety.js').create({transaction:storage.tx,
+    indexRowFor:ctx.indexRowFor, uid:ctx.uid, prepare:record=>{if(offline)ctx.detachOfflineProject(record);}});
+  ctx.storeSafety = () => safety;
   return ctx;
 }
 async function equalOriginal(ctx, blobId, original) {
@@ -244,7 +177,7 @@ async function main() {
       const firstId = restored.id;
       await target.importZipFile(zip);
       assert.notEqual(target.saved.id, firstId, 'a second import never overwrites a project in either mode');
-      assert.deepEqual(target.projects.get(firstId), restored);
+      assert.deepEqual(clone(target.projects.get(firstId)), restored);
     }
   }
 
@@ -308,4 +241,5 @@ async function main() {
   }
   console.log('ZIP compatibility regression: PASS (4 mode pairs, original bytes, overlay ownership, atomic concurrent recovery, rollback, legacy archives)');
 }
-main().catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });
+module.exports = {context, MemoryZip, fixture};

@@ -11,6 +11,7 @@ const plain = value => JSON.parse(JSON.stringify(value));
 function fixture() {
   const d = dom();
   const saved = new Map();
+  const blobs = new Map([['blob1', {blob: new Blob(['original MSI bytes'])}]]);
   const counters = { save: 0, redraw: 0, analysis: 0, errors: [] };
   const App = {
     project: null, shareMode: null, activeSectionId: null, panels: new Map(),
@@ -22,8 +23,8 @@ function fixture() {
   const ProjectStorage = {
     async getProject(id) { return structuredClone(saved.get(id)); },
     async putProject(project) { saved.set(project.id, structuredClone(project)); },
-    async getBlob() { return { blob: 'original MSI bytes' }; },
-    async putBlob() {},
+    async getBlob(id) { return blobs.get(id); },
+    async putBlob(rec) { blobs.set(rec.id, rec); },
   };
   const context = vm.createContext({ console, setTimeout, clearTimeout, structuredClone,
     ...d, App, ProjectStorage, RoiMediaModel: require('../viewer/roi-media-model.js') });
@@ -190,10 +191,7 @@ async function roiTests() {
   // This fixture has no attached photographs; obtain the actual versioned
   // empty payload through the production transport helper, not a mock shape.
   c.roiMediaPayload = c.roiMediaForTransport(project);
-  const start = html.indexOf('    const roisPayload =', html.indexOf('async function _publishCoreInner('));
-  const end = html.indexOf('    let result;', start);
-  assert.ok(start > 0 && end > start);
-  const payload = vm.runInContext('(function(){\n' + html.slice(start, end) + '\nreturn args;})()', c);
+  const payload={_rois:require('../viewer/publish-safety.js').ownedRois(project,c.encodeRoiPolygon),_meta:{anatomyPalette:project.anatomyPalette}};
   const wireRows = plain(payload._rois).map((row, i) => ({ id: 'server' + i,
     section_id: row.sectionId, color_key: row.colorKey, name: row.name, poly_msi: row.polyMsi }));
   const hydrated = c.groupRoiRowsByColor(wireRows, plain(payload._meta.anatomyPalette));
@@ -311,6 +309,7 @@ async function zipRoundTrip({ f, project }) {
     sourceReference: 'test-source', markerColor: '#123456' };
   c.App.project = project;
   c.App.openProject = async id => { imported = await c.ProjectStorage.getProject(id); };
+  require('./archive_test_support.cjs').install(c);
   vm.runInContext('let _exportInProgress = false;\n' + ['exportProjectAsZip', 'importZipFile'].map(sourceFunction).join('\n'), c);
   await c.exportProjectAsZip();
   assert.ok(bundle, 'production exporter completed');

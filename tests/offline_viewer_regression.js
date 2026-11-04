@@ -15,7 +15,8 @@ function fn(name) {
 }
 function appSource() {
   const start = html.indexOf('const App = {');
-  return html.slice(start, html.indexOf('\n};', start) + 3) + '\nglobalThis.app = App;';
+  return ['msiDisplayContextKey','msiDisplayMeasurementSignature','ensureMsiDisplayContext','msiSourceReference'].map(fn).join('\n')
+    + '\n' + html.slice(start, html.indexOf('\n};', start) + 3) + '\nglobalThis.app = App;';
 }
 function clientSource() {
   const start = html.indexOf('const SupabaseClient = (() => {');
@@ -71,7 +72,7 @@ async function main() {
   await core.app.autoPublishProject();
   await core.app._refreshMasterCollabRois();
   core.app._startMasterCollabPoll();
-  assert.equal(await core.app._serverIsNewerThanLocal(core.app.project), false);
+  core.app._scheduleAutoPublish(); // Must return before any cloud state lookup.
   await core.client.registerFromResultBatch('offline-local', [{ name: 'sample', project_local_id: 'local' }]);
   assert.equal(rpcCalls[0][0], 'register_from_result_batch');
   assert.equal(rpcCalls[0][1]._rows[0].project_local_id, 'local');
@@ -152,6 +153,7 @@ async function main() {
       } },
     App: { panels: new Map(), openProject: async () => {}, otsuBgRemove: false, otsuStrength: 0 },
   });
+  require('./archive_test_support.cjs').install(transport);
   vm.runInContext('let _exportInProgress = false;\n' + [
     'detachOfflineProject', 'sanitizeStorageKeySegment', 'guessMimeFromPath', 'remapRoiGeometry',
     'roiMediaForTransport', 'roiMediaReadOriginal', 'roiMediaPublicItem', 'exportProjectAsZip', 'importZipFile',
@@ -200,7 +202,7 @@ async function main() {
     window: { DESI_OFFLINE: true }, location: localLocation,
     history: { state: { retained: true }, replaceState: (_state, _title, next) => { localLocation.href = new URL(next, localLocation.href).href; } },
     document: { body: { classList: { remove() {} } }, getElementById: () => node },
-    ProjectStorage: { getProject: async id => clone(savedProjects.get(id) || null),
+    ProjectStorage: { releaseProject: async () => {}, getProject: async id => clone(savedProjects.get(id) || null),
       putProject: async project => savedProjects.set(project.id, clone(project)), deleteProject: async id => savedProjects.delete(id) },
     localStorage: { setItem: (key, value) => lastProject.set(key, value), removeItem: key => lastProject.delete(key) },
     SharePreview: { isOpen: () => false }, _roiRawGridCache: new Map(), parquetReleaseAll() {},
@@ -255,7 +257,7 @@ async function main() {
   blobs.delete('image');
   await transport.exportProjectAsZip();
   assert.equal(transport.exported, undefined);
-  assert.match(transport.alerts[0], /HE\/IF 原本がありません/);
+  assert.match(transport.alerts[0], /必要な原本がありません/);
   console.log('Offline viewer regression: PASS');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
