@@ -2,7 +2,7 @@
 // Deterministic transaction test adapter. Real IDB inter-tab behavior is covered
 // separately in project_store_safety_browser_regression.cjs.
 module.exports = function memoryIdb(initial = {}) {
- const names = ['projects','project_index','blobs','pq_index','project_recovery','blob_pins','archive_jobs'];
+ const names = ['projects','project_index','blobs','pq_index','project_recovery','blob_pins','archive_jobs','preferences'];
  const stores = Object.fromEntries(names.map(n => [n, initial[n] || new Map()]));
  let tail=Promise.resolve(); const api={stores,operations:[],failNextCommit:false};
  api.transaction=async (input, mode) => {

@@ -144,7 +144,8 @@ const ProjectStorage = (() => {
     // v4: added the `pq_index` store (parquet footer index; viewer only writes it).
     // MUST match viewer/index.html.
     // v5: fenced CAS writes, recovery drafts and original-file job pins.
-    const DB_VERSION = 5;
+    // v6: browser-local recovery preferences, shared across management tabs.
+    const DB_VERSION = 6;
 
     let safeStore = null;
     function storeSafety() {
@@ -263,6 +264,8 @@ const ProjectStorage = (() => {
     const patchProject = (...args) => storeSafety().patchProject(...args);
     const recordPublishReceipt = (...args) => storeSafety().recordPublishReceipt(...args);
     const listRecoveries = (...args) => storeSafety().listRecoveries(...args);
+    const getRecoveryEnabled = (...args) => storeSafety().getRecoveryEnabled(...args);
+    const setRecoveryEnabled = (...args) => storeSafety().setRecoveryEnabled(...args);
     const restoreRecovery = (...args) => storeSafety().restoreRecovery(...args);
     const discardRecovery = (...args) => storeSafety().discardRecovery(...args);
     const releaseProject = (...args) => storeSafety().releaseProject(...args);
@@ -271,7 +274,7 @@ const ProjectStorage = (() => {
     const putArchiveJob = (...args) => storeSafety().putArchiveJob(...args);
     const getArchiveJobs = (...args) => storeSafety().getArchiveJobs(...args);
     const deleteArchiveJob = (...args) => storeSafety().deleteArchiveJob(...args);
-    return { open, listProjects, listSummaries, getProject, putProject, deleteProject, patchProject, recordPublishReceipt, listRecoveries, restoreRecovery, discardRecovery, releaseProject, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob };
+    return { open, listProjects, listSummaries, getProject, putProject, deleteProject, patchProject, recordPublishReceipt, listRecoveries, getRecoveryEnabled, setRecoveryEnabled, restoreRecovery, discardRecovery, releaseProject, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob };
 })();
 
 // ===========================================================================
