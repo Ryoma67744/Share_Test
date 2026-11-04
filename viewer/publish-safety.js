@@ -7,8 +7,18 @@
  function baseline(project,slug){
    const info=project.shareInfo||{};
    if(info.slug!==slug)return {create:true,revision:0};
-   if(!revision(info.serverRevision))throw error('PUBLISH_BASELINE_UNKNOWN','このローカル版がどの公開版に対応するか未確認です。共有最新版を別コピーで取得して比較してください。');
+   if(!revision(info.serverRevision))throw error('PUBLISH_BASELINE_UNKNOWN','このローカル版がどの公開版に対応するか未確認です。比較画面で共有版を確認してください。');
    return {create:false,revision:info.serverRevision};
+ }
+ function confirmedOverwriteBaseline(project,slug,confirmation){
+   if(!confirmation||typeof confirmation!=='object'||Array.isArray(confirmation)
+     ||confirmation.slug!==slug||project.shareInfo?.slug!==slug||!revision(confirmation.serverRevision))
+     throw error('PUBLISH_OVERWRITE_INVALID','比較画面で確認した同じ共有URLの公開版を指定してください。');
+   if(project.__importFailures>0)
+     throw error('PUBLISH_SOURCE_MISSING','共有版の取得が一部失敗したローカル版からは上書きできません。原本とROIを完全に取得してから比較してください。');
+   if(revision(project.shareInfo.serverRevision)&&project.shareInfo.serverRevision>confirmation.serverRevision)
+     throw error('40001','比較後に公開版が更新されています。もう一度共有版を確認してください。');
+   return {create:false,revision:confirmation.serverRevision};
  }
  async function parallel(items,limit,fn){
    let index=0,failure;const settled=await Promise.allSettled(Array.from({length:Math.min(limit,items.length)},async()=>{
@@ -37,15 +47,26 @@
    const snapshot=copy(project),settings=copy(meta),job={projectId:project.id,sourceSlug:project.shareInfo?.slug||null,previousSlug:project.shareInfo?.slug||null,slug:meta.slug,jobId:(hooks.uuid||uuid)(),
      publishedEditEpoch:project.publishEditEpoch||0,sourceStorageRevision:project.storageRevision||0};
    if(!/^[A-Za-z0-9_-]+$/.test(job.slug||''))throw error('PUBLISH_INVALID_SLUG','共有URLの名前を確認してください。');
-   hooks.freezeSources(snapshot);
+   // Approval changes this request's CAS base only. Do not promote an unknown
+   // local baseline until a verified receipt is recorded, or persist a flag
+   // that could silently authorize a later automatic publish.
+   const overwrite=options.confirmedOverwrite===undefined?null
+     :confirmedOverwriteBaseline(snapshot,job.slug,options.confirmedOverwrite);
    const oldPending=snapshot.shareInfo&&snapshot.shareInfo.pendingPublish;
+   if(overwrite&&oldPending&&oldPending.slug!==job.slug)
+     throw error('PUBLISH_PENDING_CONFLICT','別の共有URLへの公開処理が未確認です。その処理を確認してから上書きしてください。');
+   hooks.freezeSources(snapshot);
    let resumedCreate=false;
    if(oldPending&&oldPending.slug===job.slug){
      // A lost commit response is reconciled before a fresh request. Never attach
      // the latest server revision to an unknown local snapshot.
      const state=await hooks.state(job.slug,oldPending.jobId);
+     if(overwrite&&(!state||state.protocol!==2))throw error('PUBLISH_PROTOCOL_REQUIRED','共有公開版を確認できません。アプリとサーバの公開APIを確認してください。');
      let previousReceipt=state&&state.receipt;
-     if(!previousReceipt&&oldPending.commitArgs){
+     // A fresh overwrite must never publish an older pending document first.
+     // Its original receipt may be reconciled; an uncommitted intent is then
+     // superseded by a new request bound to the explicitly approved revision.
+     if(!overwrite&&!previousReceipt&&oldPending.commitArgs){
        const ticket=await hooks.session(oldPending);
        previousReceipt=ticket.receipt||await hooks.commit({...oldPending.commitArgs,_publish_token:ticket.token});
      }
@@ -53,10 +74,15 @@
        assertReceipt(previousReceipt,oldPending);
        const receipt=localReceipt(previousReceipt,oldPending,oldPending.settings||settings,oldPending,hooks.url(job.slug));
        await hooks.receipt(receipt);await hooks.release(oldPending.jobId);job.sourceSlug=receipt.slug;job.previousSlug=receipt.slug;snapshot.shareInfo={...(snapshot.shareInfo||{}),slug:receipt.slug,serverRevision:receipt.serverRevision,blobPaths:receipt.blobPaths};
-       if(oldPending.publishedEditEpoch===job.publishedEditEpoch&&JSON.stringify(oldPending.settings)===JSON.stringify(settings))return receipt;
+       if(overwrite&&receipt.serverRevision>overwrite.revision)
+         throw error('40001','比較後に公開版が更新されています。もう一度共有版を確認してください。');
+       if(oldPending.publishedEditEpoch===job.publishedEditEpoch&&JSON.stringify(oldPending.settings)===JSON.stringify(settings)
+         &&(!overwrite||(state.exists===true&&receipt.serverRevision===overwrite.revision&&state.server_revision===overwrite.revision)))return receipt;
      }else resumedCreate=!!oldPending.create&&state&&state.exists===false;
+     if(overwrite&&(state.exists!==true||state.server_revision!==overwrite.revision))
+       throw error('40001','比較後に公開版が更新されています。もう一度共有版を確認してください。');
    }
-   const base=resumedCreate?{create:true,revision:0}:baseline(snapshot,job.slug);job.create=base.create;job.baseServerRevision=base.revision;
+   const base=overwrite||(resumedCreate?{create:true,revision:0}:baseline(snapshot,job.slug));job.create=base.create;job.baseServerRevision=base.revision;
    const session=await hooks.session(job);
    if(!session||session.protocol!==2||!session.token||session.object_prefix!==job.slug+'/publish-v2/'+job.jobId+'/')
      throw error('PUBLISH_PROTOCOL_REQUIRED','サーバの公開APIをv2へ更新してから、アプリを再読み込みしてください。');

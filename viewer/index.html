@@ -146,6 +146,8 @@ body.preview #panel-analysis { display:none !important; }
 .modal-card .actions { display:flex; gap:6px; justify-content:flex-end; margin-top:14px; }
 .modal-card .err { color:#b91c1c; font-size:11px; min-height:1em; margin-top:6px; }
 .modal-card .field-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.modal-card .publish-comparison { border-collapse:collapse; margin:8px 0; }
+.modal-card .publish-comparison th, .modal-card .publish-comparison td { padding:3px 14px 3px 0; text-align:left; }
 .modal-card.help-card { width:880px; max-width:96vw; max-height:90vh; padding:18px 24px; }
 .help-body { font-size:13px; line-height:1.65; color:#1f2937; }
 .help-body h1 { font-size:18px; font-weight:700; margin:18px 0 10px; color:#0f172a; border-bottom:1px solid #e2e8f0; padding-bottom:6px; }
@@ -10834,15 +10836,18 @@ function _noteShareTokenExpired() {
     } catch (e) {}
 }
 
-async function fetchAllShareRois(token, sections) {
+async function fetchAllShareRois(token, sections, options = {}) {
     if (!token || !Array.isArray(sections) || !sections.length) return [];
-    if (_shareTokenExpired) return [];
+    if (_shareTokenExpired && !options.strict) return [];
     const tasks = sections.map(async (sec) => {
         if (!sec || !sec.id) return [];
         try {
             const rows = await SupabaseClient.listRois(token, sec.id);
             return rows || [];
         } catch (e) {
+            // A master import must not turn a failed ROI download into an
+            // apparently complete empty roster that can later overwrite share.
+            if (options.strict) throw e;
             // 期限切れは 1 回だけ知らせて、以後は静かにする。
             if (_isExpiredTokenError(e)) { _noteShareTokenExpired(); return []; }
             console.warn('list_rois failed for section', sec.id, e);
@@ -18650,6 +18655,9 @@ async function _publishCore(project, meta, masterPw, opts) {
 }
 async function _publishCoreInner(project, meta, masterPw, opts) {
     opts=opts||{};
+    // Another project may have held the publish gate while this explicit
+    // overwrite was waiting. Validate the compared local state once more.
+    if(typeof opts.assertBeforeStart==='function')opts.assertBeforeStart();
     if (!SupabaseClient.configured()) throw new Error('supabase_not_configured');
     if (!ProjectStorage.recordPublishReceipt || !ProjectStorage.pinBlobs) throw new Error('保存機能を更新してから再読み込みしてください。');
     let progress=null,cancelled=false; const abort=new AbortController();
@@ -18691,7 +18699,8 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
             upload:(path,blob,mime,token)=>SupabaseClient.uploadBlob('atlases',path,blob,mime,token,{signal:abort.signal}),
             progress:(done,total)=>{if(progress)progress.update(done,total);if(opts.onProgress)opts.onProgress(done,total);},
             assertActive:ensureRunning,close:()=>{if(progress)progress.close();progress=null;},
-        },{forceFullUpload:!!opts.forceFullUpload||!!project.shareInfo?.forceFullUpload});
+        },{forceFullUpload:!!opts.forceFullUpload||!!project.shareInfo?.forceFullUpload,
+            ...(Object.prototype.hasOwnProperty.call(opts,'confirmedOverwrite')?{confirmedOverwrite:opts.confirmedOverwrite}:{})});
     } catch(e) {
         if(cancelled){e.cancelled=true;}
         if(e.code==='PGRST202'||/publish_protocol_upgrade_required/i.test(e.message||''))
@@ -18699,22 +18708,76 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
         throw e;
     } finally {if(progress)progress.close();}
 }
-async function _comparePublishedProject(project, slug, masterPw) {
+async function _comparePublishedProject(project, slug, masterPw, options = {}) {
+    const ctx=_publishContext(project,slug),wasInflight=ctx.inflight;
+    if(ctx.timer){clearTimeout(ctx.timer);ctx.timer=0;}
+    ctx.inflight=true;
+    const compared={id:project.id,epoch:project.publishEditEpoch||0,slug:project.shareInfo?.slug};
+    const unchanged=()=>App.project===project&&project.id===compared.id
+        &&(project.publishEditEpoch||0)===compared.epoch&&project.shareInfo?.slug===compared.slug;
+    const suppliedMeta=options.meta?JSON.parse(JSON.stringify(options.meta)):null;
+    try {
     const raw=await SupabaseClient.unlockProjectMaster(slug,masterPw),session=Array.isArray(raw)?raw[0]:raw;
     if(!session||!session.token)throw new Error('共有版を確認する認証を取得できませんでした。');
     const doc=await SupabaseClient.fetchProjectDoc(session.token);
+    if(!doc)throw new Error('共有版を取得できませんでした。');
     const groups=await Promise.all((doc.sections||[]).map(section=>SupabaseClient.listRois(session.token,section.id)));
     doc.rois=groups.flatMap(rows=>rows||[]);
+    if(!unchanged()){showToast('ローカル版が変わりました。もう一度比較してください。',6000);return;}
     const local=PublishSafety.summary(project),remote=PublishSafety.summary(doc);
-    const labels={sections:'切片',sources:'測定ソース',molecules:'分子レイヤー',images:'HE/IF画像',rois:'ROI（切片ごと）'};
+    const labels={sections:'切片',sources:'原本参照の識別数',molecules:'分子レイヤー',images:'HE/IF画像',rois:'ROI（切片ごと）'};
     const rows=Object.keys(labels).map(key=>'<tr><th>'+labels[key]+'</th><td>'+local[key]+'</td><td>'+remote[key]+'</td></tr>').join('');
     const memoEqual=JSON.stringify(project.memo||{})===JSON.stringify(doc.meta?.project_meta?.memo||{});
-    const p=openModal('<h2>ローカル版と共有版の比較</h2><p>元のローカル版は保持します。件数が同じでも内容の一致は保証しません。</p>'+
-        '<table><thead><tr><th></th><th>ローカル</th><th>共有</th></tr></thead><tbody>'+rows+'</tbody></table>'+
-        '<p>Memo: '+(memoEqual?'同じ記録':'差があります')+'</p><p>共有の公開版: '+(Number.isSafeInteger(doc.publish_revision)?doc.publish_revision:'未確認')+'</p>'+
-        '<form><div class="modal-actions"><button type="button" data-modal-cancel>閉じる</button><button type="submit" data-modal-ok>共有版を別コピーで取得</button></div></form>');
-    openModal._card._collect=()=>true;
-    if(await p){const id=await App._importProjectFromServer(slug);if(id&&App.project===project)await App.openProject(id);}
+    const revision=doc.publish_revision,localRevision=project.shareInfo?.serverRevision;
+    const validRevision=Number.isSafeInteger(revision)&&revision>=0;
+    const safe=value=>String(value==null?'':value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    const ids=new Set((project.sections||[]).map(s=>String(s.id)));
+    const removed=(doc.sections||[]).filter(s=>!ids.has(String(s.meta?.client_id||s.id)));
+    const removedIds=new Set(removed.map(s=>s.id));
+    const removedRois=doc.rois.filter(r=>removedIds.has(r.section_id||r.sectionId)).length;
+    const blocked=project.__importFailures>0?'このローカル版には取り込み失敗の記録があります。完全に取得した版から更新してください。'
+        :compared.slug!==slug?'このローカル版に登録された共有URLと異なるため、ここからは上書きできません。'
+        :!validRevision?'共有の公開番号を確認できないため、上書きできません。':'';
+    const p=openModal('<h2>ローカル版と共有版の比較</h2><p>共有URL: <strong>'+safe(slug)+'</strong></p>'+
+        '<p>ローカルの基準公開版: '+(Number.isSafeInteger(localRevision)&&localRevision>=0?localRevision:'未記録')+' ／ 共有の公開版: '+(validRevision?revision:'未確認')+'</p>'+
+        '<p>現在のROIを含むローカル版で、同じ共有URLの内容を置き換えられます。元のローカル版は保持します。</p>'+
+        '<table class="publish-comparison"><thead><tr><th></th><th>ローカル</th><th>共有</th></tr></thead><tbody>'+rows+'</tbody></table>'+
+        '<p>Memo: '+(memoEqual?'同じ記録':'差があります')+'</p><p style="font-size:11px">原本参照の識別数はファイル内容の比較ではありません。件数が同じでも内容の一致は保証しません。</p>'+
+        '<p>上書きすると、共有側の切片・画像・分子データ・masterのROI・Memoはこのローカル版の内容になります。</p>'+
+        (removed.length?'<p style="color:#b91c1c">共有側だけの切片 '+removed.length+' 件を削除します: '+removed.slice(0,10).map(s=>safe(s.display_name||s.displayName||s.id)).join('、')+(removed.length>10?'…':'')+'。これらに属するROI '+removedRois+' 件や共同編集の画像・位置合わせも削除されます。</p>':'')+
+        (blocked?'<p style="color:#b91c1c">'+blocked+'</p>':'')+
+        '<form><div class="modal-actions" style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap;margin-top:14px"><button type="button" class="btn" data-modal-cancel>閉じる</button><button type="submit" class="btn" data-modal-ok>共有版を別コピーで取得</button>'+
+        '<button type="button" class="btn primary" data-publish-overwrite'+(blocked?' disabled':'')+'>このローカル版で共有を上書き</button></div></form>');
+    const card=openModal._card;
+    card._collect=()=> 'import';
+    card.querySelector('[data-publish-overwrite]').addEventListener('click',()=>{if(!blocked)card._close('overwrite');});
+    const action=await p;
+    if(action==='import'){const id=await App._importProjectFromServer(slug);if(id&&App.project===project)await App.openProject(id);return;}
+    if(action!=='overwrite'||blocked)return;
+    const assertUnchanged=()=>{if(!unchanged())throw Object.assign(new Error('比較後にローカル版が変わりました。もう一度比較してください。'),{code:'PUBLISH_LOCAL_CHANGED'});};
+    try {
+        assertUnchanged();
+        const meta=suppliedMeta||await openPublishMetaModal(project);
+        if(!meta)return;
+        if(meta.slug!==slug)throw new Error('比較した共有URLと公開先が異なります。Publish to share からやり直してください。');
+        assertUnchanged();
+        if(await App._flushSave()===false)return;
+        assertUnchanged();
+        const receipt=await _publishCore(project,meta,masterPw,{silent:false,assertBeforeStart:assertUnchanged,
+            confirmedOverwrite:{slug,serverRevision:revision}});
+        _saveCachedMasterPw(masterPw);
+        if(App.project===project){App.refreshShareInfoButton();await openShareInfoModal(Object.assign({},project.shareInfo,receipt),{titleSuccess:true});}
+    } catch(e) {
+        if(e.code==='40001'||e.code==='PUBLISH_LOCAL_CHANGED'){
+            _publishStatus(project,slug,'conflict');
+            showToast(e.code==='40001'?'比較後に共有版が更新されました。もう一度比較してから上書きしてください。':e.message,8000);
+        }else if(e.cancelled){showToast('公開を中断しました。ローカルの編集は保持されています。');}
+        else{_publishStatus(project,slug,'error',e.userMessage||e.message);alert(e.userMessage||e.message||String(e));}
+    }
+    } finally {
+        ctx.inflight=wasInflight;
+        if(!wasInflight&&App.project===project&&project.__publishPending&&ctx.state==='local-saved')App._scheduleAutoPublish();
+    }
 }
 async function publishProjectToShare() {
     if(typeof window!=='undefined'&&window.DESI_OFFLINE===true){showToast('オフライン版では公開・同期を行いません。');return;}
@@ -18731,7 +18794,7 @@ async function publishProjectToShare() {
         if(e.cancelled){showToast('公開を中断しました。原本とローカルの編集は保持されています。');return;}
         if(e.code==='40001'||e.code==='PUBLISH_BASELINE_UNKNOWN'){
             _publishStatus(project,meta.slug,'conflict');
-            try{await _comparePublishedProject(project,meta.slug,masterPw);}catch(c){alert(c.message||String(c));}
+            try{await _comparePublishedProject(project,meta.slug,masterPw,{meta});}catch(c){alert(c.message||String(c));}
         }else{_publishStatus(project,meta.slug,'error',e.userMessage||e.message);alert(e.userMessage||e.message||String(e));}
     }finally{ctx.inflight=false;if(App.project===project&&project.__publishPending)App._scheduleAutoPublish();}
 }
@@ -23949,7 +24012,8 @@ const App = {
             const project = await this._buildLocalProjectFromDoc(slug, doc, session, lease);
             if (!project) return null;
             const importFailures = project.__importFailures || 0;
-            delete project.__importFailures;
+            // Persist incompleteness so an explicit overwrite cannot mistake a
+            // partial download for a deliberate local deletion after a reload.
             try { await ProjectStorage.finishBlobLease(lease,{project,createOnly:true}); }
             catch(error) { alert('IDB 保存失敗: '+(error.message||error));return null; }
             committed=true;
@@ -24162,7 +24226,7 @@ const App = {
             for (const s of (doc.sections || [])) {
                 if (s && s.id) uuidToClient[s.id] = (s.meta && s.meta.client_id) || s.id;
             }
-            const rows = await fetchAllShareRois(session.token, doc.sections || []);
+            const rows = await fetchAllShareRois(session.token, doc.sections || [], {strict:true});
             project.rois = groupRoiRowsByColor(rows, project.anatomyPalette).map(r => {
                 const polys = {}, sids = {};
                 for (const [uuid, poly] of Object.entries(r.polysBySection || {})) {
@@ -26478,7 +26542,7 @@ const App = {
         }
         el.textContent = text;
         el.title = (state === 'error' && a) ? a
-                 : (state === 'conflict') ? '別 PC が新しいバージョンを publish しました。クリックで対応'
+                 : (state === 'conflict') ? '基準の公開版が未確認、または共有版が更新されています。クリックで比較・上書き'
                  : (state === 'needs-master-pw') ? 'クリックで Master pw 入力'
                  : (state === 'needs-share-pw')
                      ? '取り込んだプロジェクトには共有パスワードが引き継がれません。'

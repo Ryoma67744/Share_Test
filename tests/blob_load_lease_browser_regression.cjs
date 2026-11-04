@@ -6,17 +6,21 @@ const root=path.resolve(__dirname,'..'),html=fs.readFileSync(path.join(root,'vie
 const moduleCode=fs.readFileSync(path.join(root,'project-store-safety.js'),'utf8');
 const start=html.indexOf('const ProjectStorage = (() => {'),wrapper=html.slice(start,html.indexOf('\n})();',start)+6);
 function method(name){const at=html.indexOf('    async '+name+'(');assert.ok(at>=0,name);return html.slice(at,html.indexOf('\n    },',at)+6);}
+function helper(name){let at=html.indexOf('function '+name+'(');assert.ok(at>=0,name);if(html.slice(at-6,at)==='async ')at-=6;return html.slice(at,html.indexOf('\n}',at)+2);}
 const harness=`<!doctype html><meta charset="utf-8"><title>Cloud load lease fixture</title><script src="/safety.js"></script><script>
 const uid=p=>p+'_'+crypto.randomUUID(),nowIso=()=>new Date().toISOString();
 ${wrapper}
 window.storage=ProjectStorage;
 const _shareAlignBySection=new Map(),captureSectionAlignment=()=>({}),loadShareOverlays=()=>[],_overlaysFromSections=()=>[];
-const ensureMemoShape=x=>x||{},roiMediaRegistryFromDoc=()=>({version:1,items:[]}),fetchAllShareRois=async()=>[],groupRoiRowsByColor=()=>[],remapRoiGeometry=x=>x;
+const ensureMemoShape=x=>x||{},roiMediaRegistryFromDoc=()=>({version:1,items:[]}),groupRoiRowsByColor=()=>[],remapRoiGeometry=x=>x;
+let _shareTokenExpired=false;const _isExpiredTokenError=e=>e.code==='28000',_noteShareTokenExpired=()=>{_shareTokenExpired=true;};
+${helper('fetchAllShareRois')}
 window.alerts=[];const roiMediaForTransport=()=>({items:[]}),showToast=()=>{},alert=message=>alerts.push(message);
 const doc={publish_revision:7,meta:{display_name:'Synthetic cloud',project_meta:{}},sections:[{id:'server-s',meta:{client_id:'local-s'},storage_paths:{
 images:{HE:{path:'fixture/he',filename:'HE.tif'}},msiSeries:{MSI_A:{path:'fixture/raw',filename:'raw.txt',kind:'txt',sourceFileId:'raw',archiveProvenance:{version:1,basis:'registered-source'}}},
 msiFiles:{raw:{path:'fixture/raw',filename:'raw.txt',kind:'txt',registeredAt:'2026-11-04T00:00:00Z'}}}}]};
-const SupabaseClient={configured:()=>true,fetchProjectDoc:async()=>structuredClone(doc),publicUrl:(_bucket,p)=>'/'+p};
+const SupabaseClient={configured:()=>true,fetchProjectDoc:async()=>structuredClone(doc),publicUrl:(_bucket,p)=>'/'+p,
+listRois:async()=>{if(window.roiReadFailure)throw new Error('synthetic ROI read failure');return [];}};
 const App={_openImportSession:async slug=>({slug,token:'synthetic-read-token'}),
 ${method('_importProjectFromServer')},
 ${method('_buildLocalProjectFromDoc')},
@@ -41,8 +45,23 @@ async function main(){
   assert.equal(await b.evaluate(async id=>(await storage.getBlob(id)).blob.text(),first),'original /fixture/he','other shared tab prune retains suspended import');
   await a.evaluate(()=>resumeWrite());const imported=await a.evaluate(()=>importJob);
   assert.equal(await b.evaluate(async id=>(await storage.getProject(id)).shareInfo.serverRevision,imported),7);
+  assert.equal(await b.evaluate(async id=>(await storage.getProject(id)).__importFailures,imported),undefined);
   assert.equal(await b.evaluate(async id=>(await storage.getProject(id)).sections[0].msiSeries.MSI_A.archiveProvenance.basis,imported),'registered-source');
   await b.evaluate(()=>storage.pruneShareOrphans());assert.ok(await b.evaluate(id=>storage.getBlob(id),first),'project owns committed bytes after lease removal');
+  // A failed ROI read can produce a separate inspectable copy, but never an
+  // apparently complete publish baseline. The marker must survive the actual
+  // createOnly IDB commit, another tab's read, and reloading the importing tab.
+  const partialId=await a.evaluate(async()=>{window.roiReadFailure=true;try{return await app._importProjectFromServer('fixture');}finally{window.roiReadFailure=false;}});
+  assert.ok(partialId);assert.notEqual(partialId,imported);
+  const partial=await b.evaluate(id=>storage.getProject(id),partialId);
+  assert.equal(partial.__importFailures,1);assert.equal(partial.shareInfo.serverRevision,null);
+  assert.deepEqual(partial.rois,[]);assert.ok(partial.sections[0].msiSeries.MSI_A.blobId);
+  assert.match(await a.evaluate(()=>alerts.at(-1)),/別コピー.*1 件/);
+  await a.reload();await a.waitForFunction(()=>window.ready);
+  assert.equal(await a.evaluate(async id=>(await storage.getProject(id)).__importFailures,partialId),1,'Reload retains incomplete-import protection');
+  assert.equal(await a.evaluate(async id=>(await storage.getProject(id)).shareInfo.serverRevision,partialId),null);
+  assert.equal(await b.evaluate(async id=>(await storage.getProject(id)).shareInfo.serverRevision,imported),7,'Original complete local copy remains unchanged');
+  await b.evaluate(id=>storage.deleteProject(id),partialId);
   const aIds=await a.evaluate(()=>loadShared()),bIds=await b.evaluate(()=>loadShared());
   for(const id of aIds)assert.ok(await b.evaluate(id=>storage.getBlob(id),id),'second shared tab must not delete first shared cache');
   const aLeaseId=await a.evaluate(()=>shared.__blobLease.id);
@@ -100,7 +119,7 @@ async function main(){
   for(const id of bIds)assert.ok(await b.evaluate(id=>storage.getBlob(id),id),'surviving tab retains its cache');
   assert.ok(await b.evaluate(id=>storage.getBlob(id),first),'persisted import survives all cleanup');
   assert.deepEqual(errors,[]);
-  console.log('Blob load lease browser regression: PASS (suspended import vs share, two shared tabs, real IDB write/commit abort, owner checks, BFCache '+(restored?'restored':'reload fallback')+', reload and renderer crash)');
+  console.log('Blob load lease browser regression: PASS (suspended import vs share, incomplete ROI import survives IDB/reload, two shared tabs, real IDB write/commit abort, owner checks, BFCache '+(restored?'restored':'reload fallback')+', reload and renderer crash)');
  }finally{await browser?.close();await new Promise(r=>server.close(r));}
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
