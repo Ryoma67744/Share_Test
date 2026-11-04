@@ -50,7 +50,7 @@ async function main(){
  assert.equal(await b.reclaimInactiveBlobLeases(),0);locks.held.delete('desi-blob-lease:'+crashed.id);
  assert.equal(await b.reclaimInactiveBlobLeases(),1);assert.equal(mem.stores.blobs.has('crashed-cache'),false);
  // A browser without Web Locks cannot prove another tab has ended.
- const withoutLocks=Store.create({transaction:mem.transaction,uid:p=>p+(++n),indexRowFor:p=>({id:p.id})});
+ const withoutLocks=Store.create({transaction:mem.transaction,locks:null,uid:p=>p+(++n),indexRowFor:p=>({id:p.id})});
  const unknown=await withoutLocks.beginBlobLease({kind:'share-view'});await withoutLocks.putBlob(blob('unknown-live'),{lease:unknown});
  assert.equal(await withoutLocks.reclaimInactiveBlobLeases(),0);assert.equal(mem.stores.blobs.has('unknown-live'),true);
  assert.equal(await b.reclaimInactiveBlobLeases(),0,'a lock-capable tab cannot reclaim a lease with unknown liveness');

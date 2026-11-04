@@ -51,7 +51,9 @@
         const now = options.nowIso || (() => new Date().toISOString());
         const writerId = uid('writer');
         const sessionId = 'edit:' + writerId;
-        const locks = options.locks || (typeof navigator !== 'undefined' && navigator.locks);
+        // Explicit null models an environment without Web Locks, including in
+        // test runtimes that now provide their own native navigator.locks.
+        const locks = options.locks === null ? null : options.locks || (typeof navigator !== 'undefined' && navigator.locks);
         const blobLeases = new Map();
         const leaseError = () => Object.assign(new Error('この読み込みの原本保持は終了したか、別のタブが所有しています。'), {code:'BLOB_LEASE_OWNER'});
         function ownedLease(handle, allowClosed = false) {
