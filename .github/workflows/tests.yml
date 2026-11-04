@@ -83,6 +83,8 @@ jobs:
         run: node tests/project_navigation_browser_regression.cjs
       - name: Manager list refresh after returning from another tab
         run: node tests/manager_navigation_browser_regression.cjs
+      - name: Preserve in-flight imports and shared-view originals across tabs
+        run: node tests/blob_load_lease_browser_regression.cjs
       - name: Archive import ownership and crash recovery
         run: node tests/archive_browser_regression.cjs
       - name: Publish snapshots and local receipts in the real viewer
