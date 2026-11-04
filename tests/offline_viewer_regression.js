@@ -72,7 +72,7 @@ async function main() {
   await core.app.autoPublishProject();
   await core.app._refreshMasterCollabRois();
   core.app._startMasterCollabPoll();
-  assert.equal(await core.app._serverIsNewerThanLocal(core.app.project), false);
+  core.app._scheduleAutoPublish(); // Must return before any cloud state lookup.
   await core.client.registerFromResultBatch('offline-local', [{ name: 'sample', project_local_id: 'local' }]);
   assert.equal(rpcCalls[0][0], 'register_from_result_batch');
   assert.equal(rpcCalls[0][1]._rows[0].project_local_id, 'local');

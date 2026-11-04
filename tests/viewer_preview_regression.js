@@ -1392,9 +1392,9 @@ function testStoragePathRule() {
   assert.equal(storagePathForEnt({ blobId: 'blob_1', filename: 'x.xlsx' }, {}), '');
   assert.equal(storagePathForEnt(null, project), '');
 
-  // publish 側が同じ規則で組み立てていること。
-  assert.match(html, /\$\{meta\.slug\}\/blobs\/\$\{ent\.blobId\}\$\{extByBlob\.get\(ent\.blobId\)\}/);
-  assert.match(html, /extByBlob\.set\(ent\.blobId, storageExtOf\(filename\)\)/);
+  // New jobs use receipt paths; old deterministic paths remain read-only recovery.
+  assert.equal(storagePathForEnt({blobId:'blob_1',filename:'x.xlsx'}, {shareInfo:{slug:'proj_x',blobPaths:{blob_1:{path:'proj_x/publish-v2/request/object'}}}}),'proj_x/publish-v2/request/object');
+
 }
 
 // オブジェクトのメソッド (async name(...) { ... }) を丸ごと取り出す。
@@ -1672,7 +1672,7 @@ function testEditKeepsMatchBrightness() {
   // 保存・公開・取り込みは素通しなので、明示的な whitelist が増えていないこと。
   // ★ 項目を選り分けないこと (o そのものを載せる) が要点。共有先が作った
   //   重ね合わせ (_server / _local) だけは、行ごと落とす。
-  assert.match(html, /overlays: \(project\.overlays \|\| \[\]\)\.filter\(o => !isViewerOverlay\(o\)\)/,
+  assert.match(fs.readFileSync(path.join(root,'viewer/publish-safety.js'),'utf8'), /overlays:\(snapshot\.overlays\|\|\[\]\)\.filter\(o=>!hooks\.viewerOverlay\(o\)\)/,
     'publish は overlays を (項目を選ばず) verbatim で載せ、共有先の分だけ落とす');
   assert.match(html, /return s \? s\.meta\.overlays : \[\];/, '取り込みも verbatim');
 }
@@ -2283,7 +2283,7 @@ function testShareAlignmentEditingIsLocked() {
   assert.doesNotMatch(html, /body\.share-mode #tb-align-heif,/,
     '共有先で Align を隠さないこと');
   // master の控えは publish に載せない (共有先の控えであって共有物ではない)。
-  assert.match(html, /delete m\.__alignMaster;/, 'publish から __alignMaster を落としていない');
+  assert.match(fs.readFileSync(path.join(root,'viewer/publish-safety.js'),'utf8'), /delete meta\.__alignMaster;/, 'publish から __alignMaster を落としていない');
 }
 
 // ★ 書き込みロックは入れ子で取れること。位置合わせ (Align モーダル) を開いた

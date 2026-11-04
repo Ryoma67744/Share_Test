@@ -37,12 +37,13 @@ function context() {
 async function main() {
   const ctx = context();
   const result = await ctx.deleteServerProjectWithMedia('master-pw', 'target');
-  assert.deepEqual(copy(result), { deleted: 3, failed: 0, retained: 2 });
+  assert.deepEqual(copy(result), { deleted: 0, failed: 0, retained: 5 });
   const deletes = ctx.calls.filter(call => call[0] === 'delete-file');
-  assert.equal(new Set(deletes.map(call => call[2])).size, 3, 'Duplicate layer/photo refs must delete each original once');
+  assert.equal(deletes.length, 0, 'Immutable originals remain for reference-aware administrator GC');
+  assert.ok(!ctx.calls.some(call=>call[0]==='publish-token'));
   assert.ok(deletes.every(call => call[1] === 'atlases' && call[2].startsWith('target/') && call[3] === 'delete-token'));
   assert.ok(ctx.calls.findIndex(call => call[0] === 'read') < ctx.calls.findIndex(call => call[0] === 'delete-db'));
-  assert.ok(ctx.calls.findIndex(call => call[0] === 'delete-db') < ctx.calls.findIndex(call => call[0] === 'delete-file'));
+
 
   for (const bad of ['target/../other.png', 'target/%2e%2e/other.png', 'target/%2fother.png',
     'target/%5cother.png', 'target/%00x.png', '/target/image.png', 'target//image.png',
@@ -61,15 +62,12 @@ async function main() {
   await legacy.deleteServerProjectWithMedia('pw', 'target');
   assert.ok(legacy.calls.some(call => call[0] === 'delete-db'), 'Existing endpoint documents without an optional slug field remain usable');
 
-  for (const endpoint of ['requestPublishSession', 'unlockProjectMaster', 'fetchProjectDoc']) {
+  for (const endpoint of ['unlockProjectMaster', 'fetchProjectDoc']) {
     const fail = context();
     fail.SupabaseClient[endpoint] = async () => { throw new Error('missing RPC or offline'); };
     await assert.rejects(() => fail.deleteServerProjectWithMedia('pw', 'target'), /missing RPC or offline/);
     assert.ok(!fail.calls.some(call => call[0] === 'delete-db' || call[0] === 'delete-file'), endpoint);
   }
-  const noToken = context(); noToken.SupabaseClient.requestPublishSession = async () => ({});
-  await assert.rejects(() => noToken.deleteServerProjectWithMedia('pw', 'target'), /認証/);
-  assert.ok(!noToken.calls.some(call => call[0] === 'delete-db'));
   const malformed = context(); malformed.doc.meta.project_meta.roiMedia.version = 999;
   await assert.rejects(() => malformed.deleteServerProjectWithMedia('pw', 'target'), /保存形式/);
   assert.ok(!malformed.calls.some(call => call[0] === 'delete-db'));
@@ -80,7 +78,7 @@ async function main() {
   assert.ok(!denied.calls.some(call => call[0] === 'delete-file'));
   const storageFailure = context();
   storageFailure.SupabaseClient.deleteStorageObject = async () => { throw new Error('network failure'); };
-  assert.equal((await storageFailure.deleteServerProjectWithMedia('pw', 'target')).failed, 3, 'Cleanup failures must be visible in the completion message');
+  assert.equal((await storageFailure.deleteServerProjectWithMedia('pw', 'target')).failed, 0, 'Client never attempts forbidden storage deletion');
 
   // Execute the real minimal Supabase wrapper to verify existing RPC argument names.
   const rpcCalls = [], start = source.indexOf('const SupabaseClient = (() => {');

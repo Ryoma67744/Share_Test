@@ -191,10 +191,7 @@ async function roiTests() {
   // This fixture has no attached photographs; obtain the actual versioned
   // empty payload through the production transport helper, not a mock shape.
   c.roiMediaPayload = c.roiMediaForTransport(project);
-  const start = html.indexOf('    const roisPayload =', html.indexOf('async function _publishCoreInner('));
-  const end = html.indexOf('    let result;', start);
-  assert.ok(start > 0 && end > start);
-  const payload = vm.runInContext('(function(){\n' + html.slice(start, end) + '\nreturn args;})()', c);
+  const payload={_rois:require('../viewer/publish-safety.js').ownedRois(project,c.encodeRoiPolygon),_meta:{anatomyPalette:project.anatomyPalette}};
   const wireRows = plain(payload._rois).map((row, i) => ({ id: 'server' + i,
     section_id: row.sectionId, color_key: row.colorKey, name: row.name, poly_msi: row.polyMsi }));
   const hydrated = c.groupRoiRowsByColor(wireRows, plain(payload._meta.anatomyPalette));

@@ -123,3 +123,6 @@ Windowsでは生成後に `.\dist\offline\START_OFFLINE.bat --verify-only` で�
 
 Tailwind / SheetJS / UTIF / JSZip / supabase-js / marked / DOMPurifyなどは `vendor/` に固定して同梱します。出所・ハッシュ・ライセンスは `vendor/SOURCES.json`、`assets.lock.json`、`vendor/LICENSE-*` を参照してください。配布版のWindows実行環境のライセンスも同梱します。
 不具合や要望は GitHub Issues、または直接管理者まで。
+
+
+共有公開の更新では、公開版の競合検知・原本の上書き防止にDB移行が必要です。旧ローカル版は自動上書きせず、共有版を別コピーで比較します。[公開v2の適用手順](docs/PUBLISH_SAFETY_V2.md)を参照してください（本番SQL適用は別途承認が必要です）。

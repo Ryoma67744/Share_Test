@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const { html } = require('./viewer-runtime.cjs');
+const PublishSafety = require('../viewer/publish-safety.js');
 const RoiMediaModel = require('../viewer/roi-media-model.js');
 const copy = x => JSON.parse(JSON.stringify(x));
 function fn(name, indent = '') {
@@ -40,10 +41,10 @@ class MemoryZip {
 function context(extra = {}) {
   let sequence = 0;
   const records = new Map([['original-blob', { blob: new Blob([Uint8Array.from([137, 80, 78, 71, 255, 1, 0])]), mime: 'image/png' }]]);
-  const ctx = vm.createContext({ console: { log() {}, warn() {}, error() {} }, Blob, RoiMediaModel, Map, Set, Promise, URL, AbortController,
+  const ctx = vm.createContext({ console: { log() {}, warn() {}, error() {} }, Blob, RoiMediaModel, PublishSafety, Map, Set, Promise, URL, AbortController,
     setTimeout: cb => { cb(); return 1; }, clearTimeout() {},
     uid: prefix => prefix + '-' + (++sequence), nowIso: () => '2026-09-24T12:00:00Z',
-    freezeMsiSourceReferences() {}, loadScript: async () => {}, LAZY_LIBS: { jszip: 'unused' }, JSZip: MemoryZip,
+    freezeMsiSourceReferences() {}, alignmentImageIdentity: () => null, loadScript: async () => {}, LAZY_LIBS: { jszip: 'unused' }, JSZip: MemoryZip,
     DEFAULT_ANATOMY_PALETTE: {}, ensureMemoShape: x => x || {}, safeName: x => x,
     buildSampleCsvGroups: async () => [], _yieldUi: async () => {},
     showToast() {}, alert: x => { ctx.alerts.push(String(x)); }, alerts: [], confirm: () => true,
@@ -56,20 +57,23 @@ function context(extra = {}) {
     remapRoiGeometry: (g, ids) => Object.fromEntries(Object.entries(g || {}).map(([k, v]) => [ids[k], v])),
     ProjectStorage: {
       getBlob: async id => records.get(id),
+      pinBlobs: async () => {}, releaseBlobPins: async () => {},
+      patchProject: async (id, fn) => {const p=copy(ctx.App.project),prev=p.storageRevision||0;fn(p);p.storageRevision=prev+1;return {applied:true,project:p,previousStorageRevision:prev,storageRevision:prev+1};},
+      recordPublishReceipt: async (id, receipt) => {const p=copy(ctx.App.project),prev=p.storageRevision||0;p.shareInfo={...p.shareInfo,...receipt};delete p.shareInfo.pendingPublish;p.storageRevision=prev+1;return {applied:true,project:p,previousStorageRevision:prev,storageRevision:prev+1};},
       putBlob: async rec => { records.set(rec.id, rec); return rec.id; },
       putProject: async p => { ctx.saved = copy(p); },
     },
-    App: { project: project(), panels: new Map(), openProject: async () => {}, queueSave() {} },
-    SupabaseClient: { configured: () => true, requestPublishSession: async () => ({ token: 'test' }),
+    App: { project: project(), _setSyncStatus() {}, panels: new Map(), openProject: async () => {}, queueSave() {} },
+    SupabaseClient: { configured: () => true, requestPublishSessionV2: async (_pw,job) => ({ protocol:2,token:'test',object_prefix:job.slug+'/publish-v2/'+job.jobId+'/' }),
       headObject: async () => false, uploadBlob: async (_bucket, path, blob) => { ctx.uploads.push({ path, blob }); },
-      upsertProjectDoc: async args => { ctx.published = copy(args); return { ok: true }; },
+      publishProjectDocV2: async args => { ctx.published = copy(args); return { ok:true,protocol:2,slug:args._slug,request_id:args._request_id,server_revision:args._expected_revision+1,committed_at:'2026-11-04T00:00:00Z' }; },
       publicUrl: (_bucket, path) => 'https://test.invalid/' + path },
     uploads: [], records, ...extra,
   });
   require('./archive_test_support.cjs').install(ctx);
   const names = ['sanitizeStorageKeySegment', 'storageExtOf', 'roiMediaForTransport', 'roiMediaReadOriginal',
-    'roiMediaPublicItem', 'roiMediaRegistryFromDoc', 'exportProjectAsZip', 'importZipFile', '_publishCoreInner'];
-  vm.runInContext('let _exportInProgress = false;\n' + names.map(n => fn(n)).join('\n'), ctx);
+    'roiMediaPublicItem', 'roiMediaRegistryFromDoc', 'exportProjectAsZip', 'importZipFile', '_publishContext', '_publishStatus', '_adoptPublishPatch', '_publishCoreInner'];
+  vm.runInContext('let _exportInProgress = false; const _publishContexts = new Map();\n' + names.map(n => fn(n)).join('\n'), ctx);
   return ctx;
 }
 async function main() {
@@ -106,18 +110,19 @@ async function main() {
   await missing.exportProjectAsZip();
   assert.equal(missing.exported, undefined);
   assert.match(missing.alerts[0], /必要な原本がありません/);
-  await assert.rejects(() => missing._publishCoreInner(missing.App.project, { slug: 'test' }, 'pw', { silent: true }), /ROI写真の原本/);
+  await assert.rejects(() => missing._publishCoreInner(missing.App.project, { slug: 'test' }, 'pw', { silent: true }), /原本を確認できない/);
   assert.equal(missing.published, undefined);
 
   const publishing = context();
   await publishing._publishCoreInner(publishing.App.project, { slug: 'test' }, 'pw', { silent: true });
   assert.equal(publishing.uploads.length, 1);
-  assert.match(publishing.uploads[0].path, /^test\/roi-media\/photo-1\/r1\/original-blob\.png$/);
+  assert.match(publishing.uploads[0].path, /^test\/publish-v2\/[a-f0-9-]+\/[a-f0-9-]+$/);
   const publicItem = publishing.published._meta.roiMedia.items[0];
   assert.equal(publicItem.storagePath, publishing.uploads[0].path);
   assert.equal(publicItem.blobId, undefined);
   assert.deepEqual(publicItem.roiSnapshot, item.roiSnapshot);
-  assert.equal(publishing.App.project.meta.roiMedia.items[0].storagePath, publicItem.storagePath);
+  assert.equal(publishing.App.project.meta.roiMedia.items[0].storagePath, undefined, 'Receipt must not mutate scientific registry');
+  assert.equal(publishing.App.project.shareInfo.blobPaths['original-blob'].path, publicItem.storagePath);
   publishing.records.delete('original-blob');
   publishing.SupabaseClient.headObject = async (_bucket, path) => path === publicItem.storagePath;
   await publishing._publishCoreInner(publishing.App.project, { slug: 'test' }, 'pw', { silent: true });
@@ -140,10 +145,16 @@ async function main() {
   assert.equal(failed.published, undefined, 'Upload failure cannot publish incomplete photo registry');
   const removedWhileUploading = context();
   removedWhileUploading.SupabaseClient.uploadBlob = async () => { removedWhileUploading.App.project.rois = []; };
-  await assert.rejects(() => removedWhileUploading._publishCoreInner(removedWhileUploading.App.project,
-    { slug: 'test' }, 'pw', { silent: true }), /対応先が見つかりません/);
-  assert.equal(removedWhileUploading.published, undefined, 'Deleted ROI cannot acquire an orphan photograph reference');
+  await removedWhileUploading._publishCoreInner(removedWhileUploading.App.project, { slug:'test' }, 'pw', {silent:true});
+  assert.equal(removedWhileUploading.published._rois.length,1,'Snapshot keeps its own original ROI association');
+  assert.equal(removedWhileUploading.App.project.rois.length,0,'Completion never revives the live deleted ROI');
+  const changedDestination=context();
+  changedDestination.App.project.shareInfo={slug:'old',serverRevision:2};
+  changedDestination.SupabaseClient.requestPublishSessionV2=async(_pw,job)=>{changedDestination.App.project.shareInfo.slug='changed-by-another-save';return {protocol:2,token:'t',object_prefix:job.slug+'/publish-v2/'+job.jobId+'/'};};
+  await assert.rejects(()=>changedDestination._publishCoreInner(changedDestination.App.project,{slug:'new-project'},'pw',{silent:true}),/公開先が変更/);
+  assert.equal(changedDestination.published,undefined);
   const differentSlug = context();
+  differentSlug.App.project.shareInfo={slug:'previous-project',serverRevision:4};
   differentSlug.App.project.meta.roiMedia.items[0].storagePath = 'previous-project/roi-media/old.png';
   await differentSlug._publishCoreInner(differentSlug.App.project, { slug: 'new-project' }, 'pw', { silent: true });
   assert.match(differentSlug.published._meta.roiMedia.items[0].storagePath, /^new-project\//,

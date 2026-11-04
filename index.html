@@ -325,9 +325,6 @@ const SupabaseClient = (() => {
         // writes (insert / update / delete) via the policy at
         // share_locks.sql §4. Used here to wipe orphan storage objects
         // after delete_project_doc removes the projects row.
-        requestPublishSession(masterPw, slug) {
-            return rpc('request_publish_session', { _master_pw: masterPw, _slug: slug });
-        },
         // Direct Storage REST DELETE so we can attach the x-publish-token
         // header (supabase-js's storage.remove() doesn't expose per-call
         // headers). Wrapping fetch lets us reuse the same publish_session
@@ -398,8 +395,6 @@ async function deleteServerProjectWithMedia(masterPw, slug) {
     if (typeof slug !== 'string' || !slug || /[/\\\u0000-\u001f\u007f]/.test(slug)) {
         throw new Error('対象プロジェクトが不正です');
     }
-    const publish = await SupabaseClient.requestPublishSession(masterPw, slug);
-    if (!publish || !publish.token) throw new Error('画像削除用の認証を取得できないため削除を中止しました');
     let registry;
     try {
         const raw = await SupabaseClient.unlockProjectMaster(slug, masterPw);
@@ -420,11 +415,8 @@ async function deleteServerProjectWithMedia(masterPw, slug) {
             failed++;
         }
     }
-    for (const path of registry.paths) {
-        try { await SupabaseClient.deleteStorageObject('atlases', path, publish.token); deleted++; }
-        catch (e) { console.warn('storage delete failed for', path, e); failed++; }
-    }
-    return { deleted, failed, retained: registry.retained.size };
+    // Only administrator reference-aware GC may remove immutable originals.
+    return { deleted:0, failed, retained:registry.paths.size+registry.retained.size };
 }
 
 // ===========================================================================
@@ -1938,7 +1930,7 @@ async function renderList() {
                 }
                 let msg = '削除しました (DB: ok, storage objects: ' + deleted + ' 件)';
                 if (failed) msg += ' / 失敗: ' + failed + ' 件 (orphan blob として残ります)';
-                if (retained) msg += ' / 他プロジェクトの画像: ' + retained + ' 件は保持しました';
+                if (retained) msg += ' / 原本 ' + retained + ' 件は保持しました (管理者の保管整理対象)';
                 showToast(msg, 3600);
                 await renderList();
             } catch (e) {

@@ -243,7 +243,8 @@ assert.deepEqual(restored.msiSeries,sec.msiSeries,'metadata application leaves o
 const stableImageId=ctx.alignmentImageIdentity(sec.images.HE_STAIN);
 assert.equal(ctx.alignmentImageIdentity({blobId:'new-blob',storagePath:'new-path',alignmentImageReference:stableImageId}),stableImageId);
 assert.match(html,/alignmentImageReference:alignmentImageIdentity\(ent\)/,'ZIP serialization retains image identity');
-assert.match(html,/alignmentImageReference:alignmentImageIdentity\(t\.ent\)/,'publish serialization retains image identity');
+assert.match(fs.readFileSync(path.join(__dirname,'../viewer/publish-safety.js'),'utf8'),/alignmentImageReference:hooks.imageIdentity\(entry\)/,'publish serialization retains image identity');
+assert.match(html,/imageIdentity:alignmentImageIdentity/,'adapter supplies the scientific image identity');
 assert.equal((html.match(/alignmentImageReference:(?:ref|img|ent)\.alignmentImageReference/g)||[]).length,4,
   'all ZIP/server image import constructors retain identity');
 (async()=>{

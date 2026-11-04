@@ -1,5 +1,7 @@
 # Supabase setup (Phase 1)
 
+> **公開v2移行:** 新しい公開処理には [`publish_safety_v2.sql`](./publish_safety_v2.sql) をベースSQLの最後に適用する必要があります。本番適用は別途承認が必要です。[適用順序・旧タブ・切り戻し](../docs/PUBLISH_SAFETY_V2.md) を先に確認してください。以下の旧バージョン説明にある `share_locks.sql` 単独再実行・Storage上書き/削除の説明は、v2移行後の運用には適用しません。
+
 > **既存 .exp の編集機能**: ファイル編集とローカル保存にはDB更新は不要です。MRM登録・原本付きメソッドの保存には、`mrm_library.sql` → `mrm_reconcile.sql` → `mrm_exp_import.sql` の順で適用してください。詳細は [EXP_EDITOR.md](../docs/EXP_EDITOR.md) を参照してください。
 
 このディレクトリは **共有 ROI / 認証 / 保護コンテンツ配信** を Supabase 上に立てるためのスクリプト一式です。Phase 1 では `cor_slide_1_10` を Supabase に乗せ、ログインモーダルと ROI 共有を動かすところまでをゴールにします。
