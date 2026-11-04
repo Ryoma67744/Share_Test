@@ -36,6 +36,10 @@ async function main(){
  const reuse=setup();reuse.project.shareInfo={slug:reuse.meta.slug,serverRevision:3,blobPaths:{raw:{path:'new_slug/old-original'}}};reuse.records.delete('raw');await Safety.run(reuse.project,reuse.meta,reuse.hooks);assert.equal(reuse.logs.uploads.length,2);assert.equal(reuse.logs.commits[0]._expected_revision,3);checks+=2;
  const failed=setup();let seen=0;failed.hooks.commit=async args=>{failed.logs.commits.push(clone(args));if(++seen===1)throw new Error('response lost');return {ok:true,protocol:2,slug:args._slug,request_id:args._request_id,server_revision:1};};await Safety.run(failed.project,failed.meta,failed.hooks);assert.deepEqual(failed.logs.commits[0],failed.logs.commits[1]);checks++;
  const recover=setup();const previous=a.logs.intents.at(-1);recover.project.shareInfo={slug:recover.meta.slug,pendingPublish:previous};recover.hooks.state=async()=>({exists:true,receipt:{ok:true,protocol:2,slug:previous.slug,request_id:previous.jobId,server_revision:1}});await Safety.run(recover.project,recover.meta,recover.hooks);assert.equal(recover.logs.uploads.length,0);assert.equal(recover.logs.receipts.length,1);assert.deepEqual(recover.logs.releases,[previous.jobId]);checks+=3;
+ const followed=setup();followed.project.publishEditEpoch=3;followed.project.shareInfo={slug:'previous-slug',serverRevision:4,pendingPublish:previous};
+ followed.hooks.state=recover.hooks.state;followed.hooks.receipt=async r=>{followed.project.shareInfo={slug:r.slug,serverRevision:r.serverRevision};};
+ followed.hooks.intent=async intent=>{assert.equal(intent.sourceSlug,followed.project.shareInfo.slug);assert.equal(intent.previousSlug,intent.sourceSlug);followed.logs.intents.push(clone(intent));};
+ await Safety.run(followed.project,followed.meta,followed.hooks);assert.equal(followed.logs.commits[0]._expected_revision,1);assert.equal(followed.logs.commits[0]._create_only,false);checks+=4;
  const conflict=setup();conflict.hooks.commit=async()=>{conflict.logs.commits.push(1);throw Object.assign(new Error('conflict'),{code:'40001'});};await assert.rejects(()=>Safety.run(conflict.project,conflict.meta,conflict.hooks),{code:'40001'});assert.equal(conflict.logs.commits.length,1);assert.equal(conflict.logs.receipts.length,0);checks+=3;
  // Execute production receipt adoption: never advance a stale live storage token.
  const html=fs.readFileSync(require.resolve('../viewer/index.html'),'utf8');const start=html.indexOf('function _adoptPublishPatch('),end=html.indexOf('\n}',start)+2;
@@ -59,6 +63,12 @@ async function main(){
  let autos=0;ui.ui.autoPublishProject=async()=>{autos++;};ui.ui.project=pa;ui.ui._scheduleAutoPublish();const ta=ui._publishContext(pa).timer;
  ui.ui.project=pb;ui.ui._scheduleAutoPublish();const tb=ui._publishContext(pb).timer;assert.notEqual(ta,tb);
  ui.state='B-local';ui._publishStatus(pa,'a','synced');assert.equal(ui.state,'B-local');timers.get(ta)();assert.equal(autos,0);assert.ok(timers.has(tb));timers.get(tb)();assert.equal(autos,1);checks+=5;
+ // Comparison counts polygons per section on both grouped local and server rows.
+ assert.equal(Safety.summary({rois:[{polysBySection:{s1:[],s2:[]}}]}).rois,2);
+ assert.equal(Safety.summary({rois:[{section_id:'s1'},{section_id:'s2'}]}).rois,2);
+ const calls=[],cmp=vm.createContext({PublishSafety:Safety,SupabaseClient:{unlockProjectMaster:async()=>({token:'read'}),fetchProjectDoc:async()=>({sections:[{id:'s1'},{id:'s2'}]}),listRois:async(token,id)=>{calls.push(id);return [{section_id:id}];}},openModal:()=>Promise.resolve(false)});
+ cmp.openModal._card={};const compareAt=html.indexOf('async function _comparePublishedProject(');vm.runInContext(html.slice(compareAt,html.indexOf('\n}',compareAt)+2),cmp);
+ await cmp._comparePublishedProject({sections:[],rois:[]},'s','synthetic');assert.deepEqual(calls,['s1','s2']);checks+=3;
  assert.equal(before.memo.text,'before');console.log(`Publish snapshot regression: PASS (${checks} checks)`);
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

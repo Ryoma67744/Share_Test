@@ -35,3 +35,7 @@ If a check fails, keep publishing disabled and investigate. Revert the frontend 
 ## Verification scope / 検証範囲
 
 `tests/publish_safety_db_regression.mjs` exercises migration/replay, revision conflicts, malformed documents, original existence, old writer rejection, and Storage policies in isolated PGlite. `tests/publish_snapshot_regression.cjs` executes the production snapshot generator with delayed/editing/missing-source/retry cases. Existing ROI transport/deletion regressions cover photograph associations and retention. The separate PostgreSQL CI job verifies actual concurrent transaction locking; PGlite alone is not evidence of multi-connection behavior. No automated test applies SQL to production.
+
+A tab crash before an uncommitted job has recorded its retry intent can leave conservative local Blob pins. They are not expired automatically: another live tab may still need them. This is a storage-retention limitation, not evidence that the originals can be safely deleted. Confirmed committed jobs release their pins when a lost response is reconciled.
+
+未確定ジョブが再試行記録を保存する前にタブが終了すると、ローカル原本の保持pinが残る場合があります。別タブの利用を誤って解除しないため自動失効はしません。容量上の制約として保持し、原本を削除して解消しないでください。

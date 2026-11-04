@@ -52,7 +52,7 @@
      if(previousReceipt){
        assertReceipt(previousReceipt,oldPending);
        const receipt=localReceipt(previousReceipt,oldPending,oldPending.settings||settings,oldPending,hooks.url(job.slug));
-       await hooks.receipt(receipt);await hooks.release(oldPending.jobId);snapshot.shareInfo={...(snapshot.shareInfo||{}),slug:receipt.slug,serverRevision:receipt.serverRevision,blobPaths:receipt.blobPaths};
+       await hooks.receipt(receipt);await hooks.release(oldPending.jobId);job.sourceSlug=receipt.slug;job.previousSlug=receipt.slug;snapshot.shareInfo={...(snapshot.shareInfo||{}),slug:receipt.slug,serverRevision:receipt.serverRevision,blobPaths:receipt.blobPaths};
        if(oldPending.publishedEditEpoch===job.publishedEditEpoch&&JSON.stringify(oldPending.settings)===JSON.stringify(settings))return receipt;
      }else resumedCreate=!!oldPending.create&&state&&state.exists===false;
    }
@@ -146,7 +146,7 @@
    const sections=project.sections||[],sources=new Set();let molecules=0,images=0;
    for(const s of sections){const paths=s.storage_paths||{};images+=Object.keys(s.images||paths.images||{}).length;
      for(const e of Object.values(s.msiSeries||paths.msiSeries||{})){molecules++;sources.add(e.sourceReference||e.sourceFileId||e.blobId||e.path||'unknown');}}
-   return {sections:sections.length,sources:sources.size,molecules,images,rois:(project.rois||[]).length};
+   return {sections:sections.length,sources:sources.size,molecules,images,rois:(project.rois||[]).reduce((n,r)=>n+(r.polysBySection?Object.keys(r.polysBySection).length:(r.section_id||r.sectionId?1:0)),0)};
  }
  return {run,baseline,summary,parallel,ownedRois};
 });

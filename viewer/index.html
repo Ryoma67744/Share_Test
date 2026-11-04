@@ -18665,9 +18665,10 @@ async function _comparePublishedProject(project, slug, masterPw) {
     const raw=await SupabaseClient.unlockProjectMaster(slug,masterPw),session=Array.isArray(raw)?raw[0]:raw;
     if(!session||!session.token)throw new Error('共有版を確認する認証を取得できませんでした。');
     const doc=await SupabaseClient.fetchProjectDoc(session.token);
-    const rois=await SupabaseClient.listRois(session.token,null);doc.rois=rois||[];
+    const groups=await Promise.all((doc.sections||[]).map(section=>SupabaseClient.listRois(session.token,section.id)));
+    doc.rois=groups.flatMap(rows=>rows||[]);
     const local=PublishSafety.summary(project),remote=PublishSafety.summary(doc);
-    const labels={sections:'切片',sources:'測定ソース',molecules:'分子レイヤー',images:'HE/IF画像',rois:'ROI記録'};
+    const labels={sections:'切片',sources:'測定ソース',molecules:'分子レイヤー',images:'HE/IF画像',rois:'ROI（切片ごと）'};
     const rows=Object.keys(labels).map(key=>'<tr><th>'+labels[key]+'</th><td>'+local[key]+'</td><td>'+remote[key]+'</td></tr>').join('');
     const memoEqual=JSON.stringify(project.memo||{})===JSON.stringify(doc.meta?.project_meta?.memo||{});
     const p=openModal('<h2>ローカル版と共有版の比較</h2><p>元のローカル版は保持します。件数が同じでも内容の一致は保証しません。</p>'+
