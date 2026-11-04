@@ -7,14 +7,97 @@ const original=new Blob(['immutable source'],{type:'text/plain'});
 function setup(){
  const project={id:'a',displayName:'Snapshot',storageRevision:4,publishEditEpoch:2,__publishPending:true,memo:{text:'before'},
   sections:[{id:'s',displayName:'S',images:{HE:{blobId:'image',filename:'h.png'}},msiSeries:{MSI_A:{blobId:'raw',filename:'original.txt',archiveProvenance:{version:1,basis:'registered-source'},archiveGeometryUnconfirmed:true}},msiFiles:{raw:{blobId:'raw',filename:'registered-other-name.txt'},unused:{blobId:'unused'}}}],rois:[]};
- let seq=0;const logs={uploads:[],intents:[],receipts:[],pins:[],releases:[],commits:[]},records=new Map(['image','raw','unused'].map(k=>[k,{blob:original,mime:'text/plain'}]));
+ let seq=0;const logs={uploads:[],intents:[],receipts:[],pins:[],releases:[],commits:[],sessions:[],states:[]},records=new Map(['image','raw','unused'].map(k=>[k,{blob:original,mime:'text/plain'}]));
  const hooks={uuid:()=>`00000000-0000-4000-8000-${String(++seq).padStart(12,'0')}`,freezeSources(){},media:()=>({items:[]}),publicPhoto:x=>clone(x),imageIdentity:()=>null,viewerOverlay:()=>false,encodeRoi:()=>[],url:slug=>'https://example.invalid/#share='+slug,
-  state:async()=>({protocol:2,exists:false,receipt:null}),session:async job=>({protocol:2,token:'synthetic-ticket',object_prefix:job.slug+'/publish-v2/'+job.jobId+'/'}),
+  state:async(...args)=>{logs.states.push(args);return {protocol:2,exists:false,receipt:null};},session:async job=>{logs.sessions.push(clone(job));return {protocol:2,token:'synthetic-ticket',object_prefix:job.slug+'/publish-v2/'+job.jobId+'/'};},
   blob:async id=>records.get(id),exists:async()=>true,remoteBlob:async()=>null,
   pin:async(...x)=>logs.pins.push(x),release:async id=>logs.releases.push(id),intent:async x=>logs.intents.push(clone(x)),
   upload:async(path,blob)=>logs.uploads.push({path,blob}),start(){},progress(){},assertActive(){},close(){},
   commit:async args=>{logs.commits.push(clone(args));return {ok:true,protocol:2,slug:args._slug,request_id:args._request_id,server_revision:args._expected_revision+1,committed_at:'2026-11-04T00:00:00Z'};},receipt:async r=>logs.receipts.push(clone(r))};
  return {project,hooks,logs,records,meta:{slug:'new_slug',isPublic:true}};
+}
+async function overwriteChecks(previous){
+ let checks=0;
+ const fixture=()=>{const f=setup();f.project.shareInfo={slug:f.meta.slug};return f;};
+ const approval=(f,serverRevision=5)=>({confirmedOverwrite:{slug:f.meta.slug,serverRevision}});
+ const quiet=f=>{for(const key of ['uploads','intents','receipts','pins','releases','commits','sessions','states'])assert.equal(f.logs[key].length,0,key+' must have no side effect');};
+ const approved=fixture();approved.project.rois=[{name:'local ROI',polysBySection:{s:[[1,2],[3,4],[5,6]]}},
+  {name:'collaborator ROI',_collab:true,polysBySection:{s:[[2,3],[4,5],[6,7]]}}];
+ const before=clone(approved.project),originalReceipt=approved.hooks.receipt;
+ approved.hooks.receipt=async receipt=>{assert.equal(approved.project.shareInfo.serverRevision,undefined,'Only a receipt may advance the local baseline');return originalReceipt(receipt);};
+ const receipt=await Safety.run(approved.project,approved.meta,approved.hooks,approval(approved));
+ assert.equal(receipt.serverRevision,6);assert.equal(receipt.baseServerRevision,5);
+ assert.equal(approved.logs.sessions[0].create,false);assert.equal(approved.logs.commits[0]._create_only,false);
+ assert.equal(approved.logs.commits[0]._expected_revision,5);assert.equal(approved.logs.commits[0]._rois.length,1);
+ assert.equal(approved.logs.commits[0]._rois[0].name,'local ROI');assert.deepEqual(approved.project,before);
+ assert.ok(approved.logs.uploads.every(item=>item.blob===original),'Original immutable Blobs are retained');
+ await assert.rejects(()=>Safety.run(approved.project,approved.meta,approved.hooks),{code:'PUBLISH_BASELINE_UNKNOWN'});
+ assert.equal(approved.logs.commits.length,1,'An approval is not remembered by a subsequent ordinary run');checks+=11;
+ const ordinary=fixture();ordinary.project.shareInfo.serverRevision=2;
+ await Safety.run(ordinary.project,ordinary.meta,ordinary.hooks,{confirmedOverwrite:undefined});
+ assert.equal(ordinary.logs.commits[0]._expected_revision,2,'An optional undefined approval keeps ordinary baseline validation');checks++;
+
+ for(const bad of [null,[],{},false,{slug:'different',serverRevision:5},...['5',null,false,-1,NaN,Infinity].map(serverRevision=>({slug:'new_slug',serverRevision}))]){
+  const f=fixture(),before=clone(f.project);let frozen=0;f.hooks.freezeSources=()=>{frozen++;};
+  await assert.rejects(()=>Safety.run(f.project,f.meta,f.hooks,{confirmedOverwrite:bad}),{code:'PUBLISH_OVERWRITE_INVALID'});
+  quiet(f);assert.equal(frozen,0);assert.deepEqual(f.project,before);checks+=4;
+ }
+ for(const slug of [null,'different']){
+  const f=fixture();f.project.shareInfo=slug?{slug}:{};
+  await assert.rejects(()=>Safety.run(f.project,f.meta,f.hooks,approval(f)),{code:'PUBLISH_OVERWRITE_INVALID'});quiet(f);checks+=2;
+ }
+ const incomplete=fixture();incomplete.project.__importFailures=2;const incompleteBefore=clone(incomplete.project);
+ await assert.rejects(()=>Safety.run(incomplete.project,incomplete.meta,incomplete.hooks,approval(incomplete)),{code:'PUBLISH_SOURCE_MISSING'});
+ quiet(incomplete);assert.deepEqual(incomplete.project,incompleteBefore);checks+=3;
+ const newer=fixture();newer.project.shareInfo.serverRevision=6;
+ await assert.rejects(()=>Safety.run(newer.project,newer.meta,newer.hooks,approval(newer,5)),{code:'40001'});quiet(newer);checks+=2;
+ const missing=fixture();missing.records.delete('unused');
+ await assert.rejects(()=>Safety.run(missing.project,missing.meta,missing.hooks,approval(missing)),{code:'PUBLISH_SOURCE_MISSING'});
+ assert.equal(missing.logs.uploads.length,0);assert.equal(missing.logs.commits.length,0);assert.equal(missing.project.shareInfo.serverRevision,undefined);checks+=4;
+ const sessionConflict=fixture();sessionConflict.hooks.session=async()=>{throw Object.assign(new Error('new remote version'),{code:'40001'});};
+ await assert.rejects(()=>Safety.run(sessionConflict.project,sessionConflict.meta,sessionConflict.hooks,approval(sessionConflict)),{code:'40001'});
+ quiet(sessionConflict);checks+=2;
+ const commitConflict=fixture();commitConflict.project.shareInfo.serverRevision=1;commitConflict.hooks.commit=async args=>{
+  commitConflict.logs.commits.push(clone(args));throw Object.assign(new Error('another publisher won'),{code:'40001'});};
+ await assert.rejects(()=>Safety.run(commitConflict.project,commitConflict.meta,commitConflict.hooks,approval(commitConflict)),{code:'40001'});
+ assert.equal(commitConflict.logs.commits.length,1);assert.equal(commitConflict.logs.receipts.length,0);
+ assert.equal(commitConflict.project.shareInfo.serverRevision,1,'A failed override cannot promote the old baseline');checks+=4;
+
+ const pending=(state)=>{const f=fixture();let id=700;f.hooks.uuid=()=>`00000000-0000-4000-8000-${String(++id).padStart(12,'0')}`;
+  f.project.shareInfo.pendingPublish=clone(previous);f.hooks.state=async()=>state;return f;};
+ const priorReceipt={ok:true,protocol:2,slug:previous.slug,request_id:previous.jobId,server_revision:1};
+ const uncommitted=pending({protocol:2,exists:true,server_revision:5,receipt:null});
+ await Safety.run(uncommitted.project,uncommitted.meta,uncommitted.hooks,approval(uncommitted));
+ assert.equal(uncommitted.logs.commits.length,1);assert.equal(uncommitted.logs.commits[0]._expected_revision,5);
+ assert.notEqual(uncommitted.logs.commits[0]._request_id,previous.jobId,'Superseding a stale intent uses a new immutable request');
+ assert.equal(uncommitted.logs.intents[0].replacesJobId,previous.jobId);
+ assert.ok(!uncommitted.logs.releases.includes(previous.jobId),'An uncommitted old job is not assumed dead and unpinned');checks+=5;
+ const lost=pending({protocol:2,exists:true,server_revision:5,receipt:priorReceipt});
+ await Safety.run(lost.project,lost.meta,lost.hooks,approval(lost));
+ assert.deepEqual(lost.logs.receipts.map(r=>r.serverRevision),[1,6]);
+ assert.equal(lost.logs.commits.length,1);assert.equal(lost.logs.commits[0]._expected_revision,5);
+ assert.ok(lost.logs.releases.includes(previous.jobId),'A verified completed old job may release its pin');checks+=4;
+ const done=pending({protocol:2,exists:true,server_revision:1,receipt:priorReceipt});
+ const doneReceipt=await Safety.run(done.project,done.meta,done.hooks,approval(done,1));
+ assert.equal(doneReceipt.serverRevision,1);assert.equal(done.logs.commits.length,0);assert.equal(done.logs.sessions.length,0);
+ assert.equal(done.logs.receipts.length,1,'The same already-published snapshot is reconciled without a second write');checks+=4;
+ const edited=pending({protocol:2,exists:true,server_revision:1,receipt:priorReceipt});edited.project.publishEditEpoch++;edited.project.memo.text='newer local edit';
+ await Safety.run(edited.project,edited.meta,edited.hooks,approval(edited,1));
+ assert.equal(edited.logs.commits[0]._expected_revision,1);assert.equal(edited.logs.commits[0]._meta.memo.text,'newer local edit');checks+=2;
+ for(const state of [{protocol:2,exists:true,server_revision:6,receipt:null},{protocol:2,exists:false,server_revision:null,receipt:null}]){
+  const f=pending(state);await assert.rejects(()=>Safety.run(f.project,f.meta,f.hooks,approval(f)),{code:'40001'});
+  assert.equal(f.logs.commits.length,0);assert.equal(f.logs.sessions.length,0);checks+=3;
+ }
+ const oldApproval=pending({protocol:2,exists:true,server_revision:1,receipt:priorReceipt});
+ await assert.rejects(()=>Safety.run(oldApproval.project,oldApproval.meta,oldApproval.hooks,approval(oldApproval,0)),{code:'40001'});
+ assert.equal(oldApproval.logs.commits.length,0);assert.equal(oldApproval.logs.receipts.length,1,'A genuine old receipt is recovered even when the overwrite approval has expired');checks+=3;
+ const different=fixture();different.project.shareInfo.pendingPublish={...clone(previous),slug:'different-target'};
+ await assert.rejects(()=>Safety.run(different.project,different.meta,different.hooks,approval(different)),{code:'PUBLISH_PENDING_CONFLICT'});quiet(different);checks+=2;
+ const network=fixture();let attempts=0;network.hooks.commit=async args=>{network.logs.commits.push(clone(args));
+  if(++attempts===1)throw new Error('response lost');return {ok:true,protocol:2,slug:args._slug,request_id:args._request_id,server_revision:6};};
+ await Safety.run(network.project,network.meta,network.hooks,approval(network));
+ assert.equal(attempts,2);assert.deepEqual(network.logs.commits[0],network.logs.commits[1]);assert.equal(network.logs.receipts.length,1);checks+=3;
+ return checks;
 }
 async function main(){
  let checks=0;
@@ -41,6 +124,7 @@ async function main(){
  followed.hooks.intent=async intent=>{assert.equal(intent.sourceSlug,followed.project.shareInfo.slug);assert.equal(intent.previousSlug,intent.sourceSlug);followed.logs.intents.push(clone(intent));};
  await Safety.run(followed.project,followed.meta,followed.hooks);assert.equal(followed.logs.commits[0]._expected_revision,1);assert.equal(followed.logs.commits[0]._create_only,false);checks+=4;
  const conflict=setup();conflict.hooks.commit=async()=>{conflict.logs.commits.push(1);throw Object.assign(new Error('conflict'),{code:'40001'});};await assert.rejects(()=>Safety.run(conflict.project,conflict.meta,conflict.hooks),{code:'40001'});assert.equal(conflict.logs.commits.length,1);assert.equal(conflict.logs.receipts.length,0);checks+=3;
+ checks+=await overwriteChecks(previous);
  // Execute production receipt adoption: never advance a stale live storage token.
  const html=fs.readFileSync(require.resolve('../viewer/index.html'),'utf8');const start=html.indexOf('function _adoptPublishPatch('),end=html.indexOf('\n}',start)+2;
  const live={storageRevision:4,shareInfo:{slug:'s'},memo:{text:'new unsaved edit'}};const ctx=vm.createContext({App:{project:live}});vm.runInContext(html.slice(start,end),ctx);
@@ -66,9 +150,11 @@ async function main(){
  // Comparison counts polygons per section on both grouped local and server rows.
  assert.equal(Safety.summary({rois:[{polysBySection:{s1:[],s2:[]}}]}).rois,2);
  assert.equal(Safety.summary({rois:[{section_id:'s1'},{section_id:'s2'}]}).rois,2);
- const calls=[],cmp=vm.createContext({PublishSafety:Safety,SupabaseClient:{unlockProjectMaster:async()=>({token:'read'}),fetchProjectDoc:async()=>({sections:[{id:'s1'},{id:'s2'}]}),listRois:async(token,id)=>{calls.push(id);return [{section_id:id}];}},openModal:()=>Promise.resolve(false)});
- cmp.openModal._card={};const compareAt=html.indexOf('async function _comparePublishedProject(');vm.runInContext(html.slice(compareAt,html.indexOf('\n}',compareAt)+2),cmp);
- await cmp._comparePublishedProject({sections:[],rois:[]},'s','synthetic');assert.deepEqual(calls,['s1','s2']);checks+=3;
+ const calls=[],comparisonProject={id:'comparison',sections:[],rois:[],shareInfo:{slug:'s'}},comparisonContext={inflight:false};
+ const cmp=vm.createContext({PublishSafety:Safety,App:{project:comparisonProject},_publishContext:()=>comparisonContext,showToast:()=>assert.fail('Unchanged comparison cannot be rejected'),
+  SupabaseClient:{unlockProjectMaster:async()=>({token:'read'}),fetchProjectDoc:async()=>({publish_revision:1,sections:[{id:'s1'},{id:'s2'}]}),listRois:async(token,id)=>{calls.push(id);return [{section_id:id}];}},openModal:()=>Promise.resolve(false)});
+ cmp.openModal._card={querySelector:()=>({addEventListener(){}})};const compareAt=html.indexOf('async function _comparePublishedProject(');vm.runInContext(html.slice(compareAt,html.indexOf('\n}',compareAt)+2),cmp);
+ await cmp._comparePublishedProject(comparisonProject,'s','synthetic');assert.deepEqual(calls,['s1','s2']);assert.equal(comparisonContext.inflight,false);checks+=4;
  assert.equal(before.memo.text,'before');console.log(`Publish snapshot regression: PASS (${checks} checks)`);
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

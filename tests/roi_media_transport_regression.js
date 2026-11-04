@@ -77,6 +77,49 @@ function context(extra = {}) {
   return ctx;
 }
 async function main() {
+  // Display polling may retain successful sections after one failed RPC.
+  // A master import must instead reject incomplete ROI data, including when
+  // an earlier share viewer's token-expired flag is still set in this tab.
+  const roiCalls = [], roiWarnings = [], roiRows = {
+    first: [{ id: 'master', section_id: 'first', poly_msi: copy(vertices) }],
+    second: [{ id: 'viewer', section_id: 'second', poly_msi: copy(vertices) }],
+  };
+  let roiFailure = null, expiredNotices = 0;
+  const roster = vm.createContext({
+    _shareTokenExpired: false,
+    console: { warn: (...args) => roiWarnings.push(args) },
+    _isExpiredTokenError: error => error.code === '28000',
+    _noteShareTokenExpired: () => { expiredNotices++; roster._shareTokenExpired = true; },
+    SupabaseClient: { listRois: async (token, sectionId) => {
+      roiCalls.push([token, sectionId]);
+      if (sectionId === 'second' && roiFailure) throw roiFailure;
+      return roiRows[sectionId];
+    } },
+  });
+  vm.runInContext(fn('fetchAllShareRois'), roster);
+  const roiSections = [{ id: 'first' }, { id: 'second' }];
+  const expectedRows = [...roiRows.first, ...roiRows.second];
+  assert.deepEqual(copy(await roster.fetchAllShareRois('read-token', roiSections, {strict:true})), expectedRows);
+  assert.deepEqual(roiCalls, [['read-token','first'], ['read-token','second']]);
+  roiFailure = new Error('synthetic ROI download failed');
+  await assert.rejects(() => roster.fetchAllShareRois('read-token', roiSections, {strict:true}), error => error === roiFailure);
+  assert.deepEqual(copy(await roster.fetchAllShareRois('read-token', roiSections)), roiRows.first,
+    'Normal display keeps successfully fetched ROI sections');
+  assert.equal(roiWarnings.length, 1);
+  roiFailure = Object.assign(new Error('expired synthetic token'), {code:'28000'});
+  assert.deepEqual(copy(await roster.fetchAllShareRois('expired', roiSections)), roiRows.first);
+  assert.equal(expiredNotices, 1);
+  const skippedCalls = roiCalls.length;
+  assert.deepEqual(copy(await roster.fetchAllShareRois('expired', roiSections)), []);
+  assert.equal(roiCalls.length, skippedCalls, 'Normal polling stops after its token expired');
+  roiFailure = null;
+  assert.deepEqual(copy(await roster.fetchAllShareRois('fresh-master-token', roiSections, {strict:true})), expectedRows,
+    'A fresh master import still reads ROIs after an unrelated share token expired');
+  assert.equal(roiCalls.length, skippedCalls + 2);
+  roiFailure = Object.assign(new Error('master token expired'), {code:'28000'});
+  await assert.rejects(() => roster.fetchAllShareRois('expired-master', roiSections, {strict:true}), error => error === roiFailure);
+  assert.equal(expiredNotices, 1, 'Strict import reports its error without altering display polling state');
+
   const ctx = context();
   const before = JSON.stringify(ctx.App.project.rois);
   // Two attachments referencing one original must transport exactly one binary.
