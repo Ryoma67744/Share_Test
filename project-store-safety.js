@@ -51,7 +51,97 @@
         const now = options.nowIso || (() => new Date().toISOString());
         const writerId = uid('writer');
         const sessionId = 'edit:' + writerId;
-        const locks = options.locks || (typeof navigator !== 'undefined' && navigator.locks);
+        // Explicit null models an environment without Web Locks, including in
+        // test runtimes that now provide their own native navigator.locks.
+        const locks = options.locks === null ? null : options.locks || (typeof navigator !== 'undefined' && navigator.locks);
+        const blobLeases = new Map();
+        const leaseError = () => Object.assign(new Error('この読み込みの原本保持は終了したか、別のタブが所有しています。'), {code:'BLOB_LEASE_OWNER'});
+        function ownedLease(handle, allowClosed = false) {
+            const state = handle && blobLeases.get(handle.id);
+            if (!state || state.handle !== handle || (!allowClosed && (state.closed || state.closing))) throw leaseError();
+            return state;
+        }
+        async function leaseRow(tx, handle) {
+            const row = await request(tx.objectStore('blob_pins').get(handle.id));
+            if (!row || row.kind !== 'blob-lease' || row.ownerId !== writerId) throw leaseError();
+            return row;
+        }
+        function closeLease(state) {
+            state.closed = true; state.closing = false;
+            if (state.unlock) state.unlock();
+        }
+        async function beginBlobLease(settings = {}) {
+            if (!['cloud-import','share-view'].includes(settings.kind)) throw new Error('Unknown blob lease kind');
+            const handle = Object.freeze({id:'load:'+uid('lease')});
+            const state = {handle,closed:false,closing:false,unlock:null};
+            // Acquire the lifetime lock BEFORE publishing a durable lease row.
+            // No unload/pagehide handler releases it: a BFCache page may return.
+            if (locks) await new Promise((resolve,reject) => {
+                const held = new Promise(release => {state.unlock=release;});
+                locks.request('desi-blob-lease:'+handle.id, async () => {resolve();await held;}).catch(reject);
+            });
+            blobLeases.set(handle.id,state);
+            try {
+                await run(['blob_pins'],'readwrite',tx=>request(tx.objectStore('blob_pins').add({
+                    id:handle.id,kind:'blob-lease',purpose:settings.kind,ownerId:writerId,
+                    liveness:locks?'web-lock':'unknown',projectId:settings.projectId||null,blobIds:[],ownedBlobIds:[],updatedAt:now()
+                })));
+            } catch(error) {closeLease(state);throw error;}
+            return handle;
+        }
+        async function pinBlobLease(handle, ids) {
+            ownedLease(handle);
+            return run(['blob_pins','blobs'],'readwrite',async tx=>{
+                const row=await leaseRow(tx,handle), pinned=new Set(row.blobIds);
+                for(const id of ids) {
+                    if(!await request(tx.objectStore('blobs').get(id))) throw new Error('原本がありません: '+id);
+                    pinned.add(id);
+                }
+                row.blobIds=[...pinned];await request(tx.objectStore('blob_pins').put(row));
+            });
+        }
+        async function removeLeaseRow(tx, row, discard) {
+            await request(tx.objectStore('blob_pins').delete(row.id));
+            if(discard) {
+                const used=await usedBlobs(tx);
+                // Only bytes created by this load may be reclaimed here.
+                for(const id of row.ownedBlobIds||[]) if(!used.has(id)) await request(tx.objectStore('blobs').delete(id));
+            }
+        }
+        async function finishBlobLease(handle, settings = {}) {
+            const state=ownedLease(handle,true);
+            if(state.closed)return false;
+            if(state.closing)throw leaseError();
+            if(settings.project) {
+                if(settings.createOnly!==true)throw new Error('A cloud import must create a separate project');
+                return putProject(settings.project,{createOnly:true,blobLease:handle});
+            }
+            state.closing=true;
+            try {
+                await run([...referenceStores,'blobs'],'readwrite',async tx=>{
+                    await removeLeaseRow(tx,await leaseRow(tx,handle),settings.discard!==false);
+                });
+                closeLease(state);return true;
+            } catch(error) {state.closing=false;throw error;}
+        }
+        async function reclaimInactiveBlobLeases() {
+            if(!locks)return 0; // Unknown liveness is retained; there is no TTL.
+            const rows=await run(['blob_pins'],'readonly',tx=>request(tx.objectStore('blob_pins').getAll()));
+            let reclaimed=0;
+            for(const row of rows) {
+                if(row.kind!=='blob-lease'||row.liveness!=='web-lock')continue;
+                await locks.request('desi-blob-lease:'+row.id,{ifAvailable:true},async lock=>{
+                    if(!lock)return;
+                    // Hold the liveness lock through the deletion transaction.
+                    await run([...referenceStores,'blobs'],'readwrite',async tx=>{
+                        const current=await request(tx.objectStore('blob_pins').get(row.id));
+                        if(!current||current.kind!=='blob-lease'||current.liveness!=='web-lock'||current.ownerId!==row.ownerId)return;
+                        await removeLeaseRow(tx,current,true);reclaimed++;
+                    });
+                });
+            }
+            return reclaimed;
+        }
         let activeProjectId = null, sessionLock = null, unlockSession = null;
         async function ensureSessionLock() {
             if (!locks || sessionLock) return sessionLock;
@@ -111,15 +201,22 @@
             if (Array.isArray(record.rois)) record.rois = record.rois.filter(r => !(r && r._collab));
             const expected = Object.prototype.hasOwnProperty.call(settings, 'expectedRevision')
                 ? settings.expectedRevision : project.storageRevision;
+            const load = settings.blobLease && ownedLease(settings.blobLease);
+            if(load && !settings.createOnly)throw new Error('A cloud import must create a separate project');
+            if(load)load.closing=true;
             let failure = null;
-            const committed = await run(['projects', 'project_index', 'project_recovery', 'blob_pins'], 'readwrite', async tx => {
+            let committed;
+            try { committed = await run(load ? [...referenceStores,'project_index','blobs'] : ['projects', 'project_index', 'project_recovery', 'blob_pins'], 'readwrite', async tx => {
                 const projects = tx.objectStore('projects');
+                const lease = load && await leaseRow(tx,settings.blobLease);
+                if(lease)for(const id of collectBlobIds(record))if(!await request(tx.objectStore('blobs').get(id)))throw new Error('取り込み原本がありません: '+id);
                 if (activeProjectId === record.id) await writeSession(tx, record);
                 if (settings.createOnly) {
                     while (await request(projects.get(record.id))) record.id = uid('proj');
                     record.storageRevision = 1; record.updatedAt = now();
                     await request(projects.add(record));
                     await request(tx.objectStore('project_index').put(options.indexRowFor(record)));
+                    if(lease)await removeLeaseRow(tx,lease,true);
                     return record;
                 }
                 const current = await request(projects.get(record.id));
@@ -137,7 +234,8 @@
                 record.storageRevision = actualRevision + 1; record.updatedAt = now();
                 await saveRecord(tx, record);
                 return record;
-            });
+            }); } catch(error) {if(load)load.closing=false;throw error;}
+            if(load)closeLease(load);
             if (failure) { if (options.onConflict) { try { options.onConflict(failure); } catch (_) {} } throw failure; }
             // Never advance the caller's token before durable commit.
             project.id = committed.id; project.storageRevision = committed.storageRevision;
@@ -239,11 +337,17 @@
             }
             return used;
         }
-        async function putBlob(record) {
+        async function putBlob(record, settings = {}) {
             if (!record || !record.id || !record.blob) throw new Error('putBlob requires an original blob and ID');
             record = {...record}; // Freeze identity/metadata before the transaction await; Blob bytes are immutable.
+            if(settings.lease)ownedLease(settings.lease);
             return run(['blobs','blob_pins'], 'readwrite', async tx => {
-                if (activeProjectId) {
+                if (settings.lease) {
+                    const row=await leaseRow(tx,settings.lease);
+                    row.blobIds=[...new Set([...row.blobIds,record.id])];
+                    row.ownedBlobIds=[...new Set([...row.ownedBlobIds,record.id])];
+                    await request(tx.objectStore('blob_pins').put(row));
+                } else if (activeProjectId) {
                     const pins = await request(tx.objectStore('blob_pins').getAll());
                     const pin = pins.find(row => row.id === sessionId);
                     const jobOwned = pins.some(row => row.id !== sessionId && (row.blobIds || []).includes(record.id));
@@ -289,25 +393,30 @@
             });
         }
         async function pruneShareOrphans() {
-            return run([...referenceStores, 'blobs'], 'readwrite', async tx => {
-                const used = await usedBlobs(tx);
-                for (const id of await request(tx.objectStore('blobs').getAllKeys())) if (!used.has(id)) await request(tx.objectStore('blobs').delete(id));
-            });
+            // An unleased blob may belong to a live older tab or unfinished
+            // legacy import. Absence from project records does not prove death.
+            return reclaimInactiveBlobLeases();
         }
         async function pinBlobs(id, blobIds, meta = {}) {
             return run(['blob_pins'], 'readwrite', async tx => {
                 const previous = await request(tx.objectStore('blob_pins').get(id));
+                if(previous && previous.kind==='blob-lease')throw leaseError();
                 const ids = [...new Set([...(previous && previous.blobIds || []), ...blobIds])];
                 await request(tx.objectStore('blob_pins').put({id, blobIds: ids, projectId: meta.projectId || null,
                     kind: meta.kind || 'job', updatedAt: now()}));
             });
         }
-        const releaseBlobPins = id => run(['blob_pins'], 'readwrite', tx => request(tx.objectStore('blob_pins').delete(id)));
+        const releaseBlobPins = id => run(['blob_pins'], 'readwrite', async tx => {
+            const row=await request(tx.objectStore('blob_pins').get(id));
+            if(row && row.kind==='blob-lease')throw leaseError();
+            await request(tx.objectStore('blob_pins').delete(id));
+        });
         const putArchiveJob = job => run(['archive_jobs'], 'readwrite', tx => request(tx.objectStore('archive_jobs').put(clone(job))));
         const getArchiveJobs = () => run(['archive_jobs'], 'readonly', tx => request(tx.objectStore('archive_jobs').getAll()));
         const deleteArchiveJob = id => run(['archive_jobs'], 'readwrite', tx => request(tx.objectStore('archive_jobs').delete(id)));
         return {getProject, releaseProject, putProject, patchProject, recordPublishReceipt, listRecoveries, restoreRecovery, discardRecovery,
-            deleteProject, putBlob, renameBlob, deleteBlob, pruneShareOrphans, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob};
+            deleteProject, putBlob, renameBlob, deleteBlob, pruneShareOrphans, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
+            beginBlobLease,pinBlobLease,finishBlobLease,reclaimInactiveBlobLeases};
     }
     // Accessible, persistent recovery entry point shared by both pages.
     function mountRecoveryUi(storage, options = {}) {

@@ -1414,7 +1414,7 @@ function extractMethod(source, name) {
 // 片方に寄せるともう片方が壊れるので、両方を縛る。
 function testImportSectionIdKeying() {
   const importFn = extractMethod(html, '_buildLocalProjectFromDoc');
-  const shareFn = extractMethod(html, '_hydrateSharedProject');
+  const shareFn = extractMethod(html, '_loadSharedProject');
 
   assert.match(importFn, /id:\s*\(s\.meta && s\.meta\.client_id\) \|\| s\.id/);
   // ROI はサーバの UUID で引いてから client_id へ翻訳する。
@@ -2486,7 +2486,7 @@ function testWorkerAssetsFollowApplicationBase() {
     }
   }
   const scriptSources = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(scriptSources.slice(0, 4), ['../runtime-config.js', '../app-runtime.js', '../project-store-safety.js', '../offline/offline.js']);
+  assert.deepEqual(scriptSources.slice(0, 5), ['../runtime-config.js', '../app-runtime.js', '../project-store-safety.js', '../project-navigation.js', '../offline/offline.js']);
   assert.ok(scriptSources.includes('../vendor/supabase.min.js'));
   assert.ok(!scriptSources.some(src => src.startsWith('/') || /^https?:/.test(src)), 'viewer assets must work under a project Pages path');
   assert.doesNotMatch(html, /window\.SUPABASE_(?:URL|ANON_KEY)\s*=/, 'shared runtime owns cloud configuration');

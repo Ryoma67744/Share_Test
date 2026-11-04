@@ -56,7 +56,7 @@ async function main(){
  await a.putArchiveJob({id:'import',ownedBlobIds:['staged'],cleanupBlobIds:['old']});
  for(const id of ['pinned','second','staged','old','orphan'])memory.stores.blobs.set(id,{id,blob:new Blob([id])});
  await a.pruneShareOrphans();for(const id of ['pinned','second','staged'])assert.ok(memory.stores.blobs.has(id));
- assert.ok(!memory.stores.blobs.has('old'));assert.ok(!memory.stores.blobs.has('orphan'));
+ assert.ok(memory.stores.blobs.has('old'));assert.ok(memory.stores.blobs.has('orphan'),'unleased legacy originals have unknown liveness');
  await a.releaseBlobPins('export');await a.putArchiveJob({id:'import',ownedBlobIds:[],cleanupBlobIds:['staged']});
  assert.equal(await a.deleteBlob('staged'),true);assert.equal(await a.deleteBlob('pinned'),true);await a.deleteArchiveJob('import');
  assert.deepEqual(await a.getArchiveJobs(),[]);

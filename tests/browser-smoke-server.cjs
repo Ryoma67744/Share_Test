@@ -19,7 +19,7 @@ function stageBrowserSmoke(sourceRoot = ROOT) {
     fs.copyFileSync(source,dest);
   }
   try {
-    for (const name of ['index.html','mrm.html','version.js','runtime-config.js','app-runtime.js','project-store-safety.js',
+    for (const name of ['index.html','mrm.html','version.js','runtime-config.js','app-runtime.js','project-store-safety.js','project-navigation.js',
       'offline/offline.js','offline/local-mrm.js']) copy(name);
     for (const item of fs.readdirSync(sourceRoot,{withFileTypes:true})) {
       if (item.isFile() && /^(?:OFFLINE_GUIDE|USER_GUIDE(?:\.[a-z]+)*)\.md$/.test(item.name)) copy(item.name);

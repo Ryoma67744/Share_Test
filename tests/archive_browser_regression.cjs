@@ -38,6 +38,21 @@ window.legacyArchive=async()=>{
  return z.generateAsync({type:'blob'});
 };
 </script>`;
+async function waitForArchiveOwnerToEnd(page, jobId) {
+ assert.ok(jobId,'the suspended archive has a durable journal ID');
+ await page.evaluate(async id=>{
+  try {
+   // A query() snapshot can race renderer shutdown. An actual exclusive grant
+   // proves the closed owner's lock was released before the one-shot recovery.
+   await navigator.locks.request('desi-archive-job:'+id,
+    {mode:'exclusive',signal:AbortSignal.timeout(5000)},()=>{});
+  } catch(error) {
+   const locks=await navigator.locks.query(),jobs=await storage.getArchiveJobs();
+   throw new Error('Archive owner lock did not release: '+JSON.stringify({jobId:id,
+    error:error.message,held:locks.held,pending:locks.pending,jobs}));
+  }
+ },jobId);
+}
 async function main(){
  const assets={'/store.js':'project-store-safety.js','/archive.js':'viewer/project-archive.js','/zip.js':'vendor/jszip.min.js','/media.js':'viewer/roi-media-model.js'};
  const server=http.createServer((req,res)=>{if(req.url==='/'){res.setHeader('Content-Type','text/html; charset=utf-8');res.end(harness);return;}
@@ -74,8 +89,9 @@ async function main(){
   });
   await a.waitForFunction(()=>window.stageReady===true);
   assert.equal(await b.evaluate(async()=>{await ProjectArchive.recoverImports(storage);return !!await storage.getBlob('uncommitted');}),true);
+  const uncommittedJob=await b.evaluate(async()=>(await storage.getArchiveJobs()).find(job=>(job.ownedBlobIds||[]).includes('uncommitted'))?.id);
   await a.close();
-  await b.waitForFunction(async()=>!(await navigator.locks.query()).held.some(lock=>lock.name.startsWith('desi-archive-job:')));
+  await waitForArchiveOwnerToEnd(b,uncommittedJob);
   await b.evaluate(()=>ProjectArchive.recoverImports(storage));
   assert.equal(await b.evaluate(()=>storage.getBlob('uncommitted')),null);
   assert.equal(await b.evaluate(async id=>(await storage.getBlob(id)).blob.text(),imported.source),imported.value,'existing imported source survives abandoned-import cleanup');
@@ -89,11 +105,14 @@ async function main(){
     await stage.putProject({id:'committed-project',displayName:'Committed',sections:[{id:'x',images:{HE:{blobId:'committed-original'}}}]},{createOnly:true});
    }).catch(()=>{});
   });
-  await c.waitForFunction(()=>window.didCommit===true);await c.close();
-  await b.waitForFunction(async()=>!(await navigator.locks.query()).held.some(lock=>lock.name.startsWith('desi-archive-job:')));
+  await c.waitForFunction(()=>window.didCommit===true);
+  const committedJob=await b.evaluate(async()=>(await storage.getArchiveJobs()).find(job=>(job.ownedBlobIds||[]).includes('committed-original'))?.id);
+  await c.close();
+  await waitForArchiveOwnerToEnd(b,committedJob);
   await b.evaluate(()=>ProjectArchive.recoverImports(storage));
   assert.equal(await b.evaluate(async()=>(await storage.getBlob('committed-original')).blob.text()),'committed bytes');
-  assert.equal(await b.evaluate(async()=>(await storage.getArchiveJobs()).length),0);
+  const afterRecovery=await b.evaluate(async()=>({jobs:await storage.getArchiveJobs(),locks:await navigator.locks.query()}));
+  assert.equal(afterRecovery.jobs.length,0,'Committed-import recovery must remove its journal: '+JSON.stringify(afterRecovery));
 
   // A different writer wins between staged.getBlob and create-only putBlob.
   const raced=await b.evaluate(async()=>{
