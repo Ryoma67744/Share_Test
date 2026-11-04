@@ -132,8 +132,8 @@ async function main() {
   Object.defineProperty(globalThis,'navigator',{configurable:true,value:{locks:{request:async(_name,_options,callback)=>callback(grant?{}:null)}}});
   try {
     const crashed=context(false,true), st=crashed.ProjectStorage;
-    await st.putBlob({id:'orphan',blob:text('uncommitted')});
-    await st.putProject({id:'existing',sections:[{images:{HE:{blobId:'he'}}}]});
+    await st.putBlob({id:'orphan',archiveOwnerId:'crashed',blob:text('uncommitted')});
+    await st.putProject({id:'existing',sections:[{images:{HE:{blobId:'he'}}}]},{createOnly:true});
     await st.putArchiveJob({id:'crashed',kind:'zip-import',state:'staging',ownedBlobIds:['orphan','he']});
     await st.pinBlobs('crashed',['orphan','he']);
     await Archive.recoverImports(st);assert.equal(st.__archiveTest.jobs.size,1,'live/locked job retained');

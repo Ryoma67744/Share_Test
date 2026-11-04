@@ -24,12 +24,13 @@ function install(ctx) {
   storage.deleteArchiveJob = async id => safety() ? safety().deleteArchiveJob(id) : jobs.delete(id);
   storage.pinBlobs = async (id, ids, metadata) => safety() ? safety().pinBlobs(id, ids, metadata) : pins.set(id, new Set([...(pins.get(id) || []), ...ids]));
   storage.releaseBlobPins = async id => safety() ? safety().releaseBlobPins(id) : pins.delete(id);
-  storage.deleteBlob = async id => {
-    if (safety()) { if (!await safety().deleteBlob(id)) return false; }
+  storage.deleteBlob = async (id, options = {}) => {
+    if (safety()) { if (!await safety().deleteBlob(id, options)) return false; }
+    else if (options.ownerId && (await storage.getBlob(id))?.archiveOwnerId !== options.ownerId) return false;
     else if ([...projects.values()].some(p => JSON.stringify(p).includes('"blobId":"' + id + '"'))
       || [...pins.values()].some(set => set.has(id))
       || [...jobs.values()].some(job => (job.ownedBlobIds || []).includes(id))) return false;
-    if (remove) await remove(id);
+    if (remove) await remove(id, options);
     written.delete(id);
     for (const map of [ctx.blobs, ctx.records]) if (map instanceof Map) map.delete(id);
     return true;

@@ -221,7 +221,7 @@
         const cleanupBlobIds = [...new Set([...(job.cleanupBlobIds || []), ...(job.ownedBlobIds || [])])];
         await storage.putArchiveJob({...job, state: 'cleanup', ownedBlobIds: [], cleanupBlobIds, updatedAt: Date.now()});
         await storage.releaseBlobPins(job.id);
-        for (const blobId of cleanupBlobIds) await storage.deleteBlob(blobId); // storage guards project/recovery references
+        for (const blobId of cleanupBlobIds) await storage.deleteBlob(blobId, {ownerId: job.id}); // atomic owner + project/recovery guards
         await storage.deleteArchiveJob(job.id);
     }
     async function recoverImports(storage) {
@@ -246,7 +246,7 @@
                     job.ownedBlobIds.push(rec.id); job.updatedAt = Date.now();
                     await storage.putArchiveJob(clone(job));
                     await storage.pinBlobs(job.id, [rec.id], {kind: job.kind});
-                    await storage.putBlob(rec);
+                    await storage.putBlob({...rec, archiveOwnerId: job.id});
                     if (options.onProgress) options.onProgress(job.ownedBlobIds.length);
                     cancelled(options.signal); return rec.id;
                 };
