@@ -27,6 +27,7 @@
     <script defer src="roi-media-msi.js"></script>
     <script defer src="roi-media-viewer.js"></script>
     <script defer src="roi-media-app.js"></script>
+    <script defer src="project-archive.js"></script>
     <script defer src="project-report-app.js"></script>
 <script>
   // Libraries not needed just to view are loaded on first use (jszip =
@@ -3878,6 +3879,7 @@ function createMsiSourceGeometry(rows, ent, legacyColumns) {
             }
         }
     }
+    if (ent && ent.archiveGeometryUnconfirmed) legacyReason = 'archive-source-variant-unconfirmed';
     return {sourceRef:msiSourceReference(ent),displayGeometry:grid.displayGeometry,
         legacy:{W:legacy.W,H:legacy.H,confirmed:!legacyReason,reason:legacyReason,
             x:pairs('x'),y:pairs('y')}};
@@ -10472,6 +10474,7 @@ class SectionPanel {
             blobId,
             filename: finalName,
             sourceFileId: opts.sourceFileId || null,
+            archiveProvenance: def.archiveProvenance || ProjectArchive.registeredSource(),
             compoundMeta: opts.compoundMeta || null,
             bakeMode: def.bakeMode || inheritedBake,
         });
@@ -11129,6 +11132,7 @@ async function renderAnalysisChart(gen) {
         const reasons = {
             'source-unavailable': '元データを読み込めません',
             'legacy-roi-source-ambiguous': '旧ROIがどの元データに対応するか確定できません',
+            'archive-source-variant-unconfirmed': '旧ZIPの異なる保存版を保持しています。旧ROIと位置合わせの対応は未確認です',
             'legacy-coordinate-unconfirmed': '元座標に欠測・不正値があり、旧ROIの座標対応を確認できません。元のROIは保持しています',
             'legacy-value-axis-unconfirmed': '旧描画時の測定行を確認できず、旧ROIの座標対応は未確定です',
             'legacy-render-quant-axis-mismatch': '旧描画と旧定量で座標軸が異なるため、旧ROIを安全に対応付けできません。元のROIは保持しています',
@@ -12076,6 +12080,7 @@ function _msiCellSig(e) {
     const d = e.diag;
     return (Array.isArray(e.rawRange) ? e.rawRange.join(',') : '')
         + '|' + e.rawMean + '|' + e.rawTrueMax + '|' + e.statMax + '|' + e.quantVersion
+        + '|' + JSON.stringify(e.archiveProvenance || null)
         // diag は表のバッジ。出す/出さないを決める項目だけ見る (diagBadgeHtml と同じ)。
         + '|' + (d ? [d.clippedHigh, d.dupCells, d.dupRows, d.nPixels,
                       d.gridFallback && d.gridFallback.x, d.gridFallback && d.gridFallback.y,
@@ -12703,6 +12708,8 @@ function renderMethodTable() {
             ? '<span class="eval-badge target" title="この測定像を評価するためにプレビューを開きました">評価対象</span>'
             : (isEvalPending ? '<span class="eval-badge pending" title="実測棚卸しで未処理 — この測定PJで一緒に評価できます">要評価</span>' : '');
         const diagBadge = diagBadgeHtml(ent.diag);
+        const archiveBadge = ent.archiveProvenance && ent.archiveProvenance.basis === 'legacy-derived-csv'
+            ? ' <span style="color:#925c00;font-size:10px" title="旧ZIPの派生CSVから計算した参考値です。元の空欄と測定ゼロを識別できない場合があります。">旧CSV参考値 / Legacy CSV</span>' : '';
 
         const markerColor = ent.markerColor || '';
         const markerSwatchStyle = markerColor
@@ -12714,7 +12721,7 @@ function renderMethodTable() {
             '<td class="px-1 py-1 border-b border-gray-100 text-center" data-cell="marker">' +
                 '<button type="button" class="marker-swatch" aria-haspopup="dialog" style="' + markerSwatchStyle + '"></button>' +
             '</td>' +
-            '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + diagBadge + '</td>' +
+            '<td class="px-2 py-1 border-b border-gray-100 text-gray-700 font-mono text-[11px]" data-compound-cell="' + safe(layerKey) + '" title="ダブルクリックで rename (master only)">' + safe(compoundName) + evalBadge + diagBadge + archiveBadge + '</td>' +
             // ノンターゲットは m/z・アダクト・分子式 + 強度 (Mean/Max)。
             // MRM 固有の Fragment/CE/CV と、MRM ライブラリ登録用のチェックは出さない。
             (nonTarget
@@ -17642,9 +17649,11 @@ function buildOneCsvTable(group, roiPairs, project, otsuMode) {
             headers.push(header);
             columnArrays.push(order.map(i => msiCsvCellText(col.sourceCells && col.sourceCells[i], col.values[i])));
             metadata.columns.push({ header, layerKey, sourceFrame: matrix.sourceFrame || null,
+                inputProvenance: ProjectArchive.provenance(ent.archiveProvenance),
                 sourceRowIds: order.map(i => matrix.rowIds ? matrix.rowIds[i] : i),
                 cells: order.map(i => msiCellMetadata(col.sourceCells && col.sourceCells[i])) });
             compounds.push({ layerKey, vHeader: header, sourceFileId: ent.sourceFileId || null,
+                archiveProvenance: ProjectArchive.provenance(ent.archiveProvenance),
                 kind: ent.kind || 'xlsx', compoundMeta: ent.compoundMeta || meta || null, bakeMode: ent.bakeMode || null });
         }
     }
@@ -17684,7 +17693,7 @@ function buildOneCsvTable(group, roiPairs, project, otsuMode) {
 // Build the per-sample combined CSV group(s) for a section (one per pixel-grid;
 // usually a single group). Parses each source once; memory stays bounded to one
 // sample. Returns [{ csvText, rowCount, compounds:[...] }].
-async function buildSampleCsvGroups(sec, project, otsuMode) {
+async function buildSampleCsvGroups(sec, project, otsuMode, snapshotStorage) {
     const series = sec.msiSeries || {};
     const layerKeys = sortMethodKeys(
         Object.keys(series).filter(k => /^MSI_/i.test(k)),
@@ -17710,7 +17719,7 @@ async function buildSampleCsvGroups(sec, project, otsuMode) {
         //   展開してから失敗する。ソースは parquet 本体を ZIP に同梱するので
         //   (exportProjectAsZip の Source/)、データが失われることはない。
         if (grp.repr && grp.repr.kind === 'parquet') continue;
-        const rec = await ProjectStorage.getBlob(grp.blobId);
+        const rec = await (snapshotStorage || ProjectStorage).getBlob(grp.blobId);
         if (!rec || !rec.blob) throw new Error('MSI original source is unavailable for CSV export: ' + (grp.repr.filename || grp.blobId));
         const m = await extractSourceMatrixForExport(await rec.blob.arrayBuffer(), grp.repr, grp.entries);
         if (m && m.positions.length) parsed.push({ matrix: m, entries: grp.entries });
@@ -17801,13 +17810,17 @@ function roiMediaRegistryFromDoc(doc) {
 async function exportProjectAsZip() {
     if (_exportInProgress) { showToast('Export already running'); return; }
     _exportInProgress = true;
-    let progress = null;
+    let progress = null, exportSession = null;
     try {
         const otsuMode = 'none';
         try { await loadScript(LAZY_LIBS.jszip); } catch (e) { alert('JSZip の読み込みに失敗しました'); return; }
         if (typeof JSZip === 'undefined') { alert('JSZip not loaded'); return; }
-        const project = App.project;
-        if (!project) return;
+        if (!App.project) return;
+        const exportDisplaySettings = {otsuBgRemove: !!App.otsuBgRemove, otsuStrength: App.otsuStrength, otsuManualThreshold: App.otsuManualThreshold};
+        exportSession = await ProjectArchive.beginExport(App.project, ProjectStorage, {
+            currentProject: () => App.project, readMedia: item => roiMediaReadOriginal(item)
+        });
+        const project = exportSession.project, snapshotStorage = exportSession.storage;
         freezeMsiSourceReferences(project);
         const roiMedia = roiMediaForTransport(project);
         const zip = new JSZip();
@@ -17838,7 +17851,8 @@ async function exportProjectAsZip() {
             format: 'desi_data_share_v2',
             bgRemoved: null,
             sourceContract: 'msi-source-rows-v1',
-            displaySettings: { otsuBgRemove: !!App.otsuBgRemove, otsuStrength: App.otsuStrength, otsuManualThreshold: App.otsuManualThreshold },
+            archiveContract: {version: 1, completeness: 'registered-snapshot', provenanceVersion: 1},
+            displaySettings: exportDisplaySettings,
             id: project.id,
             displayName: project.displayName,
             anatomyPalette: project.anatomyPalette || DEFAULT_ANATOMY_PALETTE,
@@ -17880,13 +17894,8 @@ async function exportProjectAsZip() {
 
             // HE/IF: full original (+ MSI-aligned PNG when a transform exists).
             for (const [layerKey, ent] of Object.entries(sec.images || {})) {
-                const rec = await ProjectStorage.getBlob(ent.blobId);
-                if (!rec || !rec.blob) {
-                    if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
-                        throw new Error('このPCに HE/IF 原本がありません: ' + (ent.filename || layerKey) + '。原本を再登録してから Export ZIP を実行してください。');
-                    }
-                    tick(); tick(); continue;
-                }
+                const rec = await snapshotStorage.getBlob(ent.blobId);
+                if (!rec || !rec.blob) throw new Error('Required HE/IF original unavailable: ' + (ent.filename || layerKey));
                 const fname = ent.filename || (layerKey + '.tif');
                 // One copy per unique content: reuse the path for identical
                 // images (same whole slide on many sections) instead of
@@ -17917,7 +17926,8 @@ async function exportProjectAsZip() {
                         imgRec.alignedPath = alignedPath;
                         imgRec.alignedFrame = { w: baked.w, h: baked.h };
                     }
-                } catch (e) { console.warn('[export] aligned bake failed', sec.id, layerKey, e); }
+                } catch (e) { throw new Error('Aligned PNG export failed: ' + (ent.filename || layerKey) + ': ' + e.message); }
+                exportSession.assertCurrent();
                 secEntry.images[layerKey] = imgRec;
                 tick(); await _yieldUi();
             }
@@ -17936,7 +17946,7 @@ async function exportProjectAsZip() {
                 if (!frec.blobId) throw new Error('MSI source is unavailable: ' + (frec.filename || fid));
                 let sourcePath = bundledSrcPaths.get(frec.blobId);
                 if (!sourcePath) {
-                    const rec = await ProjectStorage.getBlob(frec.blobId);
+                    const rec = await snapshotStorage.getBlob(frec.blobId);
                     if (!rec || !rec.blob) throw new Error('MSI original source is unavailable: ' + (frec.filename || fid));
                     const fallback = frec.kind === 'raw' ? 'source.raw.zip' : frec.kind === 'parquet' ? 'source.parquet' : frec.kind === 'txt' ? 'source.txt' : 'source.xlsx';
                     sourcePath = 'Source/' + frec.blobId + '__' + sanitizeStorageKeySegment(frec.filename || fallback);
@@ -17959,6 +17969,7 @@ async function exportProjectAsZip() {
                 secEntry.parquetSeries[k] = {
                     sourceFileId: ent.sourceFileId || null, colIdx: ent.colIdx,
                     annotation: ent.annotation, filename: ent.filename,
+                    archiveProvenance: ProjectArchive.provenance(ent.archiveProvenance),
                     compoundMeta: ent.compoundMeta || null,
                     statMax: ent.statMax, rasterW: ent.rasterW, rasterH: ent.rasterH,
                     rawRange: ent.rawRange, rawMean: ent.rawMean,
@@ -17975,6 +17986,7 @@ async function exportProjectAsZip() {
                 secEntry.rawSeries[k] = {
                     sourceFileId: ent.sourceFileId || null,
                     func: ent.func, channel: ent.channel, filename: ent.filename,
+                    archiveProvenance: ProjectArchive.provenance(ent.archiveProvenance),
                     compoundMeta: ent.compoundMeta || null,
                     rasterW: ent.rasterW, rasterH: ent.rasterH,
                     rawRange: ent.rawRange, rawMean: ent.rawMean,
@@ -17985,7 +17997,7 @@ async function exportProjectAsZip() {
 
             // Data/: per-sample combined CSV(s).
             try {
-                const groups = await buildSampleCsvGroups(sec, project, otsuMode);
+                const groups = await buildSampleCsvGroups(sec, project, otsuMode, snapshotStorage);
                 const bgTag = '';
                 groups.forEach((g, idx) => {
                     const suffix = idx > 0 ? ('__' + (idx + 1)) : '';
@@ -18011,7 +18023,7 @@ async function exportProjectAsZip() {
             const identity = item.blobId || ('storage:' + item.storagePath);
             let sourcePath = mediaPaths.get(identity);
             if (!sourcePath) {
-                const original = await roiMediaReadOriginal(item);
+                const original = await exportSession.readMedia(item);
                 sourcePath = 'ROI_Media/' + sanitizeStorageKeySegment(item.id) + '__'
                     + sanitizeStorageKeySegment(item.filename || 'image.bin');
                 zip.file(sourcePath, original.blob);
@@ -18028,9 +18040,12 @@ async function exportProjectAsZip() {
             tick(); await _yieldUi();
         }
 
+        exportSession.assertCurrent();
+        ProjectArchive.verifyExport(zip, manifest);
         zip.file(projSafe + '.json', JSON.stringify(manifest, null, 2));
         const blob = await zip.generateAsync({ type: 'blob' });
         const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        exportSession.assertCurrent();
         downloadAsFile(blob, projSafe + '_' + ts + '.zip');
         showToast('Export ready');
     } catch (e) {
@@ -18038,7 +18053,8 @@ async function exportProjectAsZip() {
         alert('Export に失敗しました: ' + (e && e.message ? e.message : e));
     } finally {
         if (progress) { try { progress.close(); } catch (_) {} }
-        _exportInProgress = false;
+        try { if (exportSession) await exportSession.close(); }
+        finally { _exportInProgress = false; }
     }
 }
 
@@ -21154,7 +21170,9 @@ const SharePreview = {
         const cellsFor = (extract) => sections.map(sec => {
             const ent = (sec.msiSeries || {})[focusKey];
             const v = ent ? extract(ent) : NaN;
-            return `<td>${formatScientific(Number(v))}</td>`;
+            const quality = ent && ent.archiveProvenance && ent.archiveProvenance.basis === 'legacy-derived-csv'
+                ? '<br><small style="color:#925c00">旧CSV参考値 / Legacy CSV</small>' : '';
+            return `<td>${formatScientific(Number(v))}${quality}</td>`;
         }).join('');
         body.innerHTML =
             // ?? NaN: cellsFor は Number(v) を通すので null をそのまま渡すと 0 と
@@ -21469,46 +21487,46 @@ async function openProjectsManagerModal() {
     return p;
 }
 
-async function importZipFile(file) {
+async function importZipFile(file, options = {}) {
+    const importController = !options.signal && typeof AbortController === 'function' ? new AbortController() : null;
+    options = {...options, signal: options.signal || (importController && importController.signal)};
     const offline = typeof window !== 'undefined' && window.DESI_OFFLINE === true;
     await loadScript(LAZY_LIBS.jszip);
-    const zip = await JSZip.loadAsync(file);
+    let zip = await JSZip.loadAsync(file, {checkCRC32: true});
     // Find the project doc — root-level *.json with format=desi_data_share_v1.
     // The exporter now names the root JSON after the project, so we scan
     // instead of expecting a fixed 'project.json'.
     const rootJsonPaths = Object.keys(zip.files).filter(p => /^[^/]+\.json$/i.test(p));
-    let projDocPath = null;
+    let projectDocCount = 0;
     let projDoc = null;
     for (const p of rootJsonPaths) {
         try {
             const candidate = JSON.parse(await zip.file(p).async('string'));
             if (candidate && (candidate.format === 'desi_data_share_v1' || candidate.format === 'desi_data_share_v2')) {
-                projDocPath = p;
+                projectDocCount++;
                 projDoc = candidate;
-                break;
             }
         } catch (e) {}
     }
     if (!projDoc) throw new Error('Project JSON (format=desi_data_share_v1/v2) not found in ZIP root');
+    if (projectDocCount !== 1) throw new Error('ZIP に複数のプロジェクト定義があります / Multiple project manifests in ZIP');
 
-    // Detect old-style ZIPs (project.json + per-layer msi_<layerKey>__ paths)
-    // and refuse with a clear message — the new format uses msi__<filename>.
-    if (projDocPath === 'project.json') {
-        const firstAtlasPath = Object.keys(zip.files).find(p => /sections\/[^/]+\/atlas\.json$/.test(p));
-        if (firstAtlasPath) {
-            try {
-                const firstAtlas = JSON.parse(await zip.file(firstAtlasPath).async('string'));
-                const sample = Object.values(firstAtlas.msiSeries || {})[0];
-                const samplePath = sample && sample.path || '';
-                if (samplePath.startsWith('data/msi_') && !samplePath.startsWith('data/msi__')) {
-                    throw new Error('旧形式の ZIP は非対応です。最新版で再 Export してください。');
-                }
-            } catch (e) {
-                if (/旧形式/.test(e.message || '')) throw e;
-            }
-        }
-    }
-
+    const prepared = await ProjectArchive.prepareImport(zip, projDoc, options);
+    zip = prepared.zip; projDoc = prepared.doc;
+    const review = options.review || (typeof openModal === 'function' ? counts => openModal(
+        '<h2>ZIP の復元 / Restore ZIP</h2><p style="white-space:pre-line">' + ProjectArchive.summary(counts)
+        + '</p><p>旧CSVは補正せず復元します。来歴のないデータを原本確認済みとは扱いません。</p>'
+        + '<button class="btn" data-modal-cancel>キャンセル / Cancel</button> '
+        + '<button class="btn" data-modal-ok>復元 / Restore</button>') : null);
+    if (review && !await review(prepared.counts)) return null;
+    const importProgress = typeof openPublishProgressModal === 'function' ? openPublishProgressModal(prepared.requiredPaths.length || 1, {
+        title: 'ZIP を復元中 / Restoring ZIP', subtitle: '原本を保存しています。中断時はこの復元で作成した一時ファイルを回収します。',
+        cancelLabel: importController ? '中断 / Cancel' : null
+    }) : null;
+    if (importProgress && importProgress.setCancelHandler && importController) importProgress.setCancelHandler(() => importController.abort());
+    const progressCallback = options.onProgress;
+    options.onProgress = count => { if (importProgress) importProgress.update(count, prepared.requiredPaths.length || 1); if (progressCallback) progressCallback(count); };
+    try { return await ProjectArchive.withImport(ProjectStorage, async archiveStorage => {
     // Reuse an available archive ID on offline recovery so the separately
     // backed-up MRM usage history still points at its original local project.
     // A second import remains a separate project and never replaces existing data.
@@ -21573,7 +21591,7 @@ async function importZipFile(file) {
             }
             const blob = await f.async('blob');
             const blobId = uid('blob');
-            await ProjectStorage.putBlob({
+            await archiveStorage.putBlob({
                 id: blobId, blob,
                 mime: mimeHint || guessMimeFromPath(relPath),
                 filename: fnameHint || (relPath.split('/').pop() || ''),
@@ -21614,6 +21632,7 @@ async function importZipFile(file) {
                         filename: fname,
                         sourceFileId: cmp.sourceFileId || null,
                         compoundMeta: cmp.compoundMeta || null,
+                        archiveProvenance: ProjectArchive.provenance(cmp.archiveProvenance, 'legacy-derived-csv'),
                         // この経路は msiSeries を直接組むので addMsiLayer の
                         // inheritedBake を通らない。ZIP に記録された設定を復元する
                         // (無ければ undefined = 既定の robust)。
@@ -21642,6 +21661,7 @@ async function importZipFile(file) {
                     colIdx: p.colIdx, annotation: p.annotation,
                     filename: p.filename, sourceFileId: p.sourceFileId || null,
                     compoundMeta: p.compoundMeta || null,
+                    archiveProvenance: ProjectArchive.provenance(p.archiveProvenance, 'legacy-v2-file'),
                     statMax: p.statMax, rasterW: p.rasterW, rasterH: p.rasterH,
                     rawRange: p.rawRange, rawMean: p.rawMean,
                     rawTrueMax: p.rawTrueMax, rawDispMax: p.rawDispMax,
@@ -21659,6 +21679,7 @@ async function importZipFile(file) {
                     func: r.func, channel: r.channel,
                     filename: r.filename, sourceFileId: r.sourceFileId || null,
                     compoundMeta: r.compoundMeta || null,
+                    archiveProvenance: ProjectArchive.provenance(r.archiveProvenance, 'legacy-v2-file'),
                     rasterW: r.rasterW, rasterH: r.rasterH,
                     rawRange: r.rawRange, rawMean: r.rawMean,
                     rawTrueMax: r.rawTrueMax, rawDispMax: r.rawDispMax,
@@ -21721,7 +21742,7 @@ async function importZipFile(file) {
                 }
                 const blob = await f.async('blob');
                 const blobId = uid('blob');
-                await ProjectStorage.putBlob({
+                await archiveStorage.putBlob({
                     id: blobId,
                     blob,
                     mime: mimeHint || guessMimeFromPath(relPath),
@@ -21802,7 +21823,7 @@ async function importZipFile(file) {
             if (!blobId) {
                 const blob = await zip.file(item.sourcePath).async('blob');
                 blobId = uid('blob');
-                await ProjectStorage.putBlob({ id: blobId, blob, mime: item.mime || blob.type,
+                await archiveStorage.putBlob({ id: blobId, blob, mime: item.mime || blob.type,
                     filename: item.filename || item.sourcePath.split('/').pop() });
                 mediaByPath.set(item.sourcePath, blobId);
             }
@@ -21818,9 +21839,12 @@ async function importZipFile(file) {
     if (offline) {
         detachOfflineProject(newProject);
     }
-    await ProjectStorage.putProject(newProject, { createOnly: true });
+    await archiveStorage.putProject(newProject, { createOnly: true });
     await App.openProject(newProject.id);
-    showToast('Imported: ' + newProject.displayName);
+    showToast('Imported: ' + newProject.displayName + '\n' + ProjectArchive.summary(prepared.counts), 10000);
+    return newProject;
+    }, options);
+    } finally { if (importProgress) importProgress.close(); }
 }
 
 // =============================================================
@@ -23740,6 +23764,7 @@ const App = {
     async init() {
         if (this.offline) setupOfflineViewer();
         await ProjectStorage.open();
+        await ProjectArchive.recoverImports(ProjectStorage);
         // Ask the browser to keep our IDB out of its automatic eviction
         // pool. The Promise resolves to true / false depending on the
         // origin's eligibility — both are fine, we just want to opt in
@@ -25359,6 +25384,7 @@ const App = {
                         blobId,
                         colIdx: f.colIdx,
                         annotation: label,
+                        archiveProvenance: ProjectArchive.registeredSource(),
                         filename: mainFile.name || 'data.parquet',
                         sourceFileId,
                         compoundMeta: f.meta,

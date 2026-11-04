@@ -102,6 +102,7 @@ function context(offline, includeOriginals = false) {
       otsuBgRemove: true, otsuStrength: 0.35, otsuManualThreshold: 1.25 },
     blobs, projects, storage, tx: storage.tx,
   });
+  require('./archive_test_support.cjs').install(ctx);
   vm.runInContext('let _exportInProgress = false;\n' + [
     'detachOfflineProject', 'sanitizeStorageKeySegment', 'guessMimeFromPath', 'remapRoiGeometry',
     'roiMediaForTransport', 'roiMediaReadOriginal', 'roiMediaPublicItem', 'exportProjectAsZip', 'importZipFile',
@@ -240,4 +241,5 @@ async function main() {
   }
   console.log('ZIP compatibility regression: PASS (4 mode pairs, original bytes, overlay ownership, atomic concurrent recovery, rollback, legacy archives)');
 }
-main().catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });
+module.exports = {context, MemoryZip, fixture};

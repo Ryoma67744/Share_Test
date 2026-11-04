@@ -229,6 +229,11 @@ async function main() {
     for (const value of ['first.raw', 'second.raw', 'DAY_ONE', 'DAY_TWO', 'Common method']) {
         assert.ok(!acquisitionXml.includes(value), 'Molecule and section acquisition metadata is not exported: ' + value);
     }
+    const legacyQuality = fixture(2, 1);
+    legacyQuality.molecules[0].sections[0].qualityNote = 'Legacy CSV; original missing states unknown; reference statistics';
+    const qualityXml = (await unzip(legacyQuality)).packageXml;
+    assert.ok(qualityXml.includes('Legacy CSV; original missing states unknown; reference statistics'));
+    assert.ok(!qualityXml.includes('Project information'));
     const controller = new AbortController(); let pageProgress = 0;
     await assert.rejects(deck.create(fixture(8, 5), { type: 'nodebuffer', signal: controller.signal,
         onProgress(event) { if (event.phase === 'slides' && ++pageProgress === 3) controller.abort(); }

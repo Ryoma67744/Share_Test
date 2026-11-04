@@ -1,6 +1,7 @@
 'use strict';
 const assert = require('node:assert/strict');
 const report = require('../viewer/project-report-app.js');
+const Archive = require('../viewer/project-archive.js');
 
 function fixture() {
     const makeEntry = (id, meta = {}) => ({ blobId: id, kind: 'txt', compoundMeta: { base: 'Dopamine',
@@ -658,6 +659,16 @@ const tests = [
         assert.equal(JSON.stringify({ input, entries }).includes('https://storage.example/'), false);
         f.sections[0].msiSeries.MSI_DA.sourceUrl = 'https://storage.example/replaced.parquet';
         assert.throws(input.assertCurrent, { code: 'REPORT_SOURCE_CHANGED' });
+    }],
+    ['legacy quality is public, stable, and independent from voltage metadata', async () => {
+        const f = sharedFixture();
+        f.sections[0].msiSeries.MSI_DA.archiveProvenance = {version: 1, basis: 'legacy-derived-csv', background: 'drop'};
+        const input = report.createAdapter(f.hooks), entries = await input.molecules[0].loadEntries();
+        assert.equal(entries[0].archiveProvenance.basis, 'legacy-derived-csv');
+        assert.match(entries[0].qualityNote, /background removal selected/);
+        assert.equal(JSON.stringify(entries[0].archiveProvenance).includes('ce'), false);
+        f.sections[0].msiSeries.MSI_DA.archiveProvenance = Archive.registeredSource();
+        assert.throws(input.assertCurrent, {code: 'REPORT_SOURCE_CHANGED'});
     }],
     ['report filename is portable', async () => {
         assert.equal(report.safeFileName('../測定:<project>?'), '.._測定__project___report.pptx');

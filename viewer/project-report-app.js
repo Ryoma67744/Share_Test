@@ -185,7 +185,7 @@
                 const scientificId = moleculeIdentity(key, meta);
                 if (meta.ce != null && meta.cv != null && Number.isFinite(Number(meta.ce)) && Number.isFinite(Number(meta.cv)))
                     voltagePairs.push([Number(meta.ce), Number(meta.cv)]);
-                const job = { state, key, entry, image: (section.images || {})[key], scientificId,
+                const job = { state, key, entry, archiveProvenance: copy(entry && entry.archiveProvenance), image: (section.images || {})[key], scientificId,
                     registeredBase: sourceMeta(entry, key).base,
                     source: sourceSignature(state.panel, key, entry), meta: viewer ? viewerMeta(key, meta, sourceMeta(entry, key).base) : meta,
                     transform: copy(hooks.transform ? hooks.transform(section) : identity()),
@@ -252,6 +252,7 @@
                 const section = job.state.section;
                 if ((section.msiSeries || {})[job.key] !== job.entry || (section.images || {})[job.key] !== job.image
                     || sourceSignature(job.state.panel, job.key, job.entry) !== job.source
+                    || JSON.stringify(job.entry && job.entry.archiveProvenance) !== JSON.stringify(job.archiveProvenance)
                     || moleculeIdentity(job.key, liveMeta(job.entry, job.key)) !== job.scientificId) throw staleError();
             }
         }
@@ -260,7 +261,9 @@
             const { section, panel } = job.state;
             const result = { sectionId: section.id, name: sectionName(section),
                 transform: copy(job.transform), pixelPitch: copy(job.pixelPitch), metadata: copy(job.meta),
-                stats: { mean: null, max: null, n: null } };
+                stats: { mean: null, max: null, n: null },
+                archiveProvenance: root.ProjectArchive ? root.ProjectArchive.provenance(job.archiveProvenance) : null,
+                qualityNote: root.ProjectArchive ? root.ProjectArchive.qualityLabel(job.archiveProvenance) : '' };
             if (!job.entry || (!job.entry.blobId && !job.entry.sourceUrl)) {
                 result.missingReason = '元の数値データが登録されていません。';
             } else if (!panel || typeof panel.ensureMsiLayerLoaded !== 'function') {

@@ -66,6 +66,7 @@ function context(extra = {}) {
       publicUrl: (_bucket, path) => 'https://test.invalid/' + path },
     uploads: [], records, ...extra,
   });
+  require('./archive_test_support.cjs').install(ctx);
   const names = ['sanitizeStorageKeySegment', 'storageExtOf', 'roiMediaForTransport', 'roiMediaReadOriginal',
     'roiMediaPublicItem', 'roiMediaRegistryFromDoc', 'exportProjectAsZip', 'importZipFile', '_publishCoreInner'];
   vm.runInContext('let _exportInProgress = false;\n' + names.map(n => fn(n)).join('\n'), ctx);
@@ -104,7 +105,7 @@ async function main() {
   missing.records.delete('original-blob');
   await missing.exportProjectAsZip();
   assert.equal(missing.exported, undefined);
-  assert.match(missing.alerts[0], /ROI写真の原本がありません/);
+  assert.match(missing.alerts[0], /必要な原本がありません/);
   await assert.rejects(() => missing._publishCoreInner(missing.App.project, { slug: 'test' }, 'pw', { silent: true }), /ROI写真の原本/);
   assert.equal(missing.published, undefined);
 

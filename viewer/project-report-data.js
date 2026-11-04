@@ -305,6 +305,7 @@
         }) : null;
         molecule.sections.push({sectionId: entry.sectionId, name: text(entry.name), ...stats,
           image, missingReason: state.error, pixelPitch: entry.pixelPitch || null,
+          archiveProvenance: metadataCopy(entry.archiveProvenance || null), qualityNote: text(entry.qualityNote),
           metadata: metadataCopy(entry.metadata || {})});
       }
       result.molecules.push(molecule);

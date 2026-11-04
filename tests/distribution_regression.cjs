@@ -9,6 +9,7 @@ const { createManifest } = require('../offline/make-manifest.cjs');
 const { verifyPackage } = require('../offline/server.cjs');
 const JSZip = require('../vendor/jszip.min.js');
 const root = path.resolve(__dirname, '..');
+const publicDocs = ['docs/EXP_EDITOR.md', 'docs/LOCAL_STORAGE_UPGRADE.md', 'docs/ARCHIVE_COMPATIBILITY.md', 'docs/ARCHIVE_COMPATIBILITY.en.md'];
 const mrmResources = ['mrm/exp-core.mjs', 'mrm/exp-editor.mjs', 'mrm/exp-editor.css', 'mrm/exp-library-import.mjs', 'docs/EXP_EDITOR.md'];
 const commit = '1234567890abcdef1234567890abcdef12345678';
 function put(dir, rel, data) {
@@ -75,11 +76,12 @@ async function main() {
     assert.match(web.buildInfo.version, /^v\d{4}-\d{2}-\d{2}\.\d+$/);
     assert.equal(appConfiguration(web.out).mode, 'online');
     assertProjectBaseResources(web.out);
+    for (const guide of publicDocs) assert.ok(web.files.includes(guide), 'web includes user guide: ' + guide);
     for (const resource of mrmResources) assert.ok(web.files.includes(resource), 'web includes MRM editor asset: ' + resource);
     for (const rel of sourceFiles) assert.deepEqual(fs.readFileSync(path.join(web.out, rel)), fs.readFileSync(path.join(root, rel)), 'web copies source bytes: ' + rel);
     assert.ok(web.files.includes('.nojekyll') && web.files.includes('vendor/SOURCES.json'));
     assert.ok(web.files.includes('project-store-safety.js') && web.files.includes('docs/LOCAL_STORAGE_UPGRADE.md'));
-    assert.ok(!web.files.some(file => /^(?:runtime|tests|tools|connector)\//.test(file) || (file.startsWith('docs/') && !['docs/EXP_EDITOR.md','docs/LOCAL_STORAGE_UPGRADE.md'].includes(file)) || /offline-smoke|\.exe$|\.bat$|\.xlsx$|\.parquet$|\.zip$/.test(file)), 'web has no development fixtures or executable runtime');
+    assert.ok(!web.files.some(file => /^(?:runtime|tests|tools|connector)\//.test(file) || (file.startsWith('docs/') && !publicDocs.includes(file)) || /offline-smoke|\.exe$|\.bat$|\.xlsx$|\.parquet$|\.zip$/.test(file)), 'web has no development fixtures or executable runtime');
     assert.ok(!web.files.includes('offline/server.cjs'));
     const webSnapshot = snapshot(web.out);
     put(web.out, 'stale-generated.txt', 'stale');
@@ -112,7 +114,7 @@ async function main() {
     for (const rel of sourceFiles.filter(file => file !== 'runtime-config.js')) {
       assert.deepEqual(fs.readFileSync(path.join(offline.out, rel)), fs.readFileSync(path.join(web.out, rel)), 'shared app/vendor bytes: ' + rel);
     }
-    assert.ok(!offline.files.some(file => /offline-smoke|^tests\/|^tools\//.test(file) || (file.startsWith('docs/') && !['docs/EXP_EDITOR.md','docs/LOCAL_STORAGE_UPGRADE.md'].includes(file))));
+    assert.ok(!offline.files.some(file => /offline-smoke|^tests\/|^tools\//.test(file) || (file.startsWith('docs/') && !publicDocs.includes(file))));
     assert.deepEqual(fs.readFileSync(path.join(offline.out, 'runtime/node.exe')), fakeRuntime);
     const bat = fs.readFileSync(path.join(offline.out, 'START_OFFLINE.bat'), 'utf8');
     assert.ok(bat.includes(fixtureLock.runtime.sha256));

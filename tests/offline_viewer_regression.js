@@ -152,6 +152,7 @@ async function main() {
       } },
     App: { panels: new Map(), openProject: async () => {}, otsuBgRemove: false, otsuStrength: 0 },
   });
+  require('./archive_test_support.cjs').install(transport);
   vm.runInContext('let _exportInProgress = false;\n' + [
     'detachOfflineProject', 'sanitizeStorageKeySegment', 'guessMimeFromPath', 'remapRoiGeometry',
     'roiMediaForTransport', 'roiMediaReadOriginal', 'roiMediaPublicItem', 'exportProjectAsZip', 'importZipFile',
@@ -255,7 +256,7 @@ async function main() {
   blobs.delete('image');
   await transport.exportProjectAsZip();
   assert.equal(transport.exported, undefined);
-  assert.match(transport.alerts[0], /HE\/IF 原本がありません/);
+  assert.match(transport.alerts[0], /必要な原本がありません/);
   console.log('Offline viewer regression: PASS');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });
