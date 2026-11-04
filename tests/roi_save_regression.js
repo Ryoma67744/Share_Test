@@ -60,6 +60,7 @@ async function main() {
       return value ? structuredClone(value) : null;
     },
     async deleteProject(id) { deletes++; stored.delete(id); },
+    async releaseProject() {},
   };
   const appStart = html.indexOf('const App = {');
   const appEnd = html.indexOf('\n};', appStart);

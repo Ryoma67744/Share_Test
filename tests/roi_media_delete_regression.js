@@ -97,26 +97,12 @@ async function main() {
       meta: { roiMedia: { version: 1, items: [{ blobId: 'photo-only' }, { blobId: 'photo-shared' }] } } },
     { id: 'keep', sections: [], meta: { roiMedia: { version: 1, items: [{ blobId: 'photo-shared' }] } } },
   ];
-  const db = { transaction(names, mode) {
-    transactions.push([names, mode]);
-    const tx = { objectStore(name) { return {
-      delete: id => deleted.push([name, id]),
-      openCursor() {
-        const request = {}; let index = 0;
-        const advance = () => queueMicrotask(() => {
-          const record = rows[index++];
-          request.onsuccess({ target: { result: record ? { value: record, continue: advance } : null } });
-          if (!record) queueMicrotask(() => tx.oncomplete());
-        });
-        advance(); return request;
-      },
-    }; } };
-    return tx;
-  } };
-  ctx.open = async () => db;
+  const memory = require('./helpers/memory-idb.cjs')({projects:new Map(rows.map(p=>[p.id,p]))});
+  const safety = require('../project-store-safety.js').create({transaction:memory.transaction,indexRowFor:p=>({id:p.id})});
+  ctx.storeSafety = () => safety;
   vm.runInContext(fn('deleteProject', '    '), ctx);
   await ctx.deleteProject('remove');
-  assert.deepEqual(copy(transactions), [[['projects', 'project_index', 'blobs'], 'readwrite']]);
+  deleted.push(...memory.operations.filter(op=>op.op==='delete').map(op=>[op.store,op.key]));
   assert.deepEqual(deleted, [['projects', 'remove'], ['project_index', 'remove'],
     ['blobs', 'HE-only'], ['blobs', 'raw-only'], ['blobs', 'photo-only']]);
   assert.ok(!deleted.some(([, id]) => id === 'photo-shared'), 'Deleting a local project must retain another project’s original');

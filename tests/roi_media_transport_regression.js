@@ -178,19 +178,13 @@ async function main() {
   vm.runInContext(fn('collectBlobIds', '    '), gc);
   assert.deepEqual([...gc.collectBlobIds(project())], ['original-blob']);
   assert.deepEqual([...gc.collectBlobIds({ meta: project().meta })], ['original-blob']);
-  const deleted = [], remaining = project();
-  const store = { delete: async id => { deleted.push(id); }, openCursor() {
-    const req = {};
-    queueMicrotask(() => req.onsuccess({ target: { result: { value: remaining,
-      continue: () => queueMicrotask(() => req.onsuccess({ target: { result: null } })) } } }));
-    return req;
-  } };
-  const target = project();
-  target.sections[0].images = { HE: { blobId: 'exclusive-blob' } };
-  Object.assign(gc, { getProject: async () => target, tx: async () => ({ objectStore: () => store }),
-    txDone: () => Promise.resolve(), pr: async x => x });
+  const remaining=project(),target=project();target.id='deleted-project';
+  target.sections[0].images={HE:{blobId:'exclusive-blob'}};
+  const memory=require('./helpers/memory-idb.cjs')({projects:new Map([[target.id,target],[remaining.id,remaining]])});
+  gc.storeSafety=()=>require('../project-store-safety.js').create({transaction:memory.transaction,indexRowFor:p=>({id:p.id})});
   vm.runInContext(fn('deleteProject', '    '), gc);
   await gc.deleteProject('deleted-project');
+  const deleted=memory.operations.filter(op=>op.store==='blobs'&&op.op==='delete').map(op=>op.key);
   assert.ok(deleted.includes('exclusive-blob'));
   assert.ok(!deleted.includes('original-blob'), 'Another project still using a photo must retain its original');
   console.log('ROI media transport regression: PASS');

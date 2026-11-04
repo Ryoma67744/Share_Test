@@ -2485,7 +2485,7 @@ function testWorkerAssetsFollowApplicationBase() {
     }
   }
   const scriptSources = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(scriptSources.slice(0, 3), ['../runtime-config.js', '../app-runtime.js', '../offline/offline.js']);
+  assert.deepEqual(scriptSources.slice(0, 4), ['../runtime-config.js', '../app-runtime.js', '../project-store-safety.js', '../offline/offline.js']);
   assert.ok(scriptSources.includes('../vendor/supabase.min.js'));
   assert.ok(!scriptSources.some(src => src.startsWith('/') || /^https?:/.test(src)), 'viewer assets must work under a project Pages path');
   assert.doesNotMatch(html, /window\.SUPABASE_(?:URL|ANON_KEY)\s*=/, 'shared runtime owns cloud configuration');

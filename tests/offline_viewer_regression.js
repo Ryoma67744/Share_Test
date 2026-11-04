@@ -200,7 +200,7 @@ async function main() {
     window: { DESI_OFFLINE: true }, location: localLocation,
     history: { state: { retained: true }, replaceState: (_state, _title, next) => { localLocation.href = new URL(next, localLocation.href).href; } },
     document: { body: { classList: { remove() {} } }, getElementById: () => node },
-    ProjectStorage: { getProject: async id => clone(savedProjects.get(id) || null),
+    ProjectStorage: { releaseProject: async () => {}, getProject: async id => clone(savedProjects.get(id) || null),
       putProject: async project => savedProjects.set(project.id, clone(project)), deleteProject: async id => savedProjects.delete(id) },
     localStorage: { setItem: (key, value) => lastProject.set(key, value), removeItem: key => lastProject.delete(key) },
     SharePreview: { isOpen: () => false }, _roiRawGridCache: new Map(), parquetReleaseAll() {},

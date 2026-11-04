@@ -63,6 +63,8 @@ The management page is gated by an admin password.
 | **Server only** | Only on the server (published from another PC, or local copy was deleted) |
 | **空** (empty) | The local record has no sections at all (created but never populated). Opening it only ever shows "no layers" |
 
+Local copies sharing a server slug are listed separately by local ID. Matching display names never automatically link a project to the server. Server imports create a new copy and retain existing local copies. Local + Server indicates a link, not verified equality of content.
+
 ---
 
 ## 4. Creating a new project
@@ -170,4 +172,13 @@ A small **`v:YYYY-MM-DD-rN`** badge is permanently visible in the bottom-right c
 | `Open (master)` keeps asking for the master password | Expected on the first `?import=<slug>` open — it is the same password that unlocks the manager |
 | `Open (master)` bounces back to the list after entering a password | Older builds asked for the project's own **admin password**. Projects published without one have no correct answer, so every attempt bounced. Reload to get the current build, or set an admin password from `🔑 パスワード` |
 | The viewer says "no layers" right after opening | Check for the **空** (empty) badge in the list — that record was created but never populated. Open the one that holds the data |
-| The same project appears twice in the list | Duplicate folder-tree entries written by an older build. The current build collapses them to one row, and one folder operation pushes the cleanup to the server |
+| Multiple rows have the same name or share slug | Different local IDs are separate preserved copies. Every copy is listed; compare the IDs and contents before deleting any |
+
+
+## 11. Save conflicts and recoverable drafts
+
+When multiple tabs edit the same local project, the first committed version is preserved. A save from an older revision creates a durable **回復用下書き** (recovery draft) instead of replacing it. Content is not merged automatically. Use the bottom-right recovery button and **別コピーとして復元** (restore as a separate copy) to create an independent project without its previous share link or passwords. Compare it with the saved version. If storage is full and the draft itself cannot be committed, a save error is shown; keep the tab open and secure your originals or ZIP backup.
+
+Deleting a project in another tab retains originals referenced by an editing tab, recovery draft, or running job. Data retained after an abnormal tab exit is not removed by an expiry timer. The recovery list can restore a closed tab's snapshot or explicitly discard its retention using **下書き・保持を破棄**. Discarding does not remove originals needed by another project or job. Live editing tabs cannot have their retention discarded.
+
+Before the DB v5 upgrade, finish saves in old tabs, export important projects as ZIP, then close old tabs. Reload all pages after updating. Old writers are fenced out; do not delete the database to fix a version error. See [Local storage upgrade procedure](docs/LOCAL_STORAGE_UPGRADE.md) for rollout and rollback notes.
