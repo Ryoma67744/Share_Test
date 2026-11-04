@@ -84,7 +84,9 @@ function fixture() {
     document:{createElement:tag => tag === 'canvas' ? createCanvas(1,1) : element(tag)},
   },['msiSourceReference','msiRoiGeometryMeta','msiValidRoiGeometry','msiLayerSourceGeometry',
     'roiPolygonForDisplay','msiAxisInterpolate','msiLegacyRasterPointToDisplay','msiDisplayPhysicalPitch',
-    'msiRawFallbackMax','msiValueEval','msiWindowEval']);
+    'msiRawFallbackMax','msiValueEval','msiWindowEval','buildMsiGrid','buildLegacyMsiGrid',
+    'createMsiSourceGeometry','msiSourceCell','msiSourceRow','msiSourceStats','calcStats',
+    'roiContainsSourcePoint','pointInPolygon']);
   vm.runInContext('const App = _testApp; const _activeColormapName = "TestMap";',context);
   const start = html.indexOf('    getMsiWindow(key, rawRange, dispMax) {');
   assert.ok(start > 0);
@@ -164,6 +166,52 @@ async function adapterChecks() {
   assert.equal(adapter.editable(shared,roi),false);
   assert.equal(adapter.editable(project,{...roi,_collab:true}),false);
   assert.equal(ctrl.msiSeries.MSI_A.rawRange[1],20);
+}
+
+async function registeredCalibrationChecks() {
+  const f = fixture(), panel = f.app.panels.get('toxo4'), key = 'MSI_A', rows = [], lines = ['x,y,v'];
+  const ent = f.toxo.msiSeries[key];
+  ent.kind = 'txt';
+  for (let y=0;y<12;y++) for (let x=0;x<16;x++) {
+    const coordinates = [(-12.3456+x*0.030005).toPrecision(6),(-4.3+y*0.03).toPrecision(6)];
+    const value = y*16+x+1;
+    lines.push([...coordinates,value].join(','));
+    rows.push(f.context.msiSourceRow(coordinates[0],coordinates[1],String(value),rows.length));
+  }
+  const original = lines.join('\n')+'\n';
+  f.blobs.set(ent.blobId,new Blob([original]));
+  const geometry = f.context.createMsiSourceGeometry(rows,ent);
+  const raster = panel.msiValueRasters.get(key);
+  raster.sourceGeometry = geometry;
+  raster.values = Float64Array.from(rows,row=>row.v);
+  f.roi.geometryBySection.toxo4.displayGeometry = plain(geometry.displayGeometry);
+  assert.deepEqual([geometry.displayGeometry.W,geometry.displayGeometry.H],[16,12]);
+  assert.equal(f.context.resolveMsiCoordinateCalibration(f.toxo,key).status,'unknown',
+    'Rounded TXT coordinates reproduce the old coordinate-gated bar rejection');
+  const extraction = html.indexOf('async function extractRoiRawFromSection(');
+  vm.runInContext(html.slice(extraction,html.indexOf('\n}',extraction)+2),f.context);
+  f.context._ensureRoiRawGrid = async () => ({rows,sourceGeometry:geometry});
+  const quantitative = async () => {
+    const roi = await f.context.extractRoiRawFromSection(panel,key,f.roi.polysBySection.toxo4,f.roi);
+    return plain({roi,roiStats:f.context.calcStats(roi.values),sourceStats:f.context.msiSourceStats(rows)});
+  };
+  const expected = await quantitative(), sourceBefore = JSON.stringify({rows,geometry,values:Array.from(raster.values)});
+  assert.equal(expected.roi.unavailable,false);
+  assert.ok(expected.roi.values.length>0,'The source-coordinate ROI has quantitative measurement rows');
+  for (const pitch of [null,{x:'30',y:'3e1'},{x:'30',y:'60'}]) {
+    f.toxo.meta.world_coords.msi_um_per_px = pitch;
+    const saved = JSON.stringify(f.project), adapter = f.api.createAdapter(f.project,f.roi);
+    const frame = await adapter.loadMsi(f.project,f.roi,'toxo4',key);
+    assert.deepEqual(plain(frame.pixelPitch),pitch ? {x:30,y:Number(pitch.y)} : null);
+    const rendered = msi.draw(createCanvas(400,300),frame,{width:400,height:300});
+    assert.equal(!!rendered.scaleBar,!!pitch,'Registered calibration controls the comparison bar');
+    if (pitch) assert.ok(Math.abs(rendered.scaleBar.pixels*rendered.scaleBar.umPerPixel-rendered.scaleBar.length)<1e-8,
+      'Comparison bar represents its labelled physical distance after image fitting');
+    assert.deepEqual(await quantitative(),expected,'Calibration and comparison rendering do not affect ROI membership or source-row statistics');
+    assert.equal(JSON.stringify(f.project),saved,'Comparison does not rewrite stored strings, ROI geometry or alignment');
+    assert.equal(JSON.stringify({rows,geometry,values:Array.from(raster.values)}),sourceBefore,'Original coordinates and intensity raster remain unchanged');
+    assert.equal(await f.blobs.get(ent.blobId).text(),original,'Original TXT bytes are preserved');
+  }
 }
 
 async function asynchronousChecks() {
@@ -401,7 +449,7 @@ function listHooks() {
 }
 
 (async () => {
-  await preflight(); await adapterChecks(); await asynchronousChecks(); await legacyPhotoSourceChecks();
+  await preflight(); await adapterChecks(); await registeredCalibrationChecks(); await asynchronousChecks(); await legacyPhotoSourceChecks();
   await persistenceAndUnloadChecks(); listHooks();
   console.log('ROI media app regression: preflight, section/source association, display isolation, async guards, persisted rollback, unload protection and ROI list entry points passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

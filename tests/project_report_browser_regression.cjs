@@ -20,11 +20,12 @@ const privateMarkers = [...voltageMarkers,
 function sharedFixture() {
   const sourcePath = 'synthetic/PRIVATE_SOURCE_SENTINEL.csv';
   const rows = ['x,y,signal_A,signal_B'];
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
-    const value = y * 8 + x + 1;
-    // RAW float32 coordinates round an otherwise uniform 70 µm grid. That
-    // serialization error must not make its registered calibration disappear.
-    rows.push([Math.fround(10 + x * 0.07), Math.fround(10 + y * 0.07), value, value * 2].join(','));
+  for (let y = 0; y < 8; y++) for (let x = 0; x < 16; x++) {
+    const value = y * 16 + x + 1;
+    // Synthetic rounded TXT coordinates intentionally fail the old RAW-only
+    // tolerance. Registered 30 µm/pixel is authoritative, not inferred from
+    // the coordinate spelling or from the 0.030005 source-coordinate step.
+    rows.push([(-12.3456 + x * 0.030005).toPrecision(6), (-4.3 + y * 0.03).toPrecision(6), value, value * 2].join(','));
   }
   const series = {};
   for (const [index, column] of ['signal_A', 'signal_B'].entries()) {
@@ -49,7 +50,8 @@ function sharedFixture() {
       meta: {raw: {instrument: 'PRIVATE_RAW_SENTINEL', msMethod: 'PRIVATE_METHOD_SENTINEL',
         ce: 137.875, cv: 246.625,
         source: {coneV: '351.3125', msCe: '452.6875', msmsCe: '553.8125', capillaryKv: '0.654321'}},
-        world_coords: {msi_um_per_px: {x: 70, y: 70}}},
+        displayTransform: {version: 2, baseOrientation: 'native-raster'},
+        world_coords: {msi_um_per_px: {x: '30', y: '3e1'}}},
       storage_paths: {images: {}, msiSeries: series}
     }]
   }};
@@ -80,7 +82,7 @@ function assertImageReportPages(deck, detailCount, context) {
   assert.doesNotMatch(deck.xml, /Project information/, context + ' omits project information pages');
 }
 
-function assertNativeScaleBars(deck, context, label = '50 µm') {
+function assertNativeScaleBars(deck, context, label = '50 µm', physicalWidthUm) {
   const slideSize = deck.xml.match(/<p:sldSz cx="(\d+)" cy="(\d+)"/);
   assert.ok(slideSize, context + ' declares slide dimensions');
   for (const xml of deck.slideXml.slice(1)) {
@@ -98,7 +100,34 @@ function assertNativeScaleBars(deck, context, label = '50 µm') {
     assert.ok(position && Number(position[1]) + Number(size[1]) <= Number(slideSize[1])
       && Number(position[2]) + Number(size[2]) <= Number(slideSize[2]), context + ' scale bar stays inside the slide');
     assert.match(bar, /<a:solidFill><a:srgbClr val="000000"/, context + ' black scale bar is visible on the white detail page');
+    if (physicalWidthUm) {
+      const pictures = xml.match(/<p:pic>[\s\S]*?<\/p:pic>/g) || [];
+      assert.equal(pictures.length, 1, context + ' detail contains one calibrated source image');
+      const imageSize = pictures[0].match(/<a:ext cx="(\d+)" cy="(\d+)"/);
+      assert.ok(imageSize, context + ' image declares its actual slide dimensions');
+      const lengthUm = Number.parseFloat(label) * (label.endsWith(' mm') ? 1000 : 1);
+      assert.ok(Math.abs(Number(size[1]) / Number(imageSize[1]) - lengthUm / physicalWidthUm) < 2 / Number(imageSize[1]),
+        context + ' native bar/image ratio equals labelled distance / registered physical image width');
+    }
   }
+}
+
+async function sharedSourceSnapshot(load) {
+  const section = App.project.sections[0], panel = App.panels.get(section.id), expected = [];
+  for (const key of Object.keys(section.msiSeries)) {
+    if (load && !await panel.ensureMsiLayerLoaded(key)) throw new Error('Shared synthetic numeric source failed to load');
+    const entry = section.msiSeries[key], raster = panel.msiValueRasters.get(key);
+    const record = await ProjectStorage.getBlob(entry.blobId);
+    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await record.blob.arrayBuffer())),
+      byte => byte.toString(16).padStart(2, '0')).join('');
+    expected.push({key, mean: msiQuantMean(entry), max: msiMaxIntensity(entry).value,
+      blobId: entry.blobId, storagePath: entry.storagePath, sourceHash: hash,
+      width: raster.W, height: raster.H, pitch: msiDisplayPhysicalPitch(section, key),
+      sourceGeometry: JSON.stringify(raster.sourceGeometry), values: Array.from(raster.values)});
+  }
+  return {expected, projectId: App.project.id, settings: JSON.stringify(section.meta),
+    rois: JSON.stringify(App.project.rois),
+    metadata: JSON.stringify(Object.values(section.msiSeries).map(entry => entry.compoundMeta))};
 }
 
 function assertNoVoltages(deck, context) {
@@ -168,22 +197,15 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
     const ceVisibility = await page.locator('#method-table th[data-sort-key="ce"]').evaluate(el => getComputedStyle(el).display);
     assert.equal(ceVisibility === 'none', role === 'viewer', 'screen measurement-condition visibility matches the session role');
 
-    const before = await page.evaluate(async () => {
-      const section = App.project.sections[0], panel = App.panels.get(section.id);
-      const expected = [];
-      for (const key of Object.keys(section.msiSeries)) {
-        if (!await panel.ensureMsiLayerLoaded(key)) throw new Error('Shared synthetic numeric source failed to load');
-        const entry = section.msiSeries[key], raster = panel.msiValueRasters.get(key);
-        expected.push({key, mean: msiQuantMean(entry), max: msiMaxIntensity(entry).value,
-          blobId: entry.blobId, storagePath: entry.storagePath, values: Array.from(raster.values)});
-      }
-      // Wait for the parser's decode completion before taking the invariant
-      // snapshot. Export must not write the shared project or its source.
-      return {expected, projectId: App.project.id, settings: JSON.stringify(section.meta),
-        metadata: JSON.stringify(Object.values(section.msiSeries).map(entry => entry.compoundMeta))};
-    });
-    assert.deepEqual(before.expected.map(entry => [entry.mean, entry.max]), [[32.5, 64], [65, 128]],
+    // Decode before the invariant snapshot; exporting must not alter original
+    // bytes, the rounded coordinate geometry, numerical values or calibration.
+    const before = await page.evaluate(sharedSourceSnapshot, true);
+    assert.deepEqual(before.expected.map(entry => [entry.mean, entry.max]), [[64.5, 128], [129, 256]],
       'shared Storage CSV is parsed into authoritative source-row statistics');
+    for (const entry of before.expected) {
+      assert.deepEqual([entry.width, entry.height], [16, 8], 'Rounded TXT retains its measured raster dimensions');
+      assert.deepEqual(entry.pitch, {x: 30, y: 30}, 'Registered numeric strings are normalized without coordinate inference');
+    }
     let downloadCount = 0;
     page.on('download', () => downloadCount++);
     // Track completion without replacing authentication or generation behavior.
@@ -196,14 +218,7 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
       };
     });
     async function assertSharedUnchanged(stage) {
-      const after = await page.evaluate(() => {
-        const section = App.project.sections[0], panel = App.panels.get(section.id);
-        return {projectId: App.project.id, settings: JSON.stringify(section.meta),
-          metadata: JSON.stringify(Object.values(section.msiSeries).map(entry => entry.compoundMeta)),
-          expected: Object.keys(section.msiSeries).map(key => ({key, mean: msiQuantMean(section.msiSeries[key]),
-            max: msiMaxIntensity(section.msiSeries[key]).value, blobId: section.msiSeries[key].blobId,
-            storagePath: section.msiSeries[key].storagePath, values: Array.from(panel.msiValueRasters.get(key).values)}))};
-      });
+      const after = await page.evaluate(sharedSourceSnapshot, false);
       assert.deepEqual(after, before, stage + ' leaves shared source values, settings and metadata unchanged');
       assert.equal(await page.evaluate(() => App.shareMode.role), role, 'PPT export does not change the share role');
     }
@@ -217,7 +232,7 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
     }
     function assertSharedDeck(deck, includeCeCv) {
       assertImageReportPages(deck, 2, 'Shared ' + role);
-      assertNativeScaleBars(deck, 'Shared ' + role, '100 µm');
+      assertNativeScaleBars(deck, 'Shared ' + role, '100 µm', 16 * 30);
       for (const label of ['共有PPT合成プロジェクト', '共有乳酸', '共有切片A']) {
         assert.ok(deck.xml.includes(label), role + ' includes public registered label: ' + label);
       }
@@ -283,6 +298,79 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
     assert.deepEqual(external, [], role + ' makes no external request');
     assert.deepEqual(errors, [], role + ' has no browser exceptions');
   } finally { await context.close(); }
+}
+
+async function checkManualPixelCalibration(page) {
+  const projectId = await page.evaluate(async () => {
+    const section = App.project.sections[0], key = Object.keys(section.msiSeries)[0];
+    App.setActiveSection(section.id); App.setFocusCompoundKey(key);
+    if (!await App.panels.get(section.id).ensureMsiLayerLoaded(key)) throw new Error('Calibration fixture source unavailable');
+    return App.project.id;
+  });
+  const invariant = snapshot => ({expected:snapshot.expected.map(({pitch, ...entry})=>entry),
+    rois:snapshot.rois, metadata:snapshot.metadata});
+  const before = invariant(await page.evaluate(sharedSourceSnapshot, true));
+  const displayed = async (pitch, preview) => {
+    await page.waitForFunction(({pitch,preview}) => {
+      const panel = App.panels.get(App.project.sections[0].id);
+      const bar = preview ? document.querySelector('#share-preview-overlay [data-cell-scalebar]') : panel.dom.scalebar;
+      const caption = preview ? document.querySelector('#share-preview-overlay .cell-title') : panel.dom.label;
+      return bar && getComputedStyle(bar).display !== 'none' && bar.getBoundingClientRect().width > 0
+        && caption && caption.textContent.includes(pitch+'×'+pitch+' μm/px');
+    },{pitch,preview});
+    return page.evaluate(preview => {
+      const panel = App.panels.get(App.project.sections[0].id);
+      const bar = preview ? document.querySelector('#share-preview-overlay [data-cell-scalebar]') : panel.dom.scalebar;
+      const line = bar.querySelector('.bar'), text = bar.querySelector('.label').textContent;
+      const lengthUm = Number.parseFloat(text) * (/mm$/.test(text) ? 1000 : 1);
+      const width = line.getBoundingClientRect().width;
+      const rect = bar.getBoundingClientRect(), host = (preview ? bar.parentElement : panel.dom.host).getBoundingClientRect();
+      return {lengthUm,width,umPerScreenPixel:lengthUm/width,inside:rect.left>=host.left-1 && rect.right<=host.right+1
+        && rect.top>=host.top-1 && rect.bottom<=host.bottom+1};
+    },preview);
+  };
+  let previous;
+  for (const pitch of [30,60]) {
+    await page.locator('#tb-msi-um').click();
+    await page.getByRole('heading',{name:'MSI pixel size (μm/px)',exact:true}).waitFor({state:'visible'});
+    await page.locator('input[name="x"]').fill(String(pitch));
+    await page.locator('input[name="y"]').fill(String(pitch));
+    await page.locator('[data-modal-ok]').click();
+    const main = await displayed(pitch,false);
+    await page.locator('#btn-share-preview').click();
+    const preview = await displayed(pitch,true);
+    for (const view of [main,preview]) {
+      assert.ok(view.lengthUm>0 && view.width>0 && view.inside,'Manual calibration draws a visible bar inside its viewport');
+    }
+    if (previous) for (const name of ['main','preview']) {
+      const value = name==='main' ? main : preview;
+      assert.ok(Math.abs(value.umPerScreenPixel/previous[name].umPerScreenPixel-2)<0.002,
+        name+' ruler reflects 30 → 60 µm without changing image zoom');
+    }
+    previous = {main,preview};
+    await page.locator('[data-preview-close]').click();
+    const saved = await page.evaluate(async () => {
+      if (await App._flushSave()===false) throw new Error('Calibration save failed');
+      return (await ProjectStorage.getProject(App.project.id)).sections[0].meta.world_coords.msi_um_per_px;
+    });
+    assert.deepEqual(saved,{x:pitch,y:pitch},'Manual modal persists its calibration in real IndexedDB');
+    assert.deepEqual(invariant(await page.evaluate(sharedSourceSnapshot,false)),before,
+      'Manual calibration and Preview preserve original SHA-256, coordinates, intensities, ROI and statistics');
+  }
+  await page.reload();
+  await page.waitForFunction(id => typeof App!=='undefined' && App.project && App.project.id===id && App.panels.size>0,projectId);
+  await page.evaluate(async () => {
+    const section=App.project.sections[0],key=Object.keys(section.msiSeries)[0];
+    App.setActiveSection(section.id); App.setFocusCompoundKey(key);
+    if (!await App.panels.get(section.id).ensureMsiLayerLoaded(key)) throw new Error('Reloaded calibration source unavailable');
+  });
+  await displayed(60,false);
+  await page.locator('#btn-share-preview').click();
+  await displayed(60,true);
+  await page.locator('[data-preview-close]').click();
+  assert.deepEqual(invariant(await page.evaluate(sharedSourceSnapshot,true)),before,
+    'Reload keeps the original bytes, source geometry, ROI and source-row statistics');
+  console.log('Manual pixel calibration browser regression passed (30 → 60 µm, main/Preview DOM, IndexedDB save and reload).');
 }
 
 // The real viewer, parsers, IndexedDB and download flow run with synthetic data
@@ -360,6 +448,12 @@ async function main() {
     // Import populates visible layers and auto-Otsu asynchronously. Finish
     // those unrelated initial derivations before checking export invariance.
     await page.waitForFunction(() => App.project.sections.every(section => App._otsuIsFresh(section) && Array.isArray(section.meta.visibleLayers)));
+    if (process.env.PPT_REPORT_CALIBRATION_ONLY === '1') {
+      await checkManualPixelCalibration(page);
+      assert.deepEqual(external,[],'Manual calibration needs no external connection');
+      assert.deepEqual(errors,[],'Manual calibration and reload have no browser exceptions');
+      return;
+    }
     const expected = await page.evaluate(async () => {
       const project = App.project, section = project.sections[0];
       project.displayName = 'PPT検証 / project';
@@ -459,6 +553,9 @@ async function main() {
     assert.deepEqual(external, [], 'Works without external connections');
     assert.deepEqual(errors, [], 'No browser exceptions');
     if (process.env.PPT_REPORT_SAMPLE_PATH) await fs.writeFile(process.env.PPT_REPORT_SAMPLE_PATH, sampleDeck.bytes);
+    await checkManualPixelCalibration(page);
+    assert.deepEqual(external, [], 'Manual calibration and reload remain offline');
+    assert.deepEqual(errors, [], 'Manual calibration and reload introduce no browser exception');
     await page.close();
     serveOnlineConfig = true;
     assert.equal(logins.length, 0, 'Local master options do not authenticate again');

@@ -246,7 +246,7 @@ body.preview #panel-analysis { display:none !important; }
 body.splitting, body.splitting * { user-select:none !important; }
 body.splitting-h { cursor:col-resize !important; }
 body.splitting-v { cursor:row-resize !important; }
-.section-panel .viewer-host { position:relative; flex:1 1 auto; min-height:320px; background:#000; overflow:hidden; touch-action:none; }
+.section-panel .viewer-host { position:relative; flex:1 1 auto; min-height:0; background:#000; overflow:hidden; touch-action:none; }
 .section-panel .viewer-rot { position:absolute; inset:0; transform-origin:50% 50%; transform: translate(var(--vt-tx, 0px), var(--vt-ty, 0px)) rotate(calc(var(--vt-rot, 0deg) - 90deg)) scale(var(--vt-scale, 1)); will-change:transform; }
 .section-panel canvas.disp { position:absolute; image-rendering:pixelated; }
 .section-panel canvas.disp.smooth { image-rendering:auto; }
@@ -265,6 +265,7 @@ body.splitting-v { cursor:row-resize !important; }
     display:inline-block; height:4px; background:#0f172a; box-shadow:0 0 0 1px #fff;
 }
 .section-panel .msi-scalebar .label { white-space:nowrap; }
+.msi-scale-status { position:absolute; left:12px; bottom:10px; z-index:5; max-width:calc(100% - 24px); padding:3px 6px; background:rgba(0,0,0,.7); color:#eee; font-size:11px; pointer-events:none; }
 .section-panel .layer-bar { padding:4px 6px 0 6px; border-top:1px solid #f1f5f9; display:flex; flex-direction:column; gap:4px; }
 .section-panel .layer-file-group { border:1px solid #e5e7eb; border-radius:4px; padding:2px 4px; }
 .section-panel .layer-file-group > summary { cursor:pointer; font-size:11px; color:#334155; display:flex; align-items:center; gap:4px; user-select:none; outline:none; }
@@ -1846,9 +1847,43 @@ function normalizeMsiPhysicalPitch(value) {
     const x = number(value.x), y = number(value.y);
     return x !== null && y !== null ? { x, y } : null;
 }
-// Physical distance and legacy ROI correspondence are separate contracts.
-// Invalid intensity can invalidate an old ROI basis without changing distance.
+// Registered sizes calibrate the source raster's pixels. Coordinate rounding
+// is not a reason to reject that calibration. Only convert the raster sampling
+// resolution here; canvas fit, rotation and zoom are handled by each renderer.
 function resolveMsiPhysicalCalibration(section, key) {
+    const wc = section && section.meta && section.meta.world_coords;
+    const pitch = normalizeMsiPhysicalPitch(wc && wc.msi_um_per_px);
+    const result = (status, displayPitch, reason, sourceRef) => ({ status, displayPitch,
+        unit: 'um/display-pixel', registeredPitch: pitch, reason,
+        evidence: { basis: 'registered-raster-pixel', sourceRef: sourceRef || null } });
+    if (!pitch) return result('unknown', null, 'missing-or-invalid-calibration');
+    const ent = section && section.msiSeries && section.msiSeries[key];
+    const g = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section, key) : null;
+    if (!g) return ent && ['raw','parquet','txt','txt-analyte','xlsx'].includes(ent.kind)
+        ? result('pending', null, 'source-geometry-not-loaded')
+        : result('known', pitch, null);
+    if (ent && g.sourceRef && typeof msiSourceReference === 'function'
+        && g.sourceRef !== msiSourceReference(ent)) return result('conflict', null, 'source-changed', g.sourceRef);
+    const displayPitch = {};
+    for (const [axis, dimension] of [['x','W'], ['y','H']]) {
+        const sourceSize = g.legacy && g.legacy[dimension];
+        const displaySize = g.displayGeometry && g.displayGeometry[dimension];
+        if (!Number.isSafeInteger(sourceSize) || sourceSize < 1
+            || !Number.isSafeInteger(displaySize) || displaySize < 1
+            || (sourceSize !== displaySize && (sourceSize === 1 || displaySize === 1)))
+            return result('unknown', null, 'invalid-display-grid', g.sourceRef);
+        // buildMsiGrid retains the first/last pixel centres. Use the complete
+        // raster span (including missing scan lines), never the observed count.
+        displayPitch[axis] = sourceSize === displaySize ? pitch[axis]
+            : pitch[axis] * (sourceSize - 1) / (displaySize - 1);
+        if (!Number.isFinite(displayPitch[axis]) || !(displayPitch[axis] > 0))
+            return result('unknown', null, 'invalid-display-grid', g.sourceRef);
+    }
+    return result('known', displayPitch, null, g.sourceRef);
+}
+// Coordinate-derived scale validation remains independent of manual raster
+// calibration. HE automatic alignment keeps its existing conservative gate.
+function resolveMsiCoordinateCalibration(section, key) {
     const wc = section && section.meta && section.meta.world_coords;
     const pitch = normalizeMsiPhysicalPitch(wc && wc.msi_um_per_px);
     const result = (status, displayPitch, reason, sourceRef) => ({ status, displayPitch,
@@ -1875,7 +1910,7 @@ function resolveMsiPhysicalCalibration(section, key) {
         // RAW stage coordinates are float32: adjacent differences can jitter
         // even for a uniform scan. Check the complete axis against its endpoint
         // line with float32 rounding tolerance, capped at 0.1% of a pixel.
-        // Real nonuniform/ordinal spacing must still have no physical scale.
+        // Nonuniform/ordinal spacing must not lock HE alignment to this scale.
         const tolerance = Math.min(slope * 1e-3,
             Math.max(Math.abs(first[0]), Math.abs(last[0]), slope) * 2 ** -23);
         for (let i=1;i<knots.length;i++) {
@@ -1896,7 +1931,7 @@ function msiDisplayPhysicalPitch(section, key) {
     return resolveMsiPhysicalCalibration(section, key).displayPitch;
 }
 function msiCalibrationMessage(calibration) {
-    return ({ 'missing-or-invalid-calibration': 'スケール未確定: 正しい X/Y 校正値がありません',
+    return ({ 'missing-or-invalid-calibration': 'ピクセルサイズ未設定: 正しい X/Y の値を設定してください',
         'source-geometry-not-loaded': 'スケール確認中: MSI 原本の読み込みを待っています',
         'source-changed': 'スケール未確定: 校正と原本の対応を確認してください',
         'invalid-coordinate-axis': 'スケール未確定: 原本の座標を確認できません',
@@ -7459,6 +7494,10 @@ class SectionPanel {
         scalebar.style.display = 'none';
         scalebar.innerHTML = '<span class="bar"></span><span class="label"></span>';
         host.appendChild(scalebar);
+        const scaleStatus = document.createElement('div');
+        scaleStatus.className = 'msi-scale-status';
+        scaleStatus.hidden = true;
+        host.appendChild(scaleStatus);
         canvasCell.appendChild(host);
 
         const layerBar = document.createElement('div');
@@ -7472,7 +7511,7 @@ class SectionPanel {
         root.appendChild(thumbsCell);
 
         this.dom = {
-            root, host, rot, cdisp, croi, roiSvg, roiSaved, roiPreview, scalebar,
+            root, host, rot, cdisp, croi, roiSvg, roiSaved, roiPreview, scalebar, scaleStatus,
             canvasCell, thumbsCell, layerBar, thumbs, label,
         };
         this.displayCtx = get2dContext(cdisp, { willReadFrequently: true });
@@ -8934,24 +8973,27 @@ class SectionPanel {
     }
 
     // ---- MSI scale bar -------------------------------------------------------
-    // Visible only when a MSI layer is loaded AND the user has set the MSI
-    // pixel size (μm/px) via the Align modal. Picks a "round" physical length
-    // (10/20/50/100/... μm) such that the on-screen bar lands near 120 px,
+    // Visible when a MSI layer has a registered pixel size (manual or RAW).
+    // Picks a round physical length that fits within about 120 screen pixels,
     // re-running every applyViewerTransform / setupCanvasSize so it tracks
     // pan-zoom and resize.
     updateScaleBar() {
         const bar = this.dom && this.dom.scalebar; if (!bar) return;
-        const calibration = resolveMsiPhysicalCalibration(this.section, this._pickRefMsiKey());
+        const msiKey = this._pickRefMsiKey();
+        const calibration = resolveMsiPhysicalCalibration(this.section, msiKey);
         const um = calibration.displayPitch;
         const message = msiCalibrationMessage(calibration);
         bar.title = message;
         if (bar.dataset) bar.dataset.calibrationStatus = calibration.status;
+        if (this.dom.scaleStatus) {
+            this.dom.scaleStatus.textContent = msiKey ? message : '';
+            this.dom.scaleStatus.hidden = !msiKey || !message;
+        }
         if (this.dom.label) this.dom.label.title = [
-            '登録された取得ピッチ。画像のスケールは原本の座標との対応確認後に表示します。',
+            '登録された MSI 1画素の物理サイズ。スケールバーは表示倍率・回転を反映します。',
             message, 'master のみ: ダブルクリックで section 名を変更'].filter(Boolean).join('\n');
         // 寸法だけ要るので、読み込み済みでなくても ent の記録から取れる
         // (遅延読み込み中にスケールバーが消えないようにする)。
-        const msiKey = this._pickRefMsiKey();
         const msiSize = msiKey ? this.msiRasterSize(msiKey) : null;
         if (!um || !Number.isFinite(um.x) || !Number.isFinite(um.y) || !msiSize) {
             bar.style.display = 'none';
@@ -8969,23 +9011,11 @@ class SectionPanel {
         const screenPxPerUm = umPerScreenPx ? (Number(vt.scale) || 1) / umPerScreenPx : 0;
         if (!(screenPxPerUm > 0) || !Number.isFinite(screenPxPerUm)) { bar.style.display = 'none'; return; }
 
-        const NICE = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
-        const TARGET = 120;
-        let chosen = NICE[0];
-        let bestDiff = Infinity;
-        for (const u of NICE) {
-            const px = u * screenPxPerUm;
-            if (px < 30 || px > 260) continue;
-            const d = Math.abs(px - TARGET);
-            if (d < bestDiff) { bestDiff = d; chosen = u; }
-        }
-        if (bestDiff === Infinity) {
-            // Out of range — fall back to nearest by absolute pixel length.
-            for (const u of NICE) {
-                const d = Math.abs(u * screenPxPerUm - TARGET);
-                if (d < bestDiff) { bestDiff = d; chosen = u; }
-            }
-        }
+        // Pick a physical length that fits; never clamp just the drawn line.
+        const available = this.dom.host && this.dom.host.clientWidth;
+        const target = available > 0 ? Math.min(120, Math.max(1, available - 120)) : 120;
+        const chosen = pickPreviewScalebarLength(1 / screenPxPerUm, target);
+        if (!chosen) { bar.style.display = 'none'; return; }
         const widthPx = chosen * screenPxPerUm;
         const labelText = chosen >= 1000 ? (chosen / 1000) + ' mm' : chosen + ' μm';
         bar.querySelector('.bar').style.width = widthPx + 'px';
@@ -14995,7 +15025,8 @@ const Wizards = {
             <h2>MSI pixel size (μm/px)</h2>
             <p style="font-size:11px;color:#475569;margin-bottom:8px;">
               この切片の MSI 画素 1 ピクセルあたりの物理サイズを入力してください。<br>
-              Share preview のスケールバーや本画面のスケールバー描画に使われます。
+              登録値を優先して画面・Share preview・PPT のスケールバーに使います。原本の座標・強度は変更しません。<br>
+              RAW 登録時は、未設定の場合だけ座標から自動推定します。
             </p>
             <form>
               <label style="display:flex;align-items:center;gap:6px;">
@@ -15030,7 +15061,10 @@ const Wizards = {
         sec.meta.world_coords = sec.meta.world_coords || {};
         sec.meta.world_coords.msi_um_per_px = { x: result.x, y: result.y };
         try { App.queueSave(); } catch (e) {}
+        try { panel.refreshSectionLabel && panel.refreshSectionLabel(); } catch (e) {}
         try { panel.updateScaleBar && panel.updateScaleBar(); } catch (e) {}
+        try { if (typeof SharePreview !== 'undefined' && SharePreview.isOpen()) SharePreview.refresh(App.project); } catch (e) {}
+        try { if (typeof RoiMediaApp !== 'undefined') RoiMediaApp.refresh(true); } catch (e) {}
         showToast(`MSI ピクセルサイズを保存: ${result.x} × ${result.y} μm/px`);
         return result;
     },
@@ -16302,7 +16336,7 @@ const Wizards = {
                     ? (Number(heUm.x) + Number(heUm.y)) / 2 : 0;
                 const msiUmMean = (Number(state.msi_um_x) > 0 && Number(state.msi_um_y) > 0)
                     ? (Number(state.msi_um_x) + Number(state.msi_um_y)) / 2 : 0;
-                const calibrated = msiDisplayPhysicalPitch(sec, alignmentMsiKey());
+                const calibrated = resolveMsiCoordinateCalibration(sec, alignmentMsiKey()).displayPitch;
                 const lockScale = (calibrated && heUmMean > 0 && msiUmMean > 0) ? (heUmMean / msiUmMean) : 0;
                 const auto = autoAlignSilhouette(heM, msiM, lockScale ? { lockScale } : null);
                 if (!auto) throw new Error('シルエットからの推定に失敗しました');
@@ -20517,9 +20551,9 @@ const SharePreview = {
             // NICE round length on every zoom change so the label tracks.
             const baseUmPerPx = panel && typeof previewMsiUmPerCanvasPixel === 'function'
                 ? previewMsiUmPerCanvasPixel(panel, this._sectionRotations[String(sec.id)] || 0) : null;
-            const scalebarHtml = baseUmPerPx
-                ? `<div class="cell-scalebar" data-cell-scalebar data-base-um-per-px="${baseUmPerPx}"><span class="bar"></span><span class="label"></span></div>`
-                : '';
+            // Keep the element while loading so progressive image completion
+            // can add the scale without rebuilding the grid or losing zoom.
+            const scalebarHtml = `<div class="cell-scalebar" data-cell-scalebar data-base-um-per-px="${baseUmPerPx || ''}" style="display:none"><span class="bar"></span><span class="label"></span></div><div class="msi-scale-status" data-cell-scale-status hidden></div>`;
             return `
                 <div class="preview-image-cell">
                     <div class="cell-title">${caption}</div>
@@ -20609,6 +20643,33 @@ const SharePreview = {
         App.sectionVisibility().save();
     },
 
+    // A loading cell, calibration edit or rotated rebake can change the
+    // physical scale after the DOM was created. Always use the current frame.
+    _syncCellScalebar(idx) {
+        const grid = this.overlay && this.overlay.querySelector('[data-image-grid]');
+        const wrap = grid && grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
+        const bar = wrap && wrap.querySelector('[data-cell-scalebar]');
+        if (!bar) return null;
+        const id = this._gridSectionIds[idx];
+        const sec = App.project && (App.project.sections || []).find(s => String(s.id) === String(id));
+        const panel = sec && App.panels && App.panels.get(sec.id);
+        const hasContent = sec && (App.activeOverlay
+            ? (App.activeOverlay.layers || []).some(l => l && (sec.msiSeries || {})[l.key])
+            : !!(App.focusCompoundKey && (sec.msiSeries || {})[App.focusCompoundKey]));
+        const hasImage = !!wrap.querySelector('[data-cell-img]');
+        const calibration = sec && resolveMsiPhysicalCalibration(sec, panel && panel._pickRefMsiKey());
+        const base = panel && hasContent && hasImage
+            ? previewMsiUmPerCanvasPixel(panel, this._sectionRotations[String(sec.id)] || 0) : null;
+        bar.dataset.baseUmPerPx = base > 0 ? String(base) : '';
+        const status = wrap.querySelector('[data-cell-scale-status]');
+        if (status) {
+            const message = hasContent && calibration ? msiCalibrationMessage(calibration) : '';
+            status.textContent = message;
+            status.hidden = !message;
+        }
+        return bar;
+    },
+
     // Re-pick a NICE round physical length for the per-cell scalebar so the
     // bar reads ~100 CSS px on screen regardless of the current zoom.
     // Mirrors SectionPanel.updateScaleBar's NICE-table pattern but uses the
@@ -20617,7 +20678,7 @@ const SharePreview = {
     _updateCellScalebar(idx, scale) {
         const grid = this.overlay && this.overlay.querySelector('[data-image-grid]');
         const wrap = grid && grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
-        const bar = wrap && wrap.querySelector('[data-cell-scalebar]');
+        const bar = this._syncCellScalebar(idx);
         if (!bar) return;
         const baseUmPerPx = parseFloat(bar.dataset.baseUmPerPx);
         if (!Number.isFinite(baseUmPerPx) || baseUmPerPx <= 0) {
@@ -20755,10 +20816,6 @@ const SharePreview = {
                 const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
                 img.src = baked.toDataURL('image/png');
                 img.dataset.natW = String(baked.width); img.dataset.natH = String(baked.height);
-                const bar = wrap.querySelector('[data-cell-scalebar]');
-                if (bar && typeof previewMsiUmPerCanvasPixel === 'function') {
-                    bar.dataset.baseUmPerPx = String(previewMsiUmPerCanvasPixel(panel, this._sectionRotations[String(sec.id)] || 0) || '');
-                }
                 this._applyCellTransform(idx, false, true);
                 // 使い回しの <img> は src 差し替え後のデコードが非同期で、静止した
                 // オーバーレイでは再描画が確実にトリガーされず反映が遅れる。decode()
