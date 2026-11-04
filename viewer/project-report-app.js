@@ -152,6 +152,15 @@
         return Array.from(new Set([...Object.keys(section.msiSeries || {}), ...Object.keys(section.images || {})]))
             .filter(key => /^MSI_/i.test(key)).sort();
     }
+    function referenceFrame(options) {
+        if(!root.MsiDisplayGeometry || !options || !options.geometries || !options.geometries.length)return null;
+        const {width,height,geometries}=options;
+        if(geometries.some(g=>!g || !g.legacy || !g.displayGeometry || g.displayGeometry.W!==width || g.displayGeometry.H!==height))return null;
+        const sizes=new Set(geometries.map(g=>JSON.stringify([g.legacy.W,g.legacy.H])));
+        if(sizes.size!==1)return null; // A synthetic TIC has no authoritative single source when grids disagree.
+        const frame=root.MsiDisplayGeometry.createFrame({...options,sourceWidth:geometries[0].legacy.W,sourceHeight:geometries[0].legacy.H});
+        return frame.calibrated?frame:null;
+    }
     function createAdapter(hooks, options = {}) {
         const app = hooks.getApp(), project = app && app.project;
         if (!project) throw new Error('プロジェクトを開いてから PPT レポートを作成してください。');
@@ -161,8 +170,18 @@
         // Use the existing shared Admin login. Ordinary shared viewers cannot
         // opt in, even if a caller passes includeCeCv or old auth options.
         const includeCeCv = !viewer && options.includeCeCv === true;
+        const displaySettings = copy(app.getMsiDisplaySettings ? app.getMsiDisplaySettings()
+            : root.MsiDisplaySettings ? root.MsiDisplaySettings.resolve(project) : {aspectMode:'legacy'});
+        const displayStyle = options.useDisplayStyle ? copy(hooks.displayStyle ? hooks.displayStyle() : null) : null;
+        if (options.useDisplayStyle && (!displayStyle || !Array.isArray(displayStyle.lut) || displayStyle.lut.length !== 256))
+            throw new Error('表示スタイルを取得できません。');
+        const manualWindows = copy(app.msiUserWindow || {});
         const sections = (project.sections || []).slice();
-        const sectionStates = sections.map(section => ({ section, panel: app.panels.get(section.id), keys: msiKeys(section) }));
+        const sectionStates = sections.map(section => ({ section, panel: app.panels.get(section.id), keys: msiKeys(section),
+            calibration: copy(section.meta && section.meta.world_coords), otsu:copy(section.meta && section.meta.otsu),
+            referenceTransforms:hooks.referenceTransforms ? {...copy(hooks.referenceTransforms(section)),
+                registeredPitch:copy(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px),
+                aspectMode:displaySettings.aspectMode,geometries:{}} : null }));
         const jobs = [], groups = new Map(), voltagePairs = [];
         const sourceMeta = (entry, key) => entry && entry.compoundMeta || (hooks.findCompoundMeta && hooks.findCompoundMeta(project, key)) || {};
         const liveMeta = (entry, key) => {
@@ -189,7 +208,10 @@
                     registeredBase: sourceMeta(entry, key).base,
                     source: sourceSignature(state.panel, key, entry), meta: viewer ? viewerMeta(key, meta, sourceMeta(entry, key).base) : meta,
                     transform: copy(hooks.transform ? hooks.transform(section) : identity()),
-                    pixelPitch: pitchValue(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px) };
+                    pixelPitch: copy(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px),
+                    rawRange:copy(entry && entry.rawRange), rawDispMax:finite(entry && entry.rawDispMax),
+                    rawTrueMax:entry && entry.quantVersion==='msi-source-rows-v1'?finite(entry.rawTrueMax):null,
+                    window:copy(manualWindows[key]) };
                 jobs.push(job);
             }
         }
@@ -281,8 +303,43 @@
                     || raster.values.length !== raster.W * raster.H) {
                     result.missingReason = '元の数値データを読み込めませんでした。';
                 } else {
-                    result.raster = { W: raster.W, H: raster.H, values: raster.values };
-                    result.pixelPitch = pitchValue(hooks.pixelPitch ? hooks.pixelPitch(section, job.key) : job.pixelPitch);
+                    result.raster = { W: raster.W, H: raster.H, values: raster.values.slice() };
+                    if (raster.measuredMask) result.raster.measuredMask = raster.measuredMask.slice();
+                    const snapshotSection = {...section,meta:{...section.meta,world_coords:copy(job.state.calibration),otsu:copy(job.state.otsu)}};
+                    result.pixelPitch = pitchValue(hooks.pixelPitch ? hooks.pixelPitch(snapshotSection, job.key) : job.pixelPitch);
+                    if (root.MsiDisplayGeometry) {
+                        const geometry = hooks.sourceGeometry ? hooks.sourceGeometry(section, job.key) : job.entry.sourceGeometry;
+                        if(job.state.referenceTransforms && geometry)job.state.referenceTransforms.geometries[job.key]={
+                            legacy:geometry.legacy && {W:geometry.legacy.W,H:geometry.legacy.H},
+                            displayGeometry:geometry.displayGeometry && {W:geometry.displayGeometry.W,H:geometry.displayGeometry.H}};
+                        result.frame = root.MsiDisplayGeometry.createFrame({width:raster.W,height:raster.H,
+                            sourceWidth:geometry && geometry.legacy && geometry.legacy.W,
+                            sourceHeight:geometry && geometry.legacy && geometry.legacy.H,
+                            registeredPitch:job.pixelPitch,orientation:job.transform,aspectMode:displaySettings.aspectMode});
+                        result.transform = result.frame.matrix;
+                        result.pixelPitch = result.frame.calibrated ? result.frame.displayPitch : null;
+                    }
+                    if (displayStyle) {
+                        const candidate = Array.isArray(job.rawRange) ? job.rawRange : job.entry.rawRange;
+                        const rr = Array.isArray(candidate) && candidate.length===2 && candidate.every(Number.isFinite) ? candidate : null;
+                        result.displayAuto = {rawRange:rr,max:displayStyle.rangePolicy === 'maximum'
+                            ? (job.rawTrueMax ?? finite(job.entry.rawTrueMax)) : (job.rawDispMax ?? finite(job.entry.rawDispMax) ?? (rr && rr[1]))};
+                        // Match the main viewer's original-measurement maximum.
+                        // Only legacy records without that statistic fall back
+                        // to the finite value raster, never clipped PNG values.
+                        if(result.displayAuto.max==null) {
+                            let maximum = -Infinity;const captured=result.raster;
+                            for (let i=0;i<captured.values.length;i++) {
+                                if(i%262144===0){assertCurrent();if(hooks.yieldControl)await hooks.yieldControl();}
+                                if ((!captured.measuredMask || captured.measuredMask[i]) && Number.isFinite(captured.values[i])) maximum=Math.max(maximum,captured.values[i]);
+                            }
+                            result.displayAuto.max = Number.isFinite(maximum)?maximum:rr?rr[1]:255;
+                        }
+                        result.manualWindow = copy(job.window);
+                        const keep = displayStyle.otsu && hooks.keepGrid ? hooks.keepGrid(snapshotSection,job.key) : null;
+                        if (keep && keep.W===raster.W && keep.H===raster.H && keep.keep.length===raster.W*raster.H)
+                            result.keepGrid = {W:keep.W,H:keep.H,keep:keep.keep.slice()};
+                    }
                     const maximum = hooks.max ? hooks.max(job.entry) : null;
                     result.stats = { mean: finite(hooks.mean ? hooks.mean(job.entry) : null),
                         max: finite(maximum && typeof maximum === 'object' ? maximum.value : maximum),
@@ -310,7 +367,7 @@
             acquisition: viewer ? {} : cleanOutput(section.meta && section.meta.raw || {}),
             pixelPitch: pitchValue(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px) }));
         const input = { projectName: cleanOutput(project.displayName || 'Project') || 'Project', generatedAt: options.generatedAt || new Date().toISOString(),
-            metadata, sections: metadata.sections.map(section => ({ id: section.sectionId, name: section.name })),
+            metadata, displayStyle, sections: metadata.sections.map(section => ({ id: section.sectionId, name: section.name })),
             molecules: Array.from(groups.values(), group => ({ key: group.key, layerKey: group.layerKey, name: group.name,
                 subtitle: group.subtitle, metadata: copy(group.metadata), async loadEntries() {
                     assertCurrent();
@@ -321,13 +378,27 @@
                         else entries.push({ sectionId: section.id, name: sectionName(section),
                             stats: { mean: null, max: null, n: null }, missingReason: 'この分子・測定条件は切片に登録されていません。' });
                     }
+                    if (displayStyle) {
+                        const maximum = Math.max(0,...entries.filter(e=>e.displayAuto).map(e=>e.displayAuto.max));
+                        for (const entry of entries) if (entry.displayAuto) {
+                            const auto=entry.displayAuto,u=entry.manualWindow||{};
+                            const individual=displayStyle.mode==='individual',rr=auto.rawRange,isMaximum=displayStyle.rangePolicy==='maximum';
+                            const defMin=isMaximum?0:individual ? (rr?rr[0]:0) : maximum>0?0:rr?rr[0]:0;
+                            const autoMax=individual?auto.max:maximum;
+                            const defMax=isMaximum?(autoMax>0?autoMax:1):individual ? auto.max : maximum>0?maximum:rr?rr[1]:255;
+                            const min=finite(u.min) ?? defMin;
+                            let max=finite(u.max) ?? defMax;
+                            if (!(max>min)) max=min+(Math.abs(defMax-defMin)||1);
+                            entry.displayWindow={min,max};
+                        }
+                    }
                     return entries;
                 } })), assertCurrent, async loadSectionReferences() {
                     const references = [];
                     if (!hooks.referenceImage) return references;
                     for (const state of sectionStates) {
                         assertCurrent();
-                        const result = await hooks.referenceImage(state.section, state.panel);
+                        const result = await hooks.referenceImage(state.section, state.panel, state.referenceTransforms);
                         assertCurrent();
                         if (result && result.referenceImage) references.push({ id: state.section.id, name: sectionName(state.section),
                             referenceImage: result.referenceImage, referenceLabel: result.referenceLabel === 'Optical' ? 'Optical' : 'TIC' });
@@ -344,7 +415,7 @@
         if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(clean)) clean = '_' + clean;
         return clean + '_report.pptx';
     }
-    function selectReportOptions(doc) {
+    function selectReportOptions(doc, canIncludeCeCv) {
         return new Promise(resolve => {
             const focused = doc.activeElement;
             const overlay = doc.createElement('div');
@@ -362,8 +433,12 @@
             const checkbox = doc.createElement('input'); checkbox.type = 'checkbox';
             checkbox.id = 'project-report-include-ce-cv'; checkbox.checked = false;
             label.append(checkbox, doc.createTextNode('CV・CEを含める'));
+            const styleLabel = doc.createElement('label');
+            styleLabel.style.cssText = 'display:flex;align-items:center;gap:8px;font-weight:600;margin:14px 0';
+            const style = doc.createElement('input'); style.type='checkbox';style.id='project-report-use-display-style';style.checked=false;
+            styleLabel.append(style,doc.createTextNode('表示スタイルを使う'));
             const help = doc.createElement('p'); help.id = 'project-report-options-help';
-            help.textContent = 'このレポートに、登録されたコーン電圧と衝突エネルギーを表示します。';
+            help.textContent = '初期設定は従来の共通p99.8配色です。表示スタイルを選ぶと配色・範囲・補間・Otsu表示を使用します。出力は画面の絞り込みによらず全切片・全分子で、Sameの自動上限は全出力切片から再計算します。手動Rangeは生強度値で優先します。';
             help.style.cssText = 'font-size:13px;line-height:1.6;margin:12px 0 20px';
             const actions = doc.createElement('div'); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
             const cancel = doc.createElement('button'); cancel.type = 'button'; cancel.className = 'btn';
@@ -376,16 +451,18 @@
                 resolve(result);
             };
             cancel.addEventListener('click', () => close(null));
-            create.addEventListener('click', () => close({ includeCeCv: checkbox.checked }));
+            create.addEventListener('click', () => close({ includeCeCv: canIncludeCeCv && checkbox.checked,useDisplayStyle:style.checked }));
             overlay.addEventListener('keydown', event => {
                 if (event.key === 'Escape') { event.preventDefault(); close(null); }
                 if (event.key === 'Tab') {
-                    const controls = [checkbox, cancel, create], index = controls.indexOf(doc.activeElement);
-                    event.preventDefault(); controls[(index + (event.shiftKey ? 2 : 1)) % controls.length].focus();
+                    const controls = [...(canIncludeCeCv?[checkbox]:[]),style,cancel,create], index = controls.indexOf(doc.activeElement);
+                    event.preventDefault(); controls[(index + (event.shiftKey ? controls.length-1 : 1)) % controls.length].focus();
                 }
             });
-            actions.append(cancel, create); dialog.append(title, label, help, actions); overlay.appendChild(dialog);
-            doc.body.appendChild(overlay); checkbox.focus();
+            actions.append(cancel, create); dialog.append(title);
+            if(canIncludeCeCv)dialog.append(label);
+            dialog.append(styleLabel, help, actions); overlay.appendChild(dialog);
+            doc.body.appendChild(overlay); (canIncludeCeCv?checkbox:style).focus();
         });
     }
     function openProgress(doc, cancel) {
@@ -434,18 +511,23 @@
             try {
                 const getApp = () => typeof App !== 'undefined' ? App : root.App;
                 const context = captureExportContext(getApp);
-                let includeCeCv = false;
-                if (context.canIncludeCeCv) {
-                    const selected = await selectReportOptions(doc);
-                    if (!selected) return null;
-                    context.assertCurrent();
-                    includeCeCv = selected.includeCeCv === true;
-                }
+                const selected = await selectReportOptions(doc,context.canIncludeCeCv);
+                if (!selected) return null;
+                const includeCeCv = selected.includeCeCv === true;
                 context.assertCurrent();
                 const input = createAdapter({ getApp,
                     transform: section => sectionLayerViewLinear(section, 'msi'),
                     pixelPitch: (section, key) => msiDisplayPhysicalPitch(section, key),
-                    referenceImage: async (section, panel) => {
+                    sourceGeometry:(section,key)=>msiLayerSourceGeometry(section,key),
+                    displayStyle:()=>({mode:getApp().msiScaleMode==='individual'?'individual':'same',
+                        rangePolicy:getApp().getMsiDisplaySettings ? getApp().getMsiDisplaySettings().rangePolicy
+                            : root.MsiDisplaySettings ? root.MsiDisplaySettings.resolve(getApp().project).rangePolicy : 'legacy',
+                        lut:getActiveColormap().map(c=>c.slice()),background:getColormapBackground().slice(),
+                        colormap:typeof _activeColormapName==='string'?_activeColormapName:'',
+                        smoothing:getApp().msiSmoothing==='linear'?'linear':'none',otsu:!!getApp().otsuBgRemove}),
+                    keepGrid:(section,key)=>_otsuKeepGridRaw(section,key),
+                    referenceTransforms:section=>({msi:sectionLayerViewLinear(section,'msi'),he:sectionLayerViewLinear(section,'he')}),
+                    referenceImage: async (section, panel, transforms) => {
                         if (!panel || !panel.imageSources) return null;
                         const loaded = image => image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0;
                         const opticalKey = Object.keys(section.images || {}).find(key => /^HE_STAIN/i.test(key)
@@ -453,9 +535,16 @@
                         const source = opticalKey ? panel.imageSources[opticalKey] : panel.imageSources.HE_STAIN_TIC;
                         if (!loaded(source)) return null;
                         try {
+                            const frame=opticalKey?null:referenceFrame({width:source.naturalWidth,height:source.naturalHeight,
+                                geometries:Object.keys(section.msiSeries||{}).filter(key=>loaded(panel.imageSources[key])
+                                    && panel.imageSources[key].naturalWidth===source.naturalWidth
+                                    && panel.imageSources[key].naturalHeight===source.naturalHeight)
+                                    .map(key=>transforms.geometries[key]),
+                                registeredPitch:transforms.registeredPitch,orientation:transforms.msi,aspectMode:transforms.aspectMode});
                             const referenceImage = await root.ProjectReportData.renderReference(source,
-                                sectionLayerViewLinear(section, opticalKey ? 'he' : 'msi'),
-                                { createCanvas: () => doc.createElement('canvas') });
+                                frame?frame.matrix:transforms[opticalKey ? 'he' : 'msi'],
+                                { createCanvas: () => doc.createElement('canvas'),frame,
+                                    drawingRects:frame?root.MsiDisplayGeometry.drawingRects(frame):null });
                             return { referenceImage, referenceLabel: opticalKey ? 'Optical' : 'TIC' };
                         } catch (_) { return null; }
                     },
@@ -463,7 +552,7 @@
                     findCompoundMeta: (project, key) => findCompoundMeta(project, key),
                     formatDisplayName: key => formatDisplayName(key),
                     yieldControl: () => new Promise(resolve => setTimeout(resolve, 0)) },
-                { includeCeCv, signal: controller.signal, onProgress: event => progress && progress.update(event) });
+                { includeCeCv, useDisplayStyle:selected.useDisplayStyle, signal: controller.signal, onProgress: event => progress && progress.update(event) });
                 progress = openProgress(doc, () => controller.abort());
                 if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
                 const libs = root.LAZY_LIBS || {};
@@ -496,5 +585,5 @@
         activeExport = run();
         try { return await activeExport; } finally { activeExport = null; }
     }
-    return { createAdapter, captureExportContext, moleculeIdentity, safeFileName, exportCurrent };
+    return { createAdapter, captureExportContext, moleculeIdentity, safeFileName, exportCurrent,referenceFrame };
 });

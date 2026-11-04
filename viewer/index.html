@@ -5,6 +5,8 @@
 <script src="../app-runtime.js"></script>
 <script src="../project-store-safety.js"></script>
 <script src="../project-navigation.js"></script>
+<script src="msi-display-settings.js"></script>
+<script src="msi-display-geometry.js"></script>
 <script src="../offline/offline.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -1008,9 +1010,19 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
                         <option value="viridis">Viridis</option>
                         <option value="inferno">Inferno</option>
                         <option value="hot">Hot</option>
+                        <option value="hotmetal">HotMetal (HDI)</option>
                         <option value="jet">Jet</option>
                         <option value="grayscale">Grayscale</option>
                     </select>
+                </span>
+                <span class="tb-group" title="原本の座標・強度・ROI定量を変えず、表示方法を選びます。共有画面での変更はこのタブだけに適用します。">
+                    <span class="tb-label">表示</span>
+                    <select id="tb-msi-style" aria-label="MSI表示スタイル" style="font-size:11px;max-width:120px">
+                        <option value="current">従来</option><option value="hdi">HDIに近い表示</option><option value="custom" disabled>カスタム</option>
+                    </select>
+                    <label style="display:inline-flex;align-items:center;gap:3px;font-size:11px;cursor:pointer">
+                        <input type="checkbox" id="tb-msi-physical">画素サイズを反映
+                    </label>
                 </span>
                 <span class="tb-group" title="MSI 表示の補間 (None=ピクセル / Linear=なめらか)">
                     <span class="tb-label">補間</span>
@@ -1724,6 +1736,48 @@ function sectionLayerViewLinear(section, kind, viewRotation) {
     return displayAffineMultiply(displayRotation(rot - 90),
         displayAffineMultiply(sectionLayerCanvasLinear(section, kind), displayRotation(sectionDisplayRasterRotation(section))));
 }
+function msiPhysicalAspectMode() {
+    if (typeof App !== 'undefined' && typeof App.getMsiDisplaySettings === 'function') return App.getMsiDisplaySettings().aspectMode;
+    return typeof MsiDisplaySettings !== 'undefined' && typeof App !== 'undefined'
+        ? MsiDisplaySettings.resolve(App.project).aspectMode : 'legacy';
+}
+function sectionMsiPhysicalFrame(section, key, width, height, orientation) {
+    if (msiPhysicalAspectMode() !== 'physical' || typeof MsiDisplayGeometry === 'undefined') return null;
+    const calibration=resolveMsiPhysicalCalibration(section,key);
+    if(calibration.status!=='known')return null;
+    const g = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section,key) : null;
+    try {
+        const frame = MsiDisplayGeometry.createFrame({width,height,sourceWidth:g&&g.legacy&&g.legacy.W,sourceHeight:g&&g.legacy&&g.legacy.H,
+            registeredPitch:section&&section.meta&&section.meta.world_coords&&section.meta.world_coords.msi_um_per_px,
+            orientation,aspectMode:'physical'});
+        return frame.aspectMode === 'physical' ? frame : null;
+    } catch (_) { return null; }
+}
+function msiFrameBakeGeometry(frame, requestedScale) {
+    const b=frame.bounds;
+    const scale=Math.min(Number(requestedScale)||1,6144/Math.max(b.width,b.height),4000/Math.sqrt(b.width)/Math.sqrt(b.height));
+    const width=Math.max(1,Math.ceil(b.width*scale-1e-10)),height=Math.max(1,Math.ceil(b.height*scale-1e-10));
+    const tx=(width-b.width*scale)/2-b.x*scale,ty=(height-b.height*scale)/2-b.y*scale;
+    return {width,height,scale,matrix:displayAffineMultiply([[scale,0,tx],[0,scale,ty],[0,0,1]],frame.matrix)};
+}
+function drawMsiFrameSource(ctx, source, frame) {
+    const sw=source.naturalWidth||source.width,sh=source.naturalHeight||source.height;
+    for(const patch of MsiDisplayGeometry.drawingRects(frame)) {
+        const s=patch.source,d=patch.dest;
+        ctx.drawImage(source,s.x*sw/frame.width,s.y*sh/frame.height,s.width*sw/frame.width,s.height*sh/frame.height,
+            d.x,d.y,d.width,d.height);
+    }
+}
+function bakeMsiImageWithFrame(source, frame, requestedScale, smoothing) {
+    if(!source||!frame)return null;
+    const g=msiFrameBakeGeometry(frame,requestedScale),out=document.createElement('canvas');
+    out.width=g.width;out.height=g.height;
+    const ctx=get2dContext(out),T=g.matrix;
+    ctx.imageSmoothingEnabled=smoothing!==false;
+    ctx.transform(T[0][0],T[1][0],T[0][1],T[1][1],T[0][2],T[1][2]);
+    drawMsiFrameSource(ctx,source,frame);
+    return out;
+}
 function toggleSectionScreenFlip(section, axis) {
     pinSectionDisplayOrientation(section);
     const meta = section.meta || (section.meta = {});
@@ -1750,7 +1804,7 @@ function displayLegacyLinear(deg, flipLr, flipUd) {
     return displayAffineMultiply(displayRotation(deg),
         [[flipLr ? -1 : 1,0,0],[0,flipUd ? -1 : 1,0],[0,0,1]]);
 }
-function bakeImageWithSectionTransform(src, deg, flipLr, flipUd) {
+function bakeImageWithSectionTransform(src, deg, flipLr, flipUd, smoothing) {
     if (!src) return null;
     const w = src.naturalWidth || src.width, h = src.naturalHeight || src.height;
     if (!w || !h) return null;
@@ -1758,6 +1812,7 @@ function bakeImageWithSectionTransform(src, deg, flipLr, flipUd) {
     const out = document.createElement('canvas');
     out.width = g.width; out.height = g.height;
     const ctx = get2dContext(out), T = g.matrix;
+    ctx.imageSmoothingEnabled = smoothing !== false;
     ctx.transform(T[0][0], T[1][0], T[0][1], T[1][1], T[0][2], T[1][2]);
     ctx.drawImage(src, 0, 0);
     return out;
@@ -1781,6 +1836,12 @@ function sectionCanvasFrame(section, baseW, baseH, includeHe, referenceKind) {
 }
 function sectionMsiCanvasMatrix(section, refW, refH, frame, kind) {
     const L = sectionLayerCanvasLinear(section, kind || 'msi');
+    if(frame.msiDisplay) {
+        const O=displayAffineMultiply(L,displayRotation(sectionDisplayRasterRotation(section)));
+        const M=displayAffineMultiply(O,frame.msiDisplay.rasterToFrame),s=frame.backingScale;
+        const centre=applyAffinePoint(M,refW/2,refH/2);
+        return displayAffineMultiply([[s,0,frame.width/2-s*centre[0]],[0,s,frame.height/2-s*centre[1]],[0,0,1]],M);
+    }
     const sx = frame.baseH / refW, sy = frame.baseW / refH;
     const native = sectionDisplayBaseOrientation(section) === 'native-raster';
     const fixed = native
@@ -1878,7 +1939,9 @@ function resolveMsiPhysicalCalibration(section, key) {
         // raster span (including missing scan lines), never the observed count.
         displayPitch[axis] = sourceSize === displaySize ? pitch[axis]
             : pitch[axis] * (sourceSize - 1) / (displaySize - 1);
-        if (!Number.isFinite(displayPitch[axis]) || !(displayPitch[axis] > 0))
+        if (!Number.isFinite(displayPitch[axis]) || !(displayPitch[axis] > 0)
+            || !Number.isFinite(sourceSize*pitch[axis])
+            || !Number.isFinite(sourceSize*(pitch[axis]/Math.min(pitch.x,pitch.y))))
             return result('unknown', null, 'invalid-display-grid', g.sourceRef);
     }
     return result('known', displayPitch, null, g.sourceRef);
@@ -3439,6 +3502,7 @@ const COLORMAPS = {
     viridis:   VIRIDIS_LUT,
     inferno:   INFERNO_LUT,
     hot:       HOT_LUT,
+    hotmetal:  typeof MsiDisplaySettings !== 'undefined' ? MsiDisplaySettings.hotMetalLut() : HOT_LUT,
     jet:       JET_LUT,
     grayscale: GRAYSCALE_LUT,
 };
@@ -8542,7 +8606,21 @@ class SectionPanel {
         w = Math.round(w * scale); h = Math.round(h * scale);
         const t = this._ensureViewerTransform();
         const oldFit = this._viewerFit;
-        const frame = sectionCanvasFrame(this.section, w, h, !!heKey, refIsMsi ? 'msi' : (heKey ? 'he' : 'other'));
+        let frame = sectionCanvasFrame(this.section, w, h, !!heKey, refIsMsi ? 'msi' : (heKey ? 'he' : 'other'));
+        const physicalFrame = refIsMsi ? sectionMsiPhysicalFrame(this.section,msiKey,refSize.w,refSize.h) : null;
+        if(physicalFrame) {
+            const kinds=heKey?['msi','he']:['msi'];
+            let logicalW=0,logicalH=0;
+            for(const kind of kinds) {
+                const O=displayAffineMultiply(sectionLayerCanvasLinear(this.section,kind),displayRotation(sectionDisplayRasterRotation(this.section)));
+                const b=MsiDisplayGeometry.bounds(physicalFrame.frameBounds,O);
+                logicalW=Math.max(logicalW,b.width);logicalH=Math.max(logicalH,b.height);
+            }
+            scale=Math.min(scale,6144/Math.max(logicalW,logicalH),4000/Math.sqrt(logicalW)/Math.sqrt(logicalH));
+            frame={baseW:physicalFrame.frameBounds.height*scale,baseH:physicalFrame.frameBounds.width*scale,
+                width:Math.max(1,Math.ceil(logicalW*scale-1e-10)),height:Math.max(1,Math.ceil(logicalH*scale-1e-10)),
+                backingScale:scale,msiDisplay:physicalFrame};
+        }
         this._displayCanvasFrame = frame;
         w = frame.width; h = frame.height;
         // ★ 同じ寸法なら代入しない。canvas.width への代入は、値が変わらなくても
@@ -8561,7 +8639,8 @@ class SectionPanel {
             const screenBox = displayBakeGeometry(w, h, displayRotation(t.rot - 90));
             const fit = Math.min(cw / screenBox.width, ch / screenBox.height);
             const cssW = w * fit, cssH = h * fit;
-            const fitKey = [refKey, refSize.w, refSize.h, t.rot, t.rotHE, t.rotMSI].join('|');
+            const fitKey = [refKey, refSize.w, refSize.h, t.rot, t.rotHE, t.rotMSI,
+                physicalFrame ? JSON.stringify(physicalFrame.rasterToFrame) : 'legacy'].join('|');
             const nativeFit = fit * scale;
             // Keep the same image position and absolute magnification when a
             // column resizes. Translation is relative to the host centre.
@@ -8754,7 +8833,8 @@ class SectionPanel {
                 // layer's raw range; winC defaults to that range (auto-scale) or
                 // the user's manual min/max. msiWindowEval maps each pixel into it.
                 const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
-                const winC = App.getMsiWindow(key, rrC, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
+                const entC = (this.section.msiSeries && this.section.msiSeries[key]) || {};
+                const winC = App.getMsiWindow(key, rrC, entC.rawDispMax, entC.rawTrueMax);
                 const ovColor = overlay ? (overlayColor[key] || '#ffffff') : null;
                 const ovScale = (overlay && overlayScale) ? (overlayScale[ovColor] || 1) : 1;
                 const lut = overlay ? monoLut(ovColor, ovScale) : getActiveColormap();
@@ -8915,8 +8995,13 @@ class SectionPanel {
                     this._heGeometryWarpCache.set(key, warped);
                     if (this._heGeometryWarpCache.size > 4) this._heGeometryWarpCache.delete(this._heGeometryWarpCache.keys().next().value);
                 }
-                if (warped.canvas) ctx.drawImage(warped.canvas, 0, 0, ref.w, ref.h);
+                const physicalFrame=this._displayCanvasFrame&&this._displayCanvasFrame.msiDisplay;
+                if (warped.canvas) {
+                    if(physicalFrame)drawMsiFrameSource(ctx,warped.canvas,physicalFrame);
+                    else ctx.drawImage(warped.canvas, 0, 0, ref.w, ref.h);
+                }
                 else {
+                    if(physicalFrame) { const r=physicalFrame.sampleBounds;ctx.beginPath();ctx.rect(r.x,r.y,r.width,r.height);ctx.clip(); }
                     ctx.transform(T[0][0], T[1][0], T[0][1], T[1][1], T[0][2], T[1][2]);
                     ctx.drawImage(drawSource, 0, 0);
                 }
@@ -8935,7 +9020,9 @@ class SectionPanel {
                 if (roiClipPath && isMsiLayer) ctx.clip(roiClipPath);
                 const layerT = this._msiCanvasMatrix('msi');
                 ctx.transform(layerT[0][0], layerT[1][0], layerT[0][1], layerT[1][1], layerT[0][2], layerT[1][2]);
-                ctx.drawImage(drawSource, 0, 0, ref.w, ref.h);
+                const physicalFrame=this._displayCanvasFrame&&this._displayCanvasFrame.msiDisplay;
+                if(physicalFrame)drawMsiFrameSource(ctx,drawSource,physicalFrame);
+                else ctx.drawImage(drawSource, 0, 0, ref.w, ref.h);
                 ctx.restore();
             } else if (isHeLike) {
                 // setupCanvasSize sized cdisp to the HE natural dimensions when
@@ -9531,7 +9618,7 @@ class SectionPanel {
         const baseLabel = (meta && meta.base) || formatDisplayName(key);
         // Display window in raw units (per-section): default = the section's own
         // range, or the user's manual override. Drives the toolbar Range inputs.
-        const win = App.getMsiWindow(key, ent.rawRange, ent.rawDispMax);
+        const win = App.getMsiWindow(key, ent.rawRange, ent.rawDispMax, ent.rawTrueMax);
         return { available: true, key, baseLabel, rawMin: win.min, rawMax: win.max };
     }
 
@@ -10158,7 +10245,8 @@ class SectionPanel {
             // vmin/vmax window no longer affects rendering. Keep the inputs (the
             // change handlers below query .vmin/.vmax) but disable them and show
             // the observed raster range for reference.
-            const _win = App.getMsiWindow(key, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawRange, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
+            const ent = (this.section.msiSeries && this.section.msiSeries[key]) || {};
+            const _win = App.getMsiWindow(key, ent.rawRange, ent.rawDispMax, ent.rawTrueMax);
             const rangeRow = mkRow('表示ウィンドウ (生単位 — ツールバーの Range で調整)',
                 '<div style="display:flex;gap:4px;"><input type="number" value="' + formatRawForInput(_win.min) + '" class="vmin" disabled title="表示ウィンドウ下限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"><input type="number" value="' + formatRawForInput(_win.max) + '" class="vmax" disabled title="表示ウィンドウ上限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"></div>');
             pop.appendChild(rangeRow);
@@ -10510,7 +10598,8 @@ class SectionPanel {
         const d = data.data;
         // Per-section display window (raw units), matching renderComposite.
         const rrT = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
-        const winT = App.getMsiWindow(key, rrT, ((this.section.msiSeries && this.section.msiSeries[key]) || {}).rawDispMax);
+        const entT = (this.section.msiSeries && this.section.msiSeries[key]) || {};
+        const winT = App.getMsiWindow(key, rrT, entT.rawDispMax, entT.rawTrueMax);
         const lut = getActiveColormap();
         const bg = getColormapBackground();
         // 背景を非表示（Otsu）: メイン表示と一致させるため縮小サムネにも同じマスクを反映。
@@ -10531,7 +10620,11 @@ class SectionPanel {
             d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
         }
         ctx.putImageData(data, 0, 0);
-        const baked = bakeImageWithSectionTransform(c, sectionLayerViewLinear(this.section, 'msi'));
+        const orientation=sectionLayerViewLinear(this.section,'msi');
+        const frame=sectionMsiPhysicalFrame(this.section,key,c.width,c.height,orientation);
+        const smooth=App.msiSmoothing==='linear';
+        const baked = frame ? bakeMsiImageWithFrame(c,frame,1,smooth) : bakeImageWithSectionTransform(c,orientation,null,null,smooth);
+        im.style.imageRendering=smooth?'auto':'pixelated';
         im.src = (baked || c).toDataURL();
     }
 
@@ -15070,6 +15163,7 @@ const Wizards = {
         sec.meta.world_coords.msi_um_per_px = { x: result.x, y: result.y };
         try { App.queueSave(); } catch (e) {}
         try { panel.refreshSectionLabel && panel.refreshSectionLabel(); } catch (e) {}
+        try { panel.setupCanvasSize && panel.setupCanvasSize(); panel._scheduleThumbRebake && panel._scheduleThumbRebake(); } catch (e) {}
         try { panel.updateScaleBar && panel.updateScaleBar(); } catch (e) {}
         try { if (typeof SharePreview !== 'undefined' && SharePreview.isOpen()) SharePreview.refresh(App.project); } catch (e) {}
         try { if (typeof RoiMediaApp !== 'undefined') RoiMediaApp.refresh(true); } catch (e) {}
@@ -15849,12 +15943,23 @@ const Wizards = {
         // what the user sees on the main canvas. Combines renderComposite's
         // versioned MSI canvas basis + .viewer-rot CSS rotate(vt.rot - 90°),
         // including each layer's own rotation and the current section mirror.
-        const sectionTransform = (kind) => ({ matrix:sectionLayerViewLinear(sec, kind || 'msi') });
+        const sectionTransform = (kind) => {
+            const matrix=sectionLayerViewLinear(sec,kind||'msi');
+            const key=alignmentMsiKey(),size=panel.msiRasterSize(key)||panel.getMsiRefSize();
+            const frame=size&&sectionMsiPhysicalFrame(sec,key,size.w,size.h,matrix);
+            return {matrix:frame?frame.matrix:matrix,frame};
+        };
         // Stamp dataset attrs the click handler / landmark renderer use to
         // unbake or re-bake coordinates without re-reading sec.meta.
         const stampThumbDataset = (imgEl, rawW, rawH, t, ss) => {
             const k = Number(ss) || 1;
             imgEl.dataset.rawW = String(rawW); imgEl.dataset.rawH = String(rawH);
+            if(t.frame) {
+                const g=msiFrameBakeGeometry(t.frame,k),B=g.matrix.map(row=>row.slice());
+                for(let i=0;i<2;i++)for(let j=0;j<3;j++)B[i][j]/=g.scale;
+                imgEl.dataset.ss=String(g.scale);imgEl.dataset.displayMatrix=JSON.stringify(B);
+                return;
+            }
             imgEl.dataset.ss = String(k);
             const B = displayBakeGeometry(rawW*k, rawH*k, t.matrix).matrix;
             B[0][2] /= k; B[1][2] /= k;
@@ -15918,7 +16023,7 @@ const Wizards = {
             const warped = heMsiDisplayWarp(heRaw, T, sec, alignmentMsiKey(), k);
             // Normalize to the supersampling already used by landmark math.
             if (warped) { tctx.setTransform(1,0,0,1,0,0); tctx.clearRect(0,0,heInMsi.width,heInMsi.height); tctx.drawImage(warped,0,0,heInMsi.width,heInMsi.height); }
-            const baked = bakeImageWithSectionTransform(heInMsi, t.matrix);
+            const baked = t.frame ? bakeMsiImageWithFrame(heInMsi,t.frame,k) : bakeImageWithSectionTransform(heInMsi, t.matrix);
             if (!baked) return;
             const nextHe = new Image();
             nextHe.src = baked.toDataURL('image/png');
@@ -16034,8 +16139,8 @@ const Wizards = {
             panel.imageSources[layer] = heRaw;
             const t = sectionTransform();
             const ent = sec.msiSeries[key] || {};
-            const win = isTicKey(key) ? null : App.getMsiWindow(key, ent.rawRange || null, ent.rawDispMax);
-            const cacheKey = JSON.stringify([key, activeFrame && activeFrame.key, t.matrix, win,
+            const win = isTicKey(key) ? null : App.getMsiWindow(key, ent.rawRange || null, ent.rawDispMax, ent.rawTrueMax);
+            const cacheKey = JSON.stringify([key, activeFrame && activeFrame.key, t.matrix, t.frame&&t.frame.bounds, win, App.msiSmoothing,
                 typeof getActiveColormap === 'function' ? getActiveColormap() : null,
                 !!App.otsuBgRemove, ent.rawRange || null]);
             let cached = coloredCache.get(cacheKey);
@@ -16043,7 +16148,8 @@ const Wizards = {
                 const srcImg = isTicKey(key) ? computeSyntheticTicForKey(key) : panel.imageSources[key];
                 if (!await waitForImg(srcImg) || !current()) return;
                 const colored = paintMsiToColored(srcImg, ent.rawRange || null, win, isTicKey(key) ? null : key);
-                const baked = colored && bakeImageWithSectionTransform(colored, t.matrix);
+                const smooth=App.msiSmoothing==='linear';
+                const baked = colored && (t.frame ? bakeMsiImageWithFrame(colored,t.frame,1,smooth) : bakeImageWithSectionTransform(colored, t.matrix,null,null,smooth));
                 if (!baked) return;
                 const ready = new Image(); ready.src = baked.toDataURL('image/png');
                 if (!await waitForImg(ready) || !current()) return;
@@ -16054,6 +16160,7 @@ const Wizards = {
             }
             if (!current()) return;
             msiImg.src = cached.url;
+            msiImg.style.imageRendering=App.msiSmoothing==='linear'?'auto':'pixelated';
             stampThumbDataset(msiImg,cached.rawW,cached.rawH,t);
             await waitForImg(msiImg);
             if (!current()) return;
@@ -19710,6 +19817,7 @@ const SharePreview = {
                             <option value="viridis">Viridis</option>
                             <option value="inferno">Inferno</option>
                             <option value="hot">Hot</option>
+                            <option value="hotmetal">HotMetal (HDI)</option>
                             <option value="jet">Jet</option>
                             <option value="grayscale">Grayscale</option>
                         </select>
@@ -20245,10 +20353,11 @@ const SharePreview = {
         // rebake the preview cells.
         let rawRange = null;
         let rawDispMax;
+        let rawTrueMax;
         if (focusKey && App.panels) {
             for (const p of App.panels.values()) {
                 const ent = ((p.section && p.section.msiSeries) || {})[focusKey];
-                if (ent && Array.isArray(ent.rawRange)) { rawRange = ent.rawRange; rawDispMax = ent.rawDispMax; break; }
+                if (ent && Array.isArray(ent.rawRange)) { rawRange = ent.rawRange; rawDispMax = ent.rawDispMax; rawTrueMax = ent.rawTrueMax; break; }
             }
         }
         if (!focusKey || !rawRange) {
@@ -20259,7 +20368,7 @@ const SharePreview = {
             minEl.title = maxEl.title = '';
             return;
         }
-        const win = App.getMsiWindow(focusKey, rawRange, rawDispMax);
+        const win = App.getMsiWindow(focusKey, rawRange, rawDispMax, rawTrueMax);
         minEl.disabled = false; maxEl.disabled = false;
         if (resetEl) resetEl.disabled = !(App.msiUserWindow && App.msiUserWindow[focusKey]);
         minEl.title = '表示ウィンドウ 下限 (生単位)';
@@ -20659,7 +20768,7 @@ const SharePreview = {
     // has the correct intrinsic dimensions for object-fit:contain to
     // letterbox without clipping.
     _bakeRotatedCanvas(srcCanvas, rotDeg) {
-        return bakeImageWithSectionTransform(srcCanvas, rotDeg);
+        return bakeImageWithSectionTransform(srcCanvas, rotDeg, null, null, App.msiSmoothing === 'linear');
     },
 
     // Per-cell pan/zoom transform. Rotation is baked into the <img> at
@@ -20697,6 +20806,8 @@ const SharePreview = {
         const wrap = grid && grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
         const stage = wrap && wrap.querySelector('[data-cell-stage]');
         if (!stage) return;
+        const img=stage.querySelector('[data-cell-img]');
+        if(img)img.style.imageRendering=App.msiSmoothing==='linear'?'auto':'pixelated';
         const m = this._cellMetrics(wrap);
         if (m) {
             const restored = restoreViewport && SectionVisibility.restoreViewport(t.viewport, m.width, m.height, m.fit);
@@ -21711,6 +21822,7 @@ const Toolbar = {
             this.colormapSel.addEventListener('change', () => {
                 const name = this.colormapSel.value;
                 setActiveColormap(name);
+                App.updateMsiDisplaySettings({colormap:name,preset:'custom'}, false);
                 if (App.panels) {
                     for (const p of App.panels.values()) {
                         // サムネイルも焼き直す。ここが renderComposite だけだったため
@@ -21740,6 +21852,18 @@ const Toolbar = {
         }
 
         const msiUmBtn = document.getElementById('tb-msi-um');
+        const styleSelect = document.getElementById('tb-msi-style');
+        if (styleSelect) styleSelect.addEventListener('change', async () => {
+            styleSelect.disabled = true;
+            try { await App.setMsiDisplayPreset(styleSelect.value); }
+            catch (error) { console.error(error); showToast('表示設定を適用できませんでした'); }
+            finally { styleSelect.disabled = false; App.refreshMsiDisplayControls(); }
+        });
+        const physicalCheck = document.getElementById('tb-msi-physical');
+        if (physicalCheck) physicalCheck.addEventListener('change', () => {
+            App.updateMsiDisplaySettings({aspectMode:physicalCheck.checked?'physical':'legacy'});
+        });
+        App.refreshMsiDisplayControls();
         if (msiUmBtn) {
             msiUmBtn.addEventListener('click', () => {
                 const p = this.activePanel();
@@ -22006,6 +22130,9 @@ const Toolbar = {
     refreshOutlierClip() {
         const cb = document.getElementById('tb-outlier-clip');
         if (!cb) return;
+        if (App.getMsiDisplaySettings().rangePolicy === 'maximum') {
+            cb.indeterminate = false; cb.checked = false; return;
+        }
         const { robust, full } = App._countBakeModes();
         // No MSI layers yet: show the default (ON) rather than a stuck tri-state.
         if (!robust && !full) { cb.indeterminate = false; cb.checked = true; return; }
@@ -22519,6 +22646,76 @@ const App = {
     otsuStrength: 0,           // 背景除去の強度(log10 単位オフセット)。0=自動Otsu、
                                // 正=強く除去(多く消す)、負=弱く(残す)。
     analysisMode: 'otsu',      // Analysis パネルの初期表示: 'otsu' 背景除去 / 'roi' 強度チャート
+    getMsiDisplaySettings() {
+        if (typeof MsiDisplaySettings === 'undefined') return {preset:'current',aspectMode:'legacy',rangePolicy:'legacy',explicit:false};
+        const key = typeof msiDisplayContextKey === 'function' ? msiDisplayContextKey(this) : null;
+        if (key !== this._msiPresentationKey) {
+            this._msiPresentationKey = key;
+            this._msiDisplayOverride = null;
+            if (this.shareMode && key) {
+                try {
+                    const value = JSON.parse(sessionStorage.getItem('desi:share:msi-display:' + key) || 'null');
+                    if (MsiDisplaySettings.normalize(value)) this._msiDisplayOverride = value;
+                } catch (_) {}
+            }
+        }
+        return MsiDisplaySettings.resolve(this.project, this._msiDisplayOverride);
+    },
+    refreshMsiDisplayControls() {
+        const settings = this.getMsiDisplaySettings();
+        const style = document.getElementById('tb-msi-style'), aspect = document.getElementById('tb-msi-physical');
+        if (style) style.value = settings.preset;
+        if (aspect) aspect.checked = settings.aspectMode === 'physical';
+    },
+    updateMsiDisplaySettings(patch, redraw = true) {
+        if (!this.project || typeof MsiDisplaySettings === 'undefined') return;
+        const resolved = this.getMsiDisplaySettings();
+        const next = {...resolved,...patch};
+        const stored = MsiDisplaySettings.normalize(next);
+        if (this.shareMode || this.project.__share) {
+            this._msiDisplayOverride = {...stored,colormap:next.colormap,interpolation:next.interpolation};
+            try { sessionStorage.setItem('desi:share:msi-display:' + this._msiPresentationKey, JSON.stringify(this._msiDisplayOverride)); } catch (_) {}
+        } else {
+            const meta = this.project.meta || (this.project.meta = {});
+            meta.msiDisplay = stored;
+            if (patch.colormap) meta.colormap = next.colormap;
+            if (patch.interpolation) meta.msiSmoothing = next.interpolation;
+            this.queueSave();
+        }
+        this.refreshMsiDisplayControls();
+        if (redraw) {
+            for (const panel of this.panels.values()) {
+                if (patch.aspectMode) panel.setupCanvasSize();
+                panel.renderComposite(); panel.markAllThumbsDirty(); panel.drawAllRois();
+                if (patch.aspectMode && panel._scheduleThumbRebake) panel._scheduleThumbRebake();
+            }
+            this.recomputeMsiAbsScale();
+            try { Toolbar.refreshRange(); Toolbar.refreshOutlierClip(); } catch (_) {}
+            try { if (SharePreview.isOpen()) SharePreview.refresh(this.project); } catch (_) {}
+        }
+    },
+    async setMsiDisplayPreset(name) {
+        if (!this.project || typeof MsiDisplaySettings === 'undefined') return;
+        const project = this.project;
+        const next = MsiDisplaySettings.preset(name);
+        ensureMsiDisplayContext(this);
+        for (const key of Object.keys(this.msiUserWindow || {})) delete this.msiUserWindow[key];
+        this.msiScaleMode = 'same';
+        const scale = document.getElementById('msi-scale-mode'); if (scale) scale.value = 'same';
+        setActiveColormap(next.colormap); this.msiSmoothing = next.interpolation;
+        const cm = document.getElementById('tb-colormap'), smoothing = document.getElementById('tb-smoothing');
+        if (cm) cm.value = next.colormap; if (smoothing) smoothing.value = next.interpolation;
+        if (this.shareMode) {
+            try { sessionStorage.setItem('desi:share:colormap:' + this.shareMode.slug, next.colormap); } catch (_) {}
+        }
+        this.updateMsiDisplaySettings(next);
+        // Presets affect visibility only. Existing masks and their source data survive.
+        if (this.otsuBgRemove) await this.setOtsuBgRemove(false);
+        if (project !== this.project) return;
+        if (name === 'current') {
+            await this.setMsiOutlierClipAll(true, {preserveDisplaySettings:true});
+        }
+    },
     roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
     // 共有先で、HE/IF ⇔ MSI の位置合わせをどちらで見るか。
     // 'master' = 共有元が登録したもの / 'shared' = 共有先が合わせ直したもの。
@@ -23021,7 +23218,11 @@ const App = {
     //
     // Skips layers already baked the requested way (ent.diag.bakeMode is written
     // by computeRasterPixels), mirroring how _otsuIsFresh avoids re-work.
-    async setMsiOutlierClipAll(on) {
+    async setMsiOutlierClipAll(on, {preserveDisplaySettings = false} = {}) {
+        // An explicit clip choice replaces the HDI maximum-only display policy.
+        // Legacy projects retain their per-layer bake contract until edited.
+        if (!preserveDisplaySettings && typeof MsiDisplaySettings !== 'undefined' && this.project)
+            this.updateMsiDisplaySettings({rangePolicy:'legacy',preset:'custom'}, false);
         const target = on ? 'robust' : 'full';
         const jobs = [];
         let fresh = 0;
@@ -23094,7 +23295,7 @@ const App = {
     },
     // Effective display window. 'same' = shared [0, in-scope common max]; else
     // the section's own range. A user min/max override wins per edge.
-    getMsiWindow(key, rawRange, dispMax) {
+    getMsiWindow(key, rawRange, dispMax, trueMax) {
         ensureMsiDisplayContext(this, key);
         this.msiUserWindow = this.msiUserWindow || {};
         const u = this.msiUserWindow[key] || null;
@@ -23103,7 +23304,9 @@ const App = {
             && Number.isFinite(rawRange[0]) && Number.isFinite(rawRange[1])) ? rawRange : null;
         // データ適応の既定表示上限(各切片の表示分位点、生単位)。欠落時(レガシー
         // データや自己正規化の合成TIC等)は堅牢ベイク上限 rawRange[1] にフォールバック。
-        const dm = Number.isFinite(dispMax) ? dispMax : (rr ? rr[1] : null);
+        const maximum = this.getMsiDisplaySettings && this.getMsiDisplaySettings().rangePolicy === 'maximum';
+        const dm = maximum && Number.isFinite(trueMax) ? trueMax
+            : (Number.isFinite(dispMax) ? dispMax : (rr ? rr[1] : null));
         let defMin, defMax;
         if (this.msiScaleMode === 'same') {
             // HDI "Same": shared range [0, common adaptive max] across in-scope
@@ -23112,12 +23315,13 @@ const App = {
             const shared = this.getMsiAbsMax(key);
             if (Number.isFinite(shared) && shared > 0) { defMin = 0; defMax = shared; }
             else if (Number.isFinite(dm) && dm > 0) { defMin = 0; defMax = dm; }   // fallback: own adaptive ceiling
+            else if (maximum) { defMin = 0; defMax = 1; }
             else if (rr) { defMin = rr[0]; defMax = rr[1]; }
             else { defMin = 0; defMax = 255; }
         } else {
             // HDI "Individual": this section's own adaptive range (per-image auto-scale).
-            defMin = rr ? rr[0] : 0;
-            defMax = Number.isFinite(dm) ? dm : (rr ? rr[1] : 255);
+            defMin = maximum ? 0 : (rr ? rr[0] : 0);
+            defMax = maximum && !(dm > 0) ? 1 : Number.isFinite(dm) ? dm : (rr ? rr[1] : 255);
         }
         // ユーザーの手動 min/max はここで既定より優先(従来どおり上書き)。
         const min = (u && Number.isFinite(u.min)) ? u.min : defMin;
@@ -23135,7 +23339,9 @@ const App = {
             const rr = ent && ent.rawRange;
             // 適応共有上限: 各切片の表示分位点(rawDispMax)を優先、無ければ
             // 堅牢ベイク上限(rawRange[1])にフォールバック。
-            const dm = (ent && Number.isFinite(ent.rawDispMax)) ? ent.rawDispMax
+            const useMaximum = this.getMsiDisplaySettings && this.getMsiDisplaySettings().rangePolicy === 'maximum';
+            const dm = (useMaximum && ent && Number.isFinite(ent.rawTrueMax)) ? ent.rawTrueMax
+                     : (ent && Number.isFinite(ent.rawDispMax)) ? ent.rawDispMax
                      : ((rr && Number.isFinite(rr[1])) ? rr[1] : NaN);
             if (Number.isFinite(dm) && dm > mx) mx = dm;
         }
@@ -23160,7 +23366,9 @@ const App = {
                 const rr = ent && ent.rawRange;
                 if (!rr || !Number.isFinite(rr[1])) continue;
                 // getMsiAbsMax と同じ適応上限基準で変化検出(再描画トリガ漏れ防止)。
-                const dm = Number.isFinite(ent.rawDispMax) ? ent.rawDispMax : rr[1];
+                const useMaximum = this.getMsiDisplaySettings && this.getMsiDisplaySettings().rangePolicy === 'maximum';
+                const dm = useMaximum && Number.isFinite(ent.rawTrueMax) ? ent.rawTrueMax
+                    : Number.isFinite(ent.rawDispMax) ? ent.rawDispMax : rr[1];
                 if (!(next[key] >= dm)) next[key] = dm;
             }
             keysByPanel.set(panel, own);
@@ -23232,6 +23440,8 @@ const App = {
         const next = (mode === 'linear') ? 'linear' : 'none';
         if (this.msiSmoothing === next) return;
         this.msiSmoothing = next;
+        if (this.project && typeof MsiDisplaySettings !== 'undefined')
+            this.updateMsiDisplaySettings({interpolation:next,preset:'custom'}, false);
         // The MSI backing resolution depends on the mode (Linear renders the
         // canvas near display size so imageSmoothingEnabled can interpolate),
         // so re-run setupCanvasSize per panel — it resizes cdisp/croi and
@@ -24479,16 +24689,18 @@ const App = {
         // master's published default). sessionStorage entry wins so a
         // recipient who chose a colormap earlier in this tab keeps it.
         try {
-            let cm = (projectMeta && projectMeta.colormap) || null;
+            const displaySettings = this.getMsiDisplaySettings();
+            let cm = displaySettings.colormap;
             const slug = (this.shareMode && this.shareMode.slug) || '';
             const saved = slug && sessionStorage.getItem('desi:share:colormap:' + slug);
-            if (saved) cm = saved;
+            if (saved && !this._msiDisplayOverride) cm = saved;
             if (cm && COLORMAPS[cm]) setActiveColormap(cm);
             const sel = document.getElementById('tb-colormap');
             if (sel) sel.value = _activeColormapName;
-            App.msiSmoothing = (projectMeta && projectMeta.msiSmoothing === 'linear') ? 'linear' : 'none';
+            App.msiSmoothing = displaySettings.interpolation;
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
+            this.refreshMsiDisplayControls();
             // 背景を非表示（Otsu） は ★ 常に OFF で開く (ユーザー確定)。
             // publish された otsuBgRemove は復元しない — master 側と同じ扱い。
             // ただし「この受信者がこのタブで自分で ON にした」場合は、その操作を
@@ -24807,18 +25019,20 @@ const App = {
         // Share-mode session overrides take precedence so a recipient who
         // already picked a different colormap in this tab keeps theirs.
         try {
-            let cm = (project.meta && project.meta.colormap) || null;
+            const displaySettings = this.getMsiDisplaySettings();
+            let cm = displaySettings.colormap;
             if (this.shareMode) {
                 const k = 'desi:share:colormap:' + (this.shareMode.slug || '');
                 const saved = sessionStorage.getItem(k);
-                if (saved) cm = saved;
+                if (saved && !this._msiDisplayOverride) cm = saved;
             }
             if (cm && COLORMAPS[cm]) setActiveColormap(cm);
             const sel = document.getElementById('tb-colormap');
             if (sel) sel.value = _activeColormapName;
-            App.msiSmoothing = (project.meta && project.meta.msiSmoothing === 'linear') ? 'linear' : 'none';
+            App.msiSmoothing = displaySettings.interpolation;
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
+            this.refreshMsiDisplayControls();
             // ★ 背景を非表示（Otsu） は常に OFF で開く (ユーザー確定)。
             //   project.meta.otsuBgRemove は書き込み自体は残している (publish の
             //   ペイロードにも載る) が、開くときには読まない。ON のまま開くと、
@@ -24918,6 +25132,7 @@ const App = {
         const project = {
             id: uid('proj'),
             displayName: name,
+            meta: MsiDisplaySettings.newProjectMeta(),
             anatomyPalette: JSON.parse(JSON.stringify(DEFAULT_ANATOMY_PALETTE)),
             sections: [],
             rois: [],

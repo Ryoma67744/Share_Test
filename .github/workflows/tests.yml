@@ -79,6 +79,8 @@ jobs:
         run: node tests/project_report_browser_regression.cjs
       - name: Physical scale bars and calibration updates
         run: node tests/msi_scalebar_browser_regression.cjs
+      - name: MSI display presets and compatibility
+        run: node tests/msi_display_settings_browser_regression.cjs
       - name: Local persistence and recovery across browser tabs
         run: node tests/project_store_safety_browser_regression.cjs
       - name: New project tabs and isolated authentication

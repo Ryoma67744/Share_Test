@@ -5,6 +5,7 @@ const { runtime } = require('./viewer-runtime.cjs');
 const id = [[1,0,0],[0,1,0],[0,0,1]];
 let geometry;
 const c = runtime({
+  MsiDisplayGeometry: require('../viewer/msi-display-geometry.js'),
   document: { createElement: () => createCanvas(1, 1) },
   get2dContext: canvas => canvas.getContext('2d'),
   msiLayerSourceGeometry: () => geometry,
@@ -49,4 +50,23 @@ for(const [x,y] of [[10,10],[30,20],[52,16]]) {
   const expected=[(legacy[0]*4-.5)*2,(legacy[1]*4-.5)*3,80];
   expected.forEach((v,j)=>assert.ok(Math.abs(data[4*(y*out.width+x)+j]-v)<=2,'registered HE colour matches inverse coordinate'));
 }
-console.log(`HE real-pixel regression: ${cases} white-image cases plus registered colour ramp passed`);
+// Apply physical shape only after the established legacy-to-display HE warp.
+// The independent source footprint stays fixed even when the display grid is wider.
+for(const irregular of [false,true]) {
+  geometry=grid(32,19,irregular);
+  const original=JSON.stringify({geometry,T:id});
+  const warped=c.heMsiDisplayWarp(white(32,19),id,{},'MSI_a',3);
+  const W=geometry.displayGeometry.W,H=geometry.displayGeometry.H;
+  const frame=c.MsiDisplayGeometry.createFrame({width:W,height:H,sourceWidth:32,sourceHeight:19,
+    registeredPitch:{x:30,y:60},aspectMode:'physical'});
+  const physical=c.bakeMsiImageWithFrame(warped,frame,3);
+  assert.equal(physical.width,96);assert.equal(physical.height,114);
+  const rgba=physical.getContext('2d').getImageData(0,0,physical.width,physical.height).data;
+  for(let y=3;y<physical.height-3;y++)for(let x=3;x<physical.width-3;x++) {
+    const n=4*(y*physical.width+x);
+    assert.equal(rgba[n+3],255,'physical HE has no internal seams or clipped strips');
+    assert.equal(rgba[n],255,'physical HE retains the original registered interior');
+  }
+  assert.equal(JSON.stringify({geometry,T:id}),original,'physical rendering leaves geometry and T unchanged');
+}
+console.log(`HE real-pixel regression: ${cases} white-image cases, registered colour ramp and physical footprints passed`);

@@ -187,12 +187,61 @@ status, reason, registered pitch and display pitch. Decimal numeric strings are
 accepted strictly; partial parses and missing units/calibration are not guessed.
 Legacy ROI correspondence (`legacy.confirmed`) is a different contract: a missing
 intensity can invalidate old ROI correspondence without invalidating distance.
-The complete coordinate axes must establish a uniform distance mapping, with the
-bounded float32 tolerance retained. Source mismatch is a conflict. Pending numeric
-source geometry cannot supply a scale bar.
+Registered pitch is authoritative for the source grid. Rounded TXT coordinates do
+not invalidate it. Coordinate-derived automatic pitch remains a separate, stricter
+decision for RAW imports, applied only when a valid registered pitch is missing.
+Source mismatch is a conflict. Pending numeric source geometry cannot supply a scale bar.
 
 Only image-specific bars are meaningful. Apply inverse display geometry including
 rotation, reflection, anisotropy and fit/zoom. Choose a physical length to fit the
 image; never clamp its drawn width independently of its label. The registered
 pitch label does not assert that the current image is calibrated. Calibration
 resolution does not mutate source coordinates, intensities, polygons or HE transforms.
+
+## 7. Physical aspect and HDI-like presentation
+
+`meta.msiDisplay` version 1 stores `preset` (`current`, `hdi`, `custom`),
+`aspectMode` (`legacy`, `physical`) and `rangePolicy` (`legacy`, `maximum`).
+The existing `meta.colormap` and `meta.msiSmoothing` fields continue to carry colour
+and interpolation. New projects start with physical aspect, HotMetal, a linear
+0-to-original-maximum intensity window, Same scaling and nearest-neighbour display.
+Otsu and normalization remain off by default. This approximates HDI presentation;
+it does not reproduce proprietary import, preprocessing or last-point-wins rules.
+Duplicate display cells retain their existing mean representative.
+
+Absent or unrecognised versioned settings resolve to legacy presentation without
+writing settings during load. An explicit user change may store version 1. Old
+projects do not silently acquire a new aspect mode. Shared-view overrides live in
+tab-local session storage, isolated by project and viewer/admin role; they do not
+change published master metadata. Master settings round-trip through project save,
+ZIP and the existing publication metadata, requiring no SQL migration.
+
+The physical frame is applied once before orientation. For `N` source pixels of
+pitch `p`, its outer extent is `N*p`; its first-to-last sample-centre span is
+`(N-1)*p`. Changing display-raster resolution preserves both separately. Edge
+footprints are clipped or extended using the boundary cell, preserving missing
+cells, rather than moving original coordinates. Single-pixel axes retain one
+pixel's extent. The frame is reused by the main image, ROI click inverse,
+thumbnails, Preview, Align, reports and microscope comparisons. Existing ROI
+vertices, saved HE transforms and landmarks remain in their original basis.
+
+For example, 100×100 source pixels at 30×60 µm have a 3×6 mm physical footprint.
+A 90-degree display rotation gives 6×3 mm, without changing the registered pitch.
+Scale bars invert the complete transform; they must not apply aspect twice.
+If source geometry or pitch is unavailable, retain legacy geometry and omit an
+unverified physical scale bar instead of inventing calibration.
+
+Maximum policy uses the original valid measurement maximum for the relevant
+molecule; Same uses the maximum across displayed sections. Manual Range overrides
+remain higher priority. Colour mapping uses numerical display representatives
+when available, never the clipped 8-bit image for quantification. A PNG-only legacy
+layer cannot regain original intensity information that is absent from its source.
+
+PPT keeps its existing p99.8/21-colour style by default. The optional display-style
+export snapshots palette, interpolation, range policy, manual Range, Otsu mask,
+orientation, pitch and source identity at the start. It still exports every project
+section and molecule: Same is recalculated per molecule across all output sections,
+not copied from the currently visible subset. Both report styles follow the
+selected aspect mode. Quantitative tables always use original rows. Ordinary
+shared viewers never receive a CV/CE option; authenticated shared Admin and master
+retain the existing explicitly selected, default-off option.

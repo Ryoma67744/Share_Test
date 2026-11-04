@@ -40,20 +40,21 @@
     }
     function colorBar(pptx, slide, x, y, w, upper, options = {}) {
         const h = options.height || 3.7;
+        const stops=options.stops || COLOR_STOPS,lower=options.lower || 0;
         // Interpolate the 21 shared stops for a continuous, editable legend.
         const steps = 80;
         for (let i = 0; i < steps; i++) {
-            const position = i / (steps - 1) * (COLOR_STOPS.length - 1);
-            const lo = Math.floor(position), hi = Math.min(lo + 1, COLOR_STOPS.length - 1), t = position - lo;
+            const position = i / (steps - 1) * (stops.length - 1);
+            const lo = Math.floor(position), hi = Math.min(lo + 1, stops.length - 1), t = position - lo;
             const color = [0, 2, 4].map(offset => Math.round(
-                parseInt(COLOR_STOPS[lo].slice(offset, offset + 2), 16) * (1 - t) +
-                parseInt(COLOR_STOPS[hi].slice(offset, offset + 2), 16) * t).toString(16).padStart(2, '0')).join('');
+                parseInt(stops[lo].slice(offset, offset + 2), 16) * (1 - t) +
+                parseInt(stops[hi].slice(offset, offset + 2), 16) * t).toString(16).padStart(2, '0')).join('');
             slide.addShape(pptx.ShapeType.rect, { x, y: y + (steps - 1 - i) * h / steps, w,
                 h: h / steps + 0.001, line: { color, transparency: 100 }, fill: { color } });
         }
         for (let tick = 0; tick <= 4; tick++) {
-            const value = Number(upper) * tick / 4;
-            text(slide, tick === 4 ? number(upper) : Number.isFinite(value) ? String(Number(value.toPrecision(4))) : '—',
+            const value = lower+(Number(upper)-lower) * tick / 4;
+            text(slide, options.percent ? Math.round(tick*25)+'%' : tick === 4 ? number(upper) : Number.isFinite(value) ? String(Number(value.toPrecision(4))) : '—',
                 { x: x + w + 0.07, y: y + h * (1 - tick / 4) - 0.09, w: 0.72, h: 0.19 },
                 { fontSize: 9, color: options.color || '17223B' });
         }
@@ -220,19 +221,28 @@
                     margin: [2, 5, 2, 5], fontFace: FONT, fontSize: 13, color: '000000',
                     align: 'center', valign: 'middle', lang: 'ja-JP'});
                 const cellW = 11.83 / sectionPage.length;
+                const style=report.displayStyle;
+                const ranges=sectionPage.map(section=>entryFor(molecule,section).displayWindow).filter(Boolean);
+                const individual=style && new Set(ranges.map(w=>JSON.stringify(w))).size>1;
                 sectionPage.forEach((section, i) => {
                     const x = 0.12 + i * cellW, entry = entryFor(molecule, section);
                     text(slide, section.name,
-                        {x: x + 0.05, y: 2.2, w: cellW - 0.1, h: 0.35},
+                        {x: x + 0.05, y: 2.2, w: cellW - 0.1, h: style?0.25:0.35},
                         {fontSize: 17, color: '000000', align: 'center'});
+                    if(style && entry.displayWindow)text(slide,'Range '+number(entry.displayWindow.min)+' – '+number(entry.displayWindow.max),
+                        {x:x+0.05,y:2.47,w:cellW-0.1,h:0.15},{fontSize:8,color:'333333',align:'center'});
                     const cell = {x: x + 0.08, y: 2.62, w: cellW - 0.16, h: 4.0};
                     const bounds = picture(slide, entry, cell, {light: true});
                     imageScaleBar(pptx, slide, entry, bounds, cell);
                 });
-                text(slide, 'Intensity', {x: 12.02, y: 2.38, w: 1.15, h: 0.25}, {fontSize: 10, color: '000000', align: 'center'});
-                colorBar(pptx, slide, 12.12, 2.83, 0.24, molecule.upper, {height: 3.7});
+                text(slide, individual?'Colour level':'Intensity', {x: 12.02, y: 2.38, w: 1.15, h: 0.25}, {fontSize: 10, color: '000000', align: 'center'});
+                const range=style && ranges[0];
+                colorBar(pptx, slide, 12.12, 2.83, 0.24, individual?1:range?range.max:molecule.upper, {height: 3.7,
+                    lower:individual?0:range?range.min:0,percent:individual,
+                    stops:style && style.lut.map(c=>c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join(''))});
                 const basis = molecule.intensityScale && molecule.intensityScale.upperBasis;
-                const scaleNote = basis === 'percentile' ? 'Shared display p99.8' :
+                const scaleNote = style ? 'Display style: '+style.colormap+' / '+(style.mode==='individual'?'Individual':'Same (all sections)')
+                    +' / '+style.smoothing+(style.otsu?' / Otsu (available masks)':'') : basis === 'percentile' ? 'Shared display p99.8' :
                     basis === 'positive-maximum-fallback' ? 'Shared positive maximum (fallback)' :
                     basis === 'unit-fallback' ? 'Upper bound 1 (no positive range)' : 'Common scale for this molecule';
                 const qualityNotes = [...new Set(sectionPage.map(section => entryFor(molecule, section).qualityNote).filter(Boolean))];

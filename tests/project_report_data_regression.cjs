@@ -236,6 +236,39 @@ const sortedPercentile = (values, p) => {
     assert.deepEqual(pixel(enlargedRotatedCanvas, (1 - y) * 334 + 167, x * 334 + 167), pixel(identity, x, y));
   }
   assert.equal(Data.geometry(tiny).width, 8, 'standalone geometry can retain native dimensions');
+  const Geometry=require('../viewer/msi-display-geometry.js');
+  const physicalRaster={W:2,H:2,values:Float64Array.from([0,10,20,30])};
+  const physicalFrame=Geometry.createFrame({width:2,height:2,sourceWidth:2,sourceHeight:2,
+    registeredPitch:{x:'30',y:'60'},aspectMode:'physical'});
+  const redLut=Array.from({length:256},(_,i)=>[i,0,0]);
+  const displayStyle={mode:'same',rangePolicy:'maximum',lut:redLut,background:[0,0,0],colormap:'red',smoothing:'none',otsu:true};
+  const styledInput={projectName:'Style',displayStyle,sections:[{id:'s',name:'S'}],molecules:[{key:'m',name:'M',sections:[{
+    sectionId:'s',raster:physicalRaster,transform:physicalFrame.matrix,frame:physicalFrame,pixelPitch:physicalFrame.displayPitch,
+    displayWindow:{min:10,max:30},keepGrid:{W:2,H:2,keep:Uint8Array.from([1,1,1,0])},stats:{mean:123,max:999,n:7}}]}]};
+  const styled=await Data.prepare(styledInput,nativeOptions),styledEntry=styled.molecules[0].sections[0];
+  assert.equal(styledEntry.image.width,2);assert.equal(styledEntry.image.height,4);
+  close(styledEntry.image.physicalWidthUm,60);close(styledEntry.image.physicalHeightUm,120);
+  const styledPixels=await decode(styledEntry.image);
+  assert.deepEqual(pixel(styledPixels,0,2),[128,0,0,255]);assert.deepEqual(pixel(styledPixels,1,2),[0,0,0,255],'captured Otsu masks affect only display colours');
+  assert.equal(styledEntry.mean,123);assert.equal(styledEntry.max,999);assert.equal(styledEntry.n,7);
+  assert.deepEqual(Array.from(physicalRaster.values),[0,10,20,30]);assert.equal(styled.intensityScale.basis,'display-style');
+  const ticCanvas=createCanvas(2,2),ticContext=ticCanvas.getContext('2d');ticContext.fillStyle='#808080';ticContext.fillRect(0,0,2,2);
+  const physicalTic=Data.renderReference(ticCanvas,physicalFrame.matrix,{createCanvas,frame:physicalFrame,drawingRects:Geometry.drawingRects(physicalFrame)});
+  assert.equal(physicalTic.width,2);assert.equal(physicalTic.height,4,'TIC reference uses the same calibrated aspect as MSI details');
+  assert.deepEqual(pixel(await decode(physicalTic),1,3),[128,128,128,255]);
+  const unchangedOptical=Data.renderReference(ticCanvas,undefined,{createCanvas});assert.equal(unchangedOptical.width,unchangedOptical.height,'optical reference keeps its native basis');
+  const physicalRotate=Geometry.createFrame({width:2,height:2,sourceWidth:2,sourceHeight:2,
+    registeredPitch:{x:30,y:60},orientation:rotate,aspectMode:'physical'});
+  const physicalRotated=await Data.render(physicalRaster,30,{...nativeOptions,transform:physicalRotate.matrix,frame:physicalRotate,pixelPitch:physicalRotate.displayPitch});
+  assert.equal(physicalRotated.width,4);assert.equal(physicalRotated.height,2);close(physicalRotated.physicalWidthUm,120);
+  const sourceFrame=Geometry.createFrame({width:4,height:1,sourceWidth:3,sourceHeight:1,
+    registeredPitch:{x:30,y:60},aspectMode:'physical'});
+  const resampled=await Data.render({W:4,H:1,values:Float64Array.from([1,2,3,4])},4,
+    {...nativeOptions,transform:sourceFrame.matrix,frame:sourceFrame,pixelPitch:sourceFrame.displayPitch});
+  close(resampled.physicalWidthUm,90,'source footprint is N × registered pitch after display-grid resampling');
+  const smooth=await Data.render(raster([0,30]),30,{createCanvas,displayStyle:{...displayStyle,smoothing:'linear'},displayWindow:{min:0,max:30}});
+  const smoothPixels=await decode(smooth),middle=pixel(smoothPixels,499,100)[0];
+  assert.ok(middle>100&&middle<150,'linear display interpolation blends colours without changing measurements');
   assert.ok(Data.geometry({W: 700, H: 1, values: new Float64Array(700)}, null, 1400, true).width <= 1400);
   const controller = new AbortController();
   await assert.rejects(() => Data.prepare({...source, molecules: [{loadEntries: async () => {controller.abort(); return [];}}]},

@@ -6,6 +6,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, '../viewer/index.html'), 'utf8').replace(/\r\n/g, '\n');
 const RoiMediaModel = require('../viewer/roi-media-model.js');
+const MsiDisplaySettings = require('../viewer/msi-display-settings.js');
 const clone = value => JSON.parse(JSON.stringify(value));
 function fn(name) {
   let start = html.indexOf('function ' + name + '(');
@@ -198,7 +199,7 @@ async function main() {
   const localLocation = { href: 'http://127.0.0.1:8765/viewer/?project=previous&import=cloud&extra=kept#share=old&focus=MSI_A' };
   const lastProject = new Map();
   const node = { value: '', style: {}, classList: { toggle() {} } };
-  const opening = vm.createContext({ console, URL, URLSearchParams, Map, Set, setTimeout, clearTimeout,
+  const opening = vm.createContext({ console, URL, URLSearchParams, Map, Set, setTimeout, clearTimeout,MsiDisplaySettings,
     window: { DESI_OFFLINE: true }, location: localLocation,
     history: { state: { retained: true }, replaceState: (_state, _title, next) => { localLocation.href = new URL(next, localLocation.href).href; } },
     document: { body: { classList: { remove() {} } }, getElementById: () => node },

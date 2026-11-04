@@ -5,6 +5,7 @@
 <script src="app-runtime.js"></script>
 <script src="project-store-safety.js"></script>
 <script src="project-navigation.js"></script>
+<script src="viewer/msi-display-settings.js"></script>
 <script src="offline/offline.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1467,6 +1468,7 @@ async function createLocalProjectFromForm(data) {
     const project = {
         id: uid('proj'),
         displayName: data.name,
+        meta: MsiDisplaySettings.newProjectMeta(),
         anatomyPalette: {},
         sections: [],
         rois: [],

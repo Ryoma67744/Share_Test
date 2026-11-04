@@ -1,8 +1,9 @@
 'use strict';
 
 // The real SectionPanel DOM/sizing/scale bars and SharePreview renderer run in
-// Chromium. Only MSI pixel painting and persistence are replaced with an
-// anonymous in-memory fixture; no project, source file or network is accessed.
+// Chromium. A synthetic pixel canvas is painted using the real display matrix
+// and frame painter; parsing and persistence use an anonymous in-memory fixture.
+// No project, source file or network is accessed.
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -28,6 +29,7 @@ assert.ok(preview.includes('_syncCellScalebar('), 'Preview updates calibration w
 const source = [helpers, ...['formatPixelPitchLabel', 'pickPreviewScalebarLength', 'msiSourceReference',
   'msiLayerSourceGeometry', 'openModal'].map(standalone),
   block('class SectionPanel {', '\n}'), preview,
+  'const TestAppMethods = {' + block('    setFocusCompoundKey(', '\n    },') + '};',
   'const Wizards = {' + block('    async openMsiUmPxModal(', '\n    },') + '};',
   'Object.assign(window, {SectionPanel, SharePreview, Wizards});'].join('\n');
 const css = html.match(/<style>([\s\S]*?)<\/style>/)[1];
@@ -45,6 +47,7 @@ async function main() {
       + '<div id="share-preview-overlay" style="position:relative;inset:auto;display:block;width:1680px;height:300px">'
       + '<div data-image-grid style="display:grid;height:260px;gap:18px"></div></div><div id="modal-host"></div>');
     await page.addScriptTag({content:fs.readFileSync(path.join(root, 'viewer/section-visibility.js'), 'utf8')});
+    await page.addScriptTag({content:fs.readFileSync(path.join(root, 'viewer/msi-display-geometry.js'), 'utf8')});
     await page.addScriptTag({content:source});
     await page.evaluate(() => {
       const key = 'MSI_synthetic', W = 80, H = 50;
@@ -68,8 +71,11 @@ async function main() {
       const selected = new Set(sections.map(section=>section.id));
       window.App = {project,panels:new Map(),viewMode:'compound',focusCompoundKey:key,activeOverlay:null,
         thumbHeight:220,msiSmoothing:'none',activeSectionId:null,saveCount:0,
+        getMsiDisplaySettings:()=>({aspectMode:window.physicalDisplay?'physical':'legacy'}),
         queueSave(){this.saveCount++;},sectionVisibility:()=>({ensure:()=>selected,save(){}}),setActiveSection(){}};
-      window.Toolbar = {refreshRotation(){}};
+      App.setFocusCompoundKey=TestAppMethods.setFocusCompoundKey;
+      window._refreshMethodRowState=()=>{};
+      window.Toolbar = {refreshRotation(){},refreshAll(){}};
       window.get2dContext = (canvas,options) => canvas.getContext('2d',options);
       window.showToast = () => {};
       for (const section of sections) {
@@ -79,7 +85,20 @@ async function main() {
           msiValueRasters:new Map([[key,{W,H,values:Float32Array.from(rows,row=>row.v),sourceGeometry:structuredClone(geometry)}]]),
           _scheduleRoiRedraw(){},_wireViewerHostInteractions(){},drawAllRois(){},
           renderComposite(){
-            const ctx=this.dom.cdisp.getContext('2d');ctx.fillStyle='#442266';ctx.fillRect(0,0,this.dom.cdisp.width,this.dom.cdisp.height);
+            if(!this._testPixels) {
+              this._testPixels=document.createElement('canvas');this._testPixels.width=W;this._testPixels.height=H;
+              const ctx=this._testPixels.getContext('2d'),data=ctx.createImageData(W,H);
+              for(let y=0;y<H;y++)for(let x=0;x<W;x++) {
+                const n=4*(y*W+x),inside=Math.pow((x-39)/33,2)+Math.pow((y-24)/20,2)<1;
+                if(inside)data.data.set([Math.round(255*x/W),Math.round(210*(1-x/W)),Math.round(100+120*y/H),255],n);
+              }
+              ctx.putImageData(data,0,0);
+            }
+            const ctx=this.dom.cdisp.getContext('2d');ctx.clearRect(0,0,this.dom.cdisp.width,this.dom.cdisp.height);
+            const T=this._msiCanvasMatrix();ctx.save();ctx.transform(T[0][0],T[1][0],T[0][1],T[1][1],T[0][2],T[1][2]);ctx.imageSmoothingEnabled=false;
+            if(this._displayCanvasFrame.msiDisplay)drawMsiFrameSource(ctx,this._testPixels,this._displayCanvasFrame.msiDisplay);
+            else ctx.drawImage(this._testPixels,0,0);
+            ctx.restore();
             this.updateScaleBar();
           }});
         App.panels.set(section.id,panel);
@@ -228,6 +247,78 @@ async function main() {
       const angle=rotation*Math.PI/180,umPerPixel=Math.hypot(Math.cos(angle)*45,Math.sin(angle)*75);
       assert.ok(Math.abs(bar.line.width-bar.length*fit*zoom/umPerPixel)<0.15,'Saved pitch immediately changes the physical scale');
     }
+
+    // Physical mode changes image geometry once, before rotation. Main/Preview
+    // and the ROI inverse share that frame; legacy mode above stays unchanged.
+    await page.evaluate(()=>{window.physicalDisplay=true;});
+    for(const rotation of [0,90,37])for(const zoom of [0.5,2]) {
+      const actual=await page.evaluate(({rotation,zoom})=>{
+        const section=fixture.project.sections[0],panel=App.panels.get(section.id);
+        section.meta.world_coords.msi_um_per_px={x:30,y:60};
+        const view=panel._ensureViewerTransform();view.rot=rotation;view.rotMSI=0;view.scale=1;
+        panel._viewerFit=null;panel.setupCanvasSize();view.scale=zoom;panel.applyViewerTransform();
+        SharePreview._sectionRotations[section.id]=rotation;SharePreview._renderImageGrid(App.project,fixture.key);
+        const viewport=SharePreview._cellTransforms[section.id];viewport.scale=zoom;viewport.tx=0;viewport.ty=0;delete viewport.viewport;
+        SharePreview._applyCellTransform(0);
+        const wrap=SharePreview.overlay.querySelector('[data-cell-idx="0"]'),img=wrap.querySelector('[data-cell-img]');
+        const native=[12.25,23.75],canvas=applyAffinePoint(panel._msiRoiCanvasMatrix(),...native);
+        const client=panel.canvasToClient(...canvas),backCanvas=panel.clientToCanvas(...client),back=panel.canvasToMsi(...backCanvas);
+        return {row:measureBars()[0],physical:panel._displayCanvasFrame.msiDisplay.sourceBoundsUm,
+          native,back,canvasWidth:panel.dom.cdisp.width,canvasHeight:panel.dom.cdisp.height,
+          backing:panel._displayCanvasFrame.backingScale,
+          mainFit:parseFloat(panel.dom.cdisp.style.width)/panel.dom.cdisp.width,
+          previewFit:Math.min(wrap.clientWidth/Number(img.dataset.natW),wrap.clientHeight/Number(img.dataset.natH)),
+          previewWidth:Number(img.dataset.natW),previewHeight:Number(img.dataset.natH)};
+      },{rotation,zoom});
+      assert.deepEqual(actual.physical,{x:0,y:0,width:2400,height:3000});
+      actual.native.forEach((value,i)=>assert.ok(Math.abs(actual.back[i]-value)<1e-8,'Physical ROI client inverse preserves sample centres'));
+      if(rotation===0){assert.equal(actual.previewWidth,80);assert.equal(actual.previewHeight,100);}
+      for(const [bar,fit] of [[actual.row.main,actual.mainFit],[actual.row.preview,actual.previewFit]]) {
+        const expected=bar.length*fit*zoom*actual.backing/30;
+        assert.ok(Math.abs(bar.line.width-expected)<0.15,`Physical bar ${rotation} degrees: ${bar.line.width} != ${expected}`);
+      }
+    }
+    const switched=await page.evaluate(()=>{
+      const section=fixture.project.sections[0],panel=App.panels.get(section.id),key='MSI_other_source';
+      section.msiSeries[key]={kind:'txt',blobId:'other-source',rasterW:24,rasterH:7};
+      App.setFocusCompoundKey(key);
+      const before={key:panel._pickRefMsiKey(),physical:!!panel._displayCanvasFrame.msiDisplay,
+        calibration:resolveMsiPhysicalCalibration(section,key).status};
+      panel.imageSources[key]={naturalWidth:24,naturalHeight:7,complete:true};
+      panel.msiValueRasters.set(key,{W:24,H:7,values:new Float32Array(24*7),sourceGeometry:{legacy:{W:12,H:7},displayGeometry:{W:24,H:7}}});
+      App.setFocusCompoundKey(key);
+      const frame=panel._displayCanvasFrame.msiDisplay;
+      const after={key:panel._pickRefMsiKey(),bounds:frame.sourceBoundsUm,pitch:frame.displayPitch};
+      App.setFocusCompoundKey(fixture.key);
+      const restored=panel._displayCanvasFrame.msiDisplay.sourceBoundsUm;
+      delete section.msiSeries[key];delete panel.imageSources[key];panel.msiValueRasters.delete(key);
+      return {before,after,restored};
+    });
+    assert.deepEqual(switched.before,{key:'MSI_other_source',physical:false,calibration:'pending'});
+    assert.deepEqual(switched.after.bounds,{x:0,y:0,width:360,height:420});
+    assert.equal(switched.after.key,'MSI_other_source');assert.ok(Math.abs(switched.after.pitch.x-30*11/23)<1e-12);
+    assert.deepEqual(switched.restored,{x:0,y:0,width:2400,height:3000},'Actual focus selection updates and restores the acquisition frame');
+    if(process.env.MSI_PHYSICAL_SCREENSHOT) {
+      await page.evaluate(()=>{
+        for(const section of fixture.project.sections) {
+          section.meta.world_coords.msi_um_per_px={x:30,y:60};
+          const p=App.panels.get(section.id),v=p._ensureViewerTransform();v.rot=0;v.rotMSI=0;v.scale=1;v.tx=0;v.ty=0;p._viewerFit=null;p.setupCanvasSize();p.refreshSectionLabel();
+          SharePreview._sectionRotations[section.id]=0;SharePreview._cellTransforms[section.id]={tx:0,ty:0,scale:1};
+        }
+        SharePreview._renderImageGrid(App.project,fixture.key);
+        fixture.project.sections.forEach((section,i)=>{SharePreview._cellTransforms[section.id]={tx:0,ty:0,scale:1};SharePreview._applyCellTransform(i);});
+      });
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+      await page.screenshot({path:process.env.MSI_PHYSICAL_SCREENSHOT,fullPage:true});
+    }
+    // Physical layout is recomputed after a real pitch edit, not just its bar.
+    await page.evaluate(()=>{window.editorPromise=Wizards.openMsiUmPxModal(App.panels.get(fixture.project.sections[0].id));});
+    await page.locator('#modal-host [name="x"]').fill('60');await page.locator('#modal-host [name="y"]').fill('30');
+    await page.locator('#modal-host [data-modal-ok]').click();
+    const physicalEdit=await page.evaluate(async()=>{await editorPromise;const p=App.panels.get(fixture.project.sections[0].id);
+      return {bounds:p._displayCanvasFrame.msiDisplay.sourceBoundsUm,matrix:p._displayCanvasFrame.msiDisplay.rasterToFrame};});
+    assert.deepEqual(physicalEdit.bounds,{x:0,y:0,width:4800,height:1500});
+    assert.deepEqual(physicalEdit.matrix,[[2,0,0],[0,1,0],[0,0,1]]);
     await page.evaluate(() => {document.body.classList.add('share-mode');});
     assert.equal(await page.locator('#tb-msi-um-group').isVisible(),false,'Shared pitch editing remains hidden');
     for (const row of await page.evaluate(() => measureBars())) {
@@ -240,7 +331,7 @@ async function main() {
     }));
     assert.deepEqual(unchanged,{rows:true,geometry:true,values:true});
     assert.deepEqual(errors,[]);assert.deepEqual(network,[]);
-    console.log('MSI scale bar browser regression: PASS (six sections, rounded coordinates, small hosts, physical lengths, late calibration, quick editor, source preservation)');
+    console.log('MSI scale bar browser regression: PASS (six sections, rounded coordinates, small hosts, physical/legacy bounds, ROI client inverse, late calibration, quick editor, source preservation)');
   } finally { await browser.close(); }
 }
 main().catch(error=>{console.error(error.stack||error);process.exitCode=1;});

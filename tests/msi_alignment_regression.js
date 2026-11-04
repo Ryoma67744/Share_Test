@@ -188,6 +188,7 @@ async function harness(options = {}) {
     const shareRecords = new Map([[section.id, { payload: {}, version: 7 }]]);
     let nextTimer = 1, storageFail = !!options.storageFail, shareFail = !!options.shareFail, closed = false, outcome;
     const App = { project, currentProject: project, focusCompoundKey: 'MSI_A', viewMode: 'compound', panels: new Map([[section.id, panel]]), shareMode: options.shared ? { token: 'test-token' } : null,
+        getMsiDisplaySettings: () => ({aspectMode: options.physical ? 'physical' : 'legacy'}),
         getMsiWindow: () => ({ min: 0, max: 30 }), queueSave: (...args) => queueSaves.push(args),
         setFocusCompoundKey(key) { this.focusCompoundKey = key; },
         _tryAcquireRoiLock: async () => true, _releaseRoiLock: () => releaseCalls.push(true), _refreshShareAlignments: async () => {},
@@ -196,7 +197,7 @@ async function harness(options = {}) {
     let workspaceCallbacks;
     const context = vm.createContext({ console, document, window, Image: class extends Element { constructor() { super('img', document); } },
         Math, Number, String, Boolean, Object, Array, Date, JSON, Map, Set, WeakMap, Promise, Float32Array, Float64Array, Uint8Array, Uint8ClampedArray, structuredClone,
-        App, panel, _shareAlignBySection: shareRecords, isShareAlignMode: () => !!options.shared,
+        App, panel, MsiDisplayGeometry: require('../viewer/msi-display-geometry.js'), _shareAlignBySection: shareRecords, isShareAlignMode: () => !!options.shared,
         alert: x => alerts.push(String(x)), confirm: () => true, showToast: x => alerts.push(String(x)),
         requestAnimationFrame: callback => { const id = nextTimer++; frames.set(id, callback); return id; }, cancelAnimationFrame: id => frames.delete(id),
         setTimeout: callback => { const id = nextTimer++; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id),
@@ -668,6 +669,33 @@ test('a broken common-only record cannot seed an apparently verified default ali
     assert.equal(h.closed,false);assert.equal(h.saves.length,0);
     assert.deepEqual(plain(h.section.meta),before);
     await h.click('[data-modal-cancel]');
+});
+
+test('physical Align thumbnails and clicks preserve native HE/MSI landmarks through rotation', async () => {
+    for (const angle of [0, 90, 37]) {
+        const h = await harness({physical:true, prepare(section) {
+            section.meta.world_coords.msi_um_per_px={x:30,y:60};
+            section.meta.displayTransform={version:2,baseOrientation:'native-raster'};
+            section.meta.viewerTransform={rotMSI:angle,rotHE:angle};
+        }});
+        const before=plain(h.section);
+        for(const side of ['msi','he']) {
+            const img=h.$(`[data-${side}-img]`), B=JSON.parse(img.dataset.displayMatrix), ss=+img.dataset.ss;
+            assert.ok(ss>0,'physical thumbnail has a bounded uniform backing scale');
+            const lx=Math.hypot(B[0][0],B[1][0]),ly=Math.hypot(B[0][1],B[1][1]);
+            assert.ok(Math.abs(ly/lx-2)<1e-10,'physical pixel aspect is applied before rotation exactly once');
+            const sourcePoint=[2.5,1.5];
+            const T=img.dataset.tMatrix?JSON.parse(img.dataset.tMatrix):identity();
+            const D=h.context.applyAffinePoint(T,...sourcePoint);
+            const p=h.context.applyAffinePoint(B,...D),rect=img.getBoundingClientRect();
+            const ev={clientX:rect.left+p[0]*ss/img.naturalWidth*rect.width,clientY:rect.top+p[1]*ss/img.naturalHeight*rect.height};
+            const recovered=h.context.alignmentThumbClickPoint(ev,img,h.section,'MSI_A');
+            recovered.forEach((v,i)=>assert.ok(Math.abs(v-sourcePoint[i])<1e-9,`${side} click returns original pixel coordinate`));
+        }
+        await h.click('[data-modal-cancel]');
+        assert.deepEqual(plain(h.section),before,'display aspect and Cancel preserve saved registration and data');
+        h.assertNumericUnchanged();
+    }
 });
 
 (async () => {

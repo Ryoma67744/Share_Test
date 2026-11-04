@@ -14,9 +14,11 @@ for(const file of ['index.html','mrm.html','viewer/index.html']){
   const html=fs.readFileSync(path.join(root,file),'utf8');
   const scripts=tags(html,'script');
   const relative=file.startsWith('viewer/')?'../':'';
-  const bootstrap=file==='mrm.html'?['runtime-config.js','app-runtime.js','offline/offline.js']
-    :['runtime-config.js','app-runtime.js','project-store-safety.js','project-navigation.js','offline/offline.js'];
-  equal(scripts.slice(0,bootstrap.length).map(tag=>attr(tag,'src')),bootstrap.map(src=>relative+src),file+' bootstrap order');
+  const bootstrap=(file==='mrm.html'?['runtime-config.js','app-runtime.js','offline/offline.js']
+    :['runtime-config.js','app-runtime.js','project-store-safety.js','project-navigation.js','offline/offline.js']).map(src=>relative+src);
+  if(file==='index.html')bootstrap.splice(4,0,'viewer/msi-display-settings.js');
+  if(file==='viewer/index.html')bootstrap.splice(4,0,'msi-display-settings.js','msi-display-geometry.js');
+  equal(scripts.slice(0,bootstrap.length).map(tag=>attr(tag,'src')),bootstrap,file+' bootstrap order');
   for(const tag of scripts.slice(0,bootstrap.length))check(!/\b(?:async|defer)\b/i.test(tag.attrs),file+' bootstrap must execute synchronously');
   for(const tag of scripts){
     const src=attr(tag,'src');if(!src)continue;

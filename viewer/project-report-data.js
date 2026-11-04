@@ -121,7 +121,7 @@
     return m;
   }
 
-  function geometry(raster, transform, maxDimension = MAX_IMAGE_DIMENSION, nearestUpscale = false) {
+  function geometry(raster, transform, maxDimension = MAX_IMAGE_DIMENSION, nearestUpscale = false, frame = null) {
     validateRaster(raster);
     const m = affine(transform);
     const corners = [[0, 0], [raster.W, 0], [0, raster.H], [raster.W, raster.H]];
@@ -131,6 +131,9 @@
       const py = m[1][0] * x + m[1][1] * y + m[1][2];
       left = Math.min(left, px); right = Math.max(right, px);
       top = Math.min(top, py); bottom = Math.max(bottom, py);
+    }
+    if (frame && frame.bounds) {
+      left=frame.bounds.x;top=frame.bounds.y;right=left+frame.bounds.width;bottom=top+frame.bounds.height;
     }
     const worldWidth = right - left, worldHeight = bottom - top;
     if (![left, top, worldWidth, worldHeight].every(Number.isFinite) || worldWidth <= 0 || worldHeight <= 0) {
@@ -183,8 +186,8 @@
       h = source && (source.naturalHeight || source.height);
     if (!(w > 0 && h > 0)) return null;
     const m = affine(transform);
-    const worldWidth = Math.abs(m[0][0]) * w + Math.abs(m[0][1]) * h;
-    const worldHeight = Math.abs(m[1][0]) * w + Math.abs(m[1][1]) * h;
+    const worldWidth = o.frame ? o.frame.bounds.width : Math.abs(m[0][0]) * w + Math.abs(m[0][1]) * h;
+    const worldHeight = o.frame ? o.frame.bounds.height : Math.abs(m[1][0]) * w + Math.abs(m[1][1]) * h;
     const scale = Math.min(1, MAX_IMAGE_DIMENSION / Math.max(worldWidth, worldHeight));
     if (![worldWidth, worldHeight, scale].every(v => Number.isFinite(v) && v > 0)) return null;
     const width = Math.max(1, Math.ceil(worldWidth * scale)), height = Math.max(1, Math.ceil(worldHeight * scale));
@@ -194,17 +197,19 @@
     const canvas = makeCanvas(width, height); canvas.width = width; canvas.height = height;
     const ctx = canvas.getContext('2d');
     if (!ctx) return null;
-    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingEnabled = !o.frame;
     ctx.imageSmoothingQuality = 'high';
     ctx.setTransform(m[0][0] * scale, m[1][0] * scale, m[0][1] * scale, m[1][1] * scale,
-      width / 2 - (m[0][0] * w + m[0][1] * h) * scale / 2,
-      height / 2 - (m[1][0] * w + m[1][1] * h) * scale / 2);
-    ctx.drawImage(source, 0, 0);
+      o.frame ? (m[0][2]-o.frame.bounds.x)*scale : width / 2 - (m[0][0] * w + m[0][1] * h) * scale / 2,
+      o.frame ? (m[1][2]-o.frame.bounds.y)*scale : height / 2 - (m[1][0] * w + m[1][1] * h) * scale / 2);
+    if(o.drawingRects)for(const rect of o.drawingRects)ctx.drawImage(source,rect.source.x,rect.source.y,rect.source.width,rect.source.height,
+      rect.dest.x,rect.dest.y,rect.dest.width,rect.dest.height);
+    else ctx.drawImage(source, 0, 0);
     return {data: canvas.toDataURL('image/png'), width, height};
   }
 
   async function render(raster, upper, options) {
-    const o = options || {}, g = geometry(raster, o.transform, o.maxDimension, o.nearestUpscale !== false);
+    const o = options || {}, g = geometry(raster, o.transform, o.maxDimension, o.nearestUpscale !== false, o.frame);
     const makeCanvas = o.createCanvas || ((w, h) => {
       if (typeof document === 'undefined') throw new Error('画像作製用Canvasが利用できません。');
       const c = document.createElement('canvas'); c.width = w; c.height = h; return c;
@@ -215,6 +220,15 @@
     if (!ctx) throw new Error('画像作製用Canvasが利用できません。');
     const pixels = ctx.createImageData(g.width, g.height), rgba = pixels.data;
     const m = g.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    const style=o.displayStyle,win=o.displayWindow;
+    const bounds=o.frame && o.frame.sampleBounds || {x:0,y:0,width:raster.W,height:raster.H};
+    const sample=(x,y)=>{
+      const index=Math.max(0,Math.min(raster.H-1,y))*raster.W+Math.max(0,Math.min(raster.W-1,x));
+      if(!measured(raster,index)||o.keepGrid && !o.keepGrid.keep[index])return style ? style.background || [0,0,0] : null;
+      if(!style)return colorAt(raster.values[index],upper);
+      const t=Math.max(0,Math.min(1,(raster.values[index]-win.min)/(win.max-win.min)));
+      return style.lut[Math.round(t*(style.lut.length-1))];
+    };
     // Rasterize the bounded output directly. No unbounded source RGBA canvas
     // is allocated, and nearest sampling cannot invent measurement values.
     for (let y = 0; y < g.height; y++) {
@@ -222,12 +236,17 @@
       const py = g.top + (y + 0.5 - g.padY) / g.scale - m[1][2];
       for (let x = 0; x < g.width; x++) {
         const px = g.left + (x + 0.5 - g.padX) / g.scale - m[0][2];
-        const sx = Math.floor((m[1][1] * px - m[0][1] * py) / det);
-        const sy = Math.floor((-m[1][0] * px + m[0][0] * py) / det);
-        if (sx < 0 || sy < 0 || sx >= raster.W || sy >= raster.H) continue;
-        const sourceIndex = sy * raster.W + sx;
-        if (!measured(raster, sourceIndex)) continue;
-        const color = colorAt(raster.values[sourceIndex], upper), dest = (y * g.width + x) * 4;
+        const sx = (m[1][1] * px - m[0][1] * py) / det;
+        const sy = (-m[1][0] * px + m[0][0] * py) / det;
+        if (sx < bounds.x || sy < bounds.y || sx >= bounds.x+bounds.width || sy >= bounds.y+bounds.height) continue;
+        let color;
+        if(style && style.smoothing==='linear') {
+          const ix=Math.floor(sx-0.5),iy=Math.floor(sy-0.5),fx=sx-0.5-ix,fy=sy-0.5-iy;
+          const a=sample(ix,iy),b=sample(ix+1,iy),c=sample(ix,iy+1),d=sample(ix+1,iy+1);
+          color=[0,1,2].map(channel=>Math.round((a[channel]*(1-fx)+b[channel]*fx)*(1-fy)+(c[channel]*(1-fx)+d[channel]*fx)*fy));
+        } else color=sample(Math.floor(sx),Math.floor(sy));
+        if(!color)continue;
+        const dest = (y * g.width + x) * 4;
         rgba[dest] = color[0]; rgba[dest + 1] = color[1]; rgba[dest + 2] = color[2]; rgba[dest + 3] = 255;
       }
     }
@@ -240,6 +259,9 @@
   async function prepare(input, options) {
     const o = options || {};
     if (!input || !Array.isArray(input.molecules) || !Array.isArray(input.sections)) throw new Error('プロジェクトのレポート情報が不正です。');
+    if(input.displayStyle && (!Array.isArray(input.displayStyle.lut)||input.displayStyle.lut.length!==256
+        ||!input.displayStyle.lut.every(c=>Array.isArray(c)&&c.length===3&&c.every(v=>Number.isFinite(v)&&v>=0&&v<=255))))
+      throw new Error('表示スタイルの配色を確認できません。');
     function assertCurrent() {
       if (o.signal && o.signal.aborted) { const error = new Error('レポート作製を中止しました。'); error.name = 'AbortError'; throw error; }
       if (typeof input.assertCurrent === 'function') input.assertCurrent();
@@ -247,11 +269,14 @@
     assertCurrent();
     const result = {
       projectName: text(input.projectName), generatedAt: input.generatedAt || new Date().toISOString(),
-      metadata: metadataCopy(input.metadata || {}), sections: input.sections.map(s => ({...s})), molecules: [],
+      metadata: metadataCopy(input.metadata || {}), displayStyle:metadataCopy(input.displayStyle || null),
+      sections: input.sections.map(s => ({...s})), molecules: [],
       intensityScale: {percentile: PERCENTILE, basis: 'finite-measured-display-raster',
         statisticsBasis: 'original-measurement-rows',
         note: '画像は同一分子の全切片に共通の表示ラスター p99.8 で配色。p99.8が0以下または計算不可の場合、正の最大表示強度、それも無い場合は1を表示上限に使用。最大・平均は元測定行の統計値を使用。欠損は測定ゼロに置換しない。'}
     };
+    if(input.displayStyle)result.intensityScale={basis:'display-style',statisticsBasis:'original-measurement-rows',
+      note:'全切片・全分子を開始時の表示スタイルで出力。Same自動上限は全出力切片で再計算。元測定行の最大・平均は変更しない。'};
     for (let moleculeIndex = 0; moleculeIndex < input.molecules.length; moleculeIndex++) {
       assertCurrent();
       const source = input.molecules[moleculeIndex];
@@ -280,15 +305,15 @@
         measuredCount += count;
         states.push({entry, size, count, error});
       }
-      let pool = new Float64Array(measuredCount), offset = 0;
-      for (const state of states) if (state.count) {
+      let pool = input.displayStyle ? null : new Float64Array(measuredCount), offset = 0;
+      for (const state of states) if (state.count && pool) {
         const raster = state.entry.raster;
         for (let i = 0; i < state.size; i++) {
           if (i % 262144 === 0) { assertCurrent(); await yieldTask(); }
           if (measured(raster, i)) pool[offset++] = raster.values[i];
         }
       }
-      const percentileValue = percentileOwned(pool, PERCENTILE);
+      const percentileValue = pool ? percentileOwned(pool, PERCENTILE) : null;
       pool = null;
       const upper = percentileValue > 0 ? percentileValue : (max > 0 ? max : 1);
       const upperBasis = percentileValue > 0 ? 'percentile' : (max > 0 ? 'positive-maximum-fallback' : 'unit-fallback');
@@ -296,15 +321,26 @@
         metadata: metadataCopy(source.metadata || {}), percentileValue, displaySampleCount: measuredCount,
         intensityScale: {percentile: PERCENTILE, percentileValue, sampleCount: measuredCount, upper, upperBasis,
           basis: 'finite-measured-display-raster'}, sections: []};
+      if(input.displayStyle) {
+        const ranges=states.map(s=>s.entry.displayWindow).filter(Boolean);
+        molecule.upper=ranges.length?Math.max(...ranges.map(w=>w.max)):1;
+        molecule.lower=ranges.length?Math.min(...ranges.map(w=>w.min)):0;
+        molecule.intensityScale={basis:'display-style',upperBasis:'display-style',statisticsBasis:'original-measurement-rows'};
+      }
       for (const state of states) {
         assertCurrent();
         const entry = state.entry, stats = statistics(entry.stats);
+        if(state.count && input.displayStyle && (!entry.displayWindow || !Number.isFinite(entry.displayWindow.min)
+          || !Number.isFinite(entry.displayWindow.max) || !(entry.displayWindow.max>entry.displayWindow.min)))
+          throw new Error('表示スタイルの強度範囲を確認できません。');
         const image = state.count ? await render(entry.raster, upper, {
-          createCanvas: o.createCanvas, transform: entry.transform, pixelPitch: entry.pixelPitch, assertCurrent,
+          createCanvas: o.createCanvas, transform: entry.transform, frame:entry.frame, pixelPitch: entry.pixelPitch, assertCurrent,
+          displayStyle:input.displayStyle, displayWindow:entry.displayWindow, keepGrid:entry.keepGrid,
           nearestUpscale: o.nearestUpscale !== false
         }) : null;
         molecule.sections.push({sectionId: entry.sectionId, name: text(entry.name), ...stats,
-          image, missingReason: state.error, pixelPitch: entry.pixelPitch || null,
+          image, missingReason: state.error, pixelPitch: entry.pixelPitch || null, displayWindow:entry.displayWindow || null,
+          otsuApplied:!!entry.keepGrid,
           archiveProvenance: metadataCopy(entry.archiveProvenance || null), qualityNote: text(entry.qualityNote),
           metadata: metadataCopy(entry.metadata || {})});
       }
