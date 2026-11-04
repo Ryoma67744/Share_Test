@@ -196,4 +196,3 @@ rotation, reflection, anisotropy and fit/zoom. Choose a physical length to fit t
 image; never clamp its drawn width independently of its label. The registered
 pitch label does not assert that the current image is calibrated. Calibration
 resolution does not mutate source coordinates, intensities, polygons or HE transforms.
-

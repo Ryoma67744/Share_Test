@@ -354,6 +354,8 @@ async function main() {
       throw error;
     });
     await page.locator('#hidden-import-input').setInputFiles(path.join(root,'tests/fixtures/browser/offline-smoke-project.zip'));
+    // The real import now reviews archive completeness/provenance before writing.
+    await page.getByRole('button', {name:'復元 / Restore', exact:true}).click();
     await page.waitForFunction(() => App.project && App.project.displayName === 'Offline smoke fixture' && App.panels.size > 0);
     // Import populates visible layers and auto-Otsu asynchronously. Finish
     // those unrelated initial derivations before checking export invariance.
