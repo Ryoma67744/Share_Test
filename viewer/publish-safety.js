@@ -52,7 +52,7 @@
      if(previousReceipt){
        assertReceipt(previousReceipt,oldPending);
        const receipt=localReceipt(previousReceipt,oldPending,oldPending.settings||settings,oldPending,hooks.url(job.slug));
-       await hooks.receipt(receipt);snapshot.shareInfo={...(snapshot.shareInfo||{}),slug:receipt.slug,serverRevision:receipt.serverRevision,blobPaths:receipt.blobPaths};
+       await hooks.receipt(receipt);await hooks.release(oldPending.jobId);snapshot.shareInfo={...(snapshot.shareInfo||{}),slug:receipt.slug,serverRevision:receipt.serverRevision,blobPaths:receipt.blobPaths};
        if(oldPending.publishedEditEpoch===job.publishedEditEpoch&&JSON.stringify(oldPending.settings)===JSON.stringify(settings))return receipt;
      }else resumedCreate=!!oldPending.create&&state&&state.exists===false;
    }
