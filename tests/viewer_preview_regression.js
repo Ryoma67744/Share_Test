@@ -1414,7 +1414,7 @@ function extractMethod(source, name) {
 // 片方に寄せるともう片方が壊れるので、両方を縛る。
 function testImportSectionIdKeying() {
   const importFn = extractMethod(html, '_buildLocalProjectFromDoc');
-  const shareFn = extractMethod(html, '_hydrateSharedProject');
+  const shareFn = extractMethod(html, '_loadSharedProject');
 
   assert.match(importFn, /id:\s*\(s\.meta && s\.meta\.client_id\) \|\| s\.id/);
   // ROI はサーバの UUID で引いてから client_id へ翻訳する。

@@ -2997,8 +2997,8 @@ const ProjectStorage = (() => {
         return Array.from(out);
     }
 
-    async function putBlob(rec) {
-        return storeSafety().putBlob(rec);
+    async function putBlob(rec, options) {
+        return storeSafety().putBlob(rec, options);
     }
     const renameBlob = (...args) => storeSafety().renameBlob(...args);
 
@@ -3040,10 +3040,8 @@ const ProjectStorage = (() => {
     // only the blobs of the ONE project passed in and deleted every other
     // project's blobs. Removed rather than left as a loaded gun.
 
-    // Delete blobs not referenced by ANY persisted project. Share recipients
-    // never persist their project, so all their downloaded blobs are orphans —
-    // this reclaims IndexedDB filled by previous share sessions WITHOUT touching
-    // the user's own (persisted) master projects' blobs.
+    // Reclaim only load-owned caches whose Web Lock proves their owner ended.
+    // An unreferenced legacy blob may still belong to another live tab.
     async function pruneShareOrphans() {
         return storeSafety().pruneShareOrphans();
     }
@@ -3059,9 +3057,13 @@ const ProjectStorage = (() => {
     const putArchiveJob = (...args) => storeSafety().putArchiveJob(...args);
     const getArchiveJobs = (...args) => storeSafety().getArchiveJobs(...args);
     const deleteArchiveJob = (...args) => storeSafety().deleteArchiveJob(...args);
+    const beginBlobLease = (...args) => storeSafety().beginBlobLease(...args);
+    const pinBlobLease = (...args) => storeSafety().pinBlobLease(...args);
+    const finishBlobLease = (...args) => storeSafety().finishBlobLease(...args);
+    const reclaimInactiveBlobLeases = (...args) => storeSafety().reclaimInactiveBlobLeases(...args);
     return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, renameBlob, deleteBlob, pruneShareOrphans,
              patchProject, recordPublishReceipt, listRecoveries, restoreRecovery, discardRecovery, releaseProject, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
-             getPqIndex, putPqIndex, deletePqIndex };
+             beginBlobLease, pinBlobLease, finishBlobLease, reclaimInactiveBlobLeases, getPqIndex, putPqIndex, deletePqIndex };
 })();
 
 // =============================================================
@@ -13882,7 +13884,7 @@ async function syncShareImageLayers() {
             const cur = (sec.images || {})[r.layerKey];
             if (cur && cur.__shareImage === r.id) continue;
             try {
-                const blobId = await _ensureShareImageBlob(r);
+                const blobId = await _ensureShareImageBlob(r, project);
                 if (!blobId) continue;
                 sec.images = sec.images || {};
                 sec.images[r.layerKey] = {
@@ -13907,11 +13909,11 @@ async function syncShareImageLayers() {
 
 // Storage の実体を IndexedDB に置いて blobId を返す。既に同じ行の分があれば使い回す。
 const _shareImageBlobIds = new Map();   // share_images.id -> blobId
-async function _ensureShareImageBlob(row) {
+async function _ensureShareImageBlob(row, project = App.project) {
     const known = _shareImageBlobIds.get(row.id);
     if (known) {
         const rec = await ProjectStorage.getBlob(known).catch(() => null);
-        if (rec && rec.blob) return known;
+        if (rec && rec.blob) { if(project?.__blobLease)await ProjectStorage.pinBlobLease(project.__blobLease,[known]); return known; }
     }
     const url = SupabaseClient.publicUrl('atlases', row.storagePath);
     if (!url) return null;
@@ -13922,7 +13924,7 @@ async function _ensureShareImageBlob(row) {
     await ProjectStorage.putBlob({
         id: blobId, blob, mime: row.mime || blob.type,
         filename: row.filename || row.storagePath.split('/').pop(),
-    });
+    }, {lease:project?.__blobLease});
     _shareImageBlobIds.set(row.id, blobId);
     return blobId;
 }
@@ -13930,6 +13932,7 @@ async function _ensureShareImageBlob(row) {
 // 共有先の HE/IF 画像を 1 枚登録する。Storage へ上げてから目録に足す。
 // 戻り値 = 画面に付いたレイヤーキー (失敗時 null)。
 async function pushShareImage(sec, layerKey, file) {
+    const project=App.project;
     const token = App.shareMode && App.shareMode.token;
     const slug = App.shareMode && App.shareMode.slug;
     if (!token || !slug || !sec) return null;
@@ -13978,7 +13981,7 @@ async function pushShareImage(sec, layerKey, file) {
     //   取り直すことになる。
     try {
         const blobId = uid('blob');
-        await ProjectStorage.putBlob({ id: blobId, blob: file, mime: file.type || '', filename: name });
+        await ProjectStorage.putBlob({ id: blobId, blob: file, mime: file.type || '', filename: name }, {lease:project?.__blobLease});
         _shareImageBlobIds.set(row.id, blobId);
     } catch (e) { console.warn('[share image] ローカル保存に失敗 (Storage から取り直します)', e); }
     const list = (_shareImages.get(sec.id) || []).filter(r => r.layerKey !== layerKey);
@@ -17497,7 +17500,7 @@ async function ensureLocalBlob(ent, project) {
     if (!ent || !ent.blobId) return null;
     let rec = null;
     try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
-    if (rec && rec.blob) return rec;
+    if (rec && rec.blob) { if(project?.__blobLease)await ProjectStorage.pinBlobLease(project.__blobLease,[ent.blobId]); return rec; }
     if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
         throw new Error('このPCに原本がありません: ' + (ent.filename || ent.blobId)
             + '。原本を含む ZIP を取り込むか、ファイルを再登録してください。');
@@ -17518,7 +17521,7 @@ async function ensureLocalBlob(ent, project) {
             await ProjectStorage.putBlob({
                 id: ent.blobId, blob, mime,
                 filename: ent.filename || path.split('/').pop(),
-            }).catch(error => { if (error.code !== 'BLOB_ID_EXISTS') throw error; });
+            }, {lease:project?.__blobLease}).catch(error => { if (error.code !== 'BLOB_ID_EXISTS') throw error; });
             const back = await ProjectStorage.getBlob(ent.blobId);
             if (!back || !back.blob) throw new Error('IndexedDB へ保存できませんでした (容量不足の可能性)');
             console.info('[repair] Storage からソースを復元しました:', path);
@@ -23882,23 +23885,29 @@ const App = {
         catch (e) { alert('project doc 取得失敗: ' + (e.message || e)); return null; }
         if (!doc) { alert('project doc が空です'); return null; }
 
-        // Import into a new local ID. Existing local edits and originals are retained.
-        const project = await this._buildLocalProjectFromDoc(slug, doc, session);
-        if (!project) return null;
-        const importFailures = project.__importFailures || 0;
-        delete project.__importFailures;          // 永続化するレコードには残さない
-        try { await ProjectStorage.putProject(project, {createOnly:true}); }
-        catch (e) { alert('IDB 保存失敗: ' + (e.message || e)); return null; }
-
-        if (importFailures) alert('別コピーを取り込みましたが ' + importFailures + ' 件の原本を取得できませんでした。既存のローカル版は保持しています。');
-        return project.id;
+        // Keep each downloaded original pinned until the separate project commit.
+        const lease=await ProjectStorage.beginBlobLease({kind:'cloud-import',projectId:slug});
+        let committed=false;
+        try {
+            const project = await this._buildLocalProjectFromDoc(slug, doc, session, lease);
+            if (!project) return null;
+            const importFailures = project.__importFailures || 0;
+            delete project.__importFailures;
+            try { await ProjectStorage.finishBlobLease(lease,{project,createOnly:true}); }
+            catch(error) { alert('IDB 保存失敗: '+(error.message||error));return null; }
+            committed=true;
+            if(importFailures)alert('別コピーを取り込みましたが '+importFailures+' 件の原本を取得できませんでした。既存のローカル版は保持しています。');
+            return project.id;
+        } finally {
+            if(!committed)await ProjectStorage.finishBlobLease(lease,{discard:true});
+        }
     },
 
     // Build a master-mode project record from a published doc + session.
     // Mirrors _hydrateSharedProject but fills in shareInfo, omits __share,
     // and assigns a fresh local id so the result can sit alongside other
     // master projects in the same IDB.
-    async _buildLocalProjectFromDoc(slug, doc, session) {
+    async _buildLocalProjectFromDoc(slug, doc, session, lease) {
         const docMeta = doc.meta || {};
         const projectMeta = docMeta.project_meta || {};
         const project = {
@@ -23994,7 +24003,7 @@ const App = {
             const blob = await fetchBlob(ref.path);
             const mime = ref.mime || blob.type;
             const id = uid('blob');
-            await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() });
+            await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() }, {lease});
             const rec = { id, mime };
             project.shareInfo.blobPaths[id] = {path:ref.path,mime,size:blob.size};
             importedByPath.set(ref.path, rec);
@@ -24116,12 +24125,9 @@ const App = {
         return project;
     },
 
-    async _hydrateSharedProject(session) {
-        if (this.offline) return;
-        if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
-        if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
+    async _loadSharedProject(session) {
         const doc = await SupabaseClient.fetchProjectDoc(session.token);
-        if (!doc) { showToast('Share project の取得に失敗しました'); return; }
+        if (!doc) throw new Error('Share project の取得に失敗しました');
         // The RPC returns { id, slug, displayName, anatomyPalette, sections[], meta }.
         // Sections must already carry storage paths so the client can fetch
         // each blob via Storage public URL.
@@ -24161,6 +24167,9 @@ const App = {
             __share: true,
         };
 
+        const lease=await ProjectStorage.beginBlobLease({kind:'share-view',projectId:project.id});
+        Object.defineProperty(project,'__blobLease',{value:lease,enumerable:false});
+        try {
         // 前の共有セッションの控えを持ち越さない。
         _shareAlignBySection.clear();
 
@@ -24212,8 +24221,8 @@ const App = {
             throw lastErr;
         };
         const failed = [];
-        // Reclaim IndexedDB filled by previous share sessions before downloading,
-        // so quota pressure can't silently evict the blobs we're about to store.
+        // Reclaim only confirmed-ended load leases; live tabs and legacy bytes
+        // with unknown ownership remain protected.
         await ProjectStorage.pruneShareOrphans().catch(() => {});
         // Dedup by storage path WITHIN this hydrate. Many compounds share ONE
         // consolidated source file (same ref.path). Storing a separate blob copy
@@ -24229,7 +24238,7 @@ const App = {
                 const blob = await fetchBlob(ref.path);
                 const mime = ref.mime || blob.type;
                 const id = uid('blob');
-                await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() });
+                await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() }, {lease});
                 // ★ 書けたことを読み戻して確かめる。putBlob は commit まで待つように
                 //   直したが、ブラウザ側の事後 eviction もありうるので、
                 //   「blobId だけ在って中身が無い」状態を絶対に先へ通さない。
@@ -24323,6 +24332,20 @@ const App = {
             project.rois = groupRoiRowsByColor(rows, project.anatomyPalette);
         } catch (e) { console.warn('share ROI fetch failed', e); }
 
+        return project;
+        } catch(error) {
+            await ProjectStorage.finishBlobLease(lease,{discard:true});
+            throw error;
+        }
+    },
+
+    async _hydrateSharedProject(session) {
+        if (this.offline) return;
+        if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
+        if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
+        const previousProject=this.project;
+        const project=await this._loadSharedProject(session);
+        const projectMeta=project.meta;
         this.project = project;
         ensureMsiDisplayContext(this);
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
@@ -24525,6 +24548,7 @@ const App = {
                 catch (e) { console.warn('SharePreview.open failed', e); }
             }));
         }
+        if(previousProject?.__blobLease)await ProjectStorage.finishBlobLease(previousProject.__blobLease,{discard:true});
     },
 
     renderEmpty() {
