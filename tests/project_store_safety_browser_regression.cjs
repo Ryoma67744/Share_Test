@@ -37,6 +37,17 @@ async function pinRows(page,projectId) {
    request.onsuccess=()=>resolve(request.result.filter(row=>row.kind==='editing-session'&&row.projectId===id));request.onerror=()=>reject(request.error);});
  },projectId);
 }
+async function storageDiagnostics(page) {
+ return page.evaluate(async()=>{
+  const db=await storage.open(),names=['projects','project_recovery','blob_pins','archive_jobs'];
+  const references=await new Promise((resolve,reject)=>{
+   const tx=db.transaction(names,'readonly'),rows={};
+   for(const name of names){const r=tx.objectStore(name).getAll();r.onsuccess=()=>{rows[name]=r.result;};}
+   tx.oncomplete=()=>resolve(rows);tx.onabort=()=>reject(tx.error);
+  });
+  return {references,locks:await navigator.locks.query()};
+ });
+}
 
 async function optionalRecoveryScenario(browser,origin,errors) {
  const context=await browser.newContext();
@@ -54,7 +65,9 @@ async function optionalRecoveryScenario(browser,origin,errors) {
   // A failed preference write must display the persisted value, not an
   // optimistic OFF selection that would misrepresent the next conflict save.
   await manager.evaluate(()=>{window.savedSetRecoveryEnabled=storage.setRecoveryEnabled;storage.setRecoveryEnabled=async()=>{throw new DOMException('Synthetic quota failure','QuotaExceededError');};});
-  await manager.getByRole('radio',{name:'自動作成しない',exact:true}).check();
+  // The failed write may restore ON before Playwright verifies a check() action.
+  // Click initiates the attempted change; the assertions below require rollback.
+  await manager.getByRole('radio',{name:'自動作成しない',exact:true}).click();
   await manager.waitForFunction(()=>document.querySelector('input[name="recovery-enabled"][value="true"]:checked:not(:disabled)'));
   assert.match(await manager.locator('#local-recovery-dialog [role="status"]').textContent(),/設定を保存できませんでした.*Synthetic quota failure/);
   assert.equal(await manager.evaluate(()=>storage.getRecoveryEnabled()),true);
@@ -104,12 +117,19 @@ async function optionalRecoveryScenario(browser,origin,errors) {
   await manager.evaluate(()=>storage.deleteProject('off-project',{expectedRevision:2}));
   assert.equal(await viewer.evaluate(()=>storage.deleteBlob('off-original')),false,'Deleting the project respects the other tab active pin');
   assert.equal(await active.evaluate(async()=>(await storage.getBlob('off-added')).blob.text()),'new original before save');
+  const pinsBeforeClose=await pinRows(manager,'off-project');
   await active.close();
   await manager.waitForFunction(async()=>{await storage.listRecoveries();const db=await storage.open();return new Promise((resolve,reject)=>{
    const r=db.transaction('blob_pins','readonly').objectStore('blob_pins').getAll();r.onsuccess=()=>resolve(!r.result.some(row=>row.kind==='editing-session'&&row.projectId==='off-project'));r.onerror=()=>reject(r.error);
   });});
   assert.deepEqual((await manager.evaluate(()=>storage.listRecoveries())).map(row=>row.id),existingDrafts.map(row=>row.id),'Closing an OFF tab creates no phantom recovery');
-  assert.equal(await viewer.evaluate(()=>storage.getBlob('off-original')),null);assert.equal(await viewer.evaluate(()=>storage.getBlob('off-added')),null);
+  const originalsAfterCleanup=await viewer.evaluate(()=>Promise.all(['off-original','off-added'].map(id=>storage.getBlob(id))));
+  // Pin removal and blob reclamation commit in one transaction. Preserve the
+  // first observation on failure; retrying collection could conceal an orphan.
+  const cleanupDiagnostics=originalsAfterCleanup.some(Boolean)
+   ? {pinsBeforeClose,...await storageDiagnostics(viewer)} : null;
+  assert.deepEqual(originalsAfterCleanup,[null,null],
+   'Closed OFF sessions reclaim both unreferenced originals'+(cleanupDiagnostics?'\n'+JSON.stringify(cleanupDiagnostics):''));
 
   await openRecovery(manager);await manager.getByRole('button',{name:'別コピーとして復元',exact:true}).click();
   await manager.waitForFunction(async()=>(await storage.listRecoveries()).length===0);await closeRecovery(manager);
