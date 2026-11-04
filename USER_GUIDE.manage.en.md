@@ -85,7 +85,7 @@ These values appear in the viewer's bottom-right Memo panel automatically.
 
 ## 5. Opening / deleting a project
 
-The buttons differ by row badge.
+The buttons differ by row badge. **Open**, **Open (master)** and **Share view** open a new tab, leaving the manager, search and folder expansion in place. On return, local project summaries refresh without fetching or republishing the server folder tree. A project imported in another tab appears as a local copy. Editing dialogs and in-progress actions finish before this automatic refresh.
 
 | Badge | Buttons | Use |
 | --- | --- | --- |
@@ -94,11 +94,11 @@ The buttons differ by row badge.
 
 ### 5-1. Server-only row buttons
 
-- **Open (master)**: navigates to viewer at `?import=<slug>`, authenticates with the **master password** (the same one that unlocks this manager), downloads the blobs from Storage, then boots the master view.
+- **Open (master)**: opens a new viewer tab at `?import=<slug>`, authenticates with the **master password** (the same one that unlocks this manager), downloads the blobs from Storage, then boots the master view.
   - If you already entered it in the manager, you are not asked again for the rest of the session.
   - parquet (TIMS non-target) sources are **not downloaded**; they are read straight from Storage (putting hundreds of MB into IndexedDB blows the quota).
   - An imported project does not inherit the share passwords (viewer / admin). The first edit turns the sync indicator into **🔑 共有パスワード未設定**; click it once and set the passwords in `Publish to share`. After that, saves auto-publish as usual.
-- **Share view**: ordinary `#share=<slug>` viewer link (recipients flow — needs viewer pw).
+- **Share view**: opens an ordinary `#share=<slug>` viewer link in a separate tab (recipient flow — needs the viewer password).
 - **Delete (server)**: requires master pw + a confirm dialog. Removes the `projects` row + cascading children (sections / rois / project_credentials / session_tokens / roi_locks) + every Storage object under `<slug>/...`. **No undo**; double-check the slug.
 
 ### 5-2. Delete on Local / Local + Server rows

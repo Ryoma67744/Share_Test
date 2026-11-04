@@ -1684,9 +1684,9 @@ function rowHtml(r) {
             </div>
             <div class="flex gap-2">
               ${r.local
-                  ? '<button type="button" class="btn primary" data-action="open-local">Open</button>'
-                  : '<button type="button" class="btn primary" data-action="open-server" title="サーバから取り込んで master mode で開きます (master password 要)">Open (master)</button>'}
-              ${(!r.local && slug) ? '<button type="button" class="btn" data-action="open-share" title="閲覧専用 share view で開きます">Share view</button>' : ''}
+                  ? '<button type="button" class="btn primary" data-action="open-local" title="新しいタブで開きます">Open</button>'
+                  : '<button type="button" class="btn primary" data-action="open-server" title="サーバから取り込み、新しいタブの master mode で開きます (master password 要)">Open (master)</button>'}
+              ${(!r.local && slug) ? '<a class="btn" data-action="open-share" href="' + safe(ProjectNavigation.shareUrl(slug)) + '" target="_blank" rel="noopener" title="閲覧専用 share view を新しいタブで開きます">Share view</a>' : ''}
               ${window.DESI_OFFLINE === true ? '' : (url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : ''))}
               ${r.local ? '<button type="button" class="btn danger" data-action="delete-local">Delete</button>' : ''}
               ${(!r.local && slug) ? '<button type="button" class="btn danger" data-action="delete-server" title="サーバから完全に削除 (master password 要)">Delete</button>' : ''}
@@ -1703,9 +1703,57 @@ function rowHtml(r) {
         </div>`;
 }
 
-async function renderList() {
+// Returning from a child tab refreshes local summaries without a server fetch or
+// tree publication. Edits/modals keep ownership of their current DOM until done.
+let _managerActions = 0, _listRenderGeneration = 0, _listRendering = 0;
+let _lastListRows = '', _managerReturnPending = false, _managerReturnTimer = 0;
+function runManagerAction(work) {
+    _managerActions++;
+    let result;
+    try { result = work(); }
+    catch (error) { _managerActions--; throw error; }
+    return Promise.resolve(result).finally(() => { _managerActions--; scheduleManagerReturnRefresh(); });
+}
+function managerRefreshBlocked() {
+    return _managerActions > 0 || _listRendering > 0 || _treePersisting || !!_treeSavePromise
+        || !!document.querySelector('#modal-host .modal-backdrop, dialog[open]')
+        || !!document.getElementById('btn-refresh-server')?.disabled;
+}
+function scheduleManagerReturnRefresh() {
+    if (!_managerReturnPending || _managerReturnTimer || document.visibilityState === 'hidden') return;
+    _managerReturnTimer = setTimeout(async () => {
+        _managerReturnTimer = 0;
+        if (document.visibilityState === 'hidden') return;
+        if (managerRefreshBlocked()) { scheduleManagerReturnRefresh(); return; }
+        _managerReturnPending = false;
+        try { await renderList({localRefresh:true}); }
+        catch (error) { console.warn('Local project list refresh failed', error); }
+        scheduleManagerReturnRefresh();
+    }, 180);
+}
+function setupManagerReturnRefresh() {
+    const request = () => { _managerReturnPending = true; scheduleManagerReturnRefresh(); };
+    window.addEventListener('focus', request);
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') request(); });
+}
+
+async function renderList(options = {}) {
+    const generation = ++_listRenderGeneration;
+    _listRendering++;
+    try {
     const list = document.getElementById('list');
     const rows = await buildRows();
+    if (generation !== _listRenderGeneration) return;
+    if (options.localRefresh && (_managerActions || _treePersisting || _treeSavePromise
+        || document.querySelector('#modal-host .modal-backdrop, dialog[open]')
+        || document.getElementById('btn-refresh-server')?.disabled)) {
+        _managerReturnPending = true; return;
+    }
+    const signature = JSON.stringify(rows);
+    if (options.localRefresh && signature === _lastListRows) return;
+    _lastListRows = signature;
+    const scroll = options.localRefresh ? {x:window.scrollX,y:window.scrollY} : null;
+    if (scroll) requestAnimationFrame(() => { if (generation === _listRenderGeneration) window.scrollTo(scroll.x,scroll.y); });
     _ensureTree();
     if (!rows.length && !(workspaceTree.children && workspaceTree.children.length)) {
         list.innerHTML = `
@@ -1723,9 +1771,11 @@ async function renderList() {
     //   焼き付け (これで別 PC でもフォルダの中に出る)、古い 2 ノード重複を
     //   ツリー格納順で 1 つに畳む。描画順ではなく格納順で畳むのは、実験日
     //   ソートの設定が違う PC 同士が別々の結果を保存して奪い合わないため。
-    const fixed = _reconcileTree(rowForNode);
-    if (fixed.healed || fixed.folded) { _treeDirty = true; _treeHealed += fixed.healed; }
-    if (_treeDirty) saveTreeQuiet();   // fire-and-forget: 取得の前に流し切られる
+    if (!options.localRefresh) {
+        const fixed = _reconcileTree(rowForNode);
+        if (fixed.healed || fixed.folded) { _treeDirty = true; _treeHealed += fixed.healed; }
+        if (_treeDirty) saveTreeQuiet();   // fire-and-forget: 取得の前に流し切られる
+    }
     // ② Experiment-date ordering (display only; the saved tree/placement is
     // untouched). Within each level: newest 実験日 first; a folder sorts by the
     // newest experiment date it contains, so 日時 > サブフォルダー. Items with
@@ -1836,7 +1886,7 @@ async function renderList() {
         else { _openFolders.add(id); if (body) body.style.display = ''; btn.textContent = '▼'; }
     }));
     list.querySelectorAll('[data-folder-add]').forEach(b => b.addEventListener('click', () => treeCreateFolder(b.getAttribute('data-folder-add'))));
-    list.querySelectorAll('[data-folder-add-project]').forEach(b => b.addEventListener('click', async () => {
+    list.querySelectorAll('[data-folder-add-project]').forEach(b => b.addEventListener('click', () => runManagerAction(async () => {
         const folderId = b.getAttribute('data-folder-add-project');
         const data = await openNewProjectFormModal();
         if (!data) return;
@@ -1845,11 +1895,11 @@ async function renderList() {
         _treeChildrenOf(folderId).push({ type: 'project', localId: project.id });
         await persistTreeAndRender();          // save folder placement before leaving
         location.href = 'viewer/index.html?project=' + encodeURIComponent(project.id);
-    }));
+    })));
     list.querySelectorAll('[data-folder-rename]').forEach(b => b.addEventListener('click', () => treeRenameFolder(b.getAttribute('data-folder-rename'))));
     list.querySelectorAll('[data-folder-move]').forEach(b => b.addEventListener('click', () => treeMoveFolder(b.getAttribute('data-folder-move'))));
     list.querySelectorAll('[data-folder-del]').forEach(b => b.addEventListener('click', () => treeDeleteFolder(b.getAttribute('data-folder-del'))));
-    list.querySelectorAll('[data-folder-share]').forEach(b => b.addEventListener('click', () => openFolderShareModal(b.getAttribute('data-folder-share'))));
+    list.querySelectorAll('[data-folder-share]').forEach(b => b.addEventListener('click', () => runManagerAction(() => openFolderShareModal(b.getAttribute('data-folder-share')))));
 
     // ---- per-row controls ----
     list.querySelectorAll('.proj-row').forEach(row => {
@@ -1858,7 +1908,7 @@ async function renderList() {
         const url = row.getAttribute('data-url');
         const click = (action, fn) => {
             const btn = row.querySelector(`[data-action="${action}"]`);
-            if (btn) btn.addEventListener('click', fn);
+            if (btn) btn.addEventListener('click', event => runManagerAction(() => fn(event)));
         };
         click('move', () => treeMoveProject(slug, localId));
         click('change-pw', () => {
@@ -1868,17 +1918,13 @@ async function renderList() {
         });
         click('open-local', () => {
             if (!localId) return;
-            location.href = 'viewer/index.html?project=' + encodeURIComponent(localId);
+            ProjectNavigation.openMaster({projectId:localId});
         });
         click('open-server', () => {
             if (!slug) return;
             // Master 取り込み経路: viewer 側で admin pw を聞いて Local IDB に
             // ダウンロード → master mode で開く。share view は別ボタンに分離。
-            location.href = 'viewer/index.html?import=' + encodeURIComponent(slug);
-        });
-        click('open-share', () => {
-            if (!slug) return;
-            location.href = 'viewer/index.html#share=' + encodeURIComponent(slug);
+            ProjectNavigation.openMaster({importSlug:slug});
         });
         click('copy-url', async () => {
             if (!url) return;
@@ -2007,11 +2053,12 @@ async function renderList() {
                     + '\n\n※ プロジェクト共有ページ自体の表示名は、master で開いて再 Publish すると反映されます。');
             } else if (slug) {
                 if (confirm('Server only のプロジェクトはここでは直接改名できません。\n「Open (master)」でローカルに取り込んでから改名 →（必要なら）再 Publish できます。\n今すぐ master mode で開きますか?')) {
-                    location.href = 'viewer/index.html?import=' + encodeURIComponent(slug);
+                    ProjectNavigation.openMaster({importSlug:slug});
                 }
             }
         });
     });
+    } finally { _listRendering--; scheduleManagerReturnRefresh(); }
 }
 
 // ===========================================================================
@@ -2185,15 +2232,16 @@ async function init() {
     // refuses to dismiss until a valid password is entered, so anything
     // below this line only runs once the user is authenticated.
     await requireMasterUnlock();
+    if (ProjectNavigation.resumeMasterDestination()) return;
     const recoveryUi = ProjectStoreSafety.mountRecoveryUi(ProjectStorage, {projectUrl:id=>'viewer/index.html?project='+encodeURIComponent(id),onRestored: () => renderList()});
     window.addEventListener('project-storage-conflict', () => recoveryUi.notify());
-    document.getElementById('btn-new').addEventListener('click', async () => {
+    document.getElementById('btn-new').addEventListener('click', () => runManagerAction(async () => {
         const data = await openNewProjectFormModal();
         if (!data) return;
         const project = await createLocalProjectFromForm(data);
         // Jump straight into the viewer with the newly-created project.
         location.href = 'viewer/index.html?project=' + encodeURIComponent(project.id);
-    });
+    }));
     // ★ 押した結果を必ず見せる。
     //
     //   以前は旧経路 (list_projects) しか無く、ボタンからは forcePrompt=true で
@@ -2291,6 +2339,7 @@ async function init() {
             } catch (e) { /* expired or wrong: silently ignore, user can hit refresh */ }
         }
     }
+    setupManagerReturnRefresh();
 }
 
 document.addEventListener('DOMContentLoaded', () => { init().catch(e => { console.error(e); alert('init failed: ' + (e.message || e)); }); });

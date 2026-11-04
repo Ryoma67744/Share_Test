@@ -85,7 +85,7 @@
 
 ## 5. プロジェクトを開く・削除する
 
-行ごとのバッジに応じて出るボタンが変わります。
+行ごとのバッジに応じて出るボタンが変わります。**Open**・**Open (master)**・**Share view** は新しいタブで開き、管理画面の検索やフォルダーの開閉状態を保ちます。管理画面へ戻るとローカル一覧だけを更新し、別タブで取り込んだプロジェクトも表示します。この更新ではサーバのフォルダー情報を取得・再公開しません。編集ダイアログや処理が進行中の場合は、終了後に更新します。
 
 | 行のバッジ | 出るボタン | 用途 |
 | --- | --- | --- |
@@ -94,11 +94,11 @@
 
 ### 5-1. Server only 行のボタン詳細
 
-- **Open (master)**: viewer に `?import=<slug>` 付きで遷移し、**master password** (この管理画面に入るときと同じもの) で認証して Storage から blob をダウンロードし、master 画面が起動します。
+- **Open (master)**: 新しいタブの viewer を `?import=<slug>` 付きで開き、**master password** (この管理画面に入るときと同じもの) で認証して Storage から blob をダウンロードし、master 画面が起動します。
   - 管理画面で一度入力していればセッション中は聞かれません。
   - parquet (TIMS ノンターゲット) は**ダウンロードせず Storage から直接読みます** (数百 MB を IndexedDB に置くと容量超過で壊れるため)。
   - 取り込んだ直後は共有パスワード (viewer / admin) が引き継がれません。編集すると同期インジケータが **🔑 共有パスワード未設定** になるので、1 回だけクリック → `Publish to share` でパスワードを設定してください。以降は通常の auto-publish フローに乗ります。
-- **Share view**: 普通の `#share=<slug>` リンクで viewer に遷移 (viewer pw 入力 → 受け手と同じ画面)。
+- **Share view**: 新しいタブに普通の `#share=<slug>` リンクで viewer を開きます（viewer pw 入力 → 受け手と同じ画面）。
 - **Delete (server)**: master pw を要求 → 確認ダイアログ → サーバの `projects` 行 + 関連子テーブル (sections / rois / project_credentials / session_tokens / roi_locks) + Storage 配下 `<slug>/...` のオブジェクトをすべて削除。**復旧手段なし** なので注意。
 
 ### 5-2. Local / Local + Server 行の Delete
