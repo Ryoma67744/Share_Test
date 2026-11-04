@@ -4,6 +4,7 @@
 <script src="../runtime-config.js"></script>
 <script src="../app-runtime.js"></script>
 <script src="../project-store-safety.js"></script>
+<script src="../project-navigation.js"></script>
 <script src="../offline/offline.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -23486,8 +23487,8 @@ const App = {
                 const raw = sessionStorage.getItem('desi:masterUnlocked');
                 const p = raw ? JSON.parse(raw) : null;
                 const ok = !!(p && p.expiresAt && Date.now() < p.expiresAt);
-                if (!ok) { location.replace('../'); return; }
-            } catch (e) { location.replace('../'); return; }
+                if (!ok) { location.replace(ProjectNavigation.masterLoginUrlFromViewer(location.href)); return; }
+            } catch (e) { location.replace(ProjectNavigation.masterLoginUrlFromViewer(location.href)); return; }
         }
         if (shareSlug) {
             this.wireUi();
