@@ -312,7 +312,11 @@ for(const baseline of ['legacy-180','native-raster']){
   const warped=context.heMsiDisplayWarp(canvas(3,2),identity(),{},'a',1);
   assert.equal(warped.width,9);assert.equal(warped.height,2);
   // Real-pixel coverage is checked by msi_he_render_regression.js.
-  assert.equal(context.msiDisplayPhysicalPitch({meta:{world_coords:{msi_um_per_px:{x:10,y:30}}}},'a'),null,'ambiguous old ordinal pitch is not a physical scale');
+  const calibratedSection={meta:{world_coords:{msi_um_per_px:{x:10,y:30}}}};
+  const registeredPitch=context.msiDisplayPhysicalPitch(calibratedSection,'a');
+  close([registeredPitch.x,registeredPitch.y],[2.5,30],'registered source-pixel pitch follows raster centre-span resolution');
+  assert.equal(context.resolveMsiCoordinateCalibration(calibratedSection,'a').displayPitch,null,'nonuniform old ordinal coordinates remain unsuitable for automatic alignment');
+  assert.equal(context.resolveMsiCoordinateCalibration(calibratedSection,'a').reason,'nonuniform-coordinate-axis');
   const img={naturalWidth:9,naturalHeight:2,dataset:{ss:'1',rawW:'9',rawH:'2',displayMatrix:JSON.stringify(identity())},getBoundingClientRect:()=>({left:100,top:200,width:90,height:20})};
   close(context.alignmentThumbClickPoint({clientX:185,clientY:215},img,{},'a'),[2.5,1.5],'last sample-centre click is not clamped to index');
   const displayMask={mask:new Uint8Array([1,0,0,0,0,0,0,0,1,0,1,0,0,0,0,0,0,0]),w:9,h:2,sx:1,sy:1};

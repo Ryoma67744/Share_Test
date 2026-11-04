@@ -2,6 +2,7 @@
 const assert = require('node:assert/strict');
 const report = require('../viewer/project-report-app.js');
 const Archive = require('../viewer/project-archive.js');
+const { runtime } = require('./viewer-runtime.cjs');
 
 function fixture() {
     const makeEntry = (id, meta = {}) => ({ blobId: id, kind: 'txt', compoundMeta: { base: 'Dopamine',
@@ -468,7 +469,7 @@ const tests = [
         f.app.shareMode.token = 'renewed';
         assert.throws(pending.assertCurrent, { code: 'REPORT_SOURCE_CHANGED' });
     }],
-    ['physical pitch is resolved after numeric loading and unknown geometry remains unknown', async () => {
+    ['physical pitch is resolved after numeric loading and missing calibration remains unknown', async () => {
         const f = fixture();
         f.hooks.pixelPitch = (section, key) => {
             assert.ok(f.app.panels.get(section.id).msiValueRasters.has(key));
@@ -476,7 +477,31 @@ const tests = [
         };
         const entries = await report.createAdapter(f.hooks).molecules[0].loadEntries();
         assert.deepEqual(entries[0].pixelPitch, { x: 25, y: 37.5 });
-        assert.equal(entries[1].pixelPitch, null, 'unconfirmed/nonuniform geometry cannot use an old pitch');
+        assert.equal(entries[1].pixelPitch, null, 'missing or invalid registered calibration is not invented');
+    }],
+    ['registered string pitch survives rounded TXT geometry without changing source statistics', async () => {
+        const f = fixture(), sourceRows = [];
+        for (let y = 0; y < 2; y++) for (let x = 0; x < 16; x++) sourceRows.push({
+            x: Number((-12.3456 + x * 0.030005).toPrecision(6)), y: -4.3 + y * 0.03, v: x + y * 16 });
+        const geometryContext = runtime({}, ['buildMsiGrid', 'buildLegacyMsiGrid', 'msiSourceReference', 'createMsiSourceGeometry']);
+        for (const section of f.sections) section.meta.world_coords.msi_um_per_px = {x:'30',y:'3e1'};
+        const geometry = geometryContext.createMsiSourceGeometry(sourceRows, f.sections[0].msiSeries.MSI_DA);
+        geometryContext.msiLayerSourceGeometry = section => ({...geometry,
+            sourceRef: geometryContext.msiSourceReference(section.msiSeries.MSI_DA)});
+        assert.equal(geometryContext.resolveMsiCoordinateCalibration(f.sections[0], 'MSI_DA').status, 'unknown',
+            'The synthetic rounded coordinates reproduce the former strict-calibration rejection');
+        f.hooks.pixelPitch = (section, key) => {
+            assert.ok(f.app.panels.get(section.id).msiValueRasters.has(key));
+            return geometryContext.msiDisplayPhysicalPitch(section, key);
+        };
+        const before = JSON.stringify({project:f.project,sourceRows,geometry});
+        const entries = await report.createAdapter(f.hooks).molecules[0].loadEntries();
+        for (const entry of entries) {
+            assert.deepEqual(entry.pixelPitch, {x:30,y:30});
+            assert.deepEqual(entry.stats, {mean:140/3,max:100,n:3}, 'Calibration does not recalculate or replace source-row statistics');
+        }
+        assert.equal(JSON.stringify({project:f.project,sourceRows,geometry}), before,
+            'Numeric-string metadata and rounded source coordinates remain unchanged');
     }],
     ['reference image loading uses snapshot sections and rejects async project changes', async () => {
         const f = fixture(), calls = [];
