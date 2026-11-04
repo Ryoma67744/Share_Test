@@ -726,6 +726,16 @@ When you `Open (master)` a server-only project from another PC / browser profile
 
 ## 15. IndexedDB persistence reliability
 
+### Choose whether to create recovery drafts
+
+The bottom-right **回復用下書き (count)・設定** button in the manager and master viewer is available even with zero drafts. Select **自動作成する** (create automatically, the default) or **自動作成しない** (do not create). This browser-wide setting applies to all local projects and persists after reload; it is not shared with viewers or other browsers.
+
+Normal updates do not create a new draft every time. Recovery preserves conflicting edits and recoverable snapshots from ended tabs. A closed tab's snapshot proven to match a successful save, with no extra unsaved originals, is not listed as a duplicate. Legacy or uncertain snapshots remain available.
+
+When automatic creation is off, future save conflicts and editing sessions do not produce recovery copies. Conflicting edits remain unsaved and cannot be recovered through this feature after the tab closes. Normal saving, publication, conflict prevention and protection of originals in active tabs continue. Existing drafts are not deleted by the preference change: use **別コピーとして復元** to restore an independent project without a share link, or **下書き・保持を破棄** to discard one after reviewing it. A recovery draft does not indicate that a share update has completed.
+
+### Save protection
+
 After we observed a "Section 2 silently disappeared from IDB" event, the save path (queueSave / _flushSave) now has three layers of defence.
 
 | Layer | Detail |

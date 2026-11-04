@@ -46,7 +46,7 @@ async function seed(page, auth, projects = [localProject(projectId)]) {
     sessionStorage.clear();
     for (const [key,value] of Object.entries(auth)) sessionStorage.setItem(key,value);
     const db = await new Promise((resolve,reject) => {
-      const request = indexedDB.open('desi-projects',5);
+      const request = indexedDB.open('desi-projects',6);
       request.onupgradeneeded = () => ProjectStoreSafety.upgrade(request.result);
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);

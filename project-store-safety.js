@@ -5,7 +5,7 @@
     if (root) root.ProjectStoreSafety = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function() {
     'use strict';
-    const VERSION = 5;
+    const VERSION = 6;
     const referenceStores = ['projects', 'project_recovery', 'blob_pins', 'archive_jobs'];
     const clone = value => structuredClone(value);
     const revision = value => value == null ? 0 : Number.isSafeInteger(value) && value >= 0 ? value : null;
@@ -18,7 +18,7 @@
         tx.onerror = () => {}; // abort carries the final transaction result
     });
     function upgrade(db) {
-        for (const name of ['projects', 'blobs', 'project_index', 'pq_index', 'project_recovery', 'blob_pins', 'archive_jobs']) {
+        for (const name of ['projects', 'blobs', 'project_index', 'pq_index', 'project_recovery', 'blob_pins', 'archive_jobs', 'preferences']) {
             if (!db.objectStoreNames.contains(name)) db.createObjectStore(name, {keyPath: 'id'});
         }
     }
@@ -155,15 +155,43 @@
             if (!locks || id === sessionId) return false;
             return locks.request('desi-project-edit:' + id, {ifAvailable:true}, lock => !!lock);
         }
-        async function writeSession(tx, project, extraIds = []) {
+        async function recoveryEnabled(tx) {
+            const preference = await request(tx.objectStore('preferences').get('recovery'));
+            return !preference || preference.enabled !== false;
+        }
+        const getRecoveryEnabled = () => run(['preferences'], 'readonly', recoveryEnabled);
+        async function setRecoveryEnabled(enabled) {
+            if (typeof enabled !== 'boolean') throw new TypeError('Recovery preference must be a boolean');
+            return run(['preferences','blob_pins'], 'readwrite', async tx => {
+                await request(tx.objectStore('preferences').put({id:'recovery',enabled}));
+                // A preference change is not permission to erase existing drafts
+                // or another tab's (possibly already ended) recovery snapshot.
+                if (!enabled && activeProjectId) {
+                    const pins = tx.objectStore('blob_pins'), pin = await request(pins.get(sessionId));
+                    if (pin && pin.kind === 'editing-session' && pin.projectId === activeProjectId) {
+                        delete pin.project; delete pin.savedRevision;
+                        pin.recoveryDisabled = true;
+                        await request(pins.put(pin));
+                    }
+                }
+                return enabled;
+            });
+        }
+        async function writeSession(tx, project, extraIds = [], saved = false) {
             if (!project) return;
             const pins = tx.objectStore('blob_pins');
             const previous = await request(pins.get(sessionId));
             const ids = new Set([...collectBlobIds(project), ...extraIds]);
             // Retain new originals written before their project definitions are saved.
             if (previous && previous.projectId === project.id) for (const id of previous.blobIds || []) ids.add(id);
-            await request(pins.put({id:sessionId,kind:'editing-session',projectId:project.id,
-                project:clone(project),blobIds:[...ids],updatedAt:now()}));
+            const enabled = await recoveryEnabled(tx);
+            const row = {id:sessionId,kind:'editing-session',projectId:project.id,
+                liveness:locks?'web-lock':'unknown',blobIds:[...ids],updatedAt:now()};
+            if (enabled) {
+                row.project = clone(project);
+                if (saved) row.savedRevision = project.storageRevision;
+            } else row.recoveryDisabled = true;
+            await request(pins.put(row));
         }
         async function run(names, mode, work) {
             const tx = await transaction(names, mode);
@@ -178,12 +206,12 @@
         async function getProject(id, settings = {}) {
             if (!id) return null;
             if (settings.activate) await ensureSessionLock();
-            const project = await run(settings.activate ? ['projects','blob_pins'] : ['projects'], settings.activate ? 'readwrite' : 'readonly', async tx => {
+            const project = await run(settings.activate ? ['projects','blob_pins','preferences'] : ['projects'], settings.activate ? 'readwrite' : 'readonly', async tx => {
                 const project = await request(tx.objectStore('projects').get(id));
                 if (!project) return null;
                 // Legacy revision zero is a read token, never a backfill write.
                 if (project.storageRevision == null) project.storageRevision = 0;
-                if (settings.activate) await writeSession(tx, project);
+                if (settings.activate) await writeSession(tx, project, [], true);
                 return project;
             });
             if (settings.activate) activeProjectId = project ? project.id : null;
@@ -191,8 +219,15 @@
         }
         async function releaseProject() {
             activeProjectId = null;
-            await run(['blob_pins'], 'readwrite', tx => request(tx.objectStore('blob_pins').delete(sessionId)));
+            const retained = await run(['blob_pins'], 'readwrite', async tx => {
+                const pins = tx.objectStore('blob_pins'), row = await request(pins.get(sessionId));
+                if (row && !row.project && row.recoveryDisabled === true) return true;
+                await request(pins.delete(sessionId)); return false;
+            });
             if (unlockSession) unlockSession(); sessionLock = null; unlockSession = null;
+            // Snapshot-free sessions must still be proven inactive before their
+            // original pins are released. Without Web Locks they are retained.
+            if (retained) await listRecoveries();
         }
         async function putProject(project, settings = {}) {
             if (!project || !project.id || project.__summary) throw new Error('putProject requires a complete project record');
@@ -206,22 +241,29 @@
             if(load)load.closing=true;
             let failure = null;
             let committed;
-            try { committed = await run(load ? [...referenceStores,'project_index','blobs'] : ['projects', 'project_index', 'project_recovery', 'blob_pins'], 'readwrite', async tx => {
+            try { committed = await run(load ? [...referenceStores,'project_index','blobs','preferences'] : ['projects', 'project_index', 'project_recovery', 'blob_pins','preferences'], 'readwrite', async tx => {
                 const projects = tx.objectStore('projects');
                 const lease = load && await leaseRow(tx,settings.blobLease);
                 if(lease)for(const id of collectBlobIds(record))if(!await request(tx.objectStore('blobs').get(id)))throw new Error('取り込み原本がありません: '+id);
-                if (activeProjectId === record.id) await writeSession(tx, record);
+                const active = !load && activeProjectId === record.id;
                 if (settings.createOnly) {
                     while (await request(projects.get(record.id))) record.id = uid('proj');
                     record.storageRevision = 1; record.updatedAt = now();
                     await request(projects.add(record));
                     await request(tx.objectStore('project_index').put(options.indexRowFor(record)));
+                    if (active && activeProjectId === record.id) await writeSession(tx, record, [], true);
                     if(lease)await removeLeaseRow(tx,lease,true);
                     return record;
                 }
                 const current = await request(projects.get(record.id));
                 const actualRevision = current ? revision(current.storageRevision) : null;
                 if (!current || expected == null || revision(expected) == null || actualRevision !== expected) {
+                    if (active) await writeSession(tx, record);
+                    if (!await recoveryEnabled(tx)) {
+                        failure = conflict('別のタブで更新または削除されています。回復用下書きの自動作成はOFFのため、今回の編集は退避していません。',
+                            {projectId:record.id,expectedRevision:expected ?? null,actualRevision,recovered:false});
+                        return null;
+                    }
                     const recoveryId = 'recovery:' + writerId + ':' + record.id;
                     const previous = await request(tx.objectStore('project_recovery').get(recoveryId));
                     await request(tx.objectStore('project_recovery').put({id: recoveryId, projectId: record.id,
@@ -233,6 +275,7 @@
                 }
                 record.storageRevision = actualRevision + 1; record.updatedAt = now();
                 await saveRecord(tx, record);
+                if (active) await writeSession(tx, record, [], true);
                 return record;
             }); } catch(error) {if(load)load.closing=false;throw error;}
             if(load)closeLease(load);
@@ -292,7 +335,39 @@
                 sessions:await request(tx.objectStore('blob_pins').getAll())
             }));
             const rows = result.drafts;
-            for (const row of result.sessions) if (row.kind === 'editing-session' && row.project && await sessionInactive(row.id)) rows.push(row);
+            for (const row of result.sessions) {
+                if (row.kind !== 'editing-session' || !locks || row.liveness === 'unknown'
+                    || (row.id === sessionId && sessionLock)) continue;
+                await locks.request('desi-project-edit:' + row.id, {ifAvailable:true}, async lock => {
+                    if (!lock) return;
+                    // Keep the liveness lock until cleanup commits; probing and
+                    // releasing it before the transaction creates a race.
+                    const recoverable = await run([...referenceStores,'blobs'], 'readwrite', async tx => {
+                        const pins = tx.objectStore('blob_pins'), current = await request(pins.get(row.id));
+                        if (!current || current.kind !== 'editing-session' || current.liveness === 'unknown') return null;
+                        if (current.liveness === 'web-lock' && !current.project && current.recoveryDisabled === true) {
+                            await request(pins.delete(current.id));
+                            const used = await usedBlobs(tx);
+                            for (const id of current.blobIds || []) if (!used.has(id)) await request(tx.objectStore('blobs').delete(id));
+                            return null;
+                        }
+                        if (!current.project) return null;
+                        const saved = await request(tx.objectStore('projects').get(current.projectId));
+                        const savedBlobIds = collectBlobIds(saved);
+                        if (current.liveness === 'web-lock' && Number.isSafeInteger(current.savedRevision)
+                            && current.savedRevision >= 0 && saved && revision(saved.storageRevision) === current.savedRevision
+                            && current.project.storageRevision === current.savedRevision
+                            && (current.blobIds || []).every(id => savedBlobIds.has(id))) {
+                            // Only our explicit normal-save marker proves that
+                            // this snapshot is redundant. Legacy rows and extra
+                            // originals from an unfinished edit are retained.
+                            await request(pins.delete(current.id)); return null;
+                        }
+                        return current;
+                    });
+                    if (recoverable) rows.push(recoverable);
+                });
+            }
             return rows.map(row => ({id:row.id,projectId:row.projectId,kind:row.kind || 'conflict',
                 displayName:row.project.displayName || row.projectId,updatedAt:row.updatedAt,
                 expectedRevision:row.expectedRevision,actualRevision:row.actualRevision}));
@@ -341,7 +416,8 @@
             if (!record || !record.id || !record.blob) throw new Error('putBlob requires an original blob and ID');
             record = {...record}; // Freeze identity/metadata before the transaction await; Blob bytes are immutable.
             if(settings.lease)ownedLease(settings.lease);
-            return run(['blobs','blob_pins'], 'readwrite', async tx => {
+            return run(['blobs','blob_pins','preferences'], 'readwrite', async tx => {
+                const enabled = await recoveryEnabled(tx);
                 if (settings.lease) {
                     const row=await leaseRow(tx,settings.lease);
                     row.blobIds=[...new Set([...row.blobIds,record.id])];
@@ -351,7 +427,15 @@
                     const pins = await request(tx.objectStore('blob_pins').getAll());
                     const pin = pins.find(row => row.id === sessionId);
                     const jobOwned = pins.some(row => row.id !== sessionId && (row.blobIds || []).includes(record.id));
-                    if (!jobOwned && pin && pin.project) await writeSession(tx, pin.project, [record.id]);
+                    if (pin) {
+                        if (!jobOwned) pin.blobIds = [...new Set([...(pin.blobIds || []),record.id])];
+                        if (!enabled) {
+                            delete pin.project; delete pin.savedRevision;
+                            pin.recoveryDisabled = true;
+                        }
+                        pin.updatedAt = now();
+                        await request(tx.objectStore('blob_pins').put(pin));
+                    }
                 }
                 // Blob IDs are immutable original identities, including for cloud path reuse.
                 const blobs = tx.objectStore('blobs');
@@ -415,6 +499,7 @@
         const getArchiveJobs = () => run(['archive_jobs'], 'readonly', tx => request(tx.objectStore('archive_jobs').getAll()));
         const deleteArchiveJob = id => run(['archive_jobs'], 'readwrite', tx => request(tx.objectStore('archive_jobs').delete(id)));
         return {getProject, releaseProject, putProject, patchProject, recordPublishReceipt, listRecoveries, restoreRecovery, discardRecovery,
+            getRecoveryEnabled,setRecoveryEnabled,
             deleteProject, putBlob, renameBlob, deleteBlob, pruneShareOrphans, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
             beginBlobLease,pinBlobLease,finishBlobLease,reclaimInactiveBlobLeases};
     }
@@ -424,20 +509,89 @@
         let button = document.getElementById('local-recovery-button');
         if (!button) {
             button = document.createElement('button'); button.id = 'local-recovery-button'; button.type = 'button';
-            button.textContent = '回復用下書き'; button.hidden = true;
+            button.textContent = '回復用下書き・設定';
             button.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:99990;padding:9px 14px;background:#fff7ed;border:2px solid #c2410c;border-radius:6px;color:#7c2d12';
             document.body.appendChild(button);
         }
-        const refresh = async () => { try { const rows = await storage.listRecoveries(); button.hidden = !rows.length; button.textContent = '回復用下書き (' + rows.length + ')'; } catch (_) {} };
+        let settingsUi = null, changing = false, refreshId = 0;
+        const refresh = async () => {
+            const id = ++refreshId;
+            try {
+                const [rows, enabled] = await Promise.all([storage.listRecoveries(), storage.getRecoveryEnabled()]);
+                if (id !== refreshId) return;
+                button.hidden = false;
+                button.textContent = '回復用下書き (' + rows.length + ')・設定';
+                button.title = '自動作成: ' + (enabled ? 'ON' : 'OFF');
+                if (settingsUi && !changing) settingsUi.update(enabled);
+            } catch (error) {
+                button.hidden = false;
+                button.title = '下書き設定を読み込めません: ' + String(error.message || error);
+                if (settingsUi) settingsUi.status.textContent = button.title;
+            }
+        };
         button.onclick = async () => {
             if (document.getElementById('local-recovery-dialog')) return;
-            const rows = await storage.listRecoveries();
             const dialog = document.createElement('dialog'); dialog.id = 'local-recovery-dialog';
-            dialog.setAttribute('aria-label', '保存競合の回復'); dialog.style.cssText = 'max-width:620px;padding:24px;border-radius:8px';
-            const title = document.createElement('h2'); title.textContent = '保存競合の回復'; dialog.appendChild(title);
-            const text = document.createElement('p'); text.textContent = '別のタブの保存は変更していません。下書きを共有先のない別プロジェクトとして復元できます。'; dialog.appendChild(text);
+            dialog.setAttribute('aria-label', '回復用下書きと設定');
+            dialog.style.cssText = 'box-sizing:border-box;width:min(640px,calc(100vw - 32px));max-height:85vh;overflow:auto;padding:24px;border:1px solid #94a3b8;border-radius:8px;background:white;color:#0f172a;line-height:1.7';
+            const title = document.createElement('h2'); title.textContent = '回復用下書きと設定'; dialog.appendChild(title);
+            const fieldset = document.createElement('fieldset');
+            fieldset.style.cssText = 'padding:12px 16px;border:1px solid #cbd5e1;border-radius:6px';
+            const legend = document.createElement('legend'); legend.textContent = '回復用下書きの自動作成'; fieldset.appendChild(legend);
+            const radios = [];
+            for (const [value, caption] of [[true, '自動作成する'], [false, '自動作成しない']]) {
+                const label = document.createElement('label'), radio = document.createElement('input');
+                label.style.cssText = 'display:inline-flex;align-items:center;gap:6px;margin-right:20px;cursor:pointer';
+                radio.type = 'radio'; radio.name = 'recovery-enabled'; radio.value = String(value); radio.disabled = true;
+                label.append(radio, document.createTextNode(caption)); fieldset.appendChild(label); radios.push(radio);
+                radio.onchange = async () => {
+                    if (!radio.checked || changing) return;
+                    changing = true; radios.forEach(input => { input.disabled = true; });
+                    status.textContent = '設定を保存しています…';
+                    try {
+                        await storage.setRecoveryEnabled(value);
+                        status.textContent = '設定を保存しました。';
+                    } catch (error) {
+                        status.textContent = '設定を保存できませんでした: ' + String(error.message || error);
+                    } finally {
+                        changing = false;
+                        // Display only the persisted preference, including after a failed write.
+                        await refresh();
+                    }
+                };
+            }
+            const scope = document.createElement('p');
+            scope.textContent = 'このブラウザー内のすべてのローカルプロジェクトに適用します。初期設定は「自動作成する」です。';
+            scope.style.cssText = 'font-size:13px;color:#475569;margin:8px 0'; fieldset.appendChild(scope);
+            const effect = document.createElement('p');
+            effect.textContent = '「自動作成しない」場合、保存が競合した編集は回復用下書きに退避されません。通常の保存・共有更新は引き続き行えます。';
+            effect.style.cssText = 'font-size:13px;margin:8px 0'; fieldset.appendChild(effect);
+            const existing = document.createElement('p');
+            existing.textContent = '作成済みの下書きは、この設定を変更しても削除されません。';
+            existing.style.cssText = 'font-size:13px;margin:8px 0'; fieldset.appendChild(existing);
+            const status = document.createElement('p'); status.setAttribute('role','status'); status.style.cssText = 'font-size:13px;margin:4px 0';
+            fieldset.appendChild(status); dialog.appendChild(fieldset);
+            settingsUi = {status, update: enabled => { for (const radio of radios) { radio.checked = radio.value === String(enabled); radio.disabled = false; } }};
+            const text = document.createElement('p'); text.textContent = '下書きは、共有先のない別プロジェクトとして復元できます。'; dialog.appendChild(text);
+            const rowsBox = document.createElement('div'); dialog.appendChild(rowsBox);
+            const close = document.createElement('button'); close.type = 'button'; close.textContent = '閉じる'; close.onclick = () => dialog.close();
+            dialog.appendChild(close); dialog.addEventListener('close', () => { settingsUi = null; dialog.remove(); button.focus(); });
+            document.body.appendChild(dialog); dialog.showModal(); close.focus();
+            let rows;
+            try {
+                const [recovered, enabled] = await Promise.all([storage.listRecoveries(), storage.getRecoveryEnabled()]);
+                rows = recovered;
+                if (!dialog.isConnected) return;
+                settingsUi.update(enabled);
+            } catch (error) {
+                status.textContent = '下書き設定を読み込めません: ' + String(error.message || error);
+                return;
+            }
+            if (!rows.length) rowsBox.textContent = '回復用下書きはありません。';
             for (const row of rows) {
                 const item = document.createElement('p'), label = document.createElement('span'), restore = document.createElement('button');
+                item.style.cssText = 'padding:12px 0;border-top:1px solid #e2e8f0';
+                label.style.cssText = 'display:block;overflow-wrap:anywhere';
                 label.textContent = row.displayName + ' — ' + row.updatedAt + (row.kind === 'editing-session' ? ' (終了したタブの保持データ) ' : ' ');
                 restore.type = 'button'; restore.textContent = '別コピーとして復元';
                 restore.onclick = async () => {
@@ -457,14 +611,14 @@
                     try { await storage.discardRecovery(row.id); item.remove(); await refresh(); }
                     catch (error) { label.textContent=String(error.message || error); }
                 };
-                item.append(label, restore, discard); dialog.appendChild(item);
+                restore.style.marginRight = '8px';
+                item.append(label, restore, discard); rowsBox.appendChild(item);
             }
-            const close = document.createElement('button'); close.type = 'button'; close.textContent = '閉じる'; close.onclick = () => dialog.close();
-            dialog.appendChild(close); dialog.addEventListener('close', () => { dialog.remove(); button.focus(); });
-            document.body.appendChild(dialog); dialog.showModal(); close.focus();
         };
+        if (typeof window !== 'undefined') window.addEventListener('focus', refresh);
+        document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
         refresh();
-        return {refresh, notify: () => { refresh(); button.hidden = false; }};
+        return {refresh, notify: refresh};
     }
     return {VERSION, upgrade, create, collectBlobIds, mountRecoveryUi};
 });
