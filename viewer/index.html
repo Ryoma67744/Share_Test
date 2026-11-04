@@ -3007,8 +3007,8 @@ const ProjectStorage = (() => {
         return await pr(t.objectStore('blobs').get(id)) || null;
     }
 
-    async function deleteBlob(id) {
-        return storeSafety().deleteBlob(id);
+    async function deleteBlob(id, options) {
+        return storeSafety().deleteBlob(id, options);
     }
 
     // ---- parquet フッタ索引 (pq_index) --------------------------------------

@@ -45,6 +45,12 @@ async function main(){
  await assert.rejects(()=>a.putBlob({id:'immutable',blob:new Blob(['other'])}),{code:'BLOB_ID_EXISTS'});
  await a.renameBlob('immutable','two');assert.equal(await memory.stores.blobs.get('immutable').blob.text(),'first');
  assert.equal(memory.stores.blobs.get('immutable').filename,'two');
+ // An import's pre-write journal is not ownership proof if another writer
+ // won a same-ID creation race. Cleanup must check the stored owner too.
+ await a.putBlob({id:'collision-winner',blob:new Blob(['other writer']),archiveOwnerId:'job-A'});
+ assert.equal(await a.deleteBlob('collision-winner',{ownerId:'job-B'}),false);
+ assert.equal(await memory.stores.blobs.get('collision-winner').blob.text(),'other writer');
+ assert.equal(await a.deleteBlob('collision-winner',{ownerId:'job-A'}),true);
  // Jobs and staging journals survive GC; cleanup lists intentionally do not pin.
  await a.pinBlobs('export',['pinned'],{kind:'zip-export'});await a.pinBlobs('export',['second']);
  await a.putArchiveJob({id:'import',ownedBlobIds:['staged'],cleanupBlobIds:['old']});

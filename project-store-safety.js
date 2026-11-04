@@ -240,6 +240,7 @@
         }
         async function putBlob(record) {
             if (!record || !record.id || !record.blob) throw new Error('putBlob requires an original blob and ID');
+            record = {...record}; // Freeze identity/metadata before the transaction await; Blob bytes are immutable.
             return run(['blobs','blob_pins'], 'readwrite', async tx => {
                 if (activeProjectId) {
                     const pins = await request(tx.objectStore('blob_pins').getAll());
@@ -260,9 +261,13 @@
                 record.filename = String(filename); await request(blobs.put(record)); return true;
             });
         }
-        async function deleteBlob(id) {
+        async function deleteBlob(id, settings = {}) {
             if (!id) return false;
             return run([...referenceStores, 'blobs'], 'readwrite', async tx => {
+                if (settings.ownerId !== undefined) {
+                    const original = await request(tx.objectStore('blobs').get(id));
+                    if (!original || original.archiveOwnerId !== settings.ownerId) return false;
+                }
                 if ((await usedBlobs(tx)).has(id)) return false;
                 await request(tx.objectStore('blobs').delete(id)); return true;
             });
