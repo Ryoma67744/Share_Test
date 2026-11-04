@@ -14,7 +14,12 @@ function install(ctx) {
   // The CAS suite supplies the production store later in fixture setup.
   const safety = () => typeof ctx.storeSafety === 'function' ? ctx.storeSafety() : null;
   storage.getBlob = async id => written.get(id) || (get && await get(id)) || null;
-  storage.putBlob = async rec => { if (put) await put(rec); written.set(rec.id, rec); return rec.id; };
+  storage.putBlob = async rec => {
+    // The CAS fixture keeps its public Blob Map alongside the IDB adapter.
+    // Write the real adapter too so atomic owner checks see the same record.
+    if (safety() && ctx.storage?.stores?.blobs !== ctx.blobs) await safety().putBlob(rec);
+    if (put) await put(rec); written.set(rec.id, rec); return rec.id;
+  };
   storage.putProject = async (project, options) => {
     const value = save ? await save(project, options) : project;
     projects.set(project.id, JSON.parse(JSON.stringify(project))); return value;

@@ -75,6 +75,7 @@ async function main(){
   await a.waitForFunction(()=>window.stageReady===true);
   assert.equal(await b.evaluate(async()=>{await ProjectArchive.recoverImports(storage);return !!await storage.getBlob('uncommitted');}),true);
   await a.close();
+  await b.waitForFunction(async()=>!(await navigator.locks.query()).held.some(lock=>lock.name.startsWith('desi-archive-job:')));
   await b.evaluate(()=>ProjectArchive.recoverImports(storage));
   assert.equal(await b.evaluate(()=>storage.getBlob('uncommitted')),null);
   assert.equal(await b.evaluate(async id=>(await storage.getBlob(id)).blob.text(),imported.source),imported.value,'existing imported source survives abandoned-import cleanup');
@@ -89,6 +90,7 @@ async function main(){
    }).catch(()=>{});
   });
   await c.waitForFunction(()=>window.didCommit===true);await c.close();
+  await b.waitForFunction(async()=>!(await navigator.locks.query()).held.some(lock=>lock.name.startsWith('desi-archive-job:')));
   await b.evaluate(()=>ProjectArchive.recoverImports(storage));
   assert.equal(await b.evaluate(async()=>(await storage.getBlob('committed-original')).blob.text()),'committed bytes');
   assert.equal(await b.evaluate(async()=>(await storage.getArchiveJobs()).length),0);
