@@ -15,7 +15,8 @@ function fn(name) {
 }
 function appSource() {
   const start = html.indexOf('const App = {');
-  return html.slice(start, html.indexOf('\n};', start) + 3) + '\nglobalThis.app = App;';
+  return ['msiDisplayContextKey','msiDisplayMeasurementSignature','ensureMsiDisplayContext','msiSourceReference'].map(fn).join('\n')
+    + '\n' + html.slice(start, html.indexOf('\n};', start) + 3) + '\nglobalThis.app = App;';
 }
 function clientSource() {
   const start = html.indexOf('const SupabaseClient = (() => {');

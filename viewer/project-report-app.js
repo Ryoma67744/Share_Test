@@ -444,8 +444,7 @@
                 context.assertCurrent();
                 const input = createAdapter({ getApp,
                     transform: section => sectionLayerViewLinear(section, 'msi'),
-                    pixelPitch: (section, key) => msiLayerSourceGeometry(section, key)?.legacy?.confirmed === false
-                        ? null : msiDisplayPhysicalPitch(section, key),
+                    pixelPitch: (section, key) => msiDisplayPhysicalPitch(section, key),
                     referenceImage: async (section, panel) => {
                         if (!panel || !panel.imageSources) return null;
                         const loaded = image => image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0;

@@ -479,11 +479,6 @@ body.share-admin #share-preview-overlay .preview-admin-login { display:none; }
 #share-preview-overlay .preview-header-right {
     display:flex; align-items:flex-start; gap:14px; flex-shrink:0;
 }
-#share-preview-overlay .preview-headerbar { display:flex; align-items:center; gap:6px; }
-#share-preview-overlay .preview-headerbar .bar {
-    display:inline-block; height:3px; background:#0f172a; box-shadow:0 0 0 1px #fff;
-}
-#share-preview-overlay .preview-headerbar .label { font-size:12px; font-weight:600; color:#0f172a; }
 #share-preview-overlay .preview-close {
     appearance:none; border:1px solid #cbd5e1; background:#fff; color:#475569;
     width:32px; height:32px; border-radius:4px; cursor:pointer; font-size:18px; line-height:1;
@@ -1535,13 +1530,11 @@ function buildCompoundTitle(focusKey, project, role) {
 // scalebar reads in the same units users already see in the main view.
 function pickPreviewScalebarLength(umPerPx, targetPx) {
     if (!Number.isFinite(umPerPx) || umPerPx <= 0) return null;
-    const NICE = [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10000, 20000];
     const wantUm = targetPx * umPerPx;
-    let chosen = NICE[0];
-    for (const v of NICE) {
-        if (v <= wantUm) chosen = v;
-    }
-    return chosen;
+    if (!Number.isFinite(wantUm) || !(wantUm > 0)) return null;
+    const unit = 10 ** Math.floor(Math.log10(wantUm)), mantissa = wantUm / unit;
+    const chosen = unit * (mantissa >= 5 ? 5 : mantissa >= 2 ? 2 : 1);
+    return chosen > 0 && Number.isFinite(chosen) ? chosen : null;
 }
 
 // Format `section.meta.world_coords.msi_um_per_px` into a short label like
@@ -1553,11 +1546,10 @@ function pickPreviewScalebarLength(umPerPx, targetPx) {
 // callers can fall back to displayName-only.
 function formatPixelPitchLabel(sec) {
     const wc = sec && sec.meta && sec.meta.world_coords;
-    const um = wc && wc.msi_um_per_px;
+    const um = normalizeMsiPhysicalPitch(wc && wc.msi_um_per_px);
     if (!um) return '';
-    const x = Number(um.x), y = Number(um.y);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || x <= 0 || y <= 0) return '';
-    const fmt = v => Number.isInteger(v) ? String(v) : v.toFixed(1);
+    const { x, y } = um;
+    const fmt = v => String(Number(v.toPrecision(6)));
     return fmt(x) + '×' + fmt(y) + ' μm/px';
 }
 
@@ -1793,21 +1785,91 @@ function sectionMsiCanvasMatrix(section, refW, refH, frame, kind) {
     T[0][2] += frame.width/2; T[1][2] += frame.height/2;
     return T;
 }
-function msiDisplayPhysicalPitch(section, key) {
+// Display-only state belongs to a project/role, never to a globally named MRM.
+// Deliberately stays in memory: opening a project does not migrate or save data.
+function msiDisplayContextKey(app) {
+    const project = app && app.project;
+    if (!project || !project.id) return null;
+    const share = app.shareMode;
+    return JSON.stringify(share || project.__share
+        ? ['share', (share && share.slug) || project.id, (share && share.role) || 'viewer']
+        : ['local', project.id]);
+}
+function msiDisplayMeasurementSignature(project, key) {
+    return JSON.stringify((project.sections || []).filter(sec => sec.msiSeries && sec.msiSeries[key])
+        .map(sec => {
+            const e = sec.msiSeries[key];
+            return [sec.id, msiSourceReference(e), e.sourceReference ? null : (e.storagePath || e.sourceUrl || e.blobId),
+                e.kind || '', e.sourceRevision || '',
+                e.sheet || '', e.func || 1, e.channel, e.col_x || e.x, e.col_y || e.y,
+                e.col_v || e.v, e.colIdx, e.compound_index, e.v_index,
+                e.annotation, e.data_start_row, e.dataStartLine, e.snap];
+        }).sort((a, b) => String(a[0]).localeCompare(String(b[0]))));
+}
+function ensureMsiDisplayContext(app, key) {
+    const contextKey = msiDisplayContextKey(app);
+    if (!contextKey) return;
+    const contexts = app._msiDisplayContexts || (app._msiDisplayContexts = new Map());
+    if (app._msiDisplayContextKey !== contextKey) {
+        const previous = contexts.get(app._msiDisplayContextKey);
+        if (previous) previous.mode = app.msiScaleMode;
+        let state = contexts.get(contextKey);
+        if (!state) {
+            state = { windows: app._msiDisplayContextKey ? {} : (app.msiUserWindow || {}),
+                mode: app._msiDisplayContextKey ? 'same' : (app.msiScaleMode || 'same'), signatures: {} };
+            contexts.set(contextKey, state);
+        }
+        app._msiDisplayContextKey = contextKey;
+        app.msiUserWindow = state.windows;
+        app.msiScaleMode = state.mode;
+        const select = typeof document !== 'undefined' && document.getElementById('msi-scale-mode');
+        if (select) select.value = state.mode;
+    }
+    if (key) {
+        const state = contexts.get(contextKey), signature = msiDisplayMeasurementSignature(app.project, key);
+        if (state.signatures[key] !== undefined && state.signatures[key] !== signature) delete state.windows[key];
+        state.signatures[key] = signature;
+    }
+}
+function normalizeMsiPhysicalPitch(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const number = v => {
+        if (typeof v === 'string') {
+            v = v.trim();
+            if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(v)) return null;
+            v = Number(v);
+        }
+        return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+    };
+    const x = number(value.x), y = number(value.y);
+    return x !== null && y !== null ? { x, y } : null;
+}
+// Physical distance and legacy ROI correspondence are separate contracts.
+// Invalid intensity can invalidate an old ROI basis without changing distance.
+function resolveMsiPhysicalCalibration(section, key) {
     const wc = section && section.meta && section.meta.world_coords;
-    const pitch = wc && wc.msi_um_per_px;
-    if (!pitch || !Number.isFinite(pitch.x) || !(pitch.x > 0)
-        || !Number.isFinite(pitch.y) || !(pitch.y > 0)) return null;
+    const pitch = normalizeMsiPhysicalPitch(wc && wc.msi_um_per_px);
+    const result = (status, displayPitch, reason, sourceRef) => ({ status, displayPitch,
+        unit: 'um/display-pixel', registeredPitch: pitch, reason,
+        evidence: { basis: 'registered-legacy-pixel', sourceRef: sourceRef || null } });
+    if (!pitch) return result('unknown', null, 'missing-or-invalid-calibration');
+    const ent = section && section.msiSeries && section.msiSeries[key];
     const g = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section, key) : null;
-    if (!g) return pitch;
-    const result = {};
+    if (!g) return ent && ['raw','parquet','txt','txt-analyte','xlsx'].includes(ent.kind)
+        ? result('pending', null, 'source-geometry-not-loaded')
+        : result('known', pitch, null);
+    if (ent && g.sourceRef && typeof msiSourceReference === 'function'
+        && g.sourceRef !== msiSourceReference(ent)) return result('conflict', null, 'source-changed', g.sourceRef);
+    const displayPitch = {};
     for (const axis of ['x','y']) {
         const knots = g.legacy && g.legacy[axis];
-        if (!knots || knots.length < 2) { result[axis] = pitch[axis]; continue; }
-        if (!knots.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))) return null;
+        if (!Array.isArray(knots) || !knots.length
+            || !knots.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite)))
+            return result('unknown', null, 'invalid-coordinate-axis', g.sourceRef);
+        if (knots.length === 1) { displayPitch[axis] = pitch[axis]; continue; }
         const first = knots[0], last = knots[knots.length - 1];
         const slope = (last[0]-first[0])/(last[1]-first[1]);
-        if (!(slope > 0) || !Number.isFinite(slope)) return null;
+        if (!(slope > 0) || !Number.isFinite(slope)) return result('unknown', null, 'invalid-coordinate-axis', g.sourceRef);
         // RAW stage coordinates are float32: adjacent differences can jitter
         // even for a uniform scan. Check the complete axis against its endpoint
         // line with float32 rounding tolerance, capped at 0.1% of a pixel.
@@ -1817,14 +1879,27 @@ function msiDisplayPhysicalPitch(section, key) {
         for (let i=1;i<knots.length;i++) {
             const p = knots[i], previous = knots[i-1];
             if (!(p[0] > previous[0]) || !(p[1] > previous[1])
-                || Math.abs((p[0]-first[0]) - (p[1]-first[1])*slope) > tolerance) return null;
+                || Math.abs((p[0]-first[0]) - (p[1]-first[1])*slope) > tolerance)
+                return result('unknown', null, 'nonuniform-coordinate-axis', g.sourceRef);
         }
         const step = g.displayGeometry && g.displayGeometry[axis] && g.displayGeometry[axis].step;
-        if (!Number.isFinite(step) || !(step > 0)) return null;
-        result[axis] = pitch[axis] * step / slope;
-        if (!Number.isFinite(result[axis])) return null;
+        if (!Number.isFinite(step) || !(step > 0)) return result('unknown', null, 'invalid-display-grid', g.sourceRef);
+        displayPitch[axis] = pitch[axis] * step / slope;
+        if (!Number.isFinite(displayPitch[axis]) || !(displayPitch[axis] > 0))
+            return result('unknown', null, 'invalid-display-grid', g.sourceRef);
     }
-    return result;
+    return result('known', displayPitch, null, g.sourceRef);
+}
+function msiDisplayPhysicalPitch(section, key) {
+    return resolveMsiPhysicalCalibration(section, key).displayPitch;
+}
+function msiCalibrationMessage(calibration) {
+    return ({ 'missing-or-invalid-calibration': 'スケール未確定: 正しい X/Y 校正値がありません',
+        'source-geometry-not-loaded': 'スケール確認中: MSI 原本の読み込みを待っています',
+        'source-changed': 'スケール未確定: 校正と原本の対応を確認してください',
+        'invalid-coordinate-axis': 'スケール未確定: 原本の座標を確認できません',
+        'nonuniform-coordinate-axis': 'スケール未確定: 旧画素から一様な距離へ換算できません',
+        'invalid-display-grid': 'スケール未確定: 画像の距離変換を確認できません' })[calibration.reason] || '';
 }
 function displayHorizontalUmPerPixel(matrix, pitch) {
     if (!pitch || !(pitch.x > 0) || !(pitch.y > 0)) return null;
@@ -8862,8 +8937,14 @@ class SectionPanel {
     // pan-zoom and resize.
     updateScaleBar() {
         const bar = this.dom && this.dom.scalebar; if (!bar) return;
-        const wc = this.section.meta && this.section.meta.world_coords;
-        const um = msiDisplayPhysicalPitch(this.section, this._pickRefMsiKey());
+        const calibration = resolveMsiPhysicalCalibration(this.section, this._pickRefMsiKey());
+        const um = calibration.displayPitch;
+        const message = msiCalibrationMessage(calibration);
+        bar.title = message;
+        if (bar.dataset) bar.dataset.calibrationStatus = calibration.status;
+        if (this.dom.label) this.dom.label.title = [
+            '登録された取得ピッチ。画像のスケールは原本の座標との対応確認後に表示します。',
+            message, 'master のみ: ダブルクリックで section 名を変更'].filter(Boolean).join('\n');
         // 寸法だけ要るので、読み込み済みでなくても ent の記録から取れる
         // (遅延読み込み中にスケールバーが消えないようにする)。
         const msiKey = this._pickRefMsiKey();
@@ -9421,6 +9502,7 @@ class SectionPanel {
     applyRangeRaw(edge, rawValue) {
         const key = this.effectiveActiveMsiKey();
         if (!key) return;
+        ensureMsiDisplayContext(App, key);
         const v = parseFloat(rawValue);
         if (!Number.isFinite(v)) return;
         // Per-MRM display window override (raw units). Only the edited edge is
@@ -9453,6 +9535,7 @@ class SectionPanel {
     resetRange() {
         const key = this.effectiveActiveMsiKey();
         if (!key) return;
+        ensureMsiDisplayContext(App, key);
         if (App.msiUserWindow) delete App.msiUserWindow[key];
         for (const p of App.panels.values()) {
             try {
@@ -14900,9 +14983,9 @@ const Wizards = {
         if (!panel || !panel.section) return null;
         const sec = panel.section;
         const wc = (sec.meta && sec.meta.world_coords) || {};
-        const cur = wc.msi_um_per_px || {};
-        const x0 = Number.isFinite(cur.x) ? cur.x : '';
-        const y0 = Number.isFinite(cur.y) ? cur.y : '';
+        const cur = normalizeMsiPhysicalPitch(wc.msi_um_per_px);
+        const x0 = cur ? cur.x : '';
+        const y0 = cur ? cur.y : '';
         const html = `
             <h2>MSI pixel size (μm/px)</h2>
             <p style="font-size:11px;color:#475569;margin-bottom:8px;">
@@ -14928,13 +15011,13 @@ const Wizards = {
         const card = openModal._card;
         const err = card.querySelector('[data-err]');
         card._collect = () => {
-            const x = parseFloat(card.querySelector('[name="x"]').value);
-            const y = parseFloat(card.querySelector('[name="y"]').value);
-            if (!Number.isFinite(x) || x <= 0 || !Number.isFinite(y) || y <= 0) {
+            const pitch = normalizeMsiPhysicalPitch({ x: card.querySelector('[name="x"]').value,
+                y: card.querySelector('[name="y"]').value });
+            if (!pitch) {
                 err.textContent = 'X / Y には正の数値を入力してください';
                 return null;
             }
-            return { x, y };
+            return pitch;
         };
         const result = await p;
         if (!result) return null;
@@ -15066,7 +15149,7 @@ const Wizards = {
             st.autoAligned = bySrc.autoAligned || null;
         };
         const state = loadStateFor(layerKey);
-        const msiUm = sec.meta.world_coords.msi_um_per_px || { x: 50, y: 50 };
+        const msiUm = normalizeMsiPhysicalPitch(sec.meta.world_coords.msi_um_per_px) || { x: 50, y: 50 };
         state.msi_um_x = Number.isFinite(msiUm.x) ? msiUm.x : 50;
         state.msi_um_y = Number.isFinite(msiUm.y) ? msiUm.y : 50;
 
@@ -20011,10 +20094,6 @@ const SharePreview = {
                     <button type="button" class="preview-admin-login" data-admin-login title="Admin password でログイン">🔑 Admin</button>
                 </div>
                 <div class="preview-header-right">
-                    <div class="preview-headerbar">
-                        <span class="bar" data-headerbar-bar></span>
-                        <span class="label" data-headerbar-label></span>
-                    </div>
                     <button type="button" class="preview-close" title="Close preview" data-preview-close>×</button>
                 </div>
             </div>
@@ -20271,7 +20350,6 @@ const SharePreview = {
         this._renderMethodHighlight(focusKey);
         this._renderImageGrid(project, focusKey);
         this._renderStatsTable(project, focusKey);
-        this._renderHeaderScalebar(project);
         this._refreshRangeInputs(project, focusKey);
         // 単一化合物 ⇄ 重ね合わせ の切り替えで右端の見せ方が変わる (グラデーション
         // ⇄ 分子=色の凡例)。open() と配色変更でしか描き直していなかったので、
@@ -20439,6 +20517,7 @@ const SharePreview = {
             if (!focusKey) return;
             const v = parseFloat(raw);
             if (!Number.isFinite(v)) return;
+            ensureMsiDisplayContext(App, focusKey);
             App.msiUserWindow = App.msiUserWindow || {};
             const cur = Object.assign({}, App.msiUserWindow[focusKey] || {});
             if (edge === 'min') cur.min = v; else cur.max = v;
@@ -21024,9 +21103,9 @@ const SharePreview = {
         const eff = baseUmPerPx / Math.max(scale * fit, 1e-6);
         const chosen = pickPreviewScalebarLength(eff, 100);
         if (!chosen) { bar.style.display = 'none'; return; }
-        const px = Math.max(40, Math.min(200, chosen / eff));
+        const px = chosen / eff;
         const labelText = chosen >= 1000 ? (chosen / 1000) + ' mm' : chosen + ' μm';
-        bar.querySelector('.bar').style.width = px.toFixed(1) + 'px';
+        bar.querySelector('.bar').style.width = px + 'px';
         bar.querySelector('.label').textContent = labelText;
         bar.style.display = '';
     },
@@ -21181,28 +21260,6 @@ const SharePreview = {
             `<tr><th>Avg Intensity</th>${cellsFor(ent => msiQuantMean(ent))}</tr>`;
     },
 
-    _renderHeaderScalebar(project) {
-        const barEl = this.overlay.querySelector('[data-headerbar-bar]');
-        const labelEl = this.overlay.querySelector('[data-headerbar-label]');
-        if (!barEl || !labelEl) return;
-        let umPerPx = null;
-        for (const sec of project.sections || []) {
-            const wc = sec.meta && sec.meta.world_coords;
-            if (wc && wc.msi_um_per_px && Number.isFinite(wc.msi_um_per_px.x)) {
-                umPerPx = wc.msi_um_per_px.x;
-                break;
-            }
-        }
-        const chosen = pickPreviewScalebarLength(umPerPx, 140);
-        if (!chosen) {
-            barEl.style.width = '0';
-            labelEl.textContent = '';
-            return;
-        }
-        const px = chosen / umPerPx;
-        barEl.style.width = Math.max(40, Math.min(220, px)) + 'px';
-        labelEl.textContent = chosen >= 1000 ? (chosen / 1000) + ' mm' : chosen + ' μm';
-    },
 };
 
 // ---------------------------------------------------------------------------
@@ -23380,6 +23437,7 @@ const App = {
     // Effective display window. 'same' = shared [0, in-scope common max]; else
     // the section's own range. A user min/max override wins per edge.
     getMsiWindow(key, rawRange, dispMax) {
+        ensureMsiDisplayContext(this, key);
         this.msiUserWindow = this.msiUserWindow || {};
         const u = this.msiUserWindow[key] || null;
         // Per-section raw range (= how this layer's PNG was baked).
@@ -23504,6 +23562,7 @@ const App = {
     },
     // Switch MSI intensity scale ('same' | 'individual') and repaint everything.
     setMsiScaleMode(mode) {
+        ensureMsiDisplayContext(this);
         const next = (mode === 'individual') ? 'individual' : 'same';
         if (this.msiScaleMode === next) return;
         this.msiScaleMode = next;
@@ -24712,6 +24771,7 @@ const App = {
         } catch (e) { console.warn('share ROI fetch failed', e); }
 
         this.project = project;
+        ensureMsiDisplayContext(this);
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         parquetReleaseAll();               // worker が抱えている parquet 索引も返す
         // Restore the project-level colormap before the first render so the
@@ -25021,6 +25081,7 @@ const App = {
             return;
         }
         this.project = project;
+        ensureMsiDisplayContext(this);
         // 前回のセッションで公開しきれなかった編集があればここで拾い直す。
         if (this.offline) {
             detachOfflineProject(project);

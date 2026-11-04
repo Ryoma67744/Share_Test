@@ -86,6 +86,7 @@ async function main() {
   loadFixedColors(context);
   vm.runInContext([
     defaultPaletteSource(),
+    ...['msiDisplayContextKey','msiDisplayMeasurementSignature','ensureMsiDisplayContext','msiSourceReference'].map(standalone),
     standalone('pickUnusedColorKey'),
     standalone('storeRoiPaletteColor'),
     standalone('roiFixedColorEditable'),

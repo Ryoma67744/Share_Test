@@ -172,3 +172,28 @@ Alignment regression coverage must additionally include A→B→A and TIC point 
 Rendering regressions use actual Canvas pixels: opaque HE remains opaque across near-uniform jitter and irregular coordinate gaps at multiple scales, and a registered colour ramp follows the inverse mapping without changing geometry or transforms. Load-lifecycle regressions exercise thumbnail/main request joining, decode failure and retry, reversed A/B/C completion, source/reader replacement, destruction/cache release, direct re-bakes, opacity 0/40 percent, real LRU eviction and Preview late-load restoration.
 
 Passing synthetic/model tests is not a substitute for visual inspection of a running browser or comparison with the user's original MSI image. Original orientation, anatomical intent of old rotated ROIs and real-project migration remain evidence-dependent checks. Report the actual tests performed and remaining limits with each release; this document itself is not a test-completion report.
+# Project display context and physical calibration
+
+Manual Range and Same/Individual are transient per-project settings. Shared
+contexts additionally distinguish slug and role, never credentials. A→B→A may
+restore A within the tab; reload restores automatic Range. Changing source or
+reader invalidates the corresponding manual window. Display clipping and loading
+the same measurement do not. Do not infer raw-intensity windows from old 0–255
+settings or persist Range through unrelated saves.
+
+`resolveMsiPhysicalCalibration` is the common physical-distance decision for the
+main image, individual Preview, microscope comparisons and PPT. It returns a
+status, reason, registered pitch and display pitch. Decimal numeric strings are
+accepted strictly; partial parses and missing units/calibration are not guessed.
+Legacy ROI correspondence (`legacy.confirmed`) is a different contract: a missing
+intensity can invalidate old ROI correspondence without invalidating distance.
+The complete coordinate axes must establish a uniform distance mapping, with the
+bounded float32 tolerance retained. Source mismatch is a conflict. Pending numeric
+source geometry cannot supply a scale bar.
+
+Only image-specific bars are meaningful. Apply inverse display geometry including
+rotation, reflection, anisotropy and fit/zoom. Choose a physical length to fit the
+image; never clamp its drawn width independently of its label. The registered
+pitch label does not assert that the current image is calibrated. Calibration
+resolution does not mutate source coordinates, intensities, polygons or HE transforms.
+

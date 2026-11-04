@@ -352,15 +352,14 @@ When a section has **no HE (`HE_STAIN`) registered** and 2+ MSI series exist, th
 - For projects created before this feature shipped, the TIC chip appears in the Layer panel but isn't visible by default. As the master, toggle it on once and save — the chosen state then ships to viewers on the next publish.
 - **Detection key is HE only**: IF/IHC registrations don't suppress TIC creation (IF/IHC are molecular overlays, not anatomical references).
 
-### 6-5. Viewer inherits the master's MSI Range
+### 6-5. MSI Range is temporary and scoped to each project
 
-The master's Range slider (Toolbar Range or the gear ⚙ "Intensity range") writes its value into **`sec.meta.layerDisplay[key].vmin/vmax`**. The Viewer reads that field on load and uses it as the **initial Range** for the corresponding MSI.
+Toolbar / gear MSI Range is a temporary display setting for each project in this tab. Adjusting Range does not save or publish it as the viewer's initial setting. Reloading restores automatic Range calculated from the source data.
 
-- **Range is shared — same window, same width — across every section of one MRM**: changing the Range min/max on one section snaps the min/max of **every section showing the same MRM (same MSI key)** to the same values (identical width). Edits from the Toolbar or the gear ⚙ both propagate to all sections and are saved into each section's `layerDisplay`. Use it to compare and publish several sections on one identical scale.
-- Whatever intensity window the master pinned for each MSI is what the viewer sees on first paint.
-- Viewers can re-tune Range freely, but the change is local — reloading restores the master's value.
-- The master needs to re-publish after tuning Range; saved-but-unpublished changes don't reach viewers.
-- `actualMin` / `actualMax` (slider endpoints) are re-derived from the viewer's local raster, so the slider stays consistent even if the data differs slightly.
+- A manual edge applies to all sections showing the same MSI key within that project; an unspecified edge remains automatic.
+- Switching A → B → A restores A's Range and Same / Individual mode without applying them to B. Replacing a measurement restores its automatic Range.
+- Shared URLs and viewer/admin display contexts are separate. Section selection and opening/closing Preview preserve manual Range.
+- Legacy 0–255 windows are retained but are not guessed into current source-intensity units. Range never changes source measurements or ROI statistics.
 
 ---
 

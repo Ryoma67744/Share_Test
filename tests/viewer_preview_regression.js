@@ -119,7 +119,8 @@ function makePreviewContext(extra = {}) {
   // 重ね合わせ一覧の ✎/× の出し分けはアプリ本体の関数がそのまま決める。
   // スタブに置き換えると「テストは通るのに画面では出ない」がすり抜ける。
   vm.runInContext(
-    extractTopLevelFunction('isShareOverlayMode') + '\n'
+    ['msiSourceReference','msiDisplayContextKey','msiDisplayMeasurementSignature','ensureMsiDisplayContext'].map(extractTopLevelFunction).join('\n') + '\n'
+    + extractTopLevelFunction('isShareOverlayMode') + '\n'
     + extractTopLevelFunction('isViewerOverlay') + '\n'
     + extractTopLevelFunction('canEditOverlay'),
     context);
