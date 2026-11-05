@@ -11,7 +11,7 @@ const ROOT = path.resolve(__dirname, '..');
 const OWNER_FILE = '.share-test-build.json';
 const GENERATOR = 'Share_Test distribution builder';
 const VIEWER_FILES = [
-  'msi-display-settings.js', 'msi-display-geometry.js', 'msi-smoothing.js',
+  'msi-display-settings.js', 'msi-display-geometry.js', 'msi-smoothing.js', 'msi-roi-range.js',
   'alignment-session.js', 'alignment-workspace.css', 'alignment-workspace.js',
   'fixed-colors.js', 'index.html', 'roi-cursor.svg', 'roi-media-app.js',
   'roi-media-model.js', 'roi-media-msi.js', 'roi-media-service.js',

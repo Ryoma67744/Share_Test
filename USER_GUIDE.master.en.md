@@ -359,6 +359,7 @@ When a section has **no HE (`HE_STAIN`) registered** and 2+ MSI series exist, th
 Toolbar / gear MSI Range is a temporary display setting for each project in this tab. Adjusting Range does not save or publish it as the viewer's initial setting. Reloading restores automatic Range calculated from the source data.
 
 - A manual edge applies to all sections showing the same MSI key within that project; an unspecified edge remains automatic.
+- Whole-view and ROI-only manual Ranges are stored separately. ROI-view adjustments preserve whole-view values; turning ROI-only off restores the original whole-view Range. `Reset` clears manual values for the current view mode.
 - Switching A → B → A restores A's Range and Same / Individual mode without applying them to B. Replacing a measurement restores its automatic Range.
 - Shared URLs and viewer/admin display contexts are separate. Section selection and opening/closing Preview preserve manual Range.
 - Legacy 0–255 windows are retained but are not guessed into current source-intensity units. Range never changes source measurements or ROI statistics.
@@ -377,7 +378,7 @@ Click `+ draw` on an existing ROI row to extend it onto another section.
 
 > **Escape** during drawing cancels (in-flight vertices are dropped). Multi-section ROIs accumulate in `polysBySection`.
 
-> **ROI-only view**: turning on the **"ROIのみ" (ROI only)** checkbox in the ROI LIST header clips **only the MSI layers** to the shape of the selected ROI (HE / background stay full). Sections without that ROI show no MSI. It follows rotation / flip and turns off to restore the full view.
+> **ROI-only view**: turning on the **"ROIのみ" (ROI only)** checkbox in the ROI LIST header clips **only the MSI layers** to the union of ROIs with Show enabled and **recalculates automatic Range from values inside them** (HE / background stay full). Overlapping areas count once; sections without an applicable ROI show no MSI. **Same** shares the largest ROI ceiling across displayed sections; **Individual** uses each section's own ROI range. Maximum/percentile and Smoothing settings are retained. Editing an ROI or changing Show updates the view; **turning ROI-only off restores the full view and its original Range**. ROI quantification, whole-section statistics, source data and numerical CSVs are unchanged.
 
 ---
 
@@ -631,6 +632,7 @@ With outlier clipping on, automatic Range uses **p99.9 (the 99.9th percentile)**
 - `Reset` discards that typed value and returns to the automatic ceiling above
 - Turning the toolbar's **outlier clip off** restores the **true maximum** as the ceiling, as before
 - Automatic Same uses a common range from displayed sections; Individual uses each section. Manual Range persists through section selection and Preview open/close
+- While ROI-only is on, automatic Range uses values inside visible ROIs. Whole-view and ROI-view manual values are separate; turning ROI-only off restores the whole-view Range
 - Clipping, colour, Range, smoothing and Otsu affect MSI appearance only. Routine display adjustments do not get a generic "加工" warning; duplicates or invalid coordinates have specific data information
 - Method/Preview whole-section statistics and ROI statistics use original measurement rows. Duplicate-coordinate rows all count. n is the valid measurement-row count, separate from unique-coordinate count. SD uses denominator n; all-missing data has n=0 and unavailable Mean/SD/Max
 - Fixes to legacy duplicate averaging, missing-to-zero conversion, Otsu exclusion or precision loss can change old results. Audit those corrections separately from the requirement that display operations leave the same input/ROI's numbers unchanged

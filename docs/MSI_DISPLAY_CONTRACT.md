@@ -181,6 +181,13 @@ reader invalidates the corresponding manual window. Display clipping and loading
 the same measurement do not. Do not infer raw-intensity windows from old 0–255
 settings or persist Range through unrelated saves.
 
+Each context keeps separate whole-view and ROI-only manual windows. Entering
+ROI-only view uses its automatic ROI window unless an ROI-view override exists;
+whole-view manual values do not override the ROI calculation. Editing or resetting
+Range affects the current view's window only. Turning ROI-only off restores the
+whole-view window. Preview shares these windows and restores its prior ROI-only
+mode on close.
+
 `resolveMsiPhysicalCalibration` is the common physical-distance decision for the
 main image, individual Preview, microscope comparisons and PPT. It returns a
 status, reason, registered pitch and display pitch. Decimal numeric strings are
@@ -237,6 +244,31 @@ molecule; Same uses the maximum across displayed sections. Manual Range override
 remain higher priority. Colour mapping uses numerical display representatives
 when available, never the clipped 8-bit image for quantification. A PNG-only legacy
 layer cannot regain original intensity information that is absent from its source.
+
+### ROI-only automatic Range
+
+ROI-only clips MSI to the union of applicable ROIs with Show enabled for each
+section. Use that same union for automatic Range; overlapping ROIs count each
+display sample or original measurement row once. Preserve distinct measurement
+rows at duplicate coordinates. The active ROI row does not restrict this union.
+
+Individual resolves the automatic window from each section's ROI values. Same
+uses the largest applicable ROI ceiling across displayed sections, retaining a
+common absolute-intensity scale. Preserve the selected maximum/percentile policy:
+maximum uses valid original measurement rows inside the ROI; legacy percentile
+uses unsmoothed numerical display representatives inside the ROI, including its
+existing full-range/outlier-clip behavior. Keep the existing lower-bound and
+degenerate-value rules. Otsu visibility, palette and Smoothing do not change the
+values sampled for this window.
+
+ROI display statistics are transient and separate from stored whole-section
+statistics and baked `rawRange`. Never overwrite those fields or source values
+with an ROI window. Cache results by project/measurement, section, ROI geometry
+and visibility, and the inputs to the range policy. Recalculate after ROI edits,
+Show changes, source replacement and relevant loads; stale asynchronous results
+cannot replace a newer selection or project. Refresh main images, thumbnails,
+Range controls and Preview images together. This display operation does not change
+ROI quantification, analysis scope, whole-section Mean/Max or numerical exports.
 
 PPT keeps its existing p99.8/21-colour style by default. The optional display-style
 export snapshots palette, interpolation, range policy, manual Range, Otsu mask,

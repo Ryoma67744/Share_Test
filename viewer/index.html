@@ -9,6 +9,7 @@
 <script src="msi-display-geometry.js"></script>
 <script src="../offline/offline.js"></script>
 <script src="msi-smoothing.js"></script>
+<script src="msi-roi-range.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
@@ -1895,19 +1896,24 @@ function ensureMsiDisplayContext(app, key) {
         if (previous) previous.mode = app.msiScaleMode;
         let state = contexts.get(contextKey);
         if (!state) {
-            state = { windows: app._msiDisplayContextKey ? {} : (app.msiUserWindow || {}),
+            state = { windows: app._msiDisplayContextKey ? {} : (app.msiUserWindow || {}), roiWindows: {},
                 mode: app._msiDisplayContextKey ? 'same' : (app.msiScaleMode || 'same'), signatures: {} };
             contexts.set(contextKey, state);
         }
         app._msiDisplayContextKey = contextKey;
         app.msiUserWindow = state.windows;
+        app.msiRoiUserWindow = state.roiWindows || (state.roiWindows = {});
+        app._roiDisplayRanges = new Map();
         app.msiScaleMode = state.mode;
         const select = typeof document !== 'undefined' && document.getElementById('msi-scale-mode');
         if (select) select.value = state.mode;
     }
     if (key) {
         const state = contexts.get(contextKey), signature = msiDisplayMeasurementSignature(app.project, key);
-        if (state.signatures[key] !== undefined && state.signatures[key] !== signature) delete state.windows[key];
+        if (state.signatures[key] !== undefined && state.signatures[key] !== signature) {
+            delete state.windows[key];
+            if (state.roiWindows) delete state.roiWindows[key];
+        }
         state.signatures[key] = signature;
     }
 }
@@ -8855,7 +8861,7 @@ class SectionPanel {
                 // the user's manual min/max. msiWindowEval maps each pixel into it.
                 const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
                 const entC = (this.section.msiSeries && this.section.msiSeries[key]) || {};
-                const winC = App.getMsiWindow(key, rrC, entC.rawDispMax, entC.rawTrueMax);
+                const winC = App.getMsiWindow(key, rrC, entC.rawDispMax, entC.rawTrueMax, this.section);
                 const ovColor = overlay ? (overlayColor[key] || '#ffffff') : null;
                 const ovScale = (overlay && overlayScale) ? (overlayScale[ovColor] || 1) : 1;
                 const lut = overlay ? monoLut(ovColor, ovScale) : getActiveColormap();
@@ -9652,8 +9658,9 @@ class SectionPanel {
         const baseLabel = (meta && meta.base) || formatDisplayName(key);
         // Display window in raw units (per-section): default = the section's own
         // range, or the user's manual override. Drives the toolbar Range inputs.
-        const win = App.getMsiWindow(key, ent.rawRange, ent.rawDispMax, ent.rawTrueMax);
-        return { available: true, key, baseLabel, rawMin: win.min, rawMax: win.max };
+        const win = App.getMsiWindow(key, ent.rawRange, ent.rawDispMax, ent.rawTrueMax, this.section);
+        const roiStatus = App.roiOnlyMode && App.roiRangeStatusText ? App.roiRangeStatusText(this.section, key) : '';
+        return { available: true, key, baseLabel, rawMin: win.min, rawMax: win.max, roiStatus };
     }
 
     // Apply a raw-scale value coming from the toolbar Range input. Mirrors
@@ -9669,14 +9676,15 @@ class SectionPanel {
         // pinned; the other stays auto (0 / in-scope-max) so it keeps tracking
         // the organ filter. Stored on App so every section showing this molecule
         // uses the same window immediately.
-        App.msiUserWindow = App.msiUserWindow || {};
-        const cur = Object.assign({}, App.msiUserWindow[key] || {});
+        const windows = App.roiOnlyMode ? (App.msiRoiUserWindow || (App.msiRoiUserWindow = {}))
+            : (App.msiUserWindow || (App.msiUserWindow = {}));
+        const cur = Object.assign({}, windows[key] || {});
         if (edge === 'min') cur.min = v; else cur.max = v;
         if (Number.isFinite(cur.min) && Number.isFinite(cur.max) && !(cur.min < cur.max)) {
             if (edge === 'min') cur.min = cur.max - Math.abs(cur.max || 1) * 1e-6 - 1e-9;
             else cur.max = cur.min + Math.abs(cur.min || 1) * 1e-6 + 1e-9;
         }
-        App.msiUserWindow[key] = cur;
+        windows[key] = cur;
         for (const p of App.panels.values()) {
             try {
                 p.renderComposite();
@@ -9696,7 +9704,8 @@ class SectionPanel {
         const key = this.effectiveActiveMsiKey();
         if (!key) return;
         ensureMsiDisplayContext(App, key);
-        if (App.msiUserWindow) delete App.msiUserWindow[key];
+        const windows = App.roiOnlyMode ? App.msiRoiUserWindow : App.msiUserWindow;
+        if (windows) delete windows[key];
         for (const p of App.panels.values()) {
             try {
                 p.renderComposite();
@@ -10280,7 +10289,7 @@ class SectionPanel {
             // change handlers below query .vmin/.vmax) but disable them and show
             // the observed raster range for reference.
             const ent = (this.section.msiSeries && this.section.msiSeries[key]) || {};
-            const _win = App.getMsiWindow(key, ent.rawRange, ent.rawDispMax, ent.rawTrueMax);
+            const _win = App.getMsiWindow(key, ent.rawRange, ent.rawDispMax, ent.rawTrueMax, this.section);
             const rangeRow = mkRow('表示ウィンドウ (生単位 — ツールバーの Range で調整)',
                 '<div style="display:flex;gap:4px;"><input type="number" value="' + formatRawForInput(_win.min) + '" class="vmin" disabled title="表示ウィンドウ下限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"><input type="number" value="' + formatRawForInput(_win.max) + '" class="vmax" disabled title="表示ウィンドウ上限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"></div>');
             pop.appendChild(rangeRow);
@@ -10633,7 +10642,7 @@ class SectionPanel {
         // Per-section display window (raw units), matching renderComposite.
         const rrT = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
         const entT = (this.section.msiSeries && this.section.msiSeries[key]) || {};
-        const winT = App.getMsiWindow(key, rrT, entT.rawDispMax, entT.rawTrueMax);
+        const winT = App.getMsiWindow(key, rrT, entT.rawDispMax, entT.rawTrueMax, this.section);
         const lut = getActiveColormap();
         const bg = getColormapBackground();
         // 背景を非表示（Otsu）: メイン表示と一致させるため縮小サムネにも同じマスクを反映。
@@ -16206,7 +16215,9 @@ const Wizards = {
             panel.imageSources[layer] = heRaw;
             const t = sectionTransform();
             const ent = sec.msiSeries[key] || {};
-            const win = isTicKey(key) ? null : App.getMsiWindow(key, ent.rawRange || null, ent.rawDispMax, ent.rawTrueMax);
+            if (App.roiOnlyMode && !isTicKey(key)) await App.ensureRoiDisplayRange(sec, key);
+            if (!current()) return;
+            const win = isTicKey(key) ? null : App.getMsiWindow(key, ent.rawRange || null, ent.rawDispMax, ent.rawTrueMax, sec);
             const cacheKey = JSON.stringify([key, activeFrame && activeFrame.key, t.matrix, t.frame&&t.frame.bounds, win, App.msiSmoothing,
                 App.msiSmoothingStrength || 1, App.msiLinearStrength || 10,
                 typeof getActiveColormap === 'function' ? getActiveColormap() : null,
@@ -19447,9 +19458,13 @@ const SharePreview = {
         // _restoreOpacity, visibility by _restoreVisibility).
         if (App && App.panels) {
             for (const p of App.panels.values()) {
-                try { p.renderComposite(); if (cmChanged) p.markAllThumbsDirty(); } catch (e) {}
+                try { p.renderComposite(); p.markAllThumbsDirty(); } catch (e) {}
             }
         }
+        try { Toolbar.refreshRange(); } catch (e) {}
+        const roiToggle = document.getElementById('roi-clip-toggle');
+        if (roiToggle) roiToggle.checked = !!App.roiOnlyMode;
+        if (App.roiOnlyMode) App.refreshRoiDisplayRanges();
         if (this._opacityRaf) {
             cancelAnimationFrame(this._opacityRaf);
             this._opacityRaf = 0;
@@ -20065,9 +20080,7 @@ const SharePreview = {
             roiCb.checked = !!App.roiOnlyMode;
             roiWrap.style.display = '';
             roiCb.addEventListener('change', () => {
-                App.roiOnlyMode = roiCb.checked;
-                if (App && App.panels) for (const p of App.panels.values()) { try { p.renderComposite(); } catch (e) {} }
-                try { this._rebakeCellImages(App.project, App.focusCompoundKey); } catch (e) {}
+                App.setRoiOnlyMode(roiCb.checked);
             });
         }
 
@@ -20332,14 +20345,15 @@ const SharePreview = {
             const v = parseFloat(raw);
             if (!Number.isFinite(v)) return;
             ensureMsiDisplayContext(App, focusKey);
-            App.msiUserWindow = App.msiUserWindow || {};
-            const cur = Object.assign({}, App.msiUserWindow[focusKey] || {});
+            const windows = App.roiOnlyMode ? (App.msiRoiUserWindow || (App.msiRoiUserWindow = {}))
+                : (App.msiUserWindow || (App.msiUserWindow = {}));
+            const cur = Object.assign({}, windows[focusKey] || {});
             if (edge === 'min') cur.min = v; else cur.max = v;
             if (Number.isFinite(cur.min) && Number.isFinite(cur.max) && !(cur.min < cur.max)) {
                 if (edge === 'min') cur.min = cur.max - Math.abs(cur.max || 1) * 1e-6 - 1e-9;
                 else cur.max = cur.min + Math.abs(cur.min || 1) * 1e-6 + 1e-9;
             }
-            App.msiUserWindow[focusKey] = cur;
+            windows[focusKey] = cur;
             repaint(focusKey);
         };
         minEl.addEventListener('change', () => apply('min', minEl.value));
@@ -20347,7 +20361,8 @@ const SharePreview = {
         if (resetEl) resetEl.addEventListener('click', () => {
             const focusKey = App.focusCompoundKey;
             if (!focusKey) return;
-            if (App.msiUserWindow) delete App.msiUserWindow[focusKey];
+            const windows = App.roiOnlyMode ? App.msiRoiUserWindow : App.msiUserWindow;
+            if (windows) delete windows[focusKey];
             repaint(focusKey);
         });
     },
@@ -20425,10 +20440,13 @@ const SharePreview = {
         let rawRange = null;
         let rawDispMax;
         let rawTrueMax;
+        let rangeSection;
         if (focusKey && App.panels) {
-            for (const p of App.panels.values()) {
+            const active = App.panels.get(App.activeSectionId);
+            for (const p of [active, ...App.panels.values()]) {
+                if (!p || (App._organInScope && !App._organInScope(p.section))) continue;
                 const ent = ((p.section && p.section.msiSeries) || {})[focusKey];
-                if (ent && Array.isArray(ent.rawRange)) { rawRange = ent.rawRange; rawDispMax = ent.rawDispMax; rawTrueMax = ent.rawTrueMax; break; }
+                if (ent && Array.isArray(ent.rawRange)) { rangeSection = p.section; rawRange = ent.rawRange; rawDispMax = ent.rawDispMax; rawTrueMax = ent.rawTrueMax; break; }
             }
         }
         if (!focusKey || !rawRange) {
@@ -20439,11 +20457,13 @@ const SharePreview = {
             minEl.title = maxEl.title = '';
             return;
         }
-        const win = App.getMsiWindow(focusKey, rawRange, rawDispMax, rawTrueMax);
+        const win = App.getMsiWindow(focusKey, rawRange, rawDispMax, rawTrueMax, rangeSection);
         minEl.disabled = false; maxEl.disabled = false;
-        if (resetEl) resetEl.disabled = !(App.msiUserWindow && App.msiUserWindow[focusKey]);
-        minEl.title = '表示ウィンドウ 下限 (生単位)';
-        maxEl.title = '表示ウィンドウ 上限 (生単位)';
+        const windows = App.roiOnlyMode ? App.msiRoiUserWindow : App.msiUserWindow;
+        if (resetEl) resetEl.disabled = !(windows && windows[focusKey]);
+        const roiStatus = App.roiOnlyMode && App.roiRangeStatusText ? App.roiRangeStatusText(rangeSection, focusKey) : '';
+        minEl.title = '表示ウィンドウ 下限 (生単位)' + roiStatus;
+        maxEl.title = '表示ウィンドウ 上限 (生単位)' + roiStatus;
         if (document.activeElement !== minEl) minEl.value = fmt(win.min);
         if (document.activeElement !== maxEl) maxEl.value = fmt(win.max);
     },
@@ -22163,10 +22183,11 @@ const Toolbar = {
         this.rangeMin.disabled = false; this.rangeMax.disabled = false;
         if (document.activeElement !== this.rangeMin) this.rangeMin.value = formatRawForInput(st.rawMin);
         if (document.activeElement !== this.rangeMax) this.rangeMax.value = formatRawForInput(st.rawMax);
-        this.rangeMin.title = '表示ウィンドウ 下限 (生単位): ' + st.baseLabel;
-        this.rangeMax.title = '表示ウィンドウ 上限 (生単位): ' + st.baseLabel;
+        this.rangeMin.title = '表示ウィンドウ 下限 (生単位): ' + st.baseLabel + (st.roiStatus || '');
+        this.rangeMax.title = '表示ウィンドウ 上限 (生単位): ' + st.baseLabel + (st.roiStatus || '');
         // Reset enabled only when a manual override exists for this molecule.
-        if (this.rangeResetBtn) this.rangeResetBtn.disabled = !(st.key && App.msiUserWindow && App.msiUserWindow[st.key]);
+        const windows = App.roiOnlyMode ? App.msiRoiUserWindow : App.msiUserWindow;
+        if (this.rangeResetBtn) this.rangeResetBtn.disabled = !(st.key && windows && windows[st.key]);
     },
 
     refreshOpacity() {
@@ -22799,7 +22820,8 @@ const App = {
         const project = this.project;
         const next = MsiDisplaySettings.preset(name);
         ensureMsiDisplayContext(this);
-        for (const key of Object.keys(this.msiUserWindow || {})) delete this.msiUserWindow[key];
+        const windows = this.roiOnlyMode ? this.msiRoiUserWindow : this.msiUserWindow;
+        for (const key of Object.keys(windows || {})) delete windows[key];
         this.msiScaleMode = 'same';
         const scale = document.getElementById('msi-scale-mode'); if (scale) scale.value = 'same';
         setActiveColormap(next.colormap); this.msiSmoothing = next.interpolation;
@@ -22816,7 +22838,7 @@ const App = {
             await this.setMsiOutlierClipAll(true, {preserveDisplaySettings:true});
         }
     },
-    roiOnlyMode: false,        // ③ clip MSI layers to the active ROI when true
+    roiOnlyMode: false,        // Clip to visible ROI union and use independent ROI display windows.
     // 共有先で、HE/IF ⇔ MSI の位置合わせをどちらで見るか。
     // 'master' = 共有元が登録したもの / 'shared' = 共有先が合わせ直したもの。
     // 位置合わせ自体は全員で共有するが、**どちらを見るかは各自の選択**なので
@@ -23395,10 +23417,209 @@ const App = {
     },
     // Effective display window. 'same' = shared [0, in-scope common max]; else
     // the section's own range. A user min/max override wins per edge.
-    getMsiWindow(key, rawRange, dispMax, trueMax) {
+    // Whole-image and ROI display windows are independent, transient settings.
+    getMsiUserWindows() {
+        ensureMsiDisplayContext(this);
+        return this.roiOnlyMode ? (this.msiRoiUserWindow || (this.msiRoiUserWindow = {}))
+            : (this.msiUserWindow || (this.msiUserWindow = {}));
+    },
+    _roiDisplayRangeRequest(section, key) {
+        const ent = section && (section.msiSeries || {})[key];
+        if (!this.project || !ent) return null;
+        const panel = this.panels && this.panels.get(section.id);
+        const rois = (this.project.rois || []).filter(roi => !(this.project.roiHidden || {})[roi.id]
+            && Array.isArray((roi.polysBySection || {})[section.id]) && roi.polysBySection[section.id].length);
+        return {ent, rois, cacheKey:JSON.stringify([section.id, key]),
+            signature:JSON.stringify([msiDisplayContextKey(this), _roiGridKey(section, key, ent),
+                panel && panel._msiLoadIdentity ? panel._msiLoadIdentity(key) : null,
+                ent.kind, ent.snap, ent.range, ent.bakeMode,
+                rois.map(roi => [roi.id, roi.polysBySection[section.id], msiRoiGeometryMeta(roi, section)])])};
+    },
+    getRoiDisplayRange(section, key) {
+        const request = this._roiDisplayRangeRequest(section, key);
+        if (!request) return {status:'unavailable'};
+        const entry = this._roiDisplayRanges && this._roiDisplayRanges.get(request.cacheKey);
+        const panel = this.panels.get(section.id);
+        const raster = panel && panel.msiValueRasters && panel.msiValueRasters.get(key);
+        const rasterStamp = identStamp(raster);
+        const sameLoad = entry && entry.result.status === 'ready' && entry.loadIdentity != null
+            && panel && panel._msiLoadIdentity && entry.loadIdentity === panel._msiLoadIdentity(key);
+        if (entry && entry.signature === request.signature && entry.project === this.project && entry.panel === panel
+            && (entry.result.status === 'pending' || sameLoad || !raster || entry.rasterStamp === rasterStamp)) {
+            // Touch only the small summary; large source/raster arrays retain their existing LRU limits.
+            this._roiDisplayRanges.delete(request.cacheKey);
+            this._roiDisplayRanges.set(request.cacheKey, entry);
+            return entry.result;
+        }
+        this.ensureRoiDisplayRange(section, key);
+        return {status:'pending'};
+    },
+    ensureRoiDisplayRange(section, key) {
         ensureMsiDisplayContext(this, key);
-        this.msiUserWindow = this.msiUserWindow || {};
-        const u = this.msiUserWindow[key] || null;
+        const request = this._roiDisplayRangeRequest(section, key);
+        if (!request) return Promise.resolve({status:'unavailable'});
+        const cache = this._roiDisplayRanges || (this._roiDisplayRanges = new Map());
+        const previous = cache.get(request.cacheKey);
+        const project = this.project, panel = this.panels.get(section.id);
+        const cachedRaster = panel && panel.msiValueRasters && panel.msiValueRasters.get(key);
+        const rasterStamp = identStamp(cachedRaster);
+        const sameLoad = previous && previous.result.status === 'ready' && previous.loadIdentity != null
+            && panel && panel._msiLoadIdentity && previous.loadIdentity === panel._msiLoadIdentity(key);
+        if (previous && previous.signature === request.signature && previous.project === project && previous.panel === panel
+            && (previous.result.status === 'pending' || sameLoad || !cachedRaster || previous.rasterStamp === rasterStamp)) return previous.promise;
+        const entry = {signature:request.signature, project, panel, key, rasterStamp, result:{status:'pending'}};
+        cache.set(request.cacheKey, entry);
+        const current = () => this.project === project && this._roiDisplayRanges === cache
+            && cache.get(request.cacheKey) === entry && this.panels.get(section.id) === panel
+            && this._roiDisplayRangeRequest(section, key)?.signature === request.signature;
+        entry.promise = Promise.resolve().then(async () => {
+            if (!request.rois.length) return {status:'no-roi'};
+            if (!panel || typeof MsiRoiRange === 'undefined') return {status:'unavailable'};
+            // Use the normal deduplicated loader. Never derive ROI values from an 8-bit PNG.
+            if (!panel.msiValueRasters?.get(key) || (panel.isMsiLayerReady && !panel.isMsiLayerReady(key))) {
+                if (panel.ensureMsiLayerLoaded) await panel.ensureMsiLayerLoaded(key, {retry:false});
+            }
+            if (!current()) return {status:'stale'};
+            const raster = panel.msiValueRasters && panel.msiValueRasters.get(key);
+            entry.rasterStamp = identStamp(raster);
+            // Reloading identical bytes after raster LRU eviction does not invalidate a small summary.
+            entry.loadIdentity = panel._msiLoadIdentity ? panel._msiLoadIdentity(key) : null;
+            const polygons = request.rois.map(roi => ({roi, poly:roiPolygonForDisplay(roi, section, key, roi.polysBySection[section.id])}))
+                .filter(item => item.poly && item.poly.length);
+            if (!raster || !raster.sourceGeometry) return {status:'unavailable'};
+            if (!polygons.length) return {status:'no-roi'};
+            const rasterStats = MsiRoiRange.summarizeRaster(raster,
+                polygons.map(item => (x, y) => pointInPolygon(x, y, item.poly)),
+                {bakeMode:request.ent.bakeMode, percentile:MSI_DEFAULT_DISPLAY_PERCENTILE});
+            const grid = await _ensureRoiRawGrid(section, key);
+            const latestRaster = panel.msiValueRasters.get(key);
+            const sameLoad = entry.loadIdentity != null && panel._msiLoadIdentity
+                && entry.loadIdentity === panel._msiLoadIdentity(key);
+            if (!current() || (latestRaster && !sameLoad && entry.rasterStamp !== identStamp(latestRaster))) return {status:'stale'};
+            const sourceStats = MsiRoiRange.summarizeRows(grid && grid.rows,
+                polygons.map(({roi}) => row => roiContainsSourcePoint(roi.polysBySection[section.id],
+                    msiRoiGeometryMeta(roi, section), grid && grid.sourceGeometry, row.x, row.y)));
+            return {status:'ready', raster:rasterStats, source:sourceStats};
+        }).catch(error => {
+            console.warn('ROI display range unavailable', key, error);
+            return {status:'unavailable'};
+        }).then(result => {
+            if (!current() || result.status === 'stale') {
+                if (cache.get(request.cacheKey) === entry) cache.delete(request.cacheKey);
+                if (this.roiOnlyMode) this.scheduleRoiRangeRepaint();
+                return {status:'stale'};
+            }
+            entry.result = result;
+            // The soft LRU cap excludes loaded/displayed demand. Evicting an active
+            // Same participant would start a calculate/evict/repaint loop for large grids.
+            for (const [id, old] of cache) {
+                if (cache.size <= 256) break;
+                const owner = old.panel, live = !!owner && this.panels.get(owner.section.id) === owner;
+                const needed = live && this._organInScope(owner.section) &&
+                    (old.key === this.focusCompoundKey || old.key === owner.activeMsiKey
+                        || owner.msiValueRasters?.has(old.key) || owner.visibleLayers?.has(old.key)
+                        || (this.activeOverlay && this.activeOverlay.layers || []).some(layer => layer.key === old.key));
+                if (id !== request.cacheKey && old.result.status !== 'pending' && !needed) cache.delete(id);
+            }
+            if (this.roiOnlyMode) this.scheduleRoiRangeRepaint();
+            return result;
+        });
+        return entry.promise;
+    },
+    roiDisplayCeiling(section, key) {
+        const stats = this.getRoiDisplayRange(section, key);
+        const maximum = this.getMsiDisplaySettings().rangePolicy === 'maximum';
+        const selected = maximum ? stats.source : stats.raster;
+        return selected && selected.status === 'ready' ? (maximum ? selected.max : selected.displayMax) : null;
+    },
+    roiRangeStatusText(section, key) {
+        const stats = this.getRoiDisplayRange(section, key);
+        const selected = this.getMsiDisplaySettings().rangePolicy === 'maximum' ? stats.source : stats.raster;
+        const status = selected ? selected.status : stats.status;
+        return status === 'ready' ? ' — ROI内'
+            : status === 'pending' ? ' — ROI内のRangeを計算中'
+            : status === 'empty' || status === 'no-roi' ? ' — ROI内の表示データなし'
+            : ' — ROI内のRangeを取得できません';
+    },
+    scheduleRoiRangeRepaint() {
+        if (this._roiRangeRepaintTimer) return;
+        const project = this.project;
+        this._roiRangeRepaintTimer = setTimeout(() => {
+            this._roiRangeRepaintTimer = null;
+            if (this.project === project && this.roiOnlyMode) this.repaintRoiRangeViews();
+        }, 0);
+    },
+    repaintRoiRangeViews() {
+        this.repaintAllMsi();
+        try {
+            if (SharePreview.isOpen()) {
+                SharePreview._refreshRangeInputs(this.project, this.focusCompoundKey);
+                SharePreview._rebakeCellImages(this.project, this.focusCompoundKey);
+            }
+        } catch (e) { console.warn('ROI range Preview refresh failed', e); }
+    },
+    async refreshRoiDisplayRanges() {
+        if (!this.roiOnlyMode || !this.project) return;
+        const project = this.project, jobs = [];
+        for (const panel of this.panels.values()) {
+            if (!this._organInScope(panel.section)) continue;
+            const keys = new Set(this.viewMode === 'compound' ? [this.focusCompoundKey] : [...(panel.visibleLayers || [])]);
+            if (panel.activeMsiKey) keys.add(panel.activeMsiKey);
+            for (const layer of (this.activeOverlay && this.activeOverlay.layers || [])) keys.add(layer.key);
+            for (const key of keys) if ((panel.section.msiSeries || {})[key]) jobs.push(this.ensureRoiDisplayRange(panel.section, key));
+        }
+        await Promise.all(jobs);
+        if (this.project === project && this.roiOnlyMode) this.repaintRoiRangeViews();
+    },
+    async setRoiOnlyMode(on) {
+        ensureMsiDisplayContext(this);
+        this.roiOnlyMode = !!on;
+        if (this.roiOnlyMode && this._roiDisplayRanges) {
+            // A user retry can recover a transient source-read failure without
+            // causing an automatic repaint/retry loop while the source is offline.
+            for (const [key, entry] of this._roiDisplayRanges) {
+                if ([entry.result, entry.result.raster, entry.result.source].some(value => value && value.status === 'unavailable'))
+                    this._roiDisplayRanges.delete(key);
+            }
+        }
+        const toggle = document.getElementById('roi-clip-toggle');
+        if (toggle) toggle.checked = this.roiOnlyMode;
+        this.repaintRoiRangeViews();
+        if (this.roiOnlyMode) await this.refreshRoiDisplayRanges();
+    },
+    getMsiWindow(key, rawRange, dispMax, trueMax, section) {
+        ensureMsiDisplayContext(this, key);
+        const windows = this.roiOnlyMode ? (this.msiRoiUserWindow || (this.msiRoiUserWindow = {}))
+            : (this.msiUserWindow || (this.msiUserWindow = {}));
+        const u = windows[key] || null;
+        if (this.roiOnlyMode && this.getRoiDisplayRange) {
+            // Pending, empty and unavailable ROIs never borrow a whole-image ceiling.
+            const stats = section ? this.getRoiDisplayRange(section, key) : {status:'unavailable'};
+            const maximum = this.getMsiDisplaySettings().rangePolicy === 'maximum';
+            const selected = maximum ? stats.source : stats.raster;
+            let lo = 0, hi = 1;
+            if (this.msiScaleMode === 'same') {
+                const shared = this.getMsiAbsMax(key);
+                if (shared > 0) hi = shared;
+                else if (!maximum && Number.isFinite(shared)) {
+                    // Valid negative measurements still need one comparable Same window.
+                    let lower = Infinity;
+                    for (const panel of this.panels.values()) {
+                        if (!this._organInScope(panel.section) || !(panel.section.msiSeries || {})[key]) continue;
+                        const r = this.getRoiDisplayRange(panel.section, key).raster;
+                        if (r && r.status === 'ready') lower = Math.min(lower, r.displayMin);
+                    }
+                    if (Number.isFinite(lower)) { lo = lower; hi = shared; }
+                }
+            } else if (selected && selected.status === 'ready') {
+                lo = maximum ? 0 : selected.displayMin;
+                hi = maximum ? (selected.max > 0 ? selected.max : 1) : selected.displayMax;
+            }
+            const min = u && Number.isFinite(u.min) ? u.min : lo;
+            let max = u && Number.isFinite(u.max) ? u.max : hi;
+            if (!(max > min)) max = min + (Math.abs(hi - lo) || 1);
+            return {min, max};
+        }
         // Per-section raw range (= how this layer's PNG was baked).
         const rr = (Array.isArray(rawRange) && rawRange.length === 2
             && Number.isFinite(rawRange[0]) && Number.isFinite(rawRange[1])) ? rawRange : null;
@@ -23432,6 +23653,15 @@ const App = {
     // Largest rawRange[1] over IN-SCOPE loaded panels (live; cheap, per-layer).
     getMsiAbsMax(key) {
         if (!key) return 0;
+        if (this.roiOnlyMode && this.roiDisplayCeiling) {
+            let max = this.getMsiDisplaySettings().rangePolicy === 'maximum' ? 0 : -Infinity;
+            for (const panel of this.panels.values()) {
+                if (!this._organInScope(panel.section) || !(panel.section.msiSeries || {})[key]) continue;
+                const ceiling = this.roiDisplayCeiling(panel.section, key);
+                if (Number.isFinite(ceiling) && ceiling > max) max = ceiling;
+            }
+            return max;
+        }
         let mx = 0;
         for (const panel of this.panels.values()) {
             if (!this._organInScope(panel.section)) continue;
@@ -23452,6 +23682,10 @@ const App = {
     // whose MSI layers changed scale. Mirrors broadcastRangeToSameMrm's panel
     // sweep; call after any section's layers load or after add/remove.
     recomputeMsiAbsScale() {
+        if (this.roiOnlyMode && this.refreshRoiDisplayRanges) {
+            this.refreshRoiDisplayRanges();
+            return;
+        }
         this.msiAbsMax = this.msiAbsMax || {};
         const next = {};
         // 1 パス目で「どのパネルがどのキーを持つか」も記録しておく。以前は
@@ -23846,8 +24080,7 @@ const App = {
         }
         const roiClip = document.getElementById('roi-clip-toggle');
         if (roiClip) roiClip.addEventListener('change', () => {
-            this.roiOnlyMode = roiClip.checked;
-            for (const p of this.panels.values()) { try { p.renderComposite(); } catch (e) {} }
+            this.setRoiOnlyMode(roiClip.checked);
         });
         const heMono = document.getElementById('tb-he-mono');
         if (heMono) heMono.addEventListener('change', () => this.setHeGrayscaleAll(heMono.checked));
@@ -25898,7 +26131,10 @@ const App = {
         this.panels.forEach(p => p.drawAllRois(this.activeRoiId));
         // ③ keep the ROI-only MSI clip in sync when the active ROI changes or
         // ROI geometry is edited (both paths call here).
-        if (this.roiOnlyMode) this.panels.forEach(p => { try { p.renderComposite(); } catch (e) {} });
+        if (this.roiOnlyMode) {
+            this.repaintRoiRangeViews();
+            this.refreshRoiDisplayRanges();
+        }
     },
 
     // ROI 統計がソース blob のパースを伴うため renderAnalysisChart は async だが、

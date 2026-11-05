@@ -444,6 +444,9 @@ function testCloseRestoresOverlay() {
   const after = { id: 'ov_after', layers: [] };
   const setCalls = [];
   const modeCalls = [];
+  const roiToggle = {checked:true};
+  let rangeRefreshes = 0;
+  let roiRefreshes = 0;
   const App = {
     activeOverlay: before,
     project: { id: 'close-test', sections: [{ id: 's1' }, { id: 's2' }] },
@@ -454,12 +457,16 @@ function testCloseRestoresOverlay() {
     viewMode: 'compound',
     setViewMode(m) { modeCalls.push(m); this.viewMode = m; },
     panels: new Map(),
-    roiOnlyMode: false,
+    roiOnlyMode: true,
+    refreshRoiDisplayRanges() { roiRefreshes++; },
   };
-  const { preview } = makePreviewContext({ App, cancelAnimationFrame() {} });
+  const { preview } = makePreviewContext({ App, cancelAnimationFrame() {},
+    document:{getElementById:id => id === 'roi-clip-toggle' ? roiToggle : null},
+    Toolbar:{refreshRange() { rangeRefreshes++; }} });
   // open() が撮る控えだけを再現し、DOM に触る復元は差し替える。
   preview._overlaySnapshot = before;
   preview._savedViewMode = 'free';    // 開く前は Free だった
+  preview._roiSnapshot = {mode:false};
   preview.overlay = { remove() {}, querySelector() { return null; } };
   for (const m of ['_restoreGrayscale', '_removeTicBackdrop', '_restoreOpacity',
                    '_restoreVisibility', '_cancelAdjacentPrefetch']) {
@@ -479,6 +486,10 @@ function testCloseRestoresOverlay() {
   assert.deepEqual([...App.activeSectionScope], ['s1'], 'close() must retain the shared section selection');
   assert.equal(preview._cellTransforms.s1.tx, 14, 'close() must retain section-ID pan/zoom');
   assert.equal(preview._sectionRotations.s1, 90, 'close() must retain section-ID rotation');
+  assert.equal(App.roiOnlyMode, false, 'close() restores the main ROI display mode');
+  assert.equal(roiToggle.checked, false, 'The main checkbox agrees with the restored ROI mode');
+  assert.equal(rangeRefreshes, 1, 'Closing Preview refreshes the main Range fields');
+  assert.equal(roiRefreshes, 0, 'Restoring whole-image mode does not start ROI calculations');
 
   // 変わっていなければ余計な再描画を起こさない
   setCalls.length = 0;
