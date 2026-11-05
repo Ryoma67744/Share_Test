@@ -81,6 +81,8 @@ jobs:
         run: node tests/msi_scalebar_browser_regression.cjs
       - name: MSI display presets and compatibility
         run: node tests/msi_display_settings_browser_regression.cjs
+      - name: ROI-only automatic display ranges and restoration
+        run: node tests/msi_roi_range_browser_regression.cjs
       - name: Local persistence and recovery across browser tabs
         run: node tests/project_store_safety_browser_regression.cjs
       - name: New project tabs and isolated authentication

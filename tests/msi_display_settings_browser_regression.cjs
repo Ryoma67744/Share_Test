@@ -128,7 +128,15 @@ async function screenshot(page,name) {
   await page.screenshot({path:path.join(directory,name+'.png'),fullPage:false});
 }
 async function prepare(page) {
-  await page.waitForFunction(()=>typeof App!=='undefined'&&App.project&&App.panels.size>0);
+  // Panel objects are published before loadAllLayers finishes. Wait for the
+  // fixture's initial images and active layer, so setup does not race the
+  // restored HE decode and MSI initialization during a real page reload.
+  await page.waitForFunction(()=>typeof App!=='undefined'&&App.project&&App.project.sections.length>0
+    && App.project.sections.every(section=>{
+      const panel=App.panels.get(section.id);
+      return panel && panel.section===section && panel.activeMsiKey
+        && Object.keys(section.msiSeries||{}).every(key=>panel.isMsiLayerReady(key));
+    }));
   await page.evaluate(async()=>{
     for(const section of App.project.sections)for(const key of Object.keys(section.msiSeries||{}))
       if(!await App.panels.get(section.id).ensureMsiLayerLoaded(key))throw new Error('Synthetic source failed');

@@ -29,7 +29,7 @@ Master-side operations (creating projects, registering layers, publishing, etc.)
 
 - Browse section images (HE / IF / MSI) layered per compound
 - Switch and compare compounds (Free / Compound mode)
-- Toggle existing ROIs on/off / **clip MSI to the selected ROI shape** (ROI-only)
+- Toggle existing ROIs on/off / **clip MSI to visible ROIs and adjust Range from their values** (ROI-only)
 - Add new ROIs and delete existing ones — **only while holding the write lock** (one editor at a time)
 - Compare mean intensity across sections × compounds in the ANALYSIS bar chart
 - **Choose displayed sections freely** (organ groups, individual checkboxes and name search)
@@ -205,11 +205,13 @@ Display zoom and pan do not change point coordinates. Original MSI intensities, 
 
 ### 4-5. ROI-only view (clip MSI to the ROI shape)
 
-Turning on the **"ROIのみ" (ROI only)** checkbox in the ROI LIST header clips **only the MSI layers** to the shape of the **currently selected ROI**. HE / background stay fully visible, so you can compare the signal inside the ROI against the surrounding histology.
+Turning on the **"ROIのみ" (ROI only)** checkbox in the ROI LIST header clips **only the MSI layers** to the **union of visible ROIs** and **recalculates automatic Range from values inside them**. HE / background stay fully visible, so you can compare the signal inside the ROIs against the surrounding histology.
 
-- Applies to the **currently selected ROI** (select a row in the ROI LIST).
-- Sections where that ROI is **not drawn show no MSI**.
-- Follows rotation / flip; turn it off to return to the full view.
+- Includes every ROI with **Show enabled** in ROI LIST. Overlapping areas count once; sections without an applicable visible ROI show no MSI.
+- **Same** shares the largest ROI ceiling across displayed sections; **Individual** uses each section's own ROI range. The maximum/percentile setting is retained.
+- Whole-view and ROI-view manual Ranges are stored separately. Manual values entered in ROI view take priority there; `Reset` restores the ROI-based automatic Range.
+- Editing an ROI or changing Show updates automatic Range. Rotation / flip still apply; **turning ROI-only off restores the full view and its original Range**.
+- ROI quantification, Method/Preview whole-section statistics, source data and numerical CSVs are unchanged. Smoothing method and level are retained.
 
 ---
 
@@ -328,7 +330,7 @@ Three groups in each section's toolbar:
 
 > **Automatic Range and highlights**: with outlier clipping on, automatic Range uses **p99.9 (the 99.9th percentile)** as its upper reference. Values above the ceiling share the upper colour. The number of saturated positions depends on sample size and ties; it is not always exactly 0.1%. Lower the ceiling manually if the image is too dark. Manual values take priority; `Reset` restores automatic Range. **Changing displayed sections or opening/closing Preview does not delete manual Range.**
 
-> **Range is temporary and scoped to a project**: the master's manual Range is not saved as a published default. Reloading restores automatic values calculated from the source data. Switching A → B → A within the same tab restores A's Range and Same / Individual mode without applying them to B. Shared URLs and viewer/admin contexts are separate. Replacing a measurement restores its automatic Range.
+> **Range is temporary and scoped to a project**: the master's manual Range is not saved as a published default. Reloading restores automatic values calculated from the source data. Switching A → B → A within the same tab restores A's Range and Same / Individual mode without applying them to B. Whole-view and ROI-view manual values are stored separately. Shared URLs and viewer/admin contexts are separate. Replacing a measurement restores its automatic Range.
 
 > **Range stays the same window — same width — across sections of one compound**: changing the Range min or max on one section snaps the min/max of **every section showing the same MRM (compound)** to the same values (so the widths match too). Editing via the gear ⚙ Intensity range does the same. Other compounds are unaffected. This lets you compare several sections on one identical scale.
 
@@ -448,7 +450,7 @@ The header **Preview** button opens a side-by-side overlay of the displayed sect
 
 > **Sets with brightness matching on**: for the same signal, green looks about 2.5x brighter than magenta (human eye sensitivity), so the master can register a set **for comparing amounts** with brightness matching enabled. In such a set **every colour is dimmed down to the darkest one**, so equal signal looks equally bright. Co-localisation is then **a pale colour rather than pure white**, and the legend note says so. The legend swatches always show **the colours as actually drawn**. Only the master can toggle this; viewers cannot change it. Matching **never changes the Stats numbers or ROI statistics**.
 
-> Preview Range and the main toolbar use the same values. Closing Preview keeps the current values; reloading restores the master's published values.
+> Preview Range and the main toolbar share separate whole-view and ROI-view values. Closing Preview restores the ROI-only state used before opening it and the Range for that view. Reloading restores automatic Range.
 > Sections with multiple sources can flip between `TIC_<filename>` rows to inspect each source's TIC separately.
 
 ---

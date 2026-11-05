@@ -90,7 +90,7 @@ function fixture() {
     'createMsiSourceGeometry','msiSourceCell','msiSourceRow','msiSourceStats','calcStats',
     'roiContainsSourcePoint','pointInPolygon']);
   vm.runInContext('const App = _testApp; const _activeColormapName = "TestMap";',context);
-  const start = html.indexOf('    getMsiWindow(key, rawRange, dispMax, trueMax) {');
+  const start = html.indexOf('    getMsiWindow(');
   assert.ok(start > 0);
   app.getMsiWindow = vm.runInContext('({' + html.slice(start,html.indexOf('\n    },',start)+7) + '}).getMsiWindow',context);
   vm.runInContext(source,context,{filename:'roi-media-app.js'});
