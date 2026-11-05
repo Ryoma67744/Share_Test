@@ -32,25 +32,49 @@ const legacy=Msi.colorize(src,{...options,valueRaster:{W:9,H:9,values},keepGrid:
 assert.deepEqual(colorAt(legacy,0,0),[...lut[0],255],'mismatched native-value dimensions use production luminance evaluator');
 assert.throws(()=>Msi.colorize(src,{...options,evaluateValue:null}),/配色/);
 
-const zeroSmooth=Msi.colorize(src,{...options,smoothing:'linear',smoothingStrength:0});
+const zeroSmooth=Msi.colorize(src,{...options,smoothing:'linear',smoothingStrength:10,linearStrength:1});
 assert.deepEqual(Buffer.from(zeroSmooth.getContext('2d').getImageData(0,0,4,2).data),
-  Buffer.from(colored.getContext('2d').getImageData(0,0,4,2).data),'zero strength preserves all comparison colours');
-const blurred=Msi.colorize(src,{...options,smoothing:'linear',smoothingStrength:100});
-assert.notDeepEqual(colorAt(blurred,0,0),colorAt(colored,0,0),'positive strength smooths the MSI colour image');
+  Buffer.from(colored.getContext('2d').getImageData(0,0,4,2).data),'Linear strength affects interpolation only, preserving native colours');
+const blurred=Msi.colorize(src,{...options,smoothing:'median',smoothingStrength:10});
+assert.notDeepEqual(colorAt(blurred,0,0),colorAt(colored,0,0),'median filters scalar display intensity before the colour lookup');
 assert.deepEqual(colorAt(blurred,1,1),[9,10,11,255],'Otsu-excluded cells keep their background');
 assert.deepEqual(colorAt(blurred,3,1),[9,10,11,255],'transparent source cells keep their background');
 assert.deepEqual(Buffer.from(srcCtx.getImageData(0,0,4,2).data),beforeSource);
 assert.deepEqual([...values],[1,2,3,4,5,6,7,8]);
 assert.deepEqual([...keep],[1,1,1,1,1,0,1,1]);
-const disabledSmooth=Msi.colorize(src,{...options,smoothing:'none',smoothingStrength:100});
+const disabledSmooth=Msi.colorize(src,{...options,smoothing:'none',smoothingStrength:10});
 assert.deepEqual(Buffer.from(disabledSmooth.getContext('2d').getImageData(0,0,4,2).data),
   Buffer.from(colored.getContext('2d').getImageData(0,0,4,2).data),'remembered strength is inactive when Smoothing is off');
 const maskedValues=Float64Array.from([4,100000,100000,4,4,4,4,4]);
 const maskedSource=createCanvas(4,2);maskedSource.getContext('2d').fillRect(0,0,4,2);
-const maskedColor=Msi.colorize(maskedSource,{...options,smoothing:'linear',smoothingStrength:100,
+const maskedColor=Msi.colorize(maskedSource,{...options,smoothing:'median',smoothingStrength:10,
   valueRaster:{W:4,H:2,values:maskedValues,measuredMask:Uint8Array.from([1,0,1,1,1,1,1,1])},
   keepGrid:{W:4,H:2,keep:Uint8Array.from([1,1,0,1,1,1,1,1])}});
 assert.deepEqual(colorAt(maskedColor,0,0),[...lut[128],255],'unmeasured and Otsu-excluded values do not enter the smoothing kernel');
+// Median uses intensity ranks, not RGB channel medians. The deliberately
+// nonmonotonic palette must return the exact colour of the scalar median.
+const medianSource=createCanvas(3,3);medianSource.getContext('2d').fillRect(0,0,3,3);
+const medianValues=Float64Array.from([0,0,0,4,100,4,4,8,8]);
+const exoticLut=Array.from({length:256},(_,i)=>[i%2?255:0,Math.abs(128-i),255-i]);
+const medianOptions={...options,lut:exoticLut,window:{min:0,max:8},keepGrid:null,
+  valueRaster:{W:3,H:3,values:medianValues},smoothing:'median'};
+for(let level=1;level<=10;level++) {
+  const median=Msi.colorize(medianSource,{...medianOptions,smoothingStrength:level});
+  assert.deepEqual(colorAt(median,1,1),[...exoticLut[128],255],`median ${level} retains the original palette mapping`);
+}
+assert.deepEqual([...medianValues],[0,0,0,4,100,4,4,8,8],'all median strengths preserve source measurements');
+
+const linearSource=createCanvas(2,1),linearContext=linearSource.getContext('2d');
+linearContext.fillStyle='#000';linearContext.fillRect(0,0,1,1);linearContext.fillStyle='#ff0000';linearContext.fillRect(1,0,1,1);
+const linearFrame={canvas:linearSource,polygon:[[0,0],[1,0],[1,.5]],smoothing:'linear'};
+let previous=0;
+for(let level=1;level<=10;level++) {
+  const output=createCanvas(100,50);
+  Msi.draw(output,{...linearFrame,linearStrength:level},{width:100,height:50,mode:'whole',outline:false,scaleBar:false});
+  const red=colorAt(output,49,25)[0];
+  assert.ok(red>previous,`Linear ${level} progressively blends the display boundary`);previous=red;
+}
+assert.deepEqual(colorAt(linearSource,0,0),[0,0,0,255]);assert.deepEqual(colorAt(linearSource,1,0),[255,0,0,255]);
 
 const raster=createCanvas(16,12), ctx=raster.getContext('2d'), pixels=ctx.createImageData(16,12);
 for(let y=0;y<12;y++)for(let x=0;x<16;x++)pixels.data.set([10*x,12*y,100+x+y,255],4*(y*16+x));

@@ -29,6 +29,7 @@ class Context2D {
 }
 function canvas(w=0,h=0){const c={width:w,height:h,style:{},classList:{toggle(){}},toDataURL(){return 'mock';}};c.ctx=new Context2D(c);return c;}
 const context=vm.createContext({console,Math,Number,Map,Set,JSON,Uint8ClampedArray,...geometryGlobals,
+  MsiSmoothing:require('../viewer/msi-smoothing.js'),
   document:{createElement:()=>canvas(),createElementNS:(_ns,tag)=>element(tag),getElementById:()=>null},get2dContext:c=>c.ctx,
   App:{viewMode:'free',roiOnlyMode:false,msiSmoothing:'none',drawing:{mode:false},getMsiWindow:()=>({min:0,max:1})},
   getActiveColormap:()=>Array.from({length:256},()=>[0,0,0]),getColormapBackground:()=>[0,0,0],

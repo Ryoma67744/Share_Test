@@ -218,18 +218,18 @@ async function registeredCalibrationChecks() {
 
 async function smoothingSnapshotChecks() {
   const f=fixture(),{app,project,roi}=f;
-  let strength=73;
-  app.msiSmoothing='linear';app.getMsiDisplaySettings=()=>({rangePolicy:'legacy',smoothingStrength:strength});
+  let strength=7,linearStrength=3;
+  app.msiSmoothing='median';app.getMsiDisplaySettings=()=>({rangePolicy:'legacy',smoothingStrength:strength,linearStrength});
   const adapter=f.api.createAdapter(project,roi);
-  app.msiSmoothing='none';strength=0;
+  app.msiSmoothing='none';strength=1;linearStrength=10;
   const frame=await adapter.loadMsi(project,roi,'toxo4','MSI_A');
-  assert.equal(frame.smoothing,'linear');assert.equal(frame.smoothingStrength,73);
-  assert.equal(f.colorCalls[0].options.smoothingStrength,73,'native colour filtering receives the captured strength');
-  assert.match(frame.status,/Smoothing 73\/100/);
+  assert.equal(frame.smoothing,'median');assert.equal(frame.smoothingStrength,7);assert.equal(frame.linearStrength,3);
+  assert.equal(f.colorCalls[0].options.smoothingStrength,7,'native colour filtering receives the captured strength');
+  assert.match(frame.status,/Median 7\/10/);
   assert.equal((await adapter.loadMsi(project,roi,'toxo4','MSI_A')).canvas,frame.canvas,'comparison cache reuses its immutable smoothing snapshot');
   const next=await f.api.createAdapter(project,roi).loadMsi(project,roi,'toxo4','MSI_A');
-  assert.equal(next.smoothing,'none');assert.equal(next.smoothingStrength,0);
-  assert.equal(app.msiSmoothing,'none');assert.equal(app.getMsiDisplaySettings().smoothingStrength,0);
+  assert.equal(next.smoothing,'none');assert.equal(next.smoothingStrength,1);assert.equal(next.linearStrength,10);
+  assert.equal(app.msiSmoothing,'none');assert.equal(app.getMsiDisplaySettings().smoothingStrength,1);
 }
 
 async function asynchronousChecks() {

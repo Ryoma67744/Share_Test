@@ -1025,17 +1025,18 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
                         <input type="checkbox" id="tb-msi-physical">画素サイズを反映
                     </label>
                 </span>
-                <span class="tb-group" title="MSI 表示の補間 (None=ピクセル / Linear=なめらか)">
-                    <span class="tb-label">補間</span>
+                <span class="tb-group" title="MSI表示専用の平滑化。元データ・ROI集計値は変わりません。">
+                    <span class="tb-label">Smoothing</span>
                     <select id="tb-smoothing" aria-label="Smoothing" title="MSI Smoothing">
                         <option value="none">None</option>
                         <option value="linear">Linear</option>
+                        <option value="median">Median</option>
                     </select>
                     <label for="tb-smoothing-strength" class="tb-label">強さ</label>
-                    <input id="tb-smoothing-strength" type="range" min="0" max="100" step="1" value="0" disabled
+                    <input id="tb-smoothing-strength" type="range" min="1" max="10" step="1" value="1" disabled
                         aria-label="Smoothingの強さ" aria-describedby="tb-smoothing-strength-value"
-                        title="0＝従来のLinear。値を上げるほど滑らかに表示します。大きな画像ではスライダーを離すと反映します。元データ・ROI集計値は変わりません。" style="width:86px">
-                    <output id="tb-smoothing-strength-value" for="tb-smoothing-strength" style="min-width:24px;text-align:right;font-variant-numeric:tabular-nums">0</output>
+                        title="Linear：補間量を1〜10で調整（10＝従来のLinear）。Median：近傍範囲を3×3〜21×21画素で調整。大きな画像はスライダーを離すと反映します。" style="width:86px">
+                    <output id="tb-smoothing-strength-value" for="tb-smoothing-strength" style="min-width:36px;text-align:right;font-variant-numeric:tabular-nums">1/10</output>
                 </span>
                 <span class="tb-group" id="tb-he-mono-group" title="HE/IF をモノクロ表示">
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;font-size:11px;">
@@ -1766,12 +1767,14 @@ function msiFrameBakeGeometry(frame, requestedScale) {
     const tx=(width-b.width*scale)/2-b.x*scale,ty=(height-b.height*scale)/2-b.y*scale;
     return {width,height,scale,matrix:displayAffineMultiply([[scale,0,tx],[0,scale,ty],[0,0,1]],frame.matrix)};
 }
-function drawMsiFrameSource(ctx, source, frame) {
+function drawMsiFrameSource(ctx, source, frame, linearStrength) {
     const sw=source.naturalWidth||source.width,sh=source.naturalHeight||source.height;
     for(const patch of MsiDisplayGeometry.drawingRects(frame)) {
         const s=patch.source,d=patch.dest;
-        ctx.drawImage(source,s.x*sw/frame.width,s.y*sh/frame.height,s.width*sw/frame.width,s.height*sh/frame.height,
-            d.x,d.y,d.width,d.height);
+        const args=[s.x*sw/frame.width,s.y*sh/frame.height,s.width*sw/frame.width,s.height*sh/frame.height,
+            d.x,d.y,d.width,d.height];
+        if(typeof linearStrength==='number')MsiSmoothing.drawImage(ctx,source,linearStrength,...args);
+        else ctx.drawImage(source,...args);
     }
 }
 function bakeMsiImageWithFrame(source, frame, requestedScale, smoothing) {
@@ -1781,7 +1784,7 @@ function bakeMsiImageWithFrame(source, frame, requestedScale, smoothing) {
     const ctx=get2dContext(out),T=g.matrix;
     ctx.imageSmoothingEnabled=smoothing!==false;
     ctx.transform(T[0][0],T[1][0],T[0][1],T[1][1],T[0][2],T[1][2]);
-    drawMsiFrameSource(ctx,source,frame);
+    drawMsiFrameSource(ctx,source,frame,typeof smoothing==='number'?smoothing:undefined);
     return out;
 }
 function toggleSectionScreenFlip(section, axis) {
@@ -1810,17 +1813,22 @@ function displayLegacyLinear(deg, flipLr, flipUd) {
     return displayAffineMultiply(displayRotation(deg),
         [[flipLr ? -1 : 1,0,0],[0,flipUd ? -1 : 1,0],[0,0,1]]);
 }
-function bakeImageWithSectionTransform(src, deg, flipLr, flipUd, smoothing) {
+function bakeImageWithSectionTransform(src, deg, flipLr, flipUd, smoothing, requestedScale) {
     if (!src) return null;
     const w = src.naturalWidth || src.width, h = src.naturalHeight || src.height;
     if (!w || !h) return null;
-    const g = displayBakeGeometry(w, h, displayLegacyLinear(deg, flipLr, flipUd));
+    const orientation=displayLegacyLinear(deg, flipLr, flipUd);
+    const base=displayBakeGeometry(w,h,orientation);
     const out = document.createElement('canvas');
+    const k = requestedScale > 0 ? Math.min(requestedScale,6144/Math.max(base.width,base.height),Math.sqrt(16000000/base.width/base.height)) : 1;
+    const g=displayBakeGeometry(w*k,h*k,orientation);
     out.width = g.width; out.height = g.height;
     const ctx = get2dContext(out), T = g.matrix;
     ctx.imageSmoothingEnabled = smoothing !== false;
     ctx.transform(T[0][0], T[1][0], T[0][1], T[1][1], T[0][2], T[1][2]);
-    ctx.drawImage(src, 0, 0);
+    ctx.scale(k,k);
+    if(typeof smoothing==='number')MsiSmoothing.drawImage(ctx,src,smoothing,0,0);
+    else ctx.drawImage(src, 0, 0);
     return out;
 }
 function unbakeSectionTransformPoint(rx, ry, rawW, rawH, deg, flipLr, flipUd) {
@@ -8609,6 +8617,13 @@ class SectionPanel {
             const ratio = target / Math.max(refSize.w, refSize.h);
             scale = Math.max(1, Math.min(8, Math.ceil(ratio)));
         }
+        if (refIsMsi && heKey && App.msiSmoothing === 'linear') {
+            // A small HE image must not leave MSI interpolation to CSS alone:
+            // bake the selected blend into a buffer at least as large as the view.
+            const host=this.dom.host;
+            const target=Math.max(host?host.clientWidth:0,host?host.clientHeight:0)||600;
+            scale=Math.max(scale,Math.min(8,Math.ceil(target/Math.max(refSize.w,refSize.h))));
+        }
         w = Math.round(w * scale); h = Math.round(h * scale);
         const t = this._ensureViewerTransform();
         const oldFit = this._viewerFit;
@@ -8868,9 +8883,9 @@ class SectionPanel {
                 //  - img / 値ラスタ / keep グリッドは作り直されたら必ず別オブジェクト
                 //    になるので、同一性スタンプで足りる。
                 //
-                // Opacity is applied at composition; only the additional Gaussian
-                // strength changes the native colour raster. Never filter source values.
-                const smoothingStrength = App.msiSmoothing === 'linear' ? (App.msiSmoothingStrength || 0) : 0;
+                // Median filters a temporary display-index raster before colour mapping.
+                // Source values, masks and ROI statistics are never modified.
+                const smoothingStrength = App.msiSmoothing === 'median' ? (App.msiSmoothingStrength || 1) : 0;
                 const lutSig = identStamp(img) + '|' + img.naturalWidth + 'x' + img.naturalHeight
                     + '|' + identStamp(vrCache)
                     + '|' + (rrC ? (rrC[0] + ',' + rrC[1]) : '-')
@@ -8896,6 +8911,7 @@ class SectionPanel {
                 const d = data.data;
                 const useKeep = keepGrid && keepGrid.W === tc.width && keepGrid.H === tc.height;
                 const smoothMask = smoothingStrength > 0 ? new Uint8Array(tc.width * tc.height) : null;
+                const smoothIndices = smoothMask ? new Uint8Array(tc.width * tc.height) : null;
                 // 生強度ラスタ (段階A で保持) があれば 8bit PNG への往復を挟まず、値を
                 // そのまま窓へ写して色にする。8bit は 1 LSB = (rawRange の幅)/255 の
                 // 粗さがあり、Range を低信号側へ寄せると数階調に潰れていた。
@@ -8924,11 +8940,19 @@ class SectionPanel {
                         const ev = Number.isFinite(vRaw)
                             ? msiValueEval(vRaw, winC, fbC)
                             : msiWindowEval(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2], rrC, winC);
-                        const c = lut[Math.round(ev.n * 255)];
+                        const index = Math.round(ev.n * 255);
+                        if (smoothIndices) smoothIndices[i >> 2] = index;
+                        const c = lut[index];
                         d[i] = c[0]; d[i+1] = c[1]; d[i+2] = c[2]; d[i+3] = 255;
                     }
                 }
-                if (smoothMask) d.set(MsiSmoothing.smoothRgba(d, tc.width, tc.height, smoothingStrength, smoothMask));
+                if (smoothMask) {
+                    const filtered = MsiSmoothing.medianIndices(smoothIndices, tc.width, tc.height, smoothingStrength, smoothMask);
+                    for (let pixel=0;pixel<filtered.length;pixel++) if(smoothMask[pixel]) {
+                        const color=lut[filtered[pixel]],offset=pixel*4;
+                        d[offset]=color[0];d[offset+1]=color[1];d[offset+2]=color[2];
+                    }
+                }
                 tctx.putImageData(data, 0, 0);
                 drawSource = tc;
                 // 焼き上がりを署名つきで保存。上限を超えたぶんは挿入順(= 使った
@@ -9031,7 +9055,9 @@ class SectionPanel {
                 const layerT = this._msiCanvasMatrix('msi');
                 ctx.transform(layerT[0][0], layerT[1][0], layerT[0][1], layerT[1][1], layerT[0][2], layerT[1][2]);
                 const physicalFrame=this._displayCanvasFrame&&this._displayCanvasFrame.msiDisplay;
-                if(physicalFrame)drawMsiFrameSource(ctx,drawSource,physicalFrame);
+                const linearStrength=App.msiSmoothing==='linear'?(App.msiLinearStrength||10):undefined;
+                if(physicalFrame)drawMsiFrameSource(ctx,drawSource,physicalFrame,linearStrength);
+                else if(linearStrength)MsiSmoothing.drawImage(ctx,drawSource,linearStrength,0,0,ref.w,ref.h);
                 else ctx.drawImage(drawSource, 0, 0, ref.w, ref.h);
                 ctx.restore();
             } else if (isHeLike) {
@@ -9066,11 +9092,9 @@ class SectionPanel {
         ctx.globalAlpha = 1.0;
         if(this._showAlignmentUnavailable)this._showAlignmentUnavailable(alignmentUnavailable);
         this._showMsiLoadStatus();
-        // HDI Smoothing: bilinear (CSS image-rendering:auto) when 'linear', else
-        // nearest. The CSS upscale (.viewer-rot transform) dominates when cdisp
-        // is native-size (MSI-only), so this class is what smooths the on-screen
-        // image; imageSmoothingEnabled above covers the drawImage upscale (MSI+HE).
-        this.dom.cdisp.classList.toggle('smooth', App.msiSmoothing === 'linear');
+        // Intermediate Linear amounts are already baked; CSS interpolation
+        // would override their blend. Keep the historical CSS behavior at 10.
+        this.dom.cdisp.classList.toggle('smooth', App.msiSmoothing === 'linear' && (App.msiLinearStrength||10) === 10);
         this.updateScaleBar();
     }
 
@@ -10619,8 +10643,9 @@ class SectionPanel {
         const vrT = this.msiValueRasters && this.msiValueRasters.get(key);
         const useValsT = !!(vrT && vrT.W === c.width && vrT.H === c.height);
         const fbT = msiRawFallbackMax(rrT);
-        const smoothingStrength = App.msiSmoothing === 'linear' ? (App.msiSmoothingStrength || 0) : 0;
+        const smoothingStrength = App.msiSmoothing === 'median' ? (App.msiSmoothingStrength || 1) : 0;
         const smoothMask = smoothingStrength > 0 ? new Uint8Array(c.width * c.height) : null;
+        const smoothIndices = smoothMask ? new Uint8Array(c.width * c.height) : null;
         for (let i = 0; i < d.length; i += 4) {
             if (d[i+3] === 0) continue;
             if (useKeepT && keepGridT.keep[i >> 2] === 0) { d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; continue; }
@@ -10630,16 +10655,29 @@ class SectionPanel {
             const ev = Number.isFinite(vRaw)
                 ? msiValueEval(vRaw, winT, fbT)
                 : msiWindowEval(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2], rrT, winT);
-            const cm = lut[Math.round(ev.n * 255)];
+            const index = Math.round(ev.n * 255);
+            if (smoothIndices) smoothIndices[i >> 2] = index;
+            const cm = lut[index];
             d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
         }
-        if (smoothMask) d.set(MsiSmoothing.smoothRgba(d, c.width, c.height, smoothingStrength, smoothMask));
+        if (smoothMask) {
+            const filtered = MsiSmoothing.medianIndices(smoothIndices, c.width, c.height, smoothingStrength, smoothMask);
+            for (let pixel=0;pixel<filtered.length;pixel++) if(smoothMask[pixel]) {
+                const color=lut[filtered[pixel]],offset=pixel*4;
+                d[offset]=color[0];d[offset+1]=color[1];d[offset+2]=color[2];
+            }
+        }
         ctx.putImageData(data, 0, 0);
         const orientation=sectionLayerViewLinear(this.section,'msi');
         const frame=sectionMsiPhysicalFrame(this.section,key,c.width,c.height,orientation);
-        const smooth=App.msiSmoothing==='linear';
-        const baked = frame ? bakeMsiImageWithFrame(c,frame,1,smooth) : bakeImageWithSectionTransform(c,orientation,null,null,smooth);
-        im.style.imageRendering=smooth?'auto':'pixelated';
+        const smooth=App.msiSmoothing==='linear'?(App.msiLinearStrength||10):false;
+        // Bake intermediate Linear levels at thumbnail resolution, so a CSS
+        // resize cannot silently turn every level into full interpolation.
+        const bounds=frame?frame.bounds:displayBakeGeometry(c.width,c.height,orientation);
+        const target=Math.max(im.clientWidth||0,im.clientHeight||0)||160;
+        const scale=smooth&&smooth<10?Math.min(8,target/Math.max(bounds.width,bounds.height)):1;
+        const baked = frame ? bakeMsiImageWithFrame(c,frame,scale,smooth) : bakeImageWithSectionTransform(c,orientation,null,null,smooth,scale);
+        im.style.imageRendering=smooth===10?'auto':'pixelated';
         im.src = (baked || c).toDataURL();
     }
 
@@ -15940,8 +15978,9 @@ const Wizards = {
             // ここだけ抜けており、背景除去 ON のとき共有プレビューにだけ背景が残っていた。
             const keepGrid = layerKey ? otsuKeepGridForLayer(sec, layerKey) : null;
             const useKeep = !!(keepGrid && keepGrid.W === c.width && keepGrid.H === c.height);
-            const smoothingStrength = layerKey && App.msiSmoothing === 'linear' ? (App.msiSmoothingStrength || 0) : 0;
+            const smoothingStrength = layerKey && App.msiSmoothing === 'median' ? (App.msiSmoothingStrength || 1) : 0;
             const smoothMask = smoothingStrength > 0 ? new Uint8Array(c.width * c.height) : null;
+            const smoothIndices = smoothMask ? new Uint8Array(c.width * c.height) : null;
             for (let i = 0; i < d.length; i += 4) {
                 if (d[i+3] === 0) continue;
                 if (useKeep && keepGrid.keep[i >> 2] === 0) { d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; continue; }
@@ -15951,10 +15990,18 @@ const Wizards = {
                 const ev = Number.isFinite(vRaw)
                     ? msiValueEval(vRaw, win, fb)
                     : msiWindowEval(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2], rawRange, win);
-                const cm = lut[Math.round(ev.n * 255)];
+                const index = Math.round(ev.n * 255);
+                if (smoothIndices) smoothIndices[i >> 2] = index;
+                const cm = lut[index];
                 d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
             }
-            if (smoothMask) d.set(MsiSmoothing.smoothRgba(d, c.width, c.height, smoothingStrength, smoothMask));
+            if (smoothMask) {
+                const filtered = MsiSmoothing.medianIndices(smoothIndices, c.width, c.height, smoothingStrength, smoothMask);
+                for (let pixel=0;pixel<filtered.length;pixel++) if(smoothMask[pixel]) {
+                    const color=lut[filtered[pixel]],offset=pixel*4;
+                    d[offset]=color[0];d[offset+1]=color[1];d[offset+2]=color[2];
+                }
+            }
             cctx.putImageData(data, 0, 0);
             return c;
         };
@@ -16161,7 +16208,7 @@ const Wizards = {
             const ent = sec.msiSeries[key] || {};
             const win = isTicKey(key) ? null : App.getMsiWindow(key, ent.rawRange || null, ent.rawDispMax, ent.rawTrueMax);
             const cacheKey = JSON.stringify([key, activeFrame && activeFrame.key, t.matrix, t.frame&&t.frame.bounds, win, App.msiSmoothing,
-                App.msiSmoothingStrength || 0,
+                App.msiSmoothingStrength || 1, App.msiLinearStrength || 10,
                 typeof getActiveColormap === 'function' ? getActiveColormap() : null,
                 !!App.otsuBgRemove, ent.rawRange || null]);
             let cached = coloredCache.get(cacheKey);
@@ -16169,20 +16216,22 @@ const Wizards = {
                 const srcImg = isTicKey(key) ? computeSyntheticTicForKey(key) : panel.imageSources[key];
                 if (!await waitForImg(srcImg) || !current()) return;
                 const colored = paintMsiToColored(srcImg, ent.rawRange || null, win, isTicKey(key) ? null : key);
-                const smooth=App.msiSmoothing==='linear';
-                const baked = colored && (t.frame ? bakeMsiImageWithFrame(colored,t.frame,1,smooth) : bakeImageWithSectionTransform(colored, t.matrix,null,null,smooth));
+                const smooth=App.msiSmoothing==='linear'?(App.msiLinearStrength||10):false;
+                const bounds=colored&&(t.frame?t.frame.bounds:displayBakeGeometry(colored.width,colored.height,t.matrix));
+                const scale=smooth&&smooth<10&&bounds?Math.min(8,600/Math.max(bounds.width,bounds.height)):1;
+                const baked = colored && (t.frame ? bakeMsiImageWithFrame(colored,t.frame,scale,smooth) : bakeImageWithSectionTransform(colored, t.matrix,null,null,smooth,scale));
                 if (!baked) return;
                 const ready = new Image(); ready.src = baked.toDataURL('image/png');
                 if (!await waitForImg(ready) || !current()) return;
-                cached = {url:ready.src,rawW:colored.width,rawH:colored.height};
+                cached = {url:ready.src,rawW:colored.width,rawH:colored.height,scale};
                 coloredCache.set(cacheKey,cached);
                 // Bound session-local thumbnails; source grids retain their existing LRU.
                 if (coloredCache.size > 12) coloredCache.delete(coloredCache.keys().next().value);
             }
             if (!current()) return;
             msiImg.src = cached.url;
-            msiImg.style.imageRendering=App.msiSmoothing==='linear'?'auto':'pixelated';
-            stampThumbDataset(msiImg,cached.rawW,cached.rawH,t);
+            msiImg.style.imageRendering=App.msiSmoothing==='linear'&&(App.msiLinearStrength||10)===10?'auto':'pixelated';
+            stampThumbDataset(msiImg,cached.rawW,cached.rawH,t,cached.scale);
             await waitForImg(msiImg);
             if (!current()) return;
             msiImg.dataset.ready = 'true';
@@ -16705,12 +16754,13 @@ const Wizards = {
             if (!imagesReady || heImg.dataset.ready !== 'true' || msiImg.dataset.ready !== 'true') return;
             const heSS = Number(heImg.dataset.ss) || 1;
             const hw=heImg.naturalWidth/heSS, hh=heImg.naturalHeight/heSS;
-            const mw=msiImg.naturalWidth, mh=msiImg.naturalHeight;
+            const msiSS=Number(msiImg.dataset.ss)||1;
+            const mw=msiImg.naturalWidth/msiSS, mh=msiImg.naturalHeight/msiSS;
             const scale=Math.min(width/Math.max(hw,mw),height/Math.max(hh,mh));
             ctx.imageSmoothingEnabled=true;
             ctx.drawImage(heImg,(width-hw*scale)/2,(height-hh*scale)/2,hw*scale,hh*scale);
             ctx.globalAlpha=opacity;
-            ctx.imageSmoothingEnabled=false;
+            ctx.imageSmoothingEnabled=App.msiSmoothing==='linear'&&(App.msiLinearStrength||10)===10;
             ctx.drawImage(msiImg,(width-mw*scale)/2,(height-mh*scale)/2,mw*scale,mh*scale);
             ctx.globalAlpha=1;
         };
@@ -20789,7 +20839,7 @@ const SharePreview = {
     // has the correct intrinsic dimensions for object-fit:contain to
     // letterbox without clipping.
     _bakeRotatedCanvas(srcCanvas, rotDeg) {
-        return bakeImageWithSectionTransform(srcCanvas, rotDeg, null, null, App.msiSmoothing === 'linear');
+        return bakeImageWithSectionTransform(srcCanvas, rotDeg, null, null, App.msiSmoothing === 'linear' && (App.msiLinearStrength||10)===10);
     },
 
     // Per-cell pan/zoom transform. Rotation is baked into the <img> at
@@ -20828,7 +20878,7 @@ const SharePreview = {
         const stage = wrap && wrap.querySelector('[data-cell-stage]');
         if (!stage) return;
         const img=stage.querySelector('[data-cell-img]');
-        if(img)img.style.imageRendering=App.msiSmoothing==='linear'?'auto':'pixelated';
+        if(img)img.style.imageRendering=App.msiSmoothing==='linear'&&(App.msiLinearStrength||10)===10?'auto':'pixelated';
         const m = this._cellMetrics(wrap);
         if (m) {
             const restored = restoreViewport && SectionVisibility.restoreViewport(t.viewport, m.width, m.height, m.fit);
@@ -21879,8 +21929,8 @@ const Toolbar = {
                     // Keep the native slider responsive for large sets of images.
                     // The final change event applies/persists the selected value.
                     const output = document.getElementById('tb-smoothing-strength-value');
-                    if (output) output.textContent = String(value);
-                    smoothingStrength.setAttribute('aria-valuetext', String(value));
+                    if (output) output.textContent = value + '/10';
+                    smoothingStrength.setAttribute('aria-valuetext', value + '/10');
                 } else App.setMsiSmoothingStrength(value);
             });
             smoothingStrength.addEventListener('change', () => App.setMsiSmoothingStrength(Number(smoothingStrength.value)));
@@ -22673,9 +22723,9 @@ const App = {
     msiScaleMode: 'same',      // MSI intensity scale: 'same' = one shared range
                                // across in-scope sections (HDI "Same"); 'individual'
                                // = each section auto-scales to its own range.
-    msiSmoothing: 'none',      // MSI display interpolation: 'none' = nearest
-                               // (pixelated), 'linear' = bilinear (HDI Smoothing).
-    msiSmoothingStrength: 0,   // Additional display-only Gaussian, 0 preserves legacy Linear.
+    msiSmoothing: 'none',      // Display only: none, linear interpolation, or median denoising.
+    msiSmoothingStrength: 1,   // Median level 1..10: 3x3 through 21x21 neighborhoods.
+    msiLinearStrength: 10,     // Linear blend 1..10: 10 preserves legacy interpolation.
     otsuBgRemove: false,       // 背景を非表示（Otsu）: TIC ベースの背景スポットを全イオン
                                // 像から一括で非表示にする(生データ非破壊)。
     otsuManualThreshold: null, // 手動閾値(生 TIC 単位)。null なら Otsu 自動。
@@ -22705,14 +22755,14 @@ const App = {
         const smoothing = document.getElementById('tb-smoothing');
         const strength = document.getElementById('tb-smoothing-strength');
         const value = document.getElementById('tb-smoothing-strength-value');
-        const amount = settings.smoothingStrength || 0;
+        const amount = settings.interpolation === 'linear' ? settings.linearStrength : settings.smoothingStrength;
         if (smoothing) smoothing.value = settings.interpolation;
         if (strength) {
             strength.value = amount;
-            strength.disabled = settings.interpolation !== 'linear';
-            strength.setAttribute('aria-valuetext', amount === 0 ? '0（従来のLinear）' : String(amount));
+            strength.disabled = settings.interpolation === 'none';
+            strength.setAttribute('aria-valuetext', amount + '/10');
         }
-        if (value) value.textContent = String(amount);
+        if (value) value.textContent = amount + '/10';
     },
     updateMsiDisplaySettings(patch, redraw = true) {
         if (!this.project || typeof MsiDisplaySettings === 'undefined') return;
@@ -22726,11 +22776,12 @@ const App = {
             const meta = this.project.meta || (this.project.meta = {});
             meta.msiDisplay = stored;
             if (patch.colormap) meta.colormap = next.colormap;
-            if (patch.interpolation) meta.msiSmoothing = next.interpolation;
+            meta.msiSmoothing = next.interpolation;
             this.queueSave();
         }
-        this.msiSmoothing = next.interpolation === 'linear' ? 'linear' : 'none';
-        this.msiSmoothingStrength = stored.smoothingStrength || 0;
+        this.msiSmoothing = next.interpolation;
+        this.msiSmoothingStrength = stored.smoothingStrength;
+        this.msiLinearStrength = stored.linearStrength;
         this.refreshMsiDisplayControls();
         if (redraw) {
             for (const panel of this.panels.values()) {
@@ -23483,10 +23534,10 @@ const App = {
         this.msiScaleMode = next;
         this.repaintAllMsi();
     },
-    // Switch MSI display interpolation ('none' | 'linear'), repaint, and persist
+    // Switch display smoothing ('none' | 'linear' | 'median'), repaint, and persist
     // (master only; share recipients keep it transient). Mirrors the colormap.
     setMsiSmoothing(mode) {
-        const next = (mode === 'linear') ? 'linear' : 'none';
+        const next = ['linear','median'].includes(mode) ? mode : 'none';
         if (this.msiSmoothing === next) return;
         this.msiSmoothing = next;
         if (this.project && typeof MsiDisplaySettings !== 'undefined')
@@ -23506,9 +23557,10 @@ const App = {
         return false;
     },
     setMsiSmoothingStrength(value) {
-        const next = MsiSmoothing.normalizeStrength(value);
-        if (!this.project || this.msiSmoothing !== 'linear' || this.msiSmoothingStrength === next) return;
-        this.updateMsiDisplaySettings({smoothingStrength:next,preset:'custom'}, false);
+        const next = MsiSmoothing.normalizeLevel(value);
+        const linear = this.msiSmoothing === 'linear';
+        if (!this.project || this.msiSmoothing === 'none' || (linear ? this.msiLinearStrength : this.msiSmoothingStrength) === next) return;
+        this.updateMsiDisplaySettings({[linear ? 'linearStrength' : 'smoothingStrength']:next,preset:'custom'}, false);
         // Persist the latest value immediately through the normal debounced save,
         // but coalesce costly display work while dragging. A queued frame never
         // updates another project's image or overrides a later mode/preset.
@@ -24763,7 +24815,8 @@ const App = {
             const sel = document.getElementById('tb-colormap');
             if (sel) sel.value = _activeColormapName;
             App.msiSmoothing = displaySettings.interpolation;
-            App.msiSmoothingStrength = displaySettings.smoothingStrength || 0;
+            App.msiSmoothingStrength = displaySettings.smoothingStrength;
+            App.msiLinearStrength = displaySettings.linearStrength;
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
             this.refreshMsiDisplayControls();
@@ -25096,7 +25149,8 @@ const App = {
             const sel = document.getElementById('tb-colormap');
             if (sel) sel.value = _activeColormapName;
             App.msiSmoothing = displaySettings.interpolation;
-            App.msiSmoothingStrength = displaySettings.smoothingStrength || 0;
+            App.msiSmoothingStrength = displaySettings.smoothingStrength;
+            App.msiLinearStrength = displaySettings.linearStrength;
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
             this.refreshMsiDisplayControls();

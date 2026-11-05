@@ -157,8 +157,9 @@
         const colormapName = typeof _activeColormapName === 'string' ? _activeColormapName : '';
         const otsuOn = !!App.otsuBgRemove;
         const displaySettings=copy(App.getMsiDisplaySettings ? App.getMsiDisplaySettings() : {rangePolicy:'legacy'});
-        const smoothing=App.msiSmoothing==='linear'?'linear':'none';
-        const smoothingStrength=MsiSmoothing.normalizeStrength(displaySettings.smoothingStrength);
+        const smoothing=['linear','median'].includes(App.msiSmoothing)?App.msiSmoothing:'none';
+        const smoothingStrength=MsiSmoothing.normalizeLevel(displaySettings.smoothingStrength);
+        const linearStrength=MsiSmoothing.normalizeLevel(displaySettings.linearStrength,10);
         const absolute = new Map();
         for (const section of project.sections || []) {
             if (!App._organInScope(section)) continue;
@@ -268,13 +269,13 @@
                 const cacheKey = id+'|'+key;
                 if (!windows.has(cacheKey)) windows.set(cacheKey,App.getMsiWindow.call(windowContext,key,ent.rawRange,ent.rawDispMax,ent.rawTrueMax));
                 const win = windows.get(cacheKey);
-                const signature = identity+'|'+JSON.stringify(win)+'|'+smoothing+'|'+smoothingStrength;
+                const signature = identity+'|'+JSON.stringify(win)+'|'+smoothing+'|'+smoothingStrength+'|'+linearStrength;
                 let cached = frameCache.get(cacheKey);
                 if (!cached || cached.signature !== signature) {
                     const maskSection = { ...section,meta:{...section.meta,otsu:masks.get(id)} };
                     const keepGrid = otsuOn ? _otsuKeepGridRaw(maskSection,key) : null;
                     const canvas = RoiMediaMsi.colorize(panel.imageSources[key], {
-                        valueRaster:panel.msiValueRasters.get(key), keepGrid,lut,background,smoothing,smoothingStrength,
+                        valueRaster:panel.msiValueRasters.get(key), keepGrid,lut,background,smoothing,smoothingStrength,linearStrength,
                         rawRange:ent.rawRange,window:win,fallbackMax:msiRawFallbackMax(ent.rawRange),
                         evaluateValue:msiValueEval,evaluateLuminance:msiWindowEval,
                     });
@@ -299,10 +300,10 @@
                 }
                 const c = r.rgba || [200,200,200,255];
                 return { canvas:cached.canvas,polygon,transform:physicalFrame?physicalFrame.matrix:displayAffineMultiply(orientations.get(id),aspect),
-                    physicalFrame,drawingRects,smoothing,smoothingStrength,
+                    physicalFrame,drawingRects,smoothing,smoothingStrength,linearStrength,
                     roiColor:'rgb('+c.slice(0,3).join(',')+')',background:'rgb('+background.join(',')+')',pixelPitch:pitch,
                     status:formatDisplayName(key)+' ／ '+colormapName+' ／ 強度 '+win.min+'–'+win.max
-                        +(smoothing==='linear' && smoothingStrength>0?' ／ Smoothing '+smoothingStrength+'/100':'')+(otsuOn?' ／ Otsu表示':'') };
+                        +(smoothing==='linear'?' ／ Linear '+linearStrength+'/10':smoothing==='median'?' ／ Median '+smoothingStrength+'/10':'')+(otsuOn?' ／ Otsu表示':'') };
             },
             add:(p,r,id,files) => getService().add(p,r,sectionFor(p,id),files),
             replace:(p,r,id,item,file) => getService().replace(p,r,sectionFor(p,id),item,file),

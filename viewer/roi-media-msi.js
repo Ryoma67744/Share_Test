@@ -88,8 +88,9 @@
     const vr = o.valueRaster, keep = o.keepGrid;
     const useValues = !!(vr && vr.W === width && vr.H === height && vr.values && vr.values.length === width*height);
     const useKeep = !!(keep && keep.W === width && keep.H === height && keep.keep && keep.keep.length === width*height);
-    const strength=o.smoothing==='linear'?MsiSmoothing.normalizeStrength(o.smoothingStrength):0;
+    const strength=o.smoothing==='median'?MsiSmoothing.normalizeLevel(o.smoothingStrength):0;
     const valid=strength>0?new Uint8Array(width*height):null;
+    const indices=valid?new Uint8Array(width*height):null;
     const bg = Array.isArray(o.background) && o.background.length >= 3 ? o.background : [0,0,0];
     const rawRange = Array.isArray(o.rawRange) && o.rawRange.length === 2 && o.rawRange.every(Number.isFinite) ? o.rawRange : null;
     const fallbackMax = Number.isFinite(o.fallbackMax) ? o.fallbackMax : (rawRange ? rawRange[1] : 255);
@@ -100,12 +101,22 @@
         const ev = Number.isFinite(value) ? o.evaluateValue(value,o.window,fallbackMax)
           : o.evaluateLuminance(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2],rawRange,o.window);
         if (!ev || !Number.isFinite(ev.n)) throw new Error('MSIの強度範囲を確認できません。');
-        color = o.lut[Math.round(clamp(ev.n,0,1)*255)];
-        if(valid)valid[i/4]=(!useValues || Number.isFinite(value)) && (!useValues || !vr.measuredMask || !!vr.measuredMask[i/4]) ? 1 : 0;
+        const paletteIndex=Math.round(clamp(ev.n,0,1)*255);
+        color = o.lut[paletteIndex];
+        if(valid) {
+          indices[i/4]=paletteIndex;
+          valid[i/4]=(!useValues || Number.isFinite(value)) && (!useValues || !vr.measuredMask || !!vr.measuredMask[i/4]) ? 1 : 0;
+        }
       }
       d[i]=color[0]; d[i+1]=color[1]; d[i+2]=color[2]; d[i+3]=255;
     }
-    if(strength>0)d.set(MsiSmoothing.smoothRgba(d,width,height,strength,valid));
+    if(strength>0) {
+      const filtered=MsiSmoothing.medianIndices(indices,width,height,strength,valid);
+      for(let i=0;i<filtered.length;i++)if(valid[i]) {
+        const color=o.lut[filtered[i]],offset=i*4;
+        d[offset]=color[0];d[offset+1]=color[1];d[offset+2]=color[2];
+      }
+    }
     ctx.putImageData(pixels,0,0);
     return canvas;
   }
@@ -161,15 +172,17 @@
     ctx.save();
     ctx.beginPath(); ctx.rect(0,0,width,height); ctx.clip();
     ctx.transform(imageMatrix[0][0],imageMatrix[1][0],imageMatrix[0][1],imageMatrix[1][1],imageMatrix[0][2],imageMatrix[1][2]);
-    // Strength zero preserves this comparison's historical nearest display.
-    ctx.imageSmoothingEnabled = frame.smoothing==='linear' && MsiSmoothing.normalizeStrength(frame.smoothingStrength)>0;
+    ctx.imageSmoothingEnabled = false;
     ctx.imageSmoothingQuality = 'high';
+    const drawImage=(...args)=>frame.smoothing==='linear'
+      ? MsiSmoothing.drawImage(ctx,frame.canvas,MsiSmoothing.normalizeLevel(frame.linearStrength,10),...args)
+      : ctx.drawImage(frame.canvas,...args);
     const sourceRect = whole ? g.whole : g.crop;
     if(frame.drawingRects) {
       ctx.beginPath();ctx.rect(sourceRect.x,sourceRect.y,sourceRect.width,sourceRect.height);ctx.clip();
-      for(const rect of frame.drawingRects)ctx.drawImage(frame.canvas,rect.source.x,rect.source.y,rect.source.width,rect.source.height,
+      for(const rect of frame.drawingRects)drawImage(rect.source.x,rect.source.y,rect.source.width,rect.source.height,
         rect.dest.x,rect.dest.y,rect.dest.width,rect.dest.height);
-    } else ctx.drawImage(frame.canvas,sourceRect.x,sourceRect.y,sourceRect.width,sourceRect.height,
+    } else drawImage(sourceRect.x,sourceRect.y,sourceRect.width,sourceRect.height,
       sourceRect.x,sourceRect.y,sourceRect.width,sourceRect.height);
     ctx.restore();
     const screenPolygon = g.worldPolygon.map(screen);

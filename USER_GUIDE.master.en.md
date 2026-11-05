@@ -61,7 +61,7 @@ Regular shared viewers also receive the display-style options dialog, but never 
 
 Public and viewer reports omit CV/CE. Shared admins and local masters can turn the option ON to include the registered transition's CV/CE in the molecule detail subtitle. Passwords and authentication tokens are never included in the PowerPoint file.
 
-By default, images retain the common display-raster p99.8 upper limit and black/blue/purple/red/yellow palette across sections with the same molecule and measurement conditions. **表示スタイルを使う** (use display style) starts OFF for every export. Turning it ON captures the palette, Same/Individual mode, manual raw-intensity Range, upper-limit policy, interpolation and available Otsu masks when generation starts. All sections and molecules remain included. Same recalculates its automatic upper limit across all output sections, independent of screen filters. The HDI-like maximum policy prefers the original measurement-row maximum; explicit manual Range endpoints take precedence. Individual reports show each image's range, with a 0–100% colour bar when ranges differ on the same page.
+By default, images retain the common display-raster p99.8 upper limit and black/blue/purple/red/yellow palette across sections with the same molecule and measurement conditions. **表示スタイルを使う** (use display style) starts OFF for every export. Turning it ON captures the palette, Same/Individual mode, manual raw-intensity Range, upper-limit policy, Smoothing method/level and available Otsu masks when generation starts. All sections and molecules remain included. Same recalculates its automatic upper limit across all output sections, independent of screen filters. The HDI-like maximum policy prefers the original measurement-row maximum; explicit manual Range endpoints take precedence. Individual reports show each image's range, with a 0–100% colour bar when ranges differ on the same page.
 
 Both colour modes capture orientation and aspect settings at generation start. Physical aspect uses registered X/Y pitch and the source image footprint; turning it OFF preserves the legacy raster ratio. Detail images receive individual scale bars when calibrated, and omit them when dimensions are unknown. Screen zoom and pan are not exported. Later display-setting changes do not alter an export already in progress.
 
@@ -409,7 +409,15 @@ New projects start with HDI-like presentation and physical aspect. Loading an ol
 
 > **Click a column header to sort**: Click any of the Compound / Precursor / Fragment / CE / CV / Mean / Max headers to reorder the rows. 1st click applies the column's default direction (Compound = A→Z, numeric columns = High→Low), 2nd click reverses it, 3rd click clears the sort and falls back to the legacy source-file → name order. Empty cells (`—`) always sink to the bottom. Sort is session-only and shared with the SharePreview Method panel; ↑/↓ keys also follow the displayed order.
 
-Adjust MSI smoothness using **補間 → Linear → 強さ** (strength, 0–100) in the toolbar. **0 preserves the original Linear display**; higher values add stronger smoothing. None retains the strength but disables its effect. Original measurements, ROI membership/statistics and numerical CSV exports remain unchanged. Master settings round-trip through save, publication and ZIP; shared overrides remain isolated by tab and role. PPT uses the strength only when **表示スタイルを使う** is selected. Selecting a display preset resets interpolation to None and strength to 0.
+Choose **None / Linear / Median** in the toolbar's **Smoothing** selector and adjust **強さ** (strength) from 1 to 10.
+
+- **None** applies neither interpolation nor median filtering. The slider is disabled, while each method retains its level.
+- **Linear** adjusts the interpolation amount from near-nearest display to the original Linear appearance. **Level 10 is the original Linear display**. Levels affect enlargement and resampling, so a native-size image may look unchanged.
+- **Median** filters display intensities to reduce speckled noise while retaining boundaries. Level 1 uses 3×3 pixels, level 2 uses 5×5, and level 10 uses 21×21. These are ten custom levels based on the SCiLS-style median approach, not a reproduction of SCiLS's complete numerical processing. Missing, transparent and Otsu-hidden pixels are excluded.
+
+Linear and Median retain separate levels. Large images update when the slider is released. Original measurements, ROI membership/statistics and numerical CSV exports remain unchanged. Master settings round-trip through save, publication and ZIP; shared overrides remain isolated by tab and role. PPT uses the selected method and level only when **表示スタイルを使う** is selected. Display presets reset the mode to None, Median to 1 and Linear to 10.
+
+Legacy settings with additional smoothing migrate to a corresponding Median level from 1 to 10. Legacy Linear with no additional smoothing becomes Linear level 10, preserving its previous appearance.
 
 ---
 

@@ -173,7 +173,10 @@
         const displaySettings = copy(app.getMsiDisplaySettings ? app.getMsiDisplaySettings()
             : root.MsiDisplaySettings ? root.MsiDisplaySettings.resolve(project) : {aspectMode:'legacy'});
         const displayStyle = options.useDisplayStyle ? copy(hooks.displayStyle ? hooks.displayStyle() : null) : null;
-        if(displayStyle)displayStyle.smoothingStrength=MsiSmoothing.normalizeStrength(displaySettings.smoothingStrength);
+        if(displayStyle) {
+            displayStyle.smoothingStrength=MsiSmoothing.normalizeLevel(displaySettings.smoothingStrength);
+            displayStyle.linearStrength=MsiSmoothing.normalizeLevel(displaySettings.linearStrength,10);
+        }
         if (options.useDisplayStyle && (!displayStyle || !Array.isArray(displayStyle.lut) || displayStyle.lut.length !== 256))
             throw new Error('表示スタイルを取得できません。');
         const manualWindows = copy(app.msiUserWindow || {});
@@ -525,7 +528,7 @@
                             : root.MsiDisplaySettings ? root.MsiDisplaySettings.resolve(getApp().project).rangePolicy : 'legacy',
                         lut:getActiveColormap().map(c=>c.slice()),background:getColormapBackground().slice(),
                         colormap:typeof _activeColormapName==='string'?_activeColormapName:'',
-                        smoothing:getApp().msiSmoothing==='linear'?'linear':'none',otsu:!!getApp().otsuBgRemove}),
+                        smoothing:['linear','median'].includes(getApp().msiSmoothing)?getApp().msiSmoothing:'none',otsu:!!getApp().otsuBgRemove}),
                     keepGrid:(section,key)=>_otsuKeepGridRaw(section,key),
                     referenceTransforms:section=>({msi:sectionLayerViewLinear(section,'msi'),he:sectionLayerViewLinear(section,'he')}),
                     referenceImage: async (section, panel, transforms) => {

@@ -7,7 +7,7 @@ const identity = [[1,0,0],[0,1,0],[0,0,1]];
 const key = 'MSI_signal';
 const pixelBytes = canvas => Buffer.from(canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data);
 
-function fixture({invalid = false} = {}) {
+function fixture({invalid = false, nonlinearPalette = false} = {}) {
     const W=9,H=3,source=createCanvas(W,H),sourceContext=source.getContext('2d');
     // Deliberately opaque, bright legacy PNG data is inconsistent with the
     // numerical missingness. It must not become a smoothing neighbour merely
@@ -25,14 +25,14 @@ function fixture({invalid = false} = {}) {
     const section={id:'section',meta:{displayTransform:{version:2,baseOrientation:'native-raster'}},
         msiSeries:{[key]:{rawRange:[0,255],rawDispMax:255,rawTrueMax:255}}};
     const project={id:'project',sections:[section],rois:[{id:'roi',polysBySection:{section:[[0,0],[8,0],[8,2]]}}]};
-    const app={project,viewMode:'free',roiOnlyMode:false,activeOverlay:null,msiSmoothing:'linear',msiSmoothingStrength:0,
+    const app={project,viewMode:'free',roiOnlyMode:false,activeOverlay:null,msiSmoothing:'linear',msiSmoothingStrength:1,msiLinearStrength:10,
         otsuBgRemove:invalid,getMsiWindow:()=>({min:0,max:255}),getMsiDisplaySettings:()=>({aspectMode:'legacy'})};
     let smoothingCalls=0,stamp=0;const stamps=new WeakMap();
     const context=runtime({App:app,
-        MsiSmoothing:{...Smoothing,smoothRgba(...args){smoothingCalls++;return Smoothing.smoothRgba(...args);}},
+        MsiSmoothing:{...Smoothing,medianIndices(...args){smoothingCalls++;return Smoothing.medianIndices(...args);}},
         document:{createElement:()=>createCanvas(1,1)},
         get2dContext:canvas=>{const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=false;return ctx;},
-        getActiveColormap:()=>Array.from({length:256},(_,i)=>[i,i,i]),getColormapBackground:()=>[0,0,0],
+        getActiveColormap:()=>Array.from({length:256},(_,i)=>nonlinearPalette?[i,(i*31)%256,(255-i)*17%256]:[i,i,i]),getColormapBackground:()=>[0,0,0],
         otsuKeepGridForLayer:()=>app.otsuBgRemove?keepGrid:null,
         identStamp:value=>{if(!value)return 'none';if(!stamps.has(value))stamps.set(value,++stamp);return stamps.get(value);},
         _activeColormapName:'test-grayscale',MSI_LUT_CACHE_MAX:4,
@@ -49,7 +49,7 @@ function fixture({invalid = false} = {}) {
     });
     const science=()=>({values:Buffer.from(values.buffer).toString('hex'),measured:Buffer.from(measuredMask).toString('hex'),
         keep:Buffer.from(keep).toString('hex'),source:pixelBytes(source).toString('hex'),project:JSON.stringify(project)});
-    return {app,panel,thumb,W,H,missing,unmeasured,hidden,science,calls:()=>smoothingCalls,
+    return {app,panel,thumb,W,H,values,missing,unmeasured,hidden,science,calls:()=>smoothingCalls,
         async thumbnailPixels(){
             panel.renderMsiThumbnail(key);
             const decoded=await loadImage(thumb.src),out=createCanvas(decoded.width,decoded.height);
@@ -64,9 +64,9 @@ async function main() {
     assert.equal(baseline[legacy.missing*4],255,'The opaque PNG fallback makes the deliberately invalid source conspicuously bright');
     assert.equal(baseline[legacy.unmeasured*4],255,'An unmeasured large value is visible in the preserved legacy baseline');
     assert.equal(baseline[legacy.hidden*4],0,'Otsu-hidden pixels use the display background');
-    legacy.app.msiSmoothingStrength=100;
+    legacy.app.msiSmoothing='median';legacy.app.msiSmoothingStrength=10;
     const filtered=legacy.render();
-    assert.equal(legacy.calls(),1,'The production main renderer invokes the Gaussian filter');
+    assert.equal(legacy.calls(),1,'The production main renderer invokes the Median filter');
     assert.deepEqual(filtered,baseline,
         'NaN fallback, measuredMask=0 high values and Otsu background neither contaminate uniform valid pixels nor get filled');
     for(let p=0;p<legacy.W*legacy.H;p++) {
@@ -74,29 +74,53 @@ async function main() {
         assert.equal(filtered[p*4],10,'Every actual measured pixel retains its uniform colour');
     }
     assert.deepEqual(await legacy.thumbnailPixels(),filtered,'The independently baked thumbnail uses the same validity mask');
-    assert.equal(legacy.calls(),2,'The production thumbnail renderer also invokes the Gaussian filter');
+    assert.equal(legacy.calls(),2,'The production thumbnail renderer also invokes the Median filter');
     assert.deepEqual(legacy.science(),before,'Rendering preserves original NaN bits, measured values, masks, PNG and ROI/project data');
 
     const peak=fixture(),peakBefore=peak.science(),zero=peak.render(),zeroCache=peak.panel._msiLutCache.get(key);
     assert.equal(zero[peak.unmeasured*4],255);
-    assert.deepEqual(await peak.thumbnailPixels(),zero,'Strength-zero thumbnail matches the unmodified main colour raster');
-    peak.app.msiSmoothingStrength=100;
+    assert.deepEqual(await peak.thumbnailPixels(),zero,'Linear-10 thumbnail matches the unmodified main colour raster');
+    peak.app.msiSmoothing='median';peak.app.msiSmoothingStrength=10;
     const strong=peak.render(),strongCache=peak.panel._msiLutCache.get(key);
     assert.notEqual(strongCache.sig,zeroCache.sig,'Changing strength invalidates the main LUT cache');
     assert.notEqual(strongCache.canvas,zeroCache.canvas);
-    assert.notDeepEqual(strong,zero,'A measured peak really changes when the Gaussian is enabled');
-    assert.ok(strong[peak.unmeasured*4]<255 && strong[(peak.unmeasured-1)*4]>10);
+    assert.notDeepEqual(strong,zero,'A measured impulse really changes when Median is enabled');
+    assert.equal(strong[peak.unmeasured*4],10,'Median removes a single-pixel spike');
+    assert.equal(strong[(peak.unmeasured-1)*4],10,'Median does not spread that spike into its neighbours');
     const calls=peak.calls();
     assert.deepEqual(peak.render(),strong);assert.equal(peak.calls(),calls,'Repeating the same strength reuses the cached colour raster');
     assert.deepEqual(await peak.thumbnailPixels(),strong,'Main and thumbnail apply the filter once at the same raster scale');
-    peak.app.msiSmoothingStrength=0;
-    assert.deepEqual(peak.render(),zero,'A 0 → 100 → 0 cache cycle returns exactly to the original display bytes');
-    assert.deepEqual(await peak.thumbnailPixels(),zero,'Thumbnail also returns exactly to strength zero');
-    peak.app.msiSmoothingStrength=100;peak.app.msiSmoothing='none';
+    peak.app.msiSmoothing='linear';
+    assert.deepEqual(peak.render(),zero,'A Linear → Median → Linear cache cycle returns exactly to the original display bytes');
+    assert.deepEqual(await peak.thumbnailPixels(),zero,'Thumbnail also returns exactly to Linear-10');
+    peak.app.msiSmoothingStrength=10;peak.app.msiSmoothing='none';
     const noneCalls=peak.calls();
     assert.deepEqual(peak.render(),zero);assert.equal(peak.calls(),noneCalls,'None mode disables the stored nonzero strength');
     assert.deepEqual(await peak.thumbnailPixels(),zero,'None mode also bypasses thumbnail smoothing');
     assert.deepEqual(peak.science(),peakBefore,'Repeated cache/mode changes do not mutate measurement or project state');
+    const palette=fixture({nonlinearPalette:true});
+    // A deliberately non-monotone colour map distinguishes filtering the scalar
+    // palette index from filtering R/G/B independently or sorting by luminance.
+    for(let i=0;i<palette.values.length;i++)palette.values[i]=(i*47+19)%256;
+    const paletteBefore=palette.science();
+    palette.app.msiSmoothing='median';
+    for(let level=1;level<=10;level++) {
+        palette.app.msiSmoothingStrength=level;
+        const pixels=palette.render();
+        for(let y=0;y<palette.H;y++)for(let x=0;x<palette.W;x++) {
+            const neighbours=[];
+            for(let ny=Math.max(0,y-level);ny<=Math.min(palette.H-1,y+level);ny++)
+                for(let nx=Math.max(0,x-level);nx<=Math.min(palette.W-1,x+level);nx++)neighbours.push(palette.values[ny*palette.W+nx]);
+            neighbours.sort((a,b)=>a-b);
+            // The masked median uses the lower middle element for even-sized
+            // clipped neighbourhoods, preserving an actual palette sample.
+            const index=neighbours[Math.floor((neighbours.length-1)/2)],p=(y*palette.W+x)*4;
+            assert.deepEqual([...pixels.subarray(p,p+3)],[index,(index*31)%256,(255-index)*17%256],
+                'Level '+level+' applies the scalar median before a nonlinear colour lookup');
+        }
+        assert.deepEqual(await palette.thumbnailPixels(),pixels,'Main/thumbnail median parity at level '+level);
+    }
+    assert.deepEqual(palette.science(),paletteBefore,'All ten Median levels preserve sources, masks, geometry and ROIs');
     console.log('MSI smoothing display: real main/thumbnail pixels, opaque legacy missingness, cache restoration and source invariance PASS');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

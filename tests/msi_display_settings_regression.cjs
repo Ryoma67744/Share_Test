@@ -10,21 +10,21 @@ const freeze = value => {
   return value;
 };
 
-assert.equal(Settings.VERSION, 1);
-for (const value of [null, undefined, false, '', {}, {version:0}, {version:2}, {version:'1'}])
+assert.equal(Settings.VERSION, 2);
+for (const value of [null, undefined, false, '', {}, {version:0}, {version:3}, {version:'2'}])
   assert.equal(Settings.normalize(value), null, 'Missing/unknown schema versions never silently migrate');
-const malformed = freeze({version:1,preset:'unknown',aspectMode:'unknown',rangePolicy:'unknown',extra:'ignored'});
-assert.deepEqual(Settings.normalize(malformed), {version:1,preset:'current',aspectMode:'legacy',rangePolicy:'legacy',smoothingStrength:0});
+const malformed = freeze({version:2,preset:'unknown',aspectMode:'unknown',rangePolicy:'unknown',extra:'ignored'});
+assert.deepEqual(Settings.normalize(malformed), {version:2,preset:'current',aspectMode:'legacy',rangePolicy:'legacy',smoothingStrength:1,linearStrength:10});
 const old = freeze({id:'old',meta:{colormap:'viridis',msiSmoothing:'linear',memo:{text:'keep'}},
   sections:[{meta:{world_coords:{msi_um_per_px:{x:30,y:60}}},sourceRows:[[0,0,0],[1,0,123]]}],rois:[{points:[[0,0],[1,1]]}]});
 const oldBytes = JSON.stringify(old);
-assert.deepEqual(Settings.resolve(old), {version:1,preset:'current',aspectMode:'legacy',rangePolicy:'legacy',
-  smoothingStrength:0,explicit:false,colormap:'viridis',interpolation:'linear'});
+assert.deepEqual(Settings.resolve(old), {version:2,preset:'current',aspectMode:'legacy',rangePolicy:'legacy',
+  smoothingStrength:1,linearStrength:10,explicit:false,colormap:'viridis',interpolation:'linear'});
 assert.equal(Settings.resolve({meta:{msiDisplay:{version:99,preset:'hdi'}}}).aspectMode, 'legacy');
 assert.equal(JSON.stringify(old), oldBytes, 'Reading old display preferences never writes a migration or measurement');
 
 const fresh = Settings.newProjectMeta();
-assert.deepEqual(fresh, {msiDisplay:{version:1,preset:'hdi',aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:0},
+assert.deepEqual(fresh, {msiDisplay:{version:2,preset:'hdi',aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:1,linearStrength:10},
   colormap:'hotmetal',msiSmoothing:'none'});
 const newResolved = Settings.resolve({meta:fresh});
 assert.equal(newResolved.explicit, true);
@@ -33,8 +33,8 @@ fresh.msiDisplay.aspectMode = 'legacy';
 assert.equal(Settings.newProjectMeta().msiDisplay.aspectMode, 'physical', 'New projects own independent settings objects');
 
 const transient = freeze({...Settings.preset('hdi'),colormap:'inferno',interpolation:'none'});
-assert.deepEqual(Settings.resolve(old, transient), {version:1,preset:'hdi',aspectMode:'physical',rangePolicy:'maximum',
-  smoothingStrength:0,explicit:true,colormap:'inferno',interpolation:'none'});
+assert.deepEqual(Settings.resolve(old, transient), {version:2,preset:'hdi',aspectMode:'physical',rangePolicy:'maximum',
+  smoothingStrength:1,linearStrength:10,explicit:true,colormap:'inferno',interpolation:'none'});
 assert.deepEqual(Settings.resolve(old, {version:999,preset:'hdi',colormap:'jet',interpolation:'none'}), Settings.resolve(old),
   'An unsupported override schema is ignored as a whole');
 assert.equal(JSON.stringify(old), oldBytes, 'Transient overrides do not mutate saved project metadata');
@@ -43,13 +43,32 @@ assert.equal(Settings.resolve(old, transient).aspectMode, 'physical', 'Resolved 
 assert.equal(Settings.preset('current').rangePolicy, 'legacy');
 assert.equal(Settings.preset('current').aspectMode, 'legacy');
 assert.equal(Settings.preset('hdi','legacy').aspectMode, 'legacy', 'A chosen aspect can be retained explicitly');
-const strongProject=freeze({meta:{msiDisplay:{...Settings.preset('hdi'),smoothingStrength:73.8},msiSmoothing:'none'}});
-assert.equal(Settings.resolve(strongProject).smoothingStrength,74,'None mode retains the saved strength without enabling it');
-assert.equal(Settings.resolve(strongProject,{...Settings.preset('current'),smoothingStrength:25}).smoothingStrength,25,
+const strongProject=freeze({meta:{msiDisplay:{...Settings.preset('hdi'),smoothingStrength:7.8,linearStrength:3.2},msiSmoothing:'none'}});
+assert.equal(Settings.resolve(strongProject).smoothingStrength,8,'None mode retains the saved median strength without enabling it');
+assert.equal(Settings.resolve(strongProject).linearStrength,3,'Linear has its own retained level');
+assert.equal(Settings.resolve(strongProject,{...Settings.preset('current'),smoothingStrength:2}).smoothingStrength,2,
   'A shared-session strength overrides the saved default');
-assert.equal(Settings.resolve(strongProject,{version:99,smoothingStrength:90}).smoothingStrength,74,
+assert.equal(Settings.resolve(strongProject,{version:99,smoothingStrength:9}).smoothingStrength,8,
   'An unknown override version does not replace the saved strength');
-assert.equal(Settings.preset('current').smoothingStrength,0);assert.equal(Settings.preset('hdi').smoothingStrength,0);
+assert.equal(Settings.preset('current').smoothingStrength,1);assert.equal(Settings.preset('hdi').smoothingStrength,1);
+assert.equal(Settings.preset('current').linearStrength,10);assert.equal(Settings.preset('hdi').linearStrength,10);
+for (const level of [1,2,3,4,5,6,7,8,9,10]) {
+  const value=Settings.resolve({meta:{msiSmoothing:'median',msiDisplay:{...Settings.preset('current'),smoothingStrength:level,linearStrength:level}}});
+  assert.equal(value.smoothingStrength,level);assert.equal(value.linearStrength,level);
+  assert.equal(value.interpolation,'median');
+}
+for (const [value,expected] of [[-1,1],[0,1],[100,10],[4.6,5]]) {
+  const normalized=Settings.normalize({...Settings.preset('current'),smoothingStrength:value,linearStrength:value});
+  assert.equal(normalized.smoothingStrength,expected);assert.equal(normalized.linearStrength,expected);
+}
+for (const [legacyStrength,expectedLevel,expectedMode] of [[0,1,'linear'],[1,1,'median'],[10,1,'median'],[11,2,'median'],[73.8,8,'median'],[100,10,'median']]) {
+  const project=freeze({meta:{msiSmoothing:'linear',msiDisplay:{version:1,preset:'custom',aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:legacyStrength}}});
+  const snapshot=JSON.stringify(project),value=Settings.resolve(project);
+  assert.equal(value.version,2);assert.equal(value.smoothingStrength,expectedLevel);assert.equal(value.linearStrength,10);
+  assert.equal(value.interpolation,expectedMode,'Version 1 Gaussian preferences become the corresponding Median level');
+  assert.equal(JSON.stringify(project),snapshot,'Reading legacy settings does not write a migration');
+  assert.equal(Settings.resolve({meta:{...project.meta,msiSmoothing:'none'}}).interpolation,'none','Migration never activates a disabled filter');
+}
 
 const lut = Settings.hotMetalLut();
 assert.equal(lut.length,256);
@@ -112,6 +131,19 @@ async function main() {
   assert.equal(app.getMsiDisplaySettings().preset,'current','Current preset remains selected after restoring legacy clipping');
   assert.equal(nodes.get('tb-msi-style').value,'current');
 
+  const migration=fixture();
+  migration.app.project.meta={colormap:'viridis',msiSmoothing:'linear',msiDisplay:{version:1,
+    preset:'custom',aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:65}};
+  const legacyMetadata=JSON.stringify(migration.app.project.meta);
+  assert.equal(migration.app.getMsiDisplaySettings().interpolation,'median');
+  assert.equal(migration.app.getMsiDisplaySettings().smoothingStrength,7);
+  assert.equal(JSON.stringify(migration.app.project.meta),legacyMetadata,'Legacy display defaults are initially read-only');
+  migration.app.updateMsiDisplaySettings({colormap:'hotmetal'});
+  assert.equal(migration.app.project.meta.msiDisplay.version,2);
+  assert.equal(migration.app.project.meta.msiSmoothing,'median','Saving any preference also preserves the migrated mode');
+  assert.equal(migration.app.getMsiDisplaySettings().interpolation,'median','Migration cannot switch back to Linear on its second resolve');
+  assert.equal(migration.app.msiSmoothingStrength,7);assert.equal(migration.app.msiLinearStrength,10);
+
   const workSize=fixture();
   const workPanel={section:{msiSeries:{MSI_a:{},MSI_b:{},MSI_unloaded:{}}},
     visibleLayers:new Set(['MSI_a','HE_STAIN','MSI_unloaded']),msiThumbRefs:new Map([['MSI_a',{}],['MSI_b',{}]]),
@@ -131,36 +163,48 @@ async function main() {
   const dragging=fixture();
   const measurementBefore=JSON.stringify({sections:dragging.app.project.sections,rois:dragging.app.project.rois});
   dragging.app.setMsiSmoothing('linear');
-  for(const strength of [10,36.7,80])dragging.app.setMsiSmoothingStrength(strength);
-  assert.equal(dragging.app.project.meta.msiDisplay.smoothingStrength,80,'The most recent slider value is saved immediately');
+  for(const strength of [1,3.7,8])dragging.app.setMsiSmoothingStrength(strength);
+  assert.equal(dragging.app.project.meta.msiDisplay.linearStrength,8,'The most recent Linear slider value is saved immediately');
+  assert.equal(dragging.app.project.meta.msiDisplay.smoothingStrength,1,'Linear changes leave Median strength unchanged');
   assert.equal(dragging.frames.size,1,'Rapid input is coalesced into one repaint');
   assert.equal(dragging.calls.repaint,0);
   dragging.flushFrames();assert.equal(dragging.calls.repaint,1);
   assert.equal(dragging.nodes.get('tb-smoothing-strength').disabled,false);
-  const activeStrength=dragging.app.msiSmoothingStrength;
+  const activeStrength=dragging.app.msiLinearStrength;
   dragging.app.setMsiSmoothing('none');
   const noneSaveCount=dragging.calls.save;
-  dragging.app.setMsiSmoothingStrength(50);
+  dragging.app.setMsiSmoothingStrength(5);
   assert.equal(dragging.calls.save,noneSaveCount,'A disabled strength control does not save or schedule work');
-  assert.equal(dragging.frames.size,0);assert.equal(dragging.app.msiSmoothingStrength,activeStrength);
+  assert.equal(dragging.frames.size,0);assert.equal(dragging.app.msiLinearStrength,activeStrength);
   assert.equal(dragging.nodes.get('tb-smoothing-strength').disabled,true);
   dragging.app.setMsiSmoothing('linear');
-  assert.equal(dragging.app.msiSmoothingStrength,80,'Re-enabling Linear restores the selected strength');
-  dragging.app.setMsiSmoothingStrength(0);dragging.flushFrames();
-  assert.equal(dragging.app.project.meta.msiDisplay.smoothingStrength,0,'Strength zero is persisted, rather than treated as missing');
-  assert.equal(dragging.app.msiSmoothing,'linear','Zero restores legacy Linear while retaining interpolation');
+  assert.equal(dragging.app.msiLinearStrength,8,'Re-enabling Linear restores the selected strength');
+  dragging.app.setMsiSmoothingStrength(10);dragging.flushFrames();
+  assert.equal(dragging.app.project.meta.msiDisplay.linearStrength,10,'Level 10 restores the legacy Linear amount');
+  dragging.app.setMsiSmoothing('median');
+  assert.equal(dragging.nodes.get('tb-smoothing-strength').disabled,false);
+  assert.equal(Number(dragging.nodes.get('tb-smoothing-strength').value),1,'Median has a separate default level');
+  for(const level of [1,2,3,4,5,6,7,8,9,10])dragging.app.setMsiSmoothingStrength(level);
+  dragging.flushFrames();
+  assert.equal(dragging.app.project.meta.msiDisplay.smoothingStrength,10);
+  dragging.app.setMsiSmoothing('linear');
+  assert.equal(Number(dragging.nodes.get('tb-smoothing-strength').value),10,'Switching modes restores its independent remembered level');
+  dragging.app.setMsiSmoothingStrength(3);dragging.flushFrames();
+  dragging.app.setMsiSmoothing('median');
+  assert.equal(dragging.app.msiSmoothingStrength,10);assert.equal(dragging.app.msiLinearStrength,3);
   assert.equal(JSON.stringify({sections:dragging.app.project.sections,rois:dragging.app.project.rois}),measurementBefore,
     'Repeated strength and mode changes preserve measurements, geometry and ROIs');
-  dragging.app.setMsiSmoothingStrength(70);
+  dragging.app.setMsiSmoothingStrength(7);
   const oldProject=dragging.app.project,repaints=dragging.calls.repaint;
   dragging.app.project={id:'other-project',meta:{},sections:[],rois:[]};dragging.app.getMsiDisplaySettings();
   dragging.flushFrames();assert.equal(dragging.calls.repaint,repaints,'A stale queued repaint cannot act on a different project');
-  assert.deepEqual(plain(dragging.app.project.meta),{});assert.equal(oldProject.meta.msiDisplay.smoothingStrength,70);
+  assert.deepEqual(plain(dragging.app.project.meta),{});assert.equal(oldProject.meta.msiDisplay.smoothingStrength,7);
 
-  const presetDuringDrag=fixture();presetDuringDrag.app.setMsiSmoothing('linear');
-  presetDuringDrag.app.setMsiSmoothingStrength(90);
+  const presetDuringDrag=fixture();presetDuringDrag.app.setMsiSmoothing('median');
+  presetDuringDrag.app.setMsiSmoothingStrength(9);
   await presetDuringDrag.app.setMsiDisplayPreset('hdi');presetDuringDrag.flushFrames();
-  assert.equal(presetDuringDrag.app.msiSmoothing,'none');assert.equal(presetDuringDrag.app.msiSmoothingStrength,0);
+  assert.equal(presetDuringDrag.app.msiSmoothing,'none');assert.equal(presetDuringDrag.app.msiSmoothingStrength,1);
+  assert.equal(presetDuringDrag.app.msiLinearStrength,10);
   assert.equal(presetDuringDrag.app.getMsiDisplaySettings().preset,'hdi','A late slider frame cannot overwrite a newer preset');
 
   const shared=fixture();shared.app.project.__share=true;shared.app.shareMode={slug:'sample',role:'viewer',token:'one'};
