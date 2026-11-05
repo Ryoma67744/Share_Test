@@ -63,6 +63,15 @@
       n
     };
   }
+  function ratioStatistics(stats) {
+    if (!stats || typeof stats !== 'object') return null;
+    const out={};
+    for (const key of ['nCandidate','nValid','validFraction','nUniqueCoordinates','unlocatedRows',
+      'sumX','sumY','totalRatio','mean','median','min','max']) out[key]=Number.isFinite(stats[key])?stats[key]:null;
+    out.reasonCounts=Object.fromEntries(Object.entries(stats.reasonCounts || {})
+      .filter(([,value])=>Number.isSafeInteger(value) && value>=0));
+    return out;
+  }
 
   function swap(a, i, j) { const tmp = a[i]; a[i] = a[j]; a[j] = tmp; }
 
@@ -300,9 +309,14 @@
     };
     if(input.displayStyle)result.intensityScale={basis:'display-style',statisticsBasis:'original-measurement-rows',
       note:'全切片・全分子を開始時の表示スタイルで出力。Same自動上限は全出力切片で再計算。元測定行の最大・平均は変更しない。'};
+    if(input.molecules.some(source=>source.kind==='ratio')) {
+      result.intensityScale.statisticsBasis='per-layer';
+      result.intensityScale.note+=' 比の統計は同じ有効な原本ペアから計算し、実測Intensityの統計とは区別する。';
+    }
     for (let moleculeIndex = 0; moleculeIndex < input.molecules.length; moleculeIndex++) {
       assertCurrent();
       const source = input.molecules[moleculeIndex];
+      const displayStyle=source.displayStyle || input.displayStyle;
       const entries = typeof source.loadEntries === 'function' ? await source.loadEntries() : source.sections;
       assertCurrent();
       if (!Array.isArray(entries)) throw new Error('分子の切片情報を読み込めません。');
@@ -328,7 +342,7 @@
         measuredCount += count;
         states.push({entry, size, count, error});
       }
-      let pool = input.displayStyle ? null : new Float64Array(measuredCount), offset = 0;
+      let pool = displayStyle ? null : new Float64Array(measuredCount), offset = 0;
       for (const state of states) if (state.count && pool) {
         const raster = state.entry.raster;
         for (let i = 0; i < state.size; i++) {
@@ -341,27 +355,39 @@
       const upper = percentileValue > 0 ? percentileValue : (max > 0 ? max : 1);
       const upperBasis = percentileValue > 0 ? 'percentile' : (max > 0 ? 'positive-maximum-fallback' : 'unit-fallback');
       const molecule = {key: source.key, name: text(source.name), subtitle: text(source.subtitle), upper,
+        ...(source.kind==='ratio'?{kind:'ratio',ratio:metadataCopy(source.ratio || {}),displayStyle:metadataCopy(displayStyle || null)}:{}),
         metadata: metadataCopy(source.metadata || {}), percentileValue, displaySampleCount: measuredCount,
         intensityScale: {percentile: PERCENTILE, percentileValue, sampleCount: measuredCount, upper, upperBasis,
           basis: 'finite-measured-display-raster'}, sections: []};
-      if(input.displayStyle) {
+      if(displayStyle) {
         const ranges=states.map(s=>s.entry.displayWindow).filter(Boolean);
         molecule.upper=ranges.length?Math.max(...ranges.map(w=>w.max)):1;
         molecule.lower=ranges.length?Math.min(...ranges.map(w=>w.min)):0;
         molecule.intensityScale={basis:'display-style',upperBasis:'display-style',statisticsBasis:'original-measurement-rows'};
       }
+      if(source.kind==='ratio') {
+        molecule.intensityScale.statisticsBasis='valid-paired-original-rows';
+        const formulas=[...new Set(entries.map(e=>text(e.metadata && e.metadata.formula)).filter(Boolean))];
+        const formula=formulas.length>1?'Section-specific X / Y':formulas[0] || molecule.ratio.formula || 'X / Y';
+        molecule.ratio.formula=formula;molecule.metadata.formula=formula;
+        molecule.subtitle=formula+'  |  Y > '+molecule.ratio.denominatorMin;
+      }
       for (const state of states) {
         assertCurrent();
         const entry = state.entry, stats = statistics(entry.stats);
-        if(state.count && input.displayStyle && (!entry.displayWindow || !Number.isFinite(entry.displayWindow.min)
+        if(state.count && displayStyle && (!entry.displayWindow || !Number.isFinite(entry.displayWindow.min)
           || !Number.isFinite(entry.displayWindow.max) || !(entry.displayWindow.max>entry.displayWindow.min)))
           throw new Error('表示スタイルの強度範囲を確認できません。');
         const image = state.count ? await render(entry.raster, upper, {
           createCanvas: o.createCanvas, transform: entry.transform, frame:entry.frame, pixelPitch: entry.pixelPitch, assertCurrent,
-          displayStyle:input.displayStyle, displayWindow:entry.displayWindow, keepGrid:entry.keepGrid,
+          displayStyle, displayWindow:entry.displayWindow, keepGrid:entry.keepGrid,
           nearestUpscale: o.nearestUpscale !== false
         }) : null;
         molecule.sections.push({sectionId: entry.sectionId, name: text(entry.name), ...stats,
+          ...(source.kind==='ratio'?{ratioStatistics:ratioStatistics(entry.ratioStatistics),
+            ratioRois:(entry.ratioRois || []).map(row=>({roiId:text(row.roiId),name:text(row.name),
+              status:text(row.status),reason:text(row.reason),
+              statistics:ratioStatistics(row.statistics)}))}:{}),
           image, missingReason: state.error, pixelPitch: entry.pixelPitch || null, displayWindow:entry.displayWindow || null,
           otsuApplied:!!entry.keepGrid,
           archiveProvenance: metadataCopy(entry.archiveProvenance || null), qualityNote: text(entry.qualityNote),

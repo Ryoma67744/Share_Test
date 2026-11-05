@@ -207,21 +207,26 @@
                 text(slide, `${molecule.name || molecule.key}${pages.length > 1 ? ' (' + (index + 1) + '/' + pages.length + ')' : ''}`,
                     {x: 0.12, y: 0.06, w: 13.0, h: 0.37}, {fontSize: 24, bold: true, color: '000000'});
                 text(slide, molecule.subtitle, {x: 0.12, y: 0.46, w: 12.95, h: 0.22}, {fontSize: 11, color: '333333'});
-                const tableWidth = 11.83, headerWidth = 1.55;
+                const ratio=molecule.kind==='ratio';
+                const tableWidth = 11.83, headerWidth = ratio?2.2:1.55;
                 const dataWidth = (tableWidth - headerWidth) / sectionPage.length;
                 const table = [['Section', ...sectionPage.map(section => shortLabel(section.name, Math.floor(dataWidth * 13), 3))],
-                    ['Max Intensity', ...sectionPage.map(section => number(entryFor(molecule, section).max))],
-                    ['Mean Intensity', ...sectionPage.map(section => number(entryFor(molecule, section).mean))]];
+                    ...(ratio ? [['Total signal ratio','totalRatio'],['Mean point ratio','mean'],['Median point ratio','median'],['Valid / paired','nValid']]
+                        .map(([label,key])=>[label,...sectionPage.map(section=>{
+                            const stats=entryFor(molecule,section).ratioStatistics || {};
+                            return key==='nValid'?number(stats.nValid)+' / '+number(stats.nCandidate):number(stats[key]);
+                        })]) : [['Max Intensity', ...sectionPage.map(section => number(entryFor(molecule, section).max))],
+                    ['Mean Intensity', ...sectionPage.map(section => number(entryFor(molecule, section).mean))]])];
                 const cells = table.map((row, rowIndex) => row.map((value, column) => ({text: value,
-                    options: {bold: column === 0 || rowIndex === 0, fontSize: rowIndex === 0 ? 11 : 13,
+                    options: {bold: column === 0 || rowIndex === 0, fontSize: ratio?10:rowIndex === 0 ? 11 : 13,
                         fill: rowIndex === 0 ? 'D1DAE9' : rowIndex === 1 ? 'E9EDF4' : 'D1DAE9'}})));
                 slide.addTable(cells, {x: 0.12, y: 0.76, w: tableWidth,
-                    colW: [headerWidth, ...sectionPage.map(() => dataWidth)], rowH: [0.63, 0.36, 0.36],
-                    h: 1.35, autoPage: false, border: {type: 'solid', color: 'FFFFFF', pt: 1},
+                    colW: [headerWidth, ...sectionPage.map(() => dataWidth)], rowH: ratio?[0.48,0.24,0.24,0.24,0.24]:[0.63, 0.36, 0.36],
+                    h: ratio?1.44:1.35, autoPage: false, border: {type: 'solid', color: 'FFFFFF', pt: 1},
                     margin: [2, 5, 2, 5], fontFace: FONT, fontSize: 13, color: '000000',
                     align: 'center', valign: 'middle', lang: 'ja-JP'});
                 const cellW = 11.83 / sectionPage.length;
-                const style=report.displayStyle;
+                const style=molecule.displayStyle || report.displayStyle;
                 const ranges=sectionPage.map(section=>entryFor(molecule,section).displayWindow).filter(Boolean);
                 const individual=style && new Set(ranges.map(w=>JSON.stringify(w))).size>1;
                 sectionPage.forEach((section, i) => {
@@ -234,8 +239,11 @@
                     const cell = {x: x + 0.08, y: 2.62, w: cellW - 0.16, h: 4.0};
                     const bounds = picture(slide, entry, cell, {light: true});
                     imageScaleBar(pptx, slide, entry, bounds, cell);
+                    if(ratio && entry.metadata && entry.metadata.formula)
+                        text(slide,shortLabel(entry.metadata.formula,Math.floor(cellW*17),2),
+                            {x:x+0.08,y:6.65,w:cellW-0.16,h:0.27},{fontSize:9,color:'333333',align:'center'});
                 });
-                text(slide, individual?'Colour level':'Intensity', {x: 12.02, y: 2.38, w: 1.15, h: 0.25}, {fontSize: 10, color: '000000', align: 'center'});
+                text(slide, individual?'Colour level':ratio?'Ratio':'Intensity', {x: 12.02, y: 2.38, w: 1.15, h: 0.25}, {fontSize: 10, color: '000000', align: 'center'});
                 const range=style && ranges[0];
                 colorBar(pptx, slide, 12.12, 2.83, 0.24, individual?1:range?range.max:molecule.upper, {height: 3.7,
                     lower:individual?0:range?range.min:0,percent:individual,
@@ -254,6 +262,27 @@
                     {x: 0.2, y: 7.15, w: 11.7, h: 0.17}, {fontSize: 9, color: '667085'});
                 text(slide, pptx._slides.length, {x: 12.3, y: 7.15, w: 0.7, h: 0.17},
                     {fontSize: 9, color: '667085', align: 'right'});
+            }
+        }
+    }
+    async function addRatioRois(pptx,report,checkpoint) {
+        for(const molecule of report.molecules.filter(m=>m.kind==='ratio')) {
+            const rows=molecule.sections.flatMap(section=>(section.ratioRois || []).map(roi=>{
+                const stats=roi.statistics || {};
+                return [shortLabel(section.name,26,2),shortLabel(roi.name,26,2),number(stats.totalRatio),
+                    number(stats.mean),number(stats.median),number(stats.nValid)+' / '+number(stats.nCandidate),
+                    roi.status==='unavailable'?'Unavailable: '+string(roi.reason):stats.nValid===0?'No valid pairs':'Ready'];
+            }));
+            for(const page of chunks(rows,12)) {
+                await checkpoint();
+                const slide=base(pptx,report,(molecule.name || 'Ratio')+' — ROI',true);
+                text(slide,molecule.subtitle,{x:0.35,y:0.85,w:12.6,h:0.35},{fontSize:11,color:'333333'});
+                slide.addTable([['Section','ROI','Total signal ratio','Mean point ratio','Median point ratio','Valid / paired','Status'],...page],
+                    {x:0.35,y:1.35,w:12.6,h:4.9,colW:[1.9,1.9,1.65,1.65,1.65,1.3,2.55],
+                        rowH:0.36,autoPage:false,margin:4,fontFace:FONT,fontSize:11,color:'17223B',
+                        border:{type:'solid',color:'D1DAE9',pt:1},fill:'FFFFFF',align:'center',valign:'middle'});
+                text(slide,'Total signal ratio = ΣX / ΣY; point ratios = X / Y on the same valid original rows. Display filters do not change these values.',
+                    {x:0.35,y:6.55,w:12.6,h:0.3},{fontSize:9,color:'667085'});
             }
         }
     }
@@ -291,6 +320,7 @@
         const sections = sectionsFor(report);
         await addMatrices(pptx, report, sections, checkpoint);
         await addDetails(pptx, report, sections, checkpoint);
+        await addRatioRois(pptx, report, checkpoint);
         await checkpoint('write');
         const output = await pptx.write({ outputType: type, compression: true });
         assertCurrent();

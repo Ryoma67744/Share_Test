@@ -20,7 +20,9 @@ function stageBrowserSmoke(sourceRoot = ROOT) {
   }
   try {
     for (const name of ['index.html','mrm.html','version.js','runtime-config.js','app-runtime.js','project-store-safety.js','project-navigation.js',
-      'offline/offline.js','offline/local-mrm.js']) copy(name);
+      'offline/offline.js','offline/local-mrm.js','help.js','help.css','help.html']) copy(name);
+    const help=JSON.parse(fs.readFileSync(path.join(sourceRoot,'docs/help/manifest.json'),'utf8'));
+    for(const name of ['docs/help/manifest.json','docs/help/capture-manifest.json',...help.screenshots.map(shot=>shot.path)]) copy(name);
     for (const item of fs.readdirSync(sourceRoot,{withFileTypes:true})) {
       if (item.isFile() && /^(?:OFFLINE_GUIDE|USER_GUIDE(?:\.[a-z]+)*)\.md$/.test(item.name)) copy(item.name);
     }

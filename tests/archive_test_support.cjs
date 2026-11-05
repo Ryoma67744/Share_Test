@@ -2,7 +2,14 @@
 // Journal/pin adapter for existing transport fixtures. Production storage is
 // covered separately; transport tests retain their original blob/project maps.
 const Archive = require('../viewer/project-archive.js');
+const vm=require('node:vm');
+const {html,standalone,installDisplayHelpers}=require('./viewer-runtime.cjs');
 function install(ctx) {
+  installDisplayHelpers(ctx);
+  vm.runInContext(['ratioRegistryFromDoc','ratioZipOptions'].map(name=>{
+    const start=html.indexOf('function '+name+'(');
+    return (html.slice(start-6,start)==='async '?'async ':'')+standalone(name);
+  }).join('\n'),ctx);
   ctx.ProjectArchive = Archive;
   const storage = ctx.ProjectStorage;
   if (storage.putArchiveJob) return;

@@ -26,7 +26,7 @@ const helperStart = html.indexOf('function displayAffineMultiply(');
 const helpers = html.slice(helperStart, html.indexOf('// ---- HE↔MSI registration math', helperStart));
 const preview = block('const SharePreview = {', '\n};');
 assert.ok(preview.includes('_syncCellScalebar('), 'Preview updates calibration without rebuilding every cell');
-const source = [helpers, ...['formatPixelPitchLabel', 'pickPreviewScalebarLength', 'msiSourceReference',
+const source = [fs.readFileSync(path.join(root,'viewer/msi-ratio-model.js'),'utf8'),helpers, ...['isRatioDisplayKey','displayMsiEntry','displayMsiKeys','formatPixelPitchLabel', 'pickPreviewScalebarLength', 'msiSourceReference',
   'msiLayerSourceGeometry', 'openModal'].map(standalone),
   block('class SectionPanel {', '\n}'), preview,
   'const TestAppMethods = {' + block('    setFocusCompoundKey(', '\n    },') + '};',
@@ -224,7 +224,13 @@ async function main() {
 
     // Exercise the actual quick editor and modal click path, including the
     // Preview refresh and label update, without saving to a real database.
-    await page.evaluate(() => {window.editorPromise=Wizards.openMsiUmPxModal(App.panels.get(fixture.project.sections[0].id));});
+    const earlyFocus = await page.evaluate(async () => {
+      window.editorPromise=Wizards.openMsiUmPxModal(App.panels.get(fixture.project.sections[0].id));
+      document.querySelector('#modal-host [name="y"]').focus();
+      await new Promise(resolve=>setTimeout(resolve,60));
+      return document.activeElement.name;
+    });
+    assert.equal(earlyFocus,'y','Delayed initial focus must not steal a field already selected by the user');
     await page.locator('#modal-host [name="x"]').fill('45');
     await page.locator('#modal-host [name="y"]').fill('75');
     await page.locator('#modal-host [data-modal-ok]').click();

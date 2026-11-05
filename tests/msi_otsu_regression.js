@@ -1,4 +1,5 @@
 'use strict';
+const {displayContext}=require('./viewer-runtime.cjs');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
@@ -16,7 +17,7 @@ const names=['msiSourceReference','msiOtsuSourceKey','otsuCurrentRecords','otsuA
   'computeSectionOtsuMasks','buildMsiGrid','computeOtsuThreshold','buildOtsuRecordFromTic',
   'packBitsToB64','unpackBitsFromB64','otsuHasMasks','_otsuKeepGridRaw','otsuKeepGridForLayer'];
 const calls=[];
-const ctx=vm.createContext({console,Uint8Array,Int32Array,Float64Array,Map,Set,
+const ctx=displayContext({console,Uint8Array,Int32Array,Float64Array,Map,Set,
   btoa:s=>Buffer.from(s,'binary').toString('base64'),atob:s=>Buffer.from(s,'base64').toString('binary'),
   OTSU_NBINS:256,_otsuTicCache:new Map(),_otsuKeepDecodeCache:new Map(),
   App:{panels:new Map(),otsuBgRemove:true,otsuStrength:0},

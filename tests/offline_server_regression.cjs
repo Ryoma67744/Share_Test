@@ -69,6 +69,10 @@ async function main() {
   put(root, 'offline/local-mrm.js', '/* local library */');
   put(root, 'USER_GUIDE.master.en.md', '# Guide');
   put(root, 'docs/EXP_EDITOR.md', '# MRM guide');
+  for (const file of ['help.html','help.js','help.css','docs/help/manifest.json','docs/help/capture-manifest.json','docs/help/images/viewer.png']) {
+    put(root,file,'Help fixture');
+    equal(resolveStatic('/'+file,root),path.join(root,file));
+  }
   const mrmResources = ['exp-core.mjs', 'exp-editor.mjs', 'exp-editor.css', 'exp-library-import.mjs'];
   for (const file of mrmResources) put(root, 'mrm/' + file, '/* ' + file + ' */');
   put(root, '.git/config', 'do not serve');
@@ -84,7 +88,7 @@ async function main() {
     '/.git/config','/runtime/node.exe','/connector/README.md','/offline/server.cjs',
     '/offline/manifest.json','/offline/config.cjs','/runtime-config.js',
     '/%72untime-config.js','/runtime%2dconfig.js','/tests/fixtures/browser/offline-smoke.html',
-    '/vendor/a/b.js', '/mrm/developer-only.mjs', '/mrm/nested/exp-editor.mjs', '/docs/guide-template.html']) equal(resolveStatic(url, root), null, url);
+    '/docs/help/private.txt','/docs/help/images/nested/private.png','/docs/help/../guide-template.html','/docs/help/images/evil.svg','/vendor/a/b.js', '/mrm/developer-only.mjs', '/mrm/nested/exp-editor.mjs', '/docs/guide-template.html']) equal(resolveStatic(url, root), null, url);
   for (const [input, size, expected] of [
     ['bytes=2-5',10,{start:2,end:5}], ['bytes=8-',10,{start:8,end:9}],
     ['bytes=-3',10,{start:7,end:9}], ['bytes=-99',10,{start:0,end:9}],

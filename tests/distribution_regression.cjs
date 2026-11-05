@@ -10,6 +10,8 @@ const { verifyPackage } = require('../offline/server.cjs');
 const JSZip = require('../vendor/jszip.min.js');
 const root = path.resolve(__dirname, '..');
 const publicDocs = ['docs/EXP_EDITOR.md', 'docs/LOCAL_STORAGE_UPGRADE.md', 'docs/ARCHIVE_COMPATIBILITY.md', 'docs/ARCHIVE_COMPATIBILITY.en.md'];
+const help = JSON.parse(fs.readFileSync(path.join(root,'docs/help/manifest.json'),'utf8'));
+publicDocs.push('docs/help/manifest.json','docs/help/capture-manifest.json',...help.screenshots.map(shot=>shot.path));
 const mrmResources = ['mrm/exp-core.mjs', 'mrm/exp-editor.mjs', 'mrm/exp-editor.css', 'mrm/exp-library-import.mjs', 'docs/EXP_EDITOR.md'];
 const commit = '1234567890abcdef1234567890abcdef12345678';
 function put(dir, rel, data) {
@@ -26,7 +28,7 @@ function appConfiguration(dir) {
 }
 function assertProjectBaseResources(dir) {
   const base = 'https://example.invalid/Share_Test/';
-  for (const page of ['index.html', 'mrm.html', 'viewer/index.html']) {
+  for (const page of ['index.html', 'mrm.html', 'viewer/index.html', 'help.html']) {
     const html = fs.readFileSync(path.join(dir, page), 'utf8');
     const refs = [...html.matchAll(/<(?:script|link)\b[^>]*\b(?:src|href)=["']([^"']+)["']/g)].map(match => match[1]);
     assert.ok(refs.length > 0, page + ' resources');
@@ -126,7 +128,11 @@ async function main() {
     assert.ok(manifest.files.some(entry => entry.file === 'app-runtime.js'));
     assert.ok(manifest.files.some(entry => entry.file === 'runtime-config.js'));
     const guide = fs.readFileSync(path.join(offline.out, 'HOW_TO_USE.html'), 'utf8');
-    assert.doesNotMatch(guide, /\{\{GUIDE_(?:CONTENT|TOC)\}\}|\{\{PREVIEW_IMAGE\}\}/);
+    assert.doesNotMatch(guide, /\{\{GUIDE_(?:CONTENT|TOC)\}\}|\{\{PREVIEW_IMAGE\}\}|\{\{VERSION\}\}/);
+    assert.doesNotMatch(guide, /src="docs\/help\//, 'offline guide images are embedded');
+    assert.match(guide,/English guide/);
+    assert.match(guide,/data:image\/png;base64,/);
+    assert.ok(guide.includes(offline.buildInfo.version), 'guide version matches distribution');
     assert.equal(offline.sha256, second.sha256, 'identical inputs produce identical ZIP bytes regardless of output name');
     assert.deepEqual(fs.readFileSync(offline.zipPath), fs.readFileSync(second.zipPath));
     assert.equal(fs.readFileSync(offline.zipPath + '.sha256', 'utf8'), offline.sha256 + '  first.zip\n');

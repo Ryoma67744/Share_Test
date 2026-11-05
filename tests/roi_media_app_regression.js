@@ -466,8 +466,41 @@ function listHooks() {
   assert.equal(f.notices.length,0);
 }
 
+async function ratioAdapterChecks() {
+  const f=fixture(),key='MSI_RATIO_example',before=plain(f.project);
+  let revision=1;
+  const raster=f.app.panels.get('toxo4').msiValueRasters.get('MSI_A');
+  const ratioRaster={...raster,values:new Float64Array(192).fill(NaN),measuredMask:new Uint8Array(192)};
+  ratioRaster.values[5*16+7]=0;ratioRaster.measuredMask[5*16+7]=1;
+  f.app.getRatioDefinitions=()=>[{id:'example',name:'X / Y'}];
+  f.app.ratioSignature=()=>String(revision);
+  f.app.ratioSourceKey=()=> 'MSI_A';
+  f.app.getRatioDisplayStyle=()=>({mode:'individual',lut:f.lut,background:f.background,colormap:'RatioMap',
+    smoothing:'median',smoothingStrength:10,linearStrength:10,rangePolicy:'maximum'});
+  f.app.resolveRatio=async()=>({kind:'ratio',raster:ratioRaster,sourceKey:'MSI_A',frameSourceKey:'MSI_A',
+    statistics:{max:10,nValid:1},displayAuto:{rawRange:[0,10],max:10},keepGrid:null});
+  f.app.focusCompoundKey=key;
+  const adapter=f.api.createAdapter(f.project,f.roi);
+  assert.equal(adapter.compounds(f.project,f.roi,'toxo4').items.find(item=>item.key===key).disabled,false);
+  assert.equal(adapter.preferredCompound(f.project,f.roi,'toxo4'),key);
+  const frame=await adapter.loadMsi(f.project,f.roi,'toxo4',key);
+  assert.equal(f.colorCalls.at(-1).image,null,'Ratio photo comparison uses values, not a pseudo PNG');
+  assert.equal(f.colorCalls.at(-1).options.numericOnly,true);
+  assert.deepEqual(plain(f.colorCalls.at(-1).options.window),{min:0,max:10});
+  assert.match(frame.status,/比 0–10/);assert.match(frame.status,/TIC背景mask/);
+  const pixels=frame.canvas.getContext('2d').getImageData(0,0,16,12).data;
+  assert.deepEqual(Array.from(pixels.slice(0,4)),[...f.background,255]);
+  assert.deepEqual(Array.from(pixels.slice((5*16+7)*4,(5*16+7)*4+4)),[...f.lut[0],255]);
+  assert.deepEqual(plain(f.project),before,'Ratio display preserves original entries and ROI/source references');
+  adapter.selectPhoto(f.project,f.roi,'toxo4',{sourceRef:'wrong-frame'});
+  assert.equal(adapter.compounds(f.project,f.roi,'toxo4').items.find(item=>item.key===key).disabled,true);
+  adapter.selectPhoto(f.project,f.roi,'toxo4',null);
+  revision++;
+  await assert.rejects(()=>adapter.loadMsi(f.project,f.roi,'toxo4',key),/比の定義または測定ソース/);
+}
+
 (async () => {
   await preflight(); await adapterChecks(); await registeredCalibrationChecks(); await smoothingSnapshotChecks(); await asynchronousChecks(); await legacyPhotoSourceChecks();
-  await persistenceAndUnloadChecks(); listHooks();
+  await persistenceAndUnloadChecks(); await ratioAdapterChecks(); listHooks();
   console.log('ROI media app regression: preflight, section/source association, display isolation, async guards, persisted rollback, unload protection and ROI list entry points passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

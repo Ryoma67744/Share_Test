@@ -1,4 +1,5 @@
 'use strict';
+const {displayContext}=require('./viewer-runtime.cjs');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const path=require('node:path');
@@ -17,7 +18,7 @@ function method(name) {
 const store=new Map(),calls=[],notices=[];
 let remoteVersion=4;
 const App={shareMode:{token:'token'},panels:new Map(),_refreshShareAlignments:async()=>{}};
-const ctx=vm.createContext({JSON,Object,Array,Map,Set,Number,Math,console,App,
+const ctx=displayContext({JSON,Object,Array,Map,Set,Number,Math,console,App,
   _shareAlignBySection:store,_shareAlignServerMissing:false,_shareAlignWriteGen:0,
   showToast:s=>notices.push(s),_isMissingRpc:()=>false,_isStaleVersionError:e=>e.code==='40001',
   SupabaseClient:{async upsertShareAlignment(token,id,payload,version) {

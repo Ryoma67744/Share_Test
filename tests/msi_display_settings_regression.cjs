@@ -1,4 +1,5 @@
 'use strict';
+const {displayContext}=require('./viewer-runtime.cjs');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const Settings = require('../viewer/msi-display-settings.js');
@@ -93,7 +94,7 @@ function fixture(storage=new Map()) {
   let nextFrame=0;
   const document={getElementById(id){if(!nodes.has(id))nodes.set(id,{value:'',checked:false,
     setAttribute(name,value){this[name]=String(value);}});return nodes.get(id);}};
-  const context=vm.createContext({MsiDisplaySettings:Settings,MsiSmoothing:Smoothing,document,
+  const context=displayContext({MsiDisplaySettings:Settings,MsiSmoothing:Smoothing,document,
     requestAnimationFrame:callback=>{const id=++nextFrame;frames.set(id,callback);return id;},
     cancelAnimationFrame:id=>frames.delete(id),
     sessionStorage:{getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value)},

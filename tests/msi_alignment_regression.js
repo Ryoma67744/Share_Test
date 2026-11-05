@@ -1,4 +1,5 @@
 'use strict';
+const {displayContext}=require('./viewer-runtime.cjs');
 // Exercise the real Align modal and its real handlers in a deterministic DOM.
 // Canvas decoding and layout are adapters; state transitions, close routing,
 // landmark math, session logic, and persistence calls come from production.
@@ -195,7 +196,7 @@ async function harness(options = {}) {
         saveProject: async (...args) => { if (storageFail) throw new Error('simulated disk failure'); saves.push(plain(args)); },
         saveNow: async (...args) => { if (storageFail) throw new Error('simulated disk failure'); saves.push(plain(args)); } };
     let workspaceCallbacks;
-    const context = vm.createContext({ console, document, window, Image: class extends Element { constructor() { super('img', document); } },
+    const context = displayContext({ console, document, window, Image: class extends Element { constructor() { super('img', document); } },
         Math, Number, String, Boolean, Object, Array, Date, JSON, Map, Set, WeakMap, Promise, Float32Array, Float64Array, Uint8Array, Uint8ClampedArray, structuredClone,
         App, panel, MsiDisplayGeometry: require('../viewer/msi-display-geometry.js'), _shareAlignBySection: shareRecords, isShareAlignMode: () => !!options.shared,
         alert: x => alerts.push(String(x)), confirm: () => true, showToast: x => alerts.push(String(x)),

@@ -1,0 +1,81 @@
+MSI ratio contract — v2026-11-05.4
+
+Scientific values
+The feature is named 比 (ratio). It calculates X / Y from paired original
+measurements before aggregation into display pixels. The first version accepts
+finite X >= 0 and finite Y > denominatorMin >= 0. The default minimum is zero.
+Zero numerator values remain valid zero ratios. Missing, invalid, negative,
+zero-denominator and nonfinite-result rows are excluded, never replaced by an
+epsilon or a fabricated zero. Unsupported source precision makes calculation
+unavailable. Neither source files nor original single-molecule ROI values change.
+
+Pairing
+Within the same reader/source frame, original row IDs and coordinates must
+agree. Across sources, the user must confirm the same coordinate units/origin;
+coordinates must then form a complete unique bijection. No resampling or
+cross-section registration is used to invent measurement pairs. Names are hints,
+not identifiers. Missing/changed/ambiguous bindings stay unavailable until rebound.
+
+ROI metrics
+All quantities use the same set S of valid pairs inside the ROI:
+  total ratio = sum(X[S]) / sum(Y[S])
+  mean ratio = mean(X[S] / Y[S])
+  median ratio = median(X[S] / Y[S])
+Candidate/valid counts, fraction, exclusion reasons and unlocated rows are kept.
+These are different statistics; e.g. X=[10,10], Y=[1,10] gives total 20/11 and
+mean 5.5. Ambiguous legacy ROI geometry is reported unavailable. Display filters,
+Range, ROI-only display, smoothing and TIC masks never change the numeric set S.
+
+Presentation
+Ratios are virtual display targets, never measured msiSeries channels. They do
+not enter TIC sums, MRM/KMD inventories or existing source CSV exports. Ratio
+Range, colormap, Median/Linear strength and presets are separate from measured
+layer settings. Manual windows use separate whole/ROI scopes and canonical
+section IDs for Individual mode. Ratio display exits a multi-molecule overlay.
+Existing TIC masks may be combined for display; no Otsu histogram is computed
+from ratios. HE/IF requires compatible X/Y coordinate frames and transforms.
+
+Persistence
+project.meta.msiRatios = {schemaVersion:1, definitions:[...]}
+Each definition contains id, name, revision, operation:'divide',
+calculationVersion:'msi-ratio-v1', denominatorMin,
+numeratorPolicy:'nonnegative', invalidPolicy:'exclude', bindings, and display.
+bindings[canonicalSectionId] records numerator/denominator references, each with
+source reference/revision, reader specification and feature identity. Coordinate
+confirmation is explicit. display.ranges has version:1 and whole/roi maps keyed
+by 'same' or canonical section ID. Metadata holds no large derived arrays.
+
+Local/master definitions use normal project saves and travel through ZIP and
+Publish. Shared Viewer/Admin edits use role/project-scoped sessionStorage only;
+editing a published definition creates a personal copy. ZIP offers explicit
+personal-settings inclusion. Unknown schema versions are preserved, not edited.
+ZIP import and shared hydration remap section aliases and individual ranges.
+
+Outputs and asynchronous work
+Ratio CSV contains original paired values/row IDs, validity, ratio metrics,
+input identity SHA-256 digests and calculation version. PPT uses ratio labels,
+section-specific formulas and display windows. Microscopy comparisons use the
+same resolver. Definitions, inputs, ROIs and context are frozen/checked during
+output; changed inputs cancel stale results. Summary requests use generation
+guards. Large ratio calculations run in a cancellable Worker. The derived cache
+uses a 128 MiB LRU estimate including typed arrays and coordinate/row metadata.
+
+Local performance observation (Windows, Chromium, synthetic CSV)
+Rows       cold resolver    cached resolver    longest sampled UI timer gap
+100,000    525 ms           1 ms               355 ms
+500,000    2,430 ms         1 ms               1,625 ms
+1,000,000  5,236 ms         2 ms               3,571 ms
+The cold path includes original CSV reading and derived raster construction.
+The existing source parser can still block the main thread during large reads.
+At 1 million rows the sampled JS heap was about 628 MB; timer sampling misses
+inter-sample peaks and excludes worker/native memory. These are observations,
+not time or memory guarantees. Reproduce with:
+  node tests/msi_ratio_browser_performance.cjs
+
+Verification and Help
+Core/model/runtime/pair-reader/transport/output regressions cover value and
+identity rules. Browser suites cover real source readers, UI, unchanged source
+hashes and original ROI metrics, CSV, Preview, ZIP, shared personal settings,
+PPTX and microscopy comparison. CI runs the new suites on Linux and Windows.
+The shared Help manifest provides 13 Japanese/English chapters and 15 actual
+synthetic-data screenshots, with generated guides/PDF and offline assets.

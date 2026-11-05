@@ -1,0 +1,1417 @@
+{
+  "format": 1,
+  "title": {
+    "ja": "SHARE_TEST 操作ガイド",
+    "en": "SHARE_TEST user guide"
+  },
+  "chapters": [
+    {
+      "id": "start",
+      "title": {
+        "ja": "はじめに・画面の見方",
+        "en": "Getting started"
+      },
+      "summary": {
+        "ja": "プロジェクトを開き、切片・分子・ROI の関係を確認します。画面写真は説明用の合成データを使っています。",
+        "en": "Open a project and identify its sections, molecules and ROIs. Screenshots use synthetic demonstration data."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "利用する画面を開く",
+            "en": "Open your workspace"
+          },
+          "body": {
+            "ja": "作成者は Projects からローカルプロジェクトを開きます。共有された URL では、求められた閲覧パスワードを入力します。",
+            "en": "Authors open a local project from Projects. For a shared URL, enter the viewing password when requested."
+          }
+        },
+        {
+          "title": {
+            "ja": "切片と分子を選ぶ",
+            "en": "Choose a section and molecule"
+          },
+          "body": {
+            "ja": "左側で切片、上部の Method / Compound で測定法と分子を選びます。Main view が選んだ切片を表示します。",
+            "en": "Select a section on the left and a Method / Compound at the top. Main view shows the selected section."
+          }
+        },
+        {
+          "title": {
+            "ja": "画像を確認する",
+            "en": "Inspect the image"
+          },
+          "body": {
+            "ja": "拡大・移動して分布を確認します。HE / IF / MSI のチェックと透明度を変えると、重なりを見比べられます。",
+            "en": "Zoom and pan to inspect the distribution. Toggle HE / IF / MSI layers and adjust opacity to compare them."
+          }
+        },
+        {
+          "title": {
+            "ja": "目的の章へ進む",
+            "en": "Continue with a task"
+          },
+          "body": {
+            "ja": "左の目次または検索から操作を選びます。「集計への影響」「保存と共有」で、画像表示と数値・保存先の違いを確認できます。",
+            "en": "Choose a chapter or search for a feature. The results and saving tabs explain numerical effects and persistence."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "色の見た目と測定値は区別します。Range・カラーマップ・Median・Linear は表示調整です。ROI の数値は元データから計算します。",
+          "en": "Colour appearance is separate from measured values. Range, colour map, Median and Linear adjust the display. ROI results use source data."
+        }
+      ],
+      "save": [
+        {
+          "ja": "ローカル編集は、このブラウザーの保存領域に保存されます。別 PC へ渡すときは Export ZIP または Publish を使います。",
+          "en": "Local edits are stored in this browser. Use Export ZIP or Publish to transfer work to another computer."
+        },
+        {
+          "ja": "共有リンクの閲覧権限と管理権限は異なります。画面に出ない編集操作を、Help から有効にすることはできません。",
+          "en": "Shared viewer and administrator permissions differ. Help cannot enable editing operations that your account cannot use."
+        }
+      ],
+      "features": [
+        {
+          "ja": "ログイン・共有パスワード・権限",
+          "en": "Sign-in, shared passwords and permissions"
+        },
+        {
+          "ja": "Main view・切片一覧・Method・Compound",
+          "en": "Main view, section list, Method and Compound"
+        },
+        {
+          "ja": "JP / EN Help・検索・印刷",
+          "en": "Japanese / English Help, search and printing"
+        }
+      ],
+      "screenshots": [
+        "viewer"
+      ],
+      "notes": {
+        "offline": {
+          "ja": "オフライン版は START_OFFLINE.bat から起動します。クラウドへのログインや Publish は利用しません。",
+          "en": "Start the offline edition with START_OFFLINE.bat. Cloud sign-in and Publish are unavailable."
+        }
+      }
+    },
+    {
+      "id": "projects",
+      "roles": [
+        "manage",
+        "master"
+      ],
+      "title": {
+        "ja": "プロジェクトを管理する",
+        "en": "Manage projects"
+      },
+      "summary": {
+        "ja": "新規作成、フォルダー整理、ローカルとサーバーの区別、保存状態を確認します。",
+        "en": "Create and organise projects, distinguish local and server copies, and check storage status."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "新規プロジェクトを作る",
+            "en": "Create a project"
+          },
+          "body": {
+            "ja": "Projects の New project を押し、名前と説明を入力します。作成後に Viewer を開きます。",
+            "en": "Choose New project in Projects, enter a name and description, then open the Viewer."
+          }
+        },
+        {
+          "title": {
+            "ja": "一覧を整理する",
+            "en": "Organise the list"
+          },
+          "body": {
+            "ja": "フォルダーを作成し、プロジェクトを移動します。Local / Server の表示で、ブラウザー内か公開済みかを確認します。",
+            "en": "Create folders and move projects. Local / Server badges indicate browser data and published copies."
+          }
+        },
+        {
+          "title": {
+            "ja": "必要なコピーを開く",
+            "en": "Open the required copy"
+          },
+          "body": {
+            "ja": "ローカルデータは Open で編集します。サーバー一覧から閲覧 URL を開くか、ローカルへ取り込んで編集を再開できます。",
+            "en": "Use Open to edit local data. From the server list, open the shared URL or import a local copy for editing."
+          }
+        },
+        {
+          "title": {
+            "ja": "削除前にバックアップする",
+            "en": "Back up before deleting"
+          },
+          "body": {
+            "ja": "Export ZIP を保存し、確認ダイアログで削除対象を読みます。ローカル削除とサーバー側の削除は別の操作です。",
+            "en": "Save an Export ZIP and read the deletion confirmation. Removing a local project and deleting server data are separate operations."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "フォルダー整理や名前の変更は測定値を変更しません。複数 PC のローカルコピーは、それぞれ独立しています。",
+          "en": "Folders and names do not change measurements. Local copies on different computers are independent."
+        }
+      ],
+      "save": [
+        {
+          "ja": "保存競合が出たら、編集を続ける前に再読み込みまたは回復用下書きの内容を確認します。回復用下書きの自動作成は設定で選べます。",
+          "en": "When a storage conflict appears, review reload or recovery draft options before continuing. Automatic recovery drafts are optional."
+        },
+        {
+          "ja": "ブラウザーデータの削除・端末故障に備え、ZIP を別の保存場所へ定期的に書き出します。",
+          "en": "Export ZIP backups regularly to another location in case browser storage is cleared or a device fails."
+        }
+      ],
+      "features": [
+        {
+          "ja": "新規作成・Open・フォルダー・名前・Delete",
+          "en": "Create, Open, folders, names and Delete"
+        },
+        {
+          "ja": "Local / Server バッジ・サーバー一覧取得・URL コピー",
+          "en": "Local / Server badges, server list and URL copy"
+        },
+        {
+          "ja": "保存競合・回復用下書き・ビルド番号",
+          "en": "Storage conflicts, recovery drafts and build version"
+        }
+      ],
+      "screenshots": [
+        "projects"
+      ],
+      "notes": {
+        "offline": {
+          "ja": "オフライン版ではローカルプロジェクトを管理します。サーバー一覧と共有 URL の操作はオンライン版で利用します。",
+          "en": "Offline mode manages local projects. Server lists and shared URLs belong to the online edition."
+        }
+      }
+    },
+    {
+      "id": "import",
+      "roles": [
+        "manage",
+        "master"
+      ],
+      "title": {
+        "ja": "切片とデータを登録する",
+        "en": "Import sections and data"
+      },
+      "summary": {
+        "ja": "HE / IF 画像と MSI の数値データを、対応する切片へ登録します。",
+        "en": "Register HE / IF images and numerical MSI data in the matching section."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "切片を用意する",
+            "en": "Prepare the section"
+          },
+          "body": {
+            "ja": "切片を追加し、名前・順番を確認します。切片名や分子名は作成者の編集画面で変更できます。",
+            "en": "Add a section and check its name and order. Authors can rename sections and compounds."
+          }
+        },
+        {
+          "title": {
+            "ja": "HE / IF 画像を選ぶ",
+            "en": "Select HE / IF images"
+          },
+          "body": {
+            "ja": "対応する切片の画像登録操作から画像を読み込みます。MSI と重ねる画像の位置は、登録後に Align で調整します。",
+            "en": "Import images into their section. Use Align after import to register them with MSI."
+          }
+        },
+        {
+          "title": {
+            "ja": "MSI の列と形式を確認する",
+            "en": "Check MSI columns and format"
+          },
+          "body": {
+            "ja": "xlsx / txt・CSV などの数値データでは、X 座標・Y 座標・信号列を指定します。Waters .raw は対応する変換環境で読み込みます。",
+            "en": "For numerical xlsx / txt / CSV data, select X, Y and signal columns. Waters .raw requires a supported conversion environment."
+          }
+        },
+        {
+          "title": {
+            "ja": "読み込み結果を点検する",
+            "en": "Review the result"
+          },
+          "body": {
+            "ja": "Method / Compound、向き、MSI pixel size を確認します。Parquet の追加・置換では確認画面の対象切片と分子を必ず確認します。",
+            "en": "Check Method / Compound, orientation and MSI pixel size. For Parquet additions or replacements, review the listed sections and compounds."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "比や ROI を計算するには元の数値データが必要です。色付きの MSI 画像だけでは、信号値を復元して計算することはできません。",
+          "en": "Ratios and ROI quantification require source numerical data. Signal values cannot be recovered from a coloured MSI image alone."
+        },
+        {
+          "ja": "元データの座標と行の対応を保ちます。異なる測定座標や互換性のない入力は、確認せずに同じ画素として扱わないでください。",
+          "en": "Preserve source coordinates and row correspondence. Do not assume incompatible acquisitions represent the same pixels."
+        }
+      ],
+      "save": [
+        {
+          "ja": "インポート後はローカルプロジェクトを保存し、Export ZIP で数値ソースと画像を含むバックアップを作ります。",
+          "en": "After import, save the local project and export a ZIP containing numerical sources and images."
+        }
+      ],
+      "features": [
+        {
+          "ja": "HE / IF・xlsx・txt / CSV・Parquet・Waters .raw",
+          "en": "HE / IF, xlsx, txt / CSV, Parquet and Waters .raw"
+        },
+        {
+          "ja": "切片追加・名前・順番・分子名",
+          "en": "Section creation, names, ordering and compound names"
+        },
+        {
+          "ja": "MSI pixel size・元データ列・追加 / 置換",
+          "en": "MSI pixel size, source columns, add / replace"
+        }
+      ],
+      "screenshots": [
+        "import"
+      ]
+    },
+    {
+      "id": "view",
+      "title": {
+        "ja": "切片と分子を見比べる",
+        "en": "Compare sections and molecules"
+      },
+      "summary": {
+        "ja": "Free / Compound、表示切片、レイヤーを組み合わせて、同じ条件で画像を見比べます。",
+        "en": "Use Free / Compound modes, section visibility and layers to compare images consistently."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "View を選ぶ",
+            "en": "Choose a View mode"
+          },
+          "body": {
+            "ja": "Free は切片ごとに分子を選びます。Compound は選んだ分子を切片間で揃えて比較します。",
+            "en": "Free lets each section show a different compound. Compound aligns the selected compound across sections."
+          }
+        },
+        {
+          "title": {
+            "ja": "表示する切片を絞る",
+            "en": "Choose visible sections"
+          },
+          "body": {
+            "ja": "表示切片の選択で必要な切片を残します。非表示は削除ではありません。再表示して比較を続けられます。",
+            "en": "Use section visibility to keep the relevant sections. Hidden sections are not deleted and can be shown again."
+          }
+        },
+        {
+          "title": {
+            "ja": "レイヤーを組み合わせる",
+            "en": "Combine layers"
+          },
+          "body": {
+            "ja": "HE / IF / MSI のチェックを切り替え、歯車から透明度・Grayscale・Apply opacity を調整します。HE 未登録時は TIC 背景が使われる場合があります。",
+            "en": "Toggle HE / IF / MSI and use layer settings for opacity, Grayscale and Apply opacity. A TIC background may be used when HE is absent."
+          }
+        },
+        {
+          "title": {
+            "ja": "向きと尺度を確認する",
+            "en": "Check orientation and scale"
+          },
+          "body": {
+            "ja": "拡大・移動・Rotation とスケールバーを確認します。作成者は切片の Flip H / V を変更できます。",
+            "en": "Inspect zoom, pan, Rotation and the scale bar. Authors can change a section's Flip H / V."
+          }
+        },
+        {
+          "title": {
+            "ja": "KMD 図で系列を探す",
+            "en": "Explore series in the KMD plot"
+          },
+          "body": {
+            "ja": "ANALYSIS で KMD図を選び、CH₂・H₂・O の単位を切り替えます。点のクリックで分子を表示、ドラッグで囲むと Method 表を絞ります。系列の「重ねる」で色分けし、⟲ または Method 表の「KMD 選択」で解除します。",
+            "en": "Choose KMD in ANALYSIS and select CH₂, H₂ or O. Click a point to display its molecule; drag a rectangle to filter the Method table. Use Overlay for a series, and clear the filter with ⟲ or KMD selection in the Method table."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "レイヤーの表示、透明度、ズーム、表示切片の選択だけでは元の信号値は変わりません。非表示の切片が出力対象に含まれるかは出力画面で確認します。",
+          "en": "Layer visibility, opacity, zoom and section visibility do not change source signals. Check the export dialog for whether hidden sections are included."
+        },
+        {
+          "ja": "KMD は m/z から Kendrick 質量欠損を計算する図です。MRM では precursor を使い、m/z のない候補は件数を示して除外します。比（X / Y）とは別の見方で、元信号や ROI 集計は変えません。",
+          "en": "KMD plots Kendrick mass defect calculated from m/z, using precursor mass for MRM. Entries without m/z are counted and excluded. This is separate from X / Y ratios and does not change source signals or ROI statistics."
+        },
+        {
+          "ja": "ノンターゲット表には m/z・Adduct・Formula・Mean・Max が表示されます。検索や m/z 範囲、列見出しで候補を絞り、並べ替えられます。Mean が未計算なら「TIC と統計を作る」を使います。source 別の TIC と表示用の TIC backdrop は用途が異なります。",
+          "en": "The non-target table displays m/z, Adduct, Formula, Mean and Max. Search, m/z bounds and column headings filter or sort candidates. Use Build TIC and statistics when Mean has not been calculated. Per-source TIC and the display-only TIC backdrop serve different purposes."
+        }
+      ],
+      "save": [
+        {
+          "ja": "表示操作の保存範囲は操作と権限によって異なります。共有画面で行う一時的な見え方の調整を、公開元データの変更と混同しないでください。",
+          "en": "Persistence depends on the setting and your permissions. Temporary display changes in a shared view do not change the published source data."
+        },
+        {
+          "ja": "KMD の選択・Method 表の絞り込み・系列の「重ねる」は一時的です。プロジェクトの比定義や保存済み重ね合わせには追加されません。別プロジェクトへ移動すると選択を解除します。",
+          "en": "KMD selection, Method filtering and series overlays are temporary. They do not add ratio definitions or saved overlays to the project. Switching projects clears the selection."
+        }
+      ],
+      "features": [
+        {
+          "ja": "Free / Compound・Method・Compound・表示切片",
+          "en": "Free / Compound, Method, Compound and visible sections"
+        },
+        {
+          "ja": "HE / IF / MSI・Opacity・Grayscale・Apply opacity・描画順",
+          "en": "HE / IF / MSI, Opacity, Grayscale, Apply opacity and drawing order"
+        },
+        {
+          "ja": "TIC 背景・ズーム・パン・Rotation・Flip・スケールバー",
+          "en": "TIC background, zoom, pan, Rotation, Flip and scale bar"
+        },
+        {
+          "ja": "ノンターゲット表・m/z / Adduct / Formula・検索・ソート・TIC と統計",
+          "en": "Non-target table, m/z / Adduct / Formula, search, sorting, TIC and statistics"
+        },
+        {
+          "ja": "KMD・CH₂ / H₂ / O・点選択・矩形絞り込み・系列重ね合わせ・解除",
+          "en": "KMD, CH₂ / H₂ / O, point selection, rectangle filtering, series overlay and reset"
+        }
+      ],
+      "screenshots": [
+        "viewer",
+        "kmd"
+      ]
+    },
+    {
+      "id": "display",
+      "title": {
+        "ja": "色・Range・滑らかさを調整する",
+        "en": "Adjust colour, Range and smoothing"
+      },
+      "summary": {
+        "ja": "表示だけを調整して分布を読み取りやすくします。Median と Linear の強さは、それぞれ 1～10 で選べます。",
+        "en": "Make distributions easier to inspect with display-only adjustments. Median and Linear each have levels 1–10."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "表示スタイルと色を選ぶ",
+            "en": "Choose style and colour"
+          },
+          "body": {
+            "ja": "MSI style とカラーマップを選びます。物理縦横比の表示を使うと、MSI pixel size に基づいた見え方になります。 背景を非表示（Otsu）と外れ値クリップも、必要に応じて表示を整えるために使います。",
+            "en": "Choose MSI style and colour map. Physical aspect display uses the specified MSI pixel size. Hide background (Otsu) and outlier clipping can also adjust the display."
+          }
+        },
+        {
+          "title": {
+            "ja": "Range を合わせる",
+            "en": "Set the Range"
+          },
+          "body": {
+            "ja": "表示する強度範囲を調整します。Same は比較対象の尺度を揃え、Individual は各画像に合わせます。白飛びしたら上限を見直します。",
+            "en": "Adjust the displayed intensity range. Same uses a common scale; Individual adapts to each image. Review the upper bound if bright areas saturate."
+          }
+        },
+        {
+          "title": {
+            "ja": "Smoothing と強さを選ぶ",
+            "en": "Choose smoothing and strength"
+          },
+          "body": {
+            "ja": "None は平滑化なし。Median は近傍の中央値を使う表示用フィルターです。Linear は補間なしに近い 1 から、従来の Linear と同じ 10 まで選べます。",
+            "en": "None disables smoothing. Median is a display filter using neighbourhood medians. Linear ranges from nearly un-interpolated at 1 to the original Linear appearance at 10."
+          }
+        },
+        {
+          "title": {
+            "ja": "ROI の範囲を見やすくする",
+            "en": "Inspect the ROI display"
+          },
+          "body": {
+            "ja": "ROIのみ表示では表示対象の ROI に絞って確認できます。自動 Range の対象が変わるため、全体表示と明るさが変わることがあります。",
+            "en": "ROI-only display focuses on visible ROIs. Its automatic Range uses the displayed ROI area, so brightness may differ from the full image."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "Median・Linear・Range・カラーマップ・物理縦横比は、元データや ROI 集計値を変更しません。集計は平滑化前の数値を使います。",
+          "en": "Median, Linear, Range, colour map and physical aspect do not alter source data or ROI statistics. Quantification uses unsmoothed numerical values."
+        },
+        {
+          "ja": "Median の段階は表示の滑らかさを選ぶためのものです。異なる装置やアプリの同じ番号と同一処理を保証する尺度ではありません。",
+          "en": "Median levels select display smoothness. The same number in another instrument or application does not imply identical processing."
+        },
+        {
+          "ja": "ROIのみ表示で自動 Range が変わっても、ROI の形や集計対象の元データは変わりません。",
+          "en": "Automatic Range changes in ROI-only display do not change ROI geometry or its source measurements."
+        },
+        {
+          "ja": "背景を非表示（Otsu）は TIC のヒストグラムで背景を判定する表示機能です。ANALYSIS で閾値を調整し、必要なら全切片に適用します。元の強度・座標・ROI 定量・数値出力は変えません。",
+          "en": "Hide background (Otsu) classifies background from the TIC histogram. Adjust its threshold in ANALYSIS and apply to all sections when needed. It does not change source intensities, coordinates, ROI quantification or numerical outputs."
+        }
+      ],
+      "save": [
+        {
+          "ja": "作成者の表示設定はプロジェクトの保存・ZIP・公開に引き継がれます。共有画面の MSI style・色・Median / Linear はこのタブの個人設定で、再読み込み後も保持します。viewer と Admin は別設定です。公開元は変更しません。",
+          "en": "Author display settings are carried by project saving, ZIP and publication. Shared MSI style, colour and Median / Linear preferences are personal to this tab and survive reloads. Viewer and Admin preferences are separate. The published source remains unchanged."
+        },
+        {
+          "ja": "Range はプロジェクトごとの一時的な表示設定です。固定条件で比較したいときは範囲と Same / Individual を記録してください。",
+          "en": "Range is a temporary display setting per project. Record the bounds and Same / Individual mode when comparisons require fixed conditions."
+        }
+      ],
+      "features": [
+        {
+          "ja": "MSI style・物理縦横比・カラーマップ",
+          "en": "MSI style, physical aspect and colour map"
+        },
+        {
+          "ja": "Range・Same / Individual・ROIのみ自動 Range",
+          "en": "Range, Same / Individual and ROI-only automatic Range"
+        },
+        {
+          "ja": "None・Median 1～10・Linear 1～10",
+          "en": "None, Median 1–10 and Linear 1–10"
+        },
+        {
+          "ja": "背景を非表示（Otsu）・TIC ヒストグラム・閾値・全切片に適用・外れ値クリップ",
+          "en": "Hide background (Otsu), TIC histogram, threshold, apply to all sections and outlier clipping"
+        }
+      ],
+      "screenshots": [
+        "display"
+      ]
+    },
+    {
+      "id": "ratio",
+      "title": {
+        "ja": "比（X / Y）を表示する",
+        "en": "Display a ratio (X / Y)"
+      },
+      "summary": {
+        "ja": "同じ切片の 2 分子から比画像を作ります。酸化分子 / 非酸化分子など、任意の X / Y に使えます。",
+        "en": "Create a ratio image from two molecules in the same section, for example oxidised / non-oxidised molecules or any other X / Y pair."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "「比」を開く",
+            "en": "Open Ratio"
+          },
+          "body": {
+            "ja": "数値データを含むプロジェクトで「比」を開きます。作成済みの比は一覧から選べます。",
+            "en": "Open Ratio in a project containing numerical sources. Existing definitions can be selected from the list."
+          }
+        },
+        {
+          "title": {
+            "ja": "分子 X と分子 Y を選ぶ",
+            "en": "Select molecules X and Y"
+          },
+          "body": {
+            "ja": "分子側（X）と分母側（Y）を切片ごとに選び、名前を付けます。検索で候補を絞り、同名ならファイル・列・測定条件で区別します。別ファイルでは座標の単位と原点が同じことを確認します。",
+            "en": "Choose X and Y for each section and name the ratio. Search to narrow candidates; distinguish identical names by file, column and acquisition conditions. For different files, confirm matching coordinate units and origin."
+          }
+        },
+        {
+          "title": {
+            "ja": "分母の下限を確認する",
+            "en": "Review the denominator threshold"
+          },
+          "body": {
+            "ja": "Y の下限は初期値 0 です。下限以下の Y、欠損、負の信号は有効な比として扱いません。無効部分は 0 に置き換えず、計算対象から除きます。",
+            "en": "The default denominator threshold is 0. Y at or below the threshold, missing values and negative signals do not produce valid ratios. Invalid positions are excluded, not replaced with zero."
+          }
+        },
+        {
+          "title": {
+            "ja": "比画像を表示して比較する",
+            "en": "Display and compare the ratio"
+          },
+          "body": {
+            "ja": "「保存して表示」で比画像と ROI 集計を確認します。「ROI集計CSV」は指標を、「測定点CSV」は測定点ごとの値・有効性・除外理由を保存します。",
+            "en": "Use Save and display to inspect the ratio image and ROI statistics. ROI summary CSV saves metrics; measurement-point CSV saves per-position values, validity and exclusion reasons."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "比は対応する元データの値から計算します。表示済みの色や、Median / Linear をかけた画像から計算しません。X = 0、Y > 下限の位置は有効な 0 です。",
+          "en": "Ratios use corresponding source values, not rendered colours or images processed with Median / Linear. X = 0 with Y above the threshold is a valid zero."
+        },
+        {
+          "ja": "ROI総信号比 = 有効な位置の X の合計 / 同じ位置の Y の合計。個別比の平均 = 各位置の X / Y の平均。個別比の中央値 = 各位置の X / Y の中央値。これらは異なる指標です。",
+          "en": "ROI total-signal ratio = sum of X / sum of Y over the same valid positions. Mean of individual ratios averages each X / Y; median of individual ratios takes their median. These are different metrics."
+        },
+        {
+          "ja": "例：X が 2, 8、Y が 1, 2 のとき、ROI総信号比は 10 / 3 ≈ 3.33、個別比の平均は (2 + 4) / 2 = 3 です。",
+          "en": "Example: X = 2, 8 and Y = 1, 2 gives a total-signal ratio of 10 / 3 ≈ 3.33, while the mean of individual ratios is (2 + 4) / 2 = 3."
+        },
+        {
+          "ja": "結果には有効数・有効率・除外理由・分母下限を添えて判断します。元の分子別 ROI 集計と比の集計は別の結果です。",
+          "en": "Interpret results with valid count, valid fraction, exclusion reasons and denominator threshold. Original molecule ROI statistics and ratio ROI statistics are separate results."
+        }
+      ],
+      "save": [
+        {
+          "ja": "作成者が保存した比の定義は、プロジェクト・ZIP・公開に含まれます。定義は X / Y と分母下限を記録し、元の信号値を書き換えません。",
+          "en": "Author ratio definitions are included in the project, ZIP and publication. They record X / Y and the denominator threshold without rewriting source signals."
+        },
+        {
+          "ja": "共有の閲覧者・管理者が編集した比は、このタブの個人用設定です。同じタブの再読み込み後も保持し、タブを閉じると失われます。公開元の比定義や他の閲覧者の設定を上書きしません。",
+          "en": "Ratio edits by shared viewers and shared administrators are personal to this tab. They survive reloads in the same tab and are lost when the tab closes. Published definitions and other viewers’ settings remain unchanged."
+        },
+        {
+          "ja": "比の ROI 結果は専用出力で保存します。画像や PPT に表示する比と、数値結果の指標・条件を対応させて記録します。",
+          "en": "Save ratio ROI results using the dedicated output. Record the metrics and conditions alongside ratio images or PPT reports."
+        }
+      ],
+      "features": [
+        {
+          "ja": "任意の X / Y・名前・分母下限・定義の編集",
+          "en": "Arbitrary X / Y, name, denominator threshold and definition editing"
+        },
+        {
+          "ja": "無効画素・有効率・除外理由",
+          "en": "Invalid positions, valid fraction and exclusion reasons"
+        },
+        {
+          "ja": "ROI総信号比・個別比の平均 / 中央値・専用出力",
+          "en": "ROI total-signal ratio, mean / median of ratios and dedicated output"
+        }
+      ],
+      "screenshots": [
+        "ratio",
+        "ratio-image"
+      ],
+      "notes": {
+        "viewer": {
+          "ja": "この共有画面で編集する比は自分用です。元の公開データは変わりません。",
+          "en": "Ratios edited in this shared view are personal. Published source data remains unchanged."
+        },
+        "admin": {
+          "ja": "共有管理者であっても、比の定義変更は個人用として扱います。",
+          "en": "Even for shared administrators, ratio definition changes are personal overrides."
+        }
+      }
+    },
+    {
+      "id": "align",
+      "title": {
+        "ja": "HE / IF と MSI を位置合わせする",
+        "en": "Align HE / IF with MSI"
+      },
+      "summary": {
+        "ja": "Align で同じ組織の位置を揃え、重ね合わせて確認します。",
+        "en": "Use Align to register matching tissue positions and inspect their overlay."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "切片から Align を開く",
+            "en": "Open Align for a section"
+          },
+          "body": {
+            "ja": "対象の切片を選び、Align を開きます。HE / IF、Source、比較する MSI を選びます。",
+            "en": "Select the section and open Align. Choose HE / IF, Source and the comparison MSI."
+          }
+        },
+        {
+          "title": {
+            "ja": "尺度と手動位置を調整する",
+            "en": "Adjust scale and position"
+          },
+          "body": {
+            "ja": "MSI pixel size を確認し、移動・回転・拡大縮小などの手動スライダーでおおまかに揃えます。",
+            "en": "Check MSI pixel size, then use manual translation, rotation and scale controls for an initial match."
+          }
+        },
+        {
+          "title": {
+            "ja": "対応点または自動整合を使う",
+            "en": "Use landmarks or automatic alignment"
+          },
+          "body": {
+            "ja": "Landmark では両画像の同じ位置を対応させます。シルエットによる自動整合も結果を目視確認してから採用します。",
+            "en": "Landmarks pair corresponding positions in the two images. Review silhouette-based automatic alignment visually before accepting it."
+          }
+        },
+        {
+          "title": {
+            "ja": "重ね合わせを確認して保存する",
+            "en": "Review the overlay and save"
+          },
+          "body": {
+            "ja": "重ね合わせ表示と MSI の濃さを使ってずれを点検します。Save で確定、Cancel で今回の変更を破棄します。",
+            "en": "Use the overlay and MSI opacity to inspect registration. Save accepts the change; Cancel discards the current adjustment."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "位置合わせは表示座標の対応です。元の MSI 信号値を書き換えません。ROI はどの座標系で描かれたかを保って扱います。",
+          "en": "Alignment defines coordinate correspondence; it does not rewrite MSI signals. ROI geometry retains its coordinate reference."
+        }
+      ],
+      "save": [
+        {
+          "ja": "作成者の Save はプロジェクトへ保存します。共有画面では必要な書き込み権限・ロックを確認します。Cancel では確定しません。",
+          "en": "Author Save writes to the project. In shared views, check required write permissions and locks. Cancel does not commit the adjustment."
+        }
+      ],
+      "features": [
+        {
+          "ja": "Source 別整合・MSI 選択・pixel size",
+          "en": "Per-source alignment, MSI selection and pixel size"
+        },
+        {
+          "ja": "手動変換・Landmark・自動整合・重ね合わせ・Save / Cancel",
+          "en": "Manual transform, Landmark, automatic alignment, overlay, Save / Cancel"
+        }
+      ],
+      "screenshots": [
+        "align"
+      ]
+    },
+    {
+      "id": "roi",
+      "title": {
+        "ja": "ROI を描いて集計する",
+        "en": "Draw and quantify ROIs"
+      },
+      "summary": {
+        "ja": "関心領域を描き、元の信号値を集計します。比の集計では、分子単独の値と区別します。",
+        "en": "Draw regions of interest and quantify their source signals. Keep ratio statistics distinct from single-molecule results."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "ROI と編集権限を確認する",
+            "en": "Check ROI and editing access"
+          },
+          "body": {
+            "ja": "ROI 一覧で名前・色・表示状態を確認します。共有画面で描画や削除をするときは、必要な書き込みロックを取得します。",
+            "en": "Check ROI names, colours and visibility. Acquire the required write lock before drawing or deleting in a shared view."
+          }
+        },
+        {
+          "title": {
+            "ja": "領域を描く",
+            "en": "Draw the region"
+          },
+          "body": {
+            "ja": "ROI の描画操作を選び、画像上で領域を囲みます。同じ ROI を別切片へ描く場合も、切片ごとに対応する位置を確認します。",
+            "en": "Choose ROI drawing and outline the region. When extending the same ROI to another section, verify that section's geometry."
+          }
+        },
+        {
+          "title": {
+            "ja": "表示と対象を点検する",
+            "en": "Review visibility and scope"
+          },
+          "body": {
+            "ja": "ROI の表示切替・ROIのみ表示を使い、意図した範囲か確認します。削除は確認画面で対象 ROI を確認してから行います。",
+            "en": "Use ROI visibility and ROI-only display to inspect the intended area. Confirm the target ROI before deleting."
+          }
+        },
+        {
+          "title": {
+            "ja": "集計を確認して出力する",
+            "en": "Review and export results"
+          },
+          "body": {
+            "ja": "元信号の集計を確認します。比の場合は専用結果の指標名、有効数、除外理由、分母下限も合わせて確認します。",
+            "en": "Review source-signal results. For a ratio, also inspect the metric, valid count, exclusion reasons and denominator threshold."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "ROI 集計は元の数値データを対象とします。Median / Linear・色・Range を変更しても集計値は変わりません。",
+          "en": "ROI quantification uses source numerical data. Median / Linear, colour and Range do not change results."
+        },
+        {
+          "ja": "比の「ROI総信号比」と「個別比の平均」は異なります。比の章の式を確認し、結果に記載された指標を使って比較してください。",
+          "en": "A ratio's total-signal ratio differs from its mean of individual ratios. Consult the formulas in the Ratio chapter and compare like metrics."
+        }
+      ],
+      "save": [
+        {
+          "ja": "作成者の ROI はプロジェクト・ZIP に保存します。共有 ROI の書き込みは共有権限とロックに従います。非表示は削除ではありません。",
+          "en": "Author ROIs are saved with the project and ZIP. Shared ROI writes follow sharing permissions and locks. Hiding is not deletion."
+        },
+        {
+          "ja": "ZIP では元データと ROI 情報を分けて保存します。比の専用出力も、測定条件が分かる名前で保存してください。",
+          "en": "ZIP keeps source data and ROI information separate. Save dedicated ratio results with names that identify the measurement conditions."
+        }
+      ],
+      "features": [
+        {
+          "ja": "ROI 一覧・名前・色・描画・複数切片・表示 / 削除",
+          "en": "ROI list, name, colour, drawing, multiple sections, visibility / deletion"
+        },
+        {
+          "ja": "書き込みロック・ROIのみ表示・元行集計・比 ROI",
+          "en": "Write lock, ROI-only display, source-row statistics and ratio ROI"
+        }
+      ],
+      "screenshots": [
+        "roi"
+      ]
+    },
+    {
+      "id": "microscope",
+      "title": {
+        "ja": "ROI に顕微鏡画像を付ける",
+        "en": "Attach microscopy images to ROIs"
+      },
+      "summary": {
+        "ja": "ROI に対応する顕微鏡画像を登録し、MSI と一緒に確認します。",
+        "en": "Attach microscopy images to an ROI and inspect them alongside MSI."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "対象 ROI の画像画面を開く",
+            "en": "Open images for the ROI"
+          },
+          "body": {
+            "ja": "ROI の画像操作を開き、対象の切片と ROI を確認します。複数の顕微鏡画像を同じ ROI に関連付けられます。",
+            "en": "Open the ROI image controls and confirm the section and ROI. Multiple microscopy images can belong to one ROI."
+          }
+        },
+        {
+          "title": {
+            "ja": "画像と説明を登録する",
+            "en": "Add images and descriptions"
+          },
+          "body": {
+            "ja": "画像ファイルを選び、タイトルや説明を入力します。位置・倍率など、読み手が対応関係を判断できる情報を残します。",
+            "en": "Select image files and enter titles or descriptions. Record position or magnification so readers can understand the correspondence."
+          }
+        },
+        {
+          "title": {
+            "ja": "MSI と見比べる",
+            "en": "Compare with MSI"
+          },
+          "body": {
+            "ja": "顕微鏡画像を拡大して確認し、ROI の MSI 表示と見比べます。分子または比の選択・表示条件も確認します。",
+            "en": "Zoom into the microscopy image and compare it with ROI MSI. Check the selected molecule or ratio and display settings."
+          }
+        },
+        {
+          "title": {
+            "ja": "順番・説明を整えて保存する",
+            "en": "Organise and save"
+          },
+          "body": {
+            "ja": "画像の順序や説明を整え、不要な画像は確認して削除します。共有時は画像を含めた公開・書き出し結果を確認します。",
+            "en": "Organise image order and descriptions; confirm before deletion. When sharing, check that the published or exported result contains the images."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "顕微鏡画像は ROI の説明資料です。画像を追加しても MSI の元信号や ROI の集計値は変わりません。",
+          "en": "Microscopy images document the ROI. Attaching them does not change MSI source signals or ROI statistics."
+        }
+      ],
+      "save": [
+        {
+          "ja": "画像と説明は ROI に関連付けて保存し、ZIP・共有に含めます。編集の可否はローカル / 共有の権限に従います。",
+          "en": "Images and descriptions are stored with their ROI and carried by ZIP and sharing. Editing follows local or shared permissions."
+        }
+      ],
+      "features": [
+        {
+          "ja": "画像追加・説明・順序・拡大表示・MSI 比較・削除",
+          "en": "Add images, descriptions, ordering, zoom, MSI comparison and deletion"
+        },
+        {
+          "ja": "ROI 画像の ZIP・公開・権限",
+          "en": "ROI image ZIP, publication and permissions"
+        }
+      ],
+      "screenshots": [
+        "microscope"
+      ],
+      "notes": {
+        "viewer": {
+          "ja": "共有画面では顕微鏡画像は閲覧専用です。登録・編集・削除はローカル作成者の画面で行います。",
+          "en": "Microscopy images are read-only in shared views. Add, edit and delete them in the local author workspace."
+        },
+        "admin": {
+          "ja": "共有画面では顕微鏡画像は閲覧専用です。登録・編集・削除はローカル作成者の画面で行います。",
+          "en": "Microscopy images are read-only in shared views. Add, edit and delete them in the local author workspace."
+        }
+      }
+    },
+    {
+      "id": "preview",
+      "title": {
+        "ja": "Preview・重ね合わせ・PPT",
+        "en": "Preview, overlays and PPT"
+      },
+      "summary": {
+        "ja": "画像一覧で比較し、複数分子のカラー合成や PPT レポートを作ります。",
+        "en": "Compare images in a grid, create multicolour molecule overlays and produce PPT reports."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "Preview を開く",
+            "en": "Open Preview"
+          },
+          "body": {
+            "ja": "Preview で分子や比、切片の画像を一覧表示します。公開前には、受け手の見え方を確認します。",
+            "en": "Open Preview to view molecule or ratio images across sections. Before publishing, inspect the recipient's view."
+          }
+        },
+        {
+          "title": {
+            "ja": "比較条件を揃える",
+            "en": "Match comparison settings"
+          },
+          "body": {
+            "ja": "表示切片と分子を選び、Range・Same / Individual・色・ROI の表示を確認します。",
+            "en": "Select sections and molecules, then check Range, Same / Individual, colour and ROI visibility."
+          }
+        },
+        {
+          "title": {
+            "ja": "複数分子を重ね合わせる",
+            "en": "Overlay molecules"
+          },
+          "body": {
+            "ja": "重ね合わせで複数分子に色を割り当てます。明るさを揃える設定の意味を確認して分布を比較します。比の多色重ね合わせは対象外です。",
+            "en": "Assign colours to multiple molecules in an overlay. Review brightness normalisation before comparing distributions. Multicolour ratio overlays are not supported."
+          }
+        },
+        {
+          "title": {
+            "ja": "PPT レポートを作る",
+            "en": "Create a PPT report"
+          },
+          "body": {
+            "ja": "PPTレポートを開き、出力する切片・分子・比と画像条件を確認して書き出します。出力後に各スライドの見出しと尺度を確認します。",
+            "en": "Open PPT report, review sections, molecules, ratios and image settings, then export. Check slide titles and scales afterwards."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "重ね合わせの色や明るさは表示条件です。色の混ざり方から、比や元信号の集計値を読み替えないでください。",
+          "en": "Overlay colours and brightness are display settings. Colour mixtures are not numerical ratios or source-signal statistics."
+        }
+      ],
+      "save": [
+        {
+          "ja": "PPT は書き出した時点の画像を保存します。プロジェクトを編集しても、既存の PPT は自動更新されません。",
+          "en": "PPT contains images captured at export time. Later project edits do not automatically update an existing PPT."
+        },
+        {
+          "ja": "共有画面で個人設定を使った場合は、その条件を資料にも記録します。",
+          "en": "If a shared view uses personal settings, document those conditions in the report."
+        },
+        {
+          "ja": "共有先で作った重ね合わせは、対応する共有環境では同じ URL の利用者に共有されます。作成者が公開した重ね合わせは読み取り専用です。保存できない環境では画面の通知に従います。",
+          "en": "In supported sharing environments, overlays created by recipients are shared with users of the same URL. Published author overlays are read-only. Follow the on-screen notice if shared saving is unavailable."
+        }
+      ],
+      "features": [
+        {
+          "ja": "Preview・切片 / 分子 / 比グリッド・公開前確認",
+          "en": "Preview, section / molecule / ratio grid and pre-publication review"
+        },
+        {
+          "ja": "複数分子カラー合成・配色・明るさ調整",
+          "en": "Multicolour molecule overlay, colours and brightness"
+        },
+        {
+          "ja": "PPT レポート・出力条件",
+          "en": "PPT reports and export settings"
+        }
+      ],
+      "screenshots": [
+        "preview",
+        "report"
+      ]
+    },
+    {
+      "id": "save",
+      "title": {
+        "ja": "保存・ZIP・共有・Memo",
+        "en": "Save, ZIP, share and Memo"
+      },
+      "summary": {
+        "ja": "ローカル保存、ファイルバックアップ、サーバー公開を目的に応じて使い分けます。",
+        "en": "Choose browser saving, file backup or server publication according to your needs."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "Memo と保存状態を確認する",
+            "en": "Check Memo and save status"
+          },
+          "body": {
+            "ja": "実験条件や気付きを Memo に残します。保存状態・競合表示を確認し、エラーのまま画面を閉じないでください。",
+            "en": "Record conditions and observations in Memo. Check save and conflict status before closing the page."
+          }
+        },
+        {
+          "title": {
+            "ja": "Export ZIP でバックアップする",
+            "en": "Back up with Export ZIP"
+          },
+          "body": {
+            "ja": "Export ZIP を選び、元データ・ROI・顕微鏡画像・比の定義を含むアーカイブを保存します。ZIP は公開とは独立しています。",
+            "en": "Use Export ZIP to save sources, ROIs, microscopy images and ratio definitions. ZIP export is independent of publication."
+          }
+        },
+        {
+          "title": {
+            "ja": "Import で復元する",
+            "en": "Restore with Import"
+          },
+          "body": {
+            "ja": "保存した ZIP を読み込み、復元内容を確認して確定します。別 PC でも対応するアプリから復元できます。",
+            "en": "Import the saved ZIP, review its contents and confirm restoration. A compatible app on another computer can restore it."
+          }
+        },
+        {
+          "title": {
+            "ja": "公開内容を確認して共有する",
+            "en": "Review and publish"
+          },
+          "body": {
+            "ja": "作成者は Preview の後に Publish to share を実行します。完了と Sync 状態を確認し、共有 URL と必要なパスワードを渡します。",
+            "en": "Authors use Publish to share after Preview. Verify completion and Sync status, then share the URL and required password."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "保存・ZIP・公開は、表示用の色を元信号に置き換える操作ではありません。元データと ROI・比の定義を区別して保持します。",
+          "en": "Saving, ZIP and publication do not replace source signals with display colours. Sources, ROI information and ratio definitions remain distinct."
+        }
+      ],
+      "save": [
+        {
+          "ja": "ローカル保存はこのブラウザー内、Export ZIP は自分で保存したファイル、Publish はサーバー上の共有内容です。それぞれ別の保存先です。",
+          "en": "Local saving uses this browser; Export ZIP creates a file you save; Publish updates shared server content. These are separate destinations."
+        },
+        {
+          "ja": "Auto-publish on save と Sync 表示を確認します。再 Publish は共有側への影響を確認して行い、大容量アップロードは完了するまで進捗を確認します。",
+          "en": "Review Auto-publish on save and Sync status. Check the consequences before republishing, and monitor large uploads until completion."
+        },
+        {
+          "ja": "共有の表示設定と比の個人変更は、公開元への保存ではありません。共有 ROI・位置合わせ・重ね合わせの保存は各機能の権限とロックに従います。共有画面の Memo 編集は一時的で、再読み込みで破棄されます。",
+          "en": "Shared display settings and personal ratio changes do not save back to the published source. Shared ROI, alignment and overlay saves follow their permissions and locks. Shared-view Memo edits are temporary and discarded on reload."
+        }
+      ],
+      "features": [
+        {
+          "ja": "Memo・ローカル保存・ZIP / Import・旧形式の互換性",
+          "en": "Memo, local saving, ZIP / Import and legacy compatibility"
+        },
+        {
+          "ja": "Publish・再公開・Auto-publish・Sync・アップロード進捗",
+          "en": "Publish, republish, Auto-publish, Sync and upload progress"
+        },
+        {
+          "ja": "URL / パスワード・別 PC への取り込み・容量",
+          "en": "URL / password, import on another PC and storage capacity"
+        }
+      ],
+      "screenshots": [
+        "save"
+      ],
+      "notes": {
+        "offline": {
+          "ja": "オフライン版では Export ZIP / Import で移動・復元します。Publish と Auto-publish は利用できません。",
+          "en": "In offline mode, transfer and restore with Export ZIP / Import. Publish and Auto-publish are unavailable."
+        },
+        "viewer": {
+          "ja": "共有閲覧者は公開元の Publish を実行しません。利用できる書き出しと個人設定を使います。",
+          "en": "Shared viewers do not publish the author's source project. Use the available exports and personal settings."
+        },
+        "admin": {
+          "ja": "共有管理者の操作範囲と、ローカル作成者の Publish は別です。比の編集は共有管理者でも個人用です。",
+          "en": "Shared administration is distinct from publishing the author's local project. Ratio edits remain personal even for shared administrators."
+        }
+      }
+    },
+    {
+      "id": "mrm",
+      "roles": [
+        "manage",
+        "master"
+      ],
+      "title": {
+        "ja": "MRM ライブラリと .exp 編集",
+        "en": "MRM library and .exp editing"
+      },
+      "summary": {
+        "ja": "MRM を化合物・タグで管理し、測定履歴や .exp ファイルを確認します。",
+        "en": "Organise MRM transitions by compound and tag, and review acquisition history and .exp files."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "MRM 管理を開く",
+            "en": "Open MRM management"
+          },
+          "body": {
+            "ja": "Projects の MRM 管理から移動します。検証済みライブラリと使用実績アーカイブを切り替え、検索とフィルターで絞ります。",
+            "en": "Open MRM management from Projects. Switch between the validated library and usage archive, then search and filter."
+          }
+        },
+        {
+          "title": {
+            "ja": "MRM を登録する",
+            "en": "Register transitions"
+          },
+          "body": {
+            "ja": "化合物追加、表への入力・貼り付け、Excel 一括登録を使います。precursor / product・CE / CV、タグ、出典を確認します。",
+            "en": "Add compounds, enter or paste table rows, or bulk import Excel. Check precursor / product, CE / CV, tags and provenance."
+          }
+        },
+        {
+          "title": {
+            "ja": "履歴とメソッドセットを整理する",
+            "en": "Organise history and method sets"
+          },
+          "body": {
+            "ja": "実測棚卸しで未登録の測定履歴を確認します。メソッドセットを保存・読み込み、出力するトランジションを選びます。",
+            "en": "Reconcile unregistered acquisition history. Save or load method sets and select transitions for output."
+          }
+        },
+        {
+          "title": {
+            "ja": ".exp を確認して書き出す",
+            "en": "Review and export .exp"
+          },
+          "body": {
+            "ja": "テンプレートから選択を .exp 出力するか、「.exp を開いて編集」で既存ファイルを確認します。変更点と検証結果を読み、別名で保存します。",
+            "en": "Export selected transitions using a template, or open an existing .exp for editing. Review changes and validation, then save a separate output file."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "MRM ライブラリの編集は、読み込み済み MSI の信号値や ROI 集計値を書き換えません。測定条件の管理と画像解析は別の操作です。",
+          "en": "Editing the MRM library does not rewrite imported MSI signals or ROI statistics. Acquisition method management and image analysis are separate operations."
+        }
+      ],
+      "save": [
+        {
+          "ja": "オフライン版のライブラリはローカルに保存します。オンラインの共有ライブラリを操作するときは保存先と権限を確認します。",
+          "en": "The offline library is local. For an online shared library, check the destination and permissions."
+        },
+        {
+          "ja": ".exp 出力は元ファイルを直接上書きせず、保存したファイルを装置側で点検します。未対応の設定や検証メッセージを確認してください。",
+          "en": ".exp output does not directly overwrite the source file. Review the saved file on the instrument side, including unsupported settings and validation messages."
+        }
+      ],
+      "features": [
+        {
+          "ja": "検証済み / 使用実績・検索・タグ・化合物・CE / CV",
+          "en": "Validated / usage shelves, search, tags, compounds and CE / CV"
+        },
+        {
+          "ja": "一括入力・Excel・実測棚卸し・メソッドセット",
+          "en": "Bulk entry, Excel, reconciliation and method sets"
+        },
+        {
+          "ja": "テンプレート・.exp 編集 / 検証 / 出力・ライブラリへの取り込み",
+          "en": "Templates, .exp editing / validation / export and library import"
+        }
+      ],
+      "screenshots": [
+        "mrm",
+        "exp"
+      ]
+    },
+    {
+      "id": "troubleshoot",
+      "title": {
+        "ja": "困ったとき・ショートカット",
+        "en": "Troubleshooting and shortcuts"
+      },
+      "summary": {
+        "ja": "表示、データ不足、保存、共有、オフライン起動の問題を切り分けます。",
+        "en": "Diagnose display issues, missing sources, storage problems, sharing and offline startup."
+      },
+      "steps": [
+        {
+          "title": {
+            "ja": "画面の状態を確認する",
+            "en": "Check the current view"
+          },
+          "body": {
+            "ja": "画像が見えないときは、切片・Method / Compound・レイヤーのチェック・Opacity・Range・ROIのみ表示を確認します。",
+            "en": "If an image is missing, check the section, Method / Compound, layer toggles, Opacity, Range and ROI-only display."
+          }
+        },
+        {
+          "title": {
+            "ja": "数値データの有無を確認する",
+            "en": "Check numerical sources"
+          },
+          "body": {
+            "ja": "比や ROI が計算できないときは、元ソースがあるか、X / Y が同じ位置に対応するか、分母下限で全て除外していないかを確認します。",
+            "en": "If ratio or ROI calculations are unavailable, check source availability, X / Y correspondence and whether the denominator threshold excludes all positions."
+          }
+        },
+        {
+          "title": {
+            "ja": "保存先と権限を確認する",
+            "en": "Check storage and permissions"
+          },
+          "body": {
+            "ja": "保存競合・容量不足・共有ロックの通知を読みます。未保存の作業は ZIP や回復用下書きで確保してから再読み込みします。",
+            "en": "Read storage conflict, capacity and shared-lock messages. Preserve unsaved work with ZIP or recovery drafts before reloading."
+          }
+        },
+        {
+          "title": {
+            "ja": "操作をやり直す",
+            "en": "Retry with the recorded conditions"
+          },
+          "body": {
+            "ja": "Method 表では ↑ / ↓ で分子を移動します。ROI 描画は Enter で確定、Esc で中止します。問い合わせ時はビルド番号・操作・入力形式・エラー文を記録します。",
+            "en": "In the Method table, ↑ / ↓ moves between molecules. During ROI drawing, Enter finishes and Esc cancels. For support, record build version, action, input format and error text."
+          }
+        }
+      ],
+      "statistics": [
+        {
+          "ja": "計算できない領域を 0 と解釈しないでください。欠損・分母条件・非対応データなどの理由を確認し、有効データと区別します。",
+          "en": "Do not interpret an unavailable result as zero. Check missing values, denominator conditions and unsupported data, and distinguish them from valid measurements."
+        }
+      ],
+      "save": [
+        {
+          "ja": "オフライン版は ZIP を完全に展開して START_OFFLINE.bat を起動します。起動用ウィンドウを閉じるとローカルサーバーも終了します。保存済みブラウザーデータと ZIP バックアップは別です。",
+          "en": "Fully extract the offline ZIP and run START_OFFLINE.bat. Closing its window stops the local server. Browser data and ZIP backups are separate."
+        },
+        {
+          "ja": "Help の印刷 / PDF から、現在の権限・言語の全章を紙面にできます。画像をクリックすると実画面を拡大できます。",
+          "en": "Print / PDF prints all chapters for the current audience and language. Click a screenshot to enlarge it."
+        }
+      ],
+      "features": [
+        {
+          "ja": "表示異常・元ソース不足・無効な比・保存競合・容量・共有ロック",
+          "en": "Display issues, missing sources, invalid ratios, conflicts, capacity and shared locks"
+        },
+        {
+          "ja": "オフライン起動・ビルド番号・キーボード・Help 印刷",
+          "en": "Offline startup, build version, keyboard controls and Help printing"
+        }
+      ],
+      "screenshots": [
+        "projects"
+      ]
+    }
+  ],
+  "screenshots": [
+    {
+      "id": "projects",
+      "path": "docs/help/images/projects.png",
+      "alt": {
+        "ja": "Projects の一覧と新規作成・MRM 管理のボタン",
+        "en": "Projects list with creation and MRM management controls"
+      },
+      "caption": {
+        "ja": "プロジェクト管理画面",
+        "en": "Project manager"
+      }
+    },
+    {
+      "id": "viewer",
+      "path": "docs/help/images/viewer.png",
+      "alt": {
+        "ja": "MSI と HE、切片一覧、分子選択、ROI を表示した Viewer",
+        "en": "Viewer showing MSI, HE, section list, compound selection and ROI"
+      },
+      "caption": {
+        "ja": "切片・分子・ROI の位置を確認",
+        "en": "Locate sections, molecules and ROIs"
+      }
+    },
+    {
+      "id": "import",
+      "path": "docs/help/images/import.png",
+      "alt": {
+        "ja": "ZIP の復元内容を確認する画面",
+        "en": "ZIP restoration review dialog"
+      },
+      "caption": {
+        "ja": "元データを含むプロジェクトの復元確認",
+        "en": "Review restoration of a project with source data"
+      }
+    },
+    {
+      "id": "display",
+      "path": "docs/help/images/display.png",
+      "alt": {
+        "ja": "Median と 10 段階の強度スライダーがある表示調整画面",
+        "en": "Display controls with Median and its ten-level strength slider"
+      },
+      "caption": {
+        "ja": "Median の表示専用調整",
+        "en": "Display-only Median adjustment"
+      }
+    },
+    {
+      "id": "ratio",
+      "path": "docs/help/images/ratio.png",
+      "alt": {
+        "ja": "分子 X と分子 Y、分母下限を指定する比の設定画面",
+        "en": "Ratio dialog with molecule X, molecule Y and denominator threshold"
+      },
+      "caption": {
+        "ja": "任意の X / Y を設定",
+        "en": "Configure an arbitrary X / Y"
+      }
+    },
+    {
+      "id": "align",
+      "path": "docs/help/images/align.png",
+      "alt": {
+        "ja": "HE と MSI の Align 画面",
+        "en": "HE and MSI Align dialog"
+      },
+      "caption": {
+        "ja": "対象画像・尺度・対応点を確認",
+        "en": "Review images, scale and landmarks"
+      }
+    },
+    {
+      "id": "roi",
+      "path": "docs/help/images/roi.png",
+      "alt": {
+        "ja": "ROI の輪郭と ROIのみ表示を確認する画面",
+        "en": "ROI outline and ROI-only display"
+      },
+      "caption": {
+        "ja": "ROI の表示対象を点検",
+        "en": "Inspect the displayed ROI area"
+      }
+    },
+    {
+      "id": "microscope",
+      "path": "docs/help/images/microscope.png",
+      "alt": {
+        "ja": "ROI の顕微鏡画像管理画面",
+        "en": "ROI microscopy image manager"
+      },
+      "caption": {
+        "ja": "ROI に関連付ける顕微鏡画像",
+        "en": "Microscopy images associated with an ROI"
+      }
+    },
+    {
+      "id": "preview",
+      "path": "docs/help/images/preview.png",
+      "alt": {
+        "ja": "Preview の画像グリッド",
+        "en": "Preview image grid"
+      },
+      "caption": {
+        "ja": "切片・分子を一覧で比較",
+        "en": "Compare sections and molecules in a grid"
+      }
+    },
+    {
+      "id": "report",
+      "path": "docs/help/images/report.png",
+      "alt": {
+        "ja": "PPT レポートの出力設定画面",
+        "en": "PPT report export settings"
+      },
+      "caption": {
+        "ja": "レポートの出力条件を確認",
+        "en": "Review report export conditions"
+      }
+    },
+    {
+      "id": "save",
+      "path": "docs/help/images/save.png",
+      "alt": {
+        "ja": "Viewer の保存・ZIP・Memo の操作",
+        "en": "Viewer saving, ZIP and Memo controls"
+      },
+      "caption": {
+        "ja": "バックアップと記録の入口",
+        "en": "Backup and note controls"
+      }
+    },
+    {
+      "id": "mrm",
+      "path": "docs/help/images/mrm.png",
+      "alt": {
+        "ja": "MRM 管理の棚・検索・一括登録・exp 編集",
+        "en": "MRM shelves, search, bulk entry and exp editing"
+      },
+      "caption": {
+        "ja": "MRM ライブラリ",
+        "en": "MRM library"
+      }
+    },
+    {
+      "id": "exp",
+      "path": "docs/help/images/exp.png",
+      "alt": {
+        "ja": "実際の exp エディター",
+        "en": "The actual exp editor"
+      },
+      "caption": {
+        "ja": "exp の内容と変更を確認",
+        "en": "Review exp content and changes"
+      }
+    },
+    {
+      "id": "ratio-image",
+      "path": "docs/help/images/ratio-image.png",
+      "alt": {
+        "ja": "比を保存して表示した実際の MSI 画面",
+        "en": "Actual MSI view displaying the saved ratio"
+      },
+      "caption": {
+        "ja": "保存した比の画像と表示条件",
+        "en": "Saved ratio image and display conditions"
+      }
+    },
+    {
+      "id": "kmd",
+      "path": "docs/help/images/kmd.png",
+      "alt": {
+        "ja": "ノンターゲット表と、CH₂ 単位で 2 同族列・12 分子を表示する実 KMD パネル",
+        "en": "Actual non-target table and KMD panel showing 12 synthetic molecules in two CH₂ series"
+      },
+      "caption": {
+        "ja": "ANALYSIS の KMD図：単位選択、系列一覧、重ねる、選択解除",
+        "en": "ANALYSIS KMD plot: units, series list, overlay and reset"
+      }
+    }
+  ]
+}

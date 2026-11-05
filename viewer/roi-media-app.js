@@ -137,8 +137,11 @@
         return service;
     }
 
+    function sourceKeyFor(section,key) {
+        return /^MSI_RATIO_/.test(key) && typeof App.ratioSourceKey==='function' ? App.ratioSourceKey(section,key):key;
+    }
     function compatibility(roi, section, key) {
-        const ent = (section.msiSeries || {})[key];
+        const ent = (section.msiSeries || {})[sourceKeyFor(section,key)];
         if (!ent) return 'この切片には対象のMSIがありません。';
         const meta = msiRoiGeometryMeta(roi,section);
         if (meta && !msiValidRoiGeometry(meta)) return 'ROIの座標情報を確認できません。';
@@ -161,6 +164,18 @@
         const smoothingStrength=MsiSmoothing.normalizeLevel(displaySettings.smoothingStrength);
         const linearStrength=MsiSmoothing.normalizeLevel(displaySettings.linearStrength,10);
         const absolute = new Map();
+        const ratios=typeof App.getRatioDefinitions==='function'?copy(App.getRatioDefinitions()):[];
+        const ratioStyles=new Map(ratios.map(def=>['MSI_RATIO_'+def.id,
+            typeof App.getRatioDisplayStyle==='function'?copy(App.getRatioDisplayStyle('MSI_RATIO_'+def.id)):null]));
+        const ratioIdentities=new Map();
+        for(const section of project.sections || [])for(const def of ratios) {
+            const key='MSI_RATIO_'+def.id;
+            if(typeof App.ratioSignature==='function')ratioIdentities.set(section.id+'|'+key,App.ratioSignature(section,key));
+        }
+        const assertRatio=(section,key)=>{
+            if(typeof App.ratioSignature!=='function' || App.ratioSignature(section,key)!==ratioIdentities.get(section.id+'|'+key))
+                throw new Error('比の定義または測定ソースが変更されました。比較画面を開き直してください。');
+        };
         for (const section of project.sections || []) {
             if (!App._organInScope(section)) continue;
             for (const [key,ent] of Object.entries(section.msiSeries || {})) {
@@ -182,7 +197,7 @@
             const reason = compatibility(r,section,key);
             if (reason || !selectedPhoto) return reason;
             if (!selectedPhoto.sourceRef) return '写真登録時のMSI測定ソースを確認できません。写真を再登録すると現在の対応先を記録できます。';
-            if (selectedPhoto.sourceRef !== msiSourceReference(section.msiSeries[key]))
+            if (selectedPhoto.sourceRef !== msiSourceReference(section.msiSeries[sourceKeyFor(section,key)]))
                 return '写真登録時とはMSI測定ソースが異なります。対応を確認してから写真を再登録してください。';
             return '';
         };
@@ -226,6 +241,10 @@
                     const reason = photoCompatibility(r,section,key);
                     return {key,label:formatDisplayName(key),disabled:!!reason,reason};
                 });
+                for(const def of ratios) {
+                    const key='MSI_RATIO_'+def.id,reason=photoCompatibility(r,section,key);
+                    items.push({key,label:formatDisplayName(key),disabled:!!reason,reason});
+                }
                 return { items, notice:items.some(x => !x.disabled) ? '' : (items[0] && items[0].reason || 'このROIの座標に対応するMSIがありません。写真は閲覧できます。') };
             },
             preferredCompound:(p,r,id) => !photoCompatibility(r,sectionFor(p,id),focus) ? focus : null,
@@ -257,26 +276,66 @@
                 const reason = photoCompatibility(r,section,key);
                 if (reason) throw new Error(reason);
                 if (!panel || panel._destroyed) throw new Error('切片のMSIを読み込めません。');
-                const ent = section.msiSeries[key], identity = panel._msiLoadIdentity(key);
-                if (!await panel.ensureMsiLayerLoaded(key)) throw new Error('MSIの元データを読み込めませんでした。');
+                const ratio=/^MSI_RATIO_/.test(key) && !section.msiSeries[key],sourceKey=sourceKeyFor(section,key);
+                const ent = section.msiSeries[sourceKey], identity = ratio ? App.ratioSignature(section,key):panel._msiLoadIdentity(key);
+                let resolved=null;
+                if(ratio) {
+                    assertRatio(section,key);
+                    resolved=await App.resolveRatio(section,key);
+                    assertRatio(section,key);
+                    if(!resolved || !resolved.raster)throw new Error(resolved && resolved.reason || '比の元データを読み込めませんでした。');
+                    if(resolved.status==='empty' || resolved.statistics && resolved.statistics.nValid===0)
+                        throw new Error(resolved.reason || '有効な比がありません。分母下限と元の値を確認してください。');
+                    if(resolved.assertCurrent)resolved.assertCurrent();
+                    if((resolved.frameSourceKey || resolved.sourceKey)!==sourceKey)throw new Error('比の座標フレームが変更されました。');
+                } else if (!await panel.ensureMsiLayerLoaded(key)) throw new Error('MSIの元データを読み込めませんでした。');
                 assertValid();
                 const changedPhotoReason = photoCompatibility(r,section,key);
                 if (changedPhotoReason) throw new Error(changedPhotoReason);
-                if (section.msiSeries[key] !== ent || identity !== panel._msiLoadIdentity(key))
+                if (section.msiSeries[sourceKey] !== ent || identity !== (ratio?App.ratioSignature(section,key):panel._msiLoadIdentity(key)))
                     throw new Error('MSIの測定ソースが変更されました。比較画面を開き直してください。');
-                const polygon = roiPolygonForDisplay(r,section,key,(r.polysBySection || {})[id]);
+                const polygon = roiPolygonForDisplay(r,section,sourceKey,(r.polysBySection || {})[id]);
                 if (!polygon || polygon.length < 3) throw new Error('ROIとMSIの対応座標を確認できません。');
                 const cacheKey = id+'|'+key;
-                if (!windows.has(cacheKey)) windows.set(cacheKey,App.getMsiWindow.call(windowContext,key,ent.rawRange,ent.rawDispMax,ent.rawTrueMax));
+                if (!windows.has(cacheKey)) {
+                    if(ratio) {
+                        const style=ratioStyles.get(key);
+                        const model=root.MsiRatioModel || (typeof module==='object'&&module.exports?require('./msi-ratio-model.js'):null);
+                        const scope=style && style.mode==='individual' && model?model.canonicalSectionId(section):'same';
+                        const manual=style && style.ranges?(style.ranges.whole && style.ranges.whole[scope] || {})
+                            :windowContext.msiUserWindow[key] || {};
+                        const ceilingOf=value=>style && style.outlierClip && Number.isFinite(value && value.robustMax)?value.robustMax
+                            :value && value.displayAuto && value.displayAuto.max || value && value.statistics && value.statistics.max || 0;
+                        let max=ceilingOf(resolved);
+                        if((style && style.mode || windowContext.msiScaleMode)!=='individual') {
+                            for(const other of project.sections || [])if(App._organInScope(other)) {
+                                assertRatio(other,key);
+                                const value=other===section?resolved:await App.resolveRatio(other,key);
+                                assertRatio(other,key);assertValid();
+                                const ceiling=ceilingOf(value);
+                                if(Number.isFinite(ceiling))max=Math.max(max,ceiling);
+                            }
+                        }
+                        const min=Number.isFinite(manual.min)?manual.min:0;
+                        max=Number.isFinite(manual.max)?manual.max:max>0?max:1;
+                        windows.set(cacheKey,{min,max:max>min?max:min+1});
+                    }else windows.set(cacheKey,App.getMsiWindow.call(windowContext,key,ent.rawRange,ent.rawDispMax,ent.rawTrueMax));
+                }
                 const win = windows.get(cacheKey);
-                const signature = identity+'|'+JSON.stringify(win)+'|'+smoothing+'|'+smoothingStrength+'|'+linearStrength;
+                const style=ratio && ratioStyles.get(key);
+                const frameSmoothing=style?style.smoothing:smoothing,frameStrength=style?style.smoothingStrength:smoothingStrength,
+                    frameLinear=style?style.linearStrength:linearStrength,frameLut=style?style.lut:lut,frameBackground=style?style.background:background;
+                const raster=ratio?resolved.raster:panel.msiValueRasters.get(key);
+                const signature = identity+'|'+JSON.stringify(win)+'|'+frameSmoothing+'|'+frameStrength+'|'+frameLinear;
                 let cached = frameCache.get(cacheKey);
                 if (!cached || cached.signature !== signature) {
                     const maskSection = { ...section,meta:{...section.meta,otsu:masks.get(id)} };
-                    const keepGrid = otsuOn ? _otsuKeepGridRaw(maskSection,key) : null;
-                    const canvas = RoiMediaMsi.colorize(panel.imageSources[key], {
-                        valueRaster:panel.msiValueRasters.get(key), keepGrid,lut,background,smoothing,smoothingStrength,linearStrength,
-                        rawRange:ent.rawRange,window:win,fallbackMax:msiRawFallbackMax(ent.rawRange),
+                    const keepGrid = otsuOn ? ratio?resolved.keepGrid:_otsuKeepGridRaw(maskSection,key) : null;
+                    const rawRange=ratio?resolved.displayAuto && resolved.displayAuto.rawRange:ent.rawRange;
+                    const canvas = RoiMediaMsi.colorize(ratio?null:panel.imageSources[key], {
+                        valueRaster:raster,numericOnly:ratio,keepGrid,lut:frameLut,background:frameBackground,
+                        smoothing:frameSmoothing,smoothingStrength:frameStrength,linearStrength:frameLinear,
+                        rawRange,window:win,fallbackMax:msiRawFallbackMax(rawRange),
                         evaluateValue:msiValueEval,evaluateLuminance:msiWindowEval,
                     });
                     cached = {signature,canvas};
@@ -284,12 +343,12 @@
                     frameCache.clear(); frameCache.set(cacheKey,cached);
                 }
                 const snapshotSection={...section,meta:{...section.meta,world_coords:calibrations.get(id)}};
-                let pitch = msiDisplayPhysicalPitch(snapshotSection,key),physicalFrame=null,drawingRects=null;
+                let pitch = msiDisplayPhysicalPitch(snapshotSection,sourceKey),physicalFrame=null,drawingRects=null;
                 const aspect = pitch ? [[pitch.x/Math.min(pitch.x,pitch.y),0,0],[0,pitch.y/Math.min(pitch.x,pitch.y),0],[0,0,1]]
                     : [[1,0,0],[0,1,0],[0,0,1]];
                 if(root.MsiDisplayGeometry) {
-                    const geometry=typeof msiLayerSourceGeometry==='function'?msiLayerSourceGeometry(section,key):null;
-                    const size=panel.msiValueRasters.get(key),original=geometry && geometry.legacy;
+                    const geometry=ratio?raster.sourceGeometry:typeof msiLayerSourceGeometry==='function'?msiLayerSourceGeometry(section,key):null;
+                    const size=raster,original=geometry && geometry.legacy;
                     // ROI comparison has always respected physical aspect,
                     // including projects without the new display preference.
                     physicalFrame=root.MsiDisplayGeometry.createFrame({width:size.W,height:size.H,
@@ -300,10 +359,13 @@
                 }
                 const c = r.rgba || [200,200,200,255];
                 return { canvas:cached.canvas,polygon,transform:physicalFrame?physicalFrame.matrix:displayAffineMultiply(orientations.get(id),aspect),
-                    physicalFrame,drawingRects,smoothing,smoothingStrength,linearStrength,
-                    roiColor:'rgb('+c.slice(0,3).join(',')+')',background:'rgb('+background.join(',')+')',pixelPitch:pitch,
-                    status:formatDisplayName(key)+' ／ '+colormapName+' ／ 強度 '+win.min+'–'+win.max
-                        +(smoothing==='linear'?' ／ Linear '+linearStrength+'/10':smoothing==='median'?' ／ Median '+smoothingStrength+'/10':'')+(otsuOn?' ／ Otsu表示':'') };
+                    physicalFrame,drawingRects,smoothing:frameSmoothing,smoothingStrength:frameStrength,linearStrength:frameLinear,
+                    roiColor:'rgb('+c.slice(0,3).join(',')+')',background:'rgb('+frameBackground.join(',')+')',pixelPitch:pitch,
+                    status:formatDisplayName(key)+' ／ '
+                        +(style?style.colormap:colormapName)+' ／ '+(ratio?'比 ':'強度 ')+win.min+'–'+win.max
+                        +(frameSmoothing==='linear'?' ／ Linear '+frameLinear+'/10':frameSmoothing==='median'?' ／ Median '+frameStrength+'/10':'')
+                        +(otsuOn && (!ratio || resolved.keepGrid)?' ／ Otsu表示':'')
+                        +(otsuOn && ratio && !resolved.keepGrid?' ／ '+(resolved.otsuReason || '比に対応するTIC背景maskがありません'):'') };
             },
             add:(p,r,id,files) => getService().add(p,r,sectionFor(p,id),files),
             replace:(p,r,id,item,file) => getService().replace(p,r,sectionFor(p,id),item,file),
