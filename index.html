@@ -3,10 +3,12 @@
 <head>
 <script src="runtime-config.js"></script>
 <script src="app-runtime.js"></script>
+<link rel="stylesheet" href="help.css">
 <script src="project-store-safety.js"></script>
 <script src="project-navigation.js"></script>
 <script src="viewer/msi-display-settings.js"></script>
 <script src="offline/offline.js"></script>
+<script defer src="help.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
@@ -2101,6 +2103,7 @@ function _readHelpAudience(fallback) {
 }
 
 async function openHelpModal(audience, lang) {
+    if (window.GuidedHelp) return GuidedHelp.open({audience,lang,role:audience === 'viewer' ? 'viewer' : audience === 'master' ? 'master' : 'manage', mode:window.DESI_OFFLINE ? 'offline' : 'online',chapter:'projects'});
     audience = (audience === 'manage' || audience === 'master' || audience === 'viewer')
         ? audience : _readHelpAudience('manage');
     lang = (lang === 'en' || lang === 'ja') ? lang : _readHelpLang();
@@ -2278,7 +2281,6 @@ async function init() {
     });
     document.getElementById('btn-new-folder').addEventListener('click', () => treeCreateFolder(null));
     document.getElementById('btn-help').addEventListener('click', () => {
-        if (window.DESI_OFFLINE === true) { location.href = 'OFFLINE_GUIDE.md'; return; }
         // Native modal so we don't bounce away from the manager. Default
         // audience is 'manage' since this page IS the management screen.
         openHelpModal('manage').catch(e => console.error(e));

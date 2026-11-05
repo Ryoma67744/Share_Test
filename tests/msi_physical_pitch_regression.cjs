@@ -1,10 +1,11 @@
 'use strict';
+const {displayContext}=require('./viewer-runtime.cjs');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, '../viewer/index.html'), 'utf8');
-const context = vm.createContext({});
+const context = displayContext({});
 for (const name of ['buildMsiGrid', 'buildLegacyMsiGrid', 'msiSourceReference',
     'createMsiSourceGeometry', 'normalizeMsiPhysicalPitch', 'resolveMsiCoordinateCalibration', 'resolveMsiPhysicalCalibration',
     'msiDisplayPhysicalPitch', 'formatPixelPitchLabel', 'pickPreviewScalebarLength', 'rawPitchOf']) {

@@ -15,6 +15,8 @@ const _shareAlignBySection=new Map(),captureSectionAlignment=()=>({}),loadShareO
 const ensureMemoShape=x=>x||{},roiMediaRegistryFromDoc=()=>({version:1,items:[]}),groupRoiRowsByColor=()=>[],remapRoiGeometry=x=>x;
 let _shareTokenExpired=false;const _isExpiredTokenError=e=>e.code==='28000',_noteShareTokenExpired=()=>{_shareTokenExpired=true;};
 ${helper('fetchAllShareRois')}
+${fs.readFileSync(path.join(root,'viewer/msi-ratio-model.js'),'utf8')}
+${helper('ratioRegistryFromDoc')}
 window.alerts=[];const roiMediaForTransport=()=>({items:[]}),showToast=()=>{},alert=message=>alerts.push(message);
 const doc={publish_revision:7,meta:{display_name:'Synthetic cloud',project_meta:{}},sections:[{id:'server-s',meta:{client_id:'local-s'},storage_paths:{
 images:{HE:{path:'fixture/he',filename:'HE.tif'}},msiSeries:{MSI_A:{path:'fixture/raw',filename:'raw.txt',kind:'txt',sourceFileId:'raw',archiveProvenance:{version:1,basis:'registered-source'}}},

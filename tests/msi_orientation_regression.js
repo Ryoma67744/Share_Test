@@ -1,4 +1,5 @@
 'use strict';
+const {displayContext}=require('./viewer-runtime.cjs');
 // Scientific display-coordinate regression: non-square asymmetric landmarks,
 // actual main renderer/ROI paths, inverse clicks, all turns/flips, physical pitch.
 const assert = require('node:assert/strict');
@@ -28,7 +29,7 @@ class Context2D {
   closePath(){} stroke(){this.paths.push(this.path);} setLineDash(){} arc(){} fill(){} clip(p){this.clipped=p;}
 }
 function canvas(w=0,h=0){const c={width:w,height:h,style:{},classList:{toggle(){}},toDataURL(){return 'mock';}};c.ctx=new Context2D(c);return c;}
-const context=vm.createContext({console,Math,Number,Map,Set,JSON,Uint8ClampedArray,...geometryGlobals,
+const context=displayContext({console,Math,Number,Map,Set,JSON,Uint8ClampedArray,...geometryGlobals,
   MsiSmoothing:require('../viewer/msi-smoothing.js'),
   document:{createElement:()=>canvas(),createElementNS:(_ns,tag)=>element(tag),getElementById:()=>null},get2dContext:c=>c.ctx,
   App:{viewMode:'free',roiOnlyMode:false,msiSmoothing:'none',drawing:{mode:false},getMsiWindow:()=>({min:0,max:1})},

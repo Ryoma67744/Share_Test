@@ -1,0 +1,312 @@
+{
+  "format": 1,
+  "sourceFilesSha256": {
+    "app-runtime.js": "59256f2c7e57636e21264ddb635f2372202d564090fa83985da82a437b2b1573",
+    "index.html": "8f4798c16f4a8ba2e56dc7c0aada3cec3af9ca2eb5beaa644046cd501637f742",
+    "mrm.html": "1684c0c340574c3aa79c81a2fecd909805cc8bbb4d693be969e98a5d511c94ea",
+    "mrm/exp-core.mjs": "4a341dbfe11f3e4042627b6d293c08277fafc3bbde329e8c65f49d2416f63a79",
+    "mrm/exp-editor.css": "491cb6915daa833bae995570340881ca2342587900f769334cba97e41e14cdde",
+    "mrm/exp-editor.mjs": "7e53492f0e5023ae8501ae3c74e015d3e0942291c49eaf90744056344fe786ea",
+    "mrm/exp-library-import.mjs": "284a46c01b8c9c505acd8ea1b6a04105530169bc7ca0d6efba5768d6b0fb9e7d",
+    "version.js": "821140f10e96a880b964c9f96558e3799b7e29c28cdd9cdb71e4a3f15c0bb040",
+    "viewer/alignment-session.js": "cb224af9e6379ddb4446c4ccdd507badc9e8219aa63b9ac279859cb4dad64ead",
+    "viewer/alignment-workspace.css": "256c3b1ee65e9176cb7c48f61edfcbff7fd6144f11157dadc6784c55e404286b",
+    "viewer/alignment-workspace.js": "e0e29f4e45ac4b210fa241e726a8134e4bebaede02c5d489efbeef413e52445d",
+    "viewer/fixed-colors.js": "b3ed915c49be6fd19226016c61113d7e01b07aefbb545c5a0b80044ddf960ff5",
+    "viewer/index.html": "859920cdb1b02448706cd3f735c14eace7d82d86c1da0d6ec1f57c682a5a6838",
+    "viewer/msi-display-geometry.js": "a1600289a9f5014a460f6a32c0e73c1acaa4dc277d8efbe94a17d0bb39559813",
+    "viewer/msi-display-settings.js": "3ae2889e6c4d6c1c6100ea412cdf1ef96d9740ec5fd8bf407b0cf2d6bfad2ea3",
+    "viewer/msi-ratio-app.js": "7706e3297bff3746316129c00d4cd183dc99a7471bf874702cafcea9758946d5",
+    "viewer/msi-ratio-core.js": "fb6faf21fad5d2f0a4bb5b196e5dfb6474a7d46991ced10253af8be90c06ea79",
+    "viewer/msi-ratio-model.js": "7511b5128a1c30d3636e2c0af517d68cf7f80c8176757782b566a9aed2604d97",
+    "viewer/msi-ratio-worker.js": "690e94764b6b648a6a99c8369346fae46e0dd757e2aa6eb429c79c38cf70e404",
+    "viewer/msi-ratio.css": "3e470053172d614bcc7262cb0c8d4a8620e88fa5a29553b3d6ef239e79d99bcb",
+    "viewer/msi-roi-range.js": "8e1bb9a54ec164b9319323f0ab3ca682cb54c1053129bb4ec30930aa6e2b9ae0",
+    "viewer/msi-smoothing.js": "af0964a616c68ae26e8b6ef247204da732a1e8c92ff1b2bb89ba7c1883b5f49e",
+    "viewer/project-archive.js": "6e3259ef313d053b8346c16ed42a095bcd2f2aee661e5bf6d0303ced79f4c850",
+    "viewer/project-report-app.js": "e1e98193817755539d180989d354dfb030281ee925e560ad6377e4298cd90881",
+    "viewer/project-report-data.js": "4ac90f2b73970a2e36a5df52e759206de8bdc59dd9ffc09a68486d4bcc77d798",
+    "viewer/project-report-deck.js": "764d72d9fdbddd5234981d120783c37daac062193f303b5ed95c4a28b02a81d7",
+    "viewer/publish-safety.js": "fc6d32fe068256393c06d8f3662f137a50e5707759aecb1c67ac272f48eddc3d",
+    "viewer/roi-media-app.js": "1439c3d676497d2eca1fc9641401d8416899756b2f6497f7bdaaa9445c7ee3cf",
+    "viewer/roi-media-model.js": "5f1e91b22b2d86479e600c0b90970912f2266b8b0e7968c2823fb8087d20ab6f",
+    "viewer/roi-media-msi.js": "5527cab5d45b252f35bc84529d0c9ff572aed2e5ac51e47d950e26a648f64c8d",
+    "viewer/roi-media-service.js": "423e16fe55e8516dfc66708198820260b5a2c602cd25addc42be7b7177a7c97e",
+    "viewer/roi-media-viewer.css": "806dba0af97cd28c12b02b1d4e4eacb2e88f47ca4e58aa276a144d24acbb5e23",
+    "viewer/roi-media-viewer.js": "a452e59621f190157a1ea62dd3e82698ccecebf01c9acd753e8010ca95c806c8",
+    "viewer/section-visibility.js": "f44a5723e8b3a7dcd38a8bfcf7fb4543f8f90f9dfc6366c7c08663eed9bc594e"
+  },
+  "captureToolSha256": "6cfc65257d8aa5e7798040d2c472504306385985ae345344b0f73dc469a68cde",
+  "generatedBy": "node tools/help-capture.cjs",
+  "sourceVersion": "v2026-11-05.4",
+  "browser": "151.0.7922.34",
+  "fixture": "tests/fixtures/browser/offline-smoke-project.zip with deterministic X/Y source extension",
+  "fixtureSha256": "1c48173874c5f0fed7ec32759f14712785fc119b1a975461158ef2b16a452dcd",
+  "numericalSourceSha256": "f5e4c58d3a04cc51c2e7569f35e1aeb99365856b37bdde37fd3350c0fd253835",
+  "synthetic": true,
+  "captures": [
+    {
+      "id": "align",
+      "path": "docs/help/images/align.png",
+      "sha256": "2f0698232cecfcfa6f432a6d745ea17844f941136c3fa65a3d8314c06b078aa4",
+      "scenario": "Actual Align workspace",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "align"
+      ]
+    },
+    {
+      "id": "display",
+      "path": "docs/help/images/display.png",
+      "sha256": "b665311ab06e4d978c35773a0ef33f673b9f186b918701784f78a2bb6376d26f",
+      "scenario": "Display-only Median at strength 6 of 10",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "display"
+      ]
+    },
+    {
+      "id": "exp",
+      "path": "docs/help/images/exp.png",
+      "sha256": "eb316d63456fb0776422a0f1b990be204690655c06e4b502c0b96bad0a8eca7b",
+      "scenario": "Actual exp editor with the synthetic supported MRM fixture",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "mrm"
+      ]
+    },
+    {
+      "id": "import",
+      "path": "docs/help/images/import.png",
+      "sha256": "ac4dd40b1a90dfb20be37579bfe1808cdd2b3ef6a68095e7fef9094949d4caf8",
+      "scenario": "ZIP import confirmation with original numerical sources",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "import"
+      ]
+    },
+    {
+      "id": "kmd",
+      "path": "docs/help/images/kmd.png",
+      "sha256": "96c9b973faa3ca558733789f6e584aca56b37192a03864d2ec6fb54c0254546b",
+      "scenario": "Actual non-target Method table and KMD panel with 12 synthetic masses in two CH2 series",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "fixture": "offline-smoke ZIP with synthetic non-target metadata",
+      "compoundMetadataSha256": "bb76fd0bec1a5c5a5d2f24abffb1469694516682eac20f66ff2dbcb8232a377b",
+      "mode": "offline",
+      "chapterIds": [
+        "view"
+      ]
+    },
+    {
+      "id": "microscope",
+      "path": "docs/help/images/microscope.png",
+      "sha256": "482c017c68d37a4536b5d66c57a976a1f16eb212dba336609d205e29a12a280d",
+      "scenario": "Actual ROI microscopy workspace",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "microscope"
+      ]
+    },
+    {
+      "id": "mrm",
+      "path": "docs/help/images/mrm.png",
+      "sha256": "15c02f5db13fbfe5d953f96e8f9cca9dbfe3727cb96c053a0db534987bae4353",
+      "scenario": "Actual local MRM management",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "mrm"
+      ]
+    },
+    {
+      "id": "preview",
+      "path": "docs/help/images/preview.png",
+      "sha256": "9a637f667c3dc2fea9c824a37296dbeb36f0704b7571fa20b765f74598788b4f",
+      "scenario": "Actual Preview image grid",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "preview"
+      ]
+    },
+    {
+      "id": "projects",
+      "path": "docs/help/images/projects.png",
+      "sha256": "a274501976c09aae408792b6507ac913a79d9516c380ce5f361dd1b87a2109ed",
+      "scenario": "Actual local project manager with imported synthetic project",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "projects",
+        "troubleshoot"
+      ]
+    },
+    {
+      "id": "ratio",
+      "path": "docs/help/images/ratio.png",
+      "sha256": "0e7eb90ecb0d801ba0070681106526412edded2cd0ba69cc5b40a0d9579a38f3",
+      "scenario": "Saved X/Y ratio with actual ROI summary and validity counts",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "fixture": "tests/msi_ratio_browser_regression.cjs:fixture/archive",
+      "numericalSourceSha256": "e4c385520218e38d961df791a61ac598c8c4728fb868f5e8161f92a594184dad",
+      "mode": "offline",
+      "chapterIds": [
+        "ratio"
+      ]
+    },
+    {
+      "id": "ratio-image",
+      "path": "docs/help/images/ratio-image.png",
+      "sha256": "57849e99e24d98da5035995cf254e9a84cf88ffb6e25ba12f813f38bdd7d70be",
+      "scenario": "Actual ratio MSI image after saving the definition",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "fixture": "tests/msi_ratio_browser_regression.cjs:fixture/archive",
+      "numericalSourceSha256": "e4c385520218e38d961df791a61ac598c8c4728fb868f5e8161f92a594184dad",
+      "mode": "offline",
+      "chapterIds": [
+        "ratio"
+      ]
+    },
+    {
+      "id": "report",
+      "path": "docs/help/images/report.png",
+      "sha256": "47225614084623154e850d5f3f4eec55a9d4ed280751ef7eb25966d53c0d1bd2",
+      "scenario": "Actual PPT export options",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "preview"
+      ]
+    },
+    {
+      "id": "roi",
+      "path": "docs/help/images/roi.png",
+      "sha256": "ebef745c20911b750a1b28d5fef33350350c4cf59743c3df456370d08199c3df",
+      "scenario": "ROI-only display with automatic ROI Range",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "roi"
+      ]
+    },
+    {
+      "id": "save",
+      "path": "docs/help/images/save.png",
+      "sha256": "b779e30ff6b104391a8f001342205b45ef2f1df81cce486f15cdb7c6307646b7",
+      "scenario": "Main toolbar exposes Export ZIP, Memo and project saving",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "save"
+      ]
+    },
+    {
+      "id": "viewer",
+      "path": "docs/help/images/viewer.png",
+      "sha256": "8e02d5061d2d699fa838e645f19dd7ab58ecfcba62ab9b481470c369013090c9",
+      "scenario": "Compound view with X/Y numerical sources and an existing ROI",
+      "role": "local author",
+      "uiLanguage": "ja / en (application labels)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "mode": "offline",
+      "chapterIds": [
+        "start",
+        "view"
+      ]
+    }
+  ]
+}

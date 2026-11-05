@@ -181,7 +181,26 @@
             throw new Error('表示スタイルを取得できません。');
         const manualWindows = copy(app.msiUserWindow || {});
         const sections = (project.sections || []).slice();
+        const ratioDefinitions = options.includeRatios && typeof app.getRatioDefinitions === 'function'
+            ? copy(app.getRatioDefinitions()) : [];
+        const ratioDefinitionSignature = JSON.stringify(ratioDefinitions);
+        const ratioRoiSignature = ratioDefinitions.length ? JSON.stringify(project.rois || []) : null;
+        const ratioGuards = [];
+        const ratioInputs = ratioDefinitions.map(definition => ({definition, key:'MSI_RATIO_'+definition.id,
+            style:options.useDisplayStyle?copy(typeof app.getRatioDisplayStyle==='function'
+                ?app.getRatioDisplayStyle('MSI_RATIO_'+definition.id):displayStyle):null,
+            signatures:new Map(sections.map(section => [section.id, typeof app.ratioSignature === 'function'
+                ? app.ratioSignature(section,'MSI_RATIO_'+definition.id) : null]))}));
+        const ratioManualWindow = (style,section,key) => {
+            if(!style || !style.ranges)return manualWindows[key];
+            const model=root.MsiRatioModel || (typeof module==='object'&&module.exports?require('./msi-ratio-model.js'):null);
+            const scope=style.mode==='individual' && model?model.canonicalSectionId(section):'same';
+            // Report tiles cover the whole frame. Cropping a photo/ROI does
+            // not opt the export into the viewer's separate ROI-only range.
+            return style.ranges.whole && style.ranges.whole[scope];
+        };
         const sectionStates = sections.map(section => ({ section, panel: app.panels.get(section.id), keys: msiKeys(section),
+            ratioTransform:copy(hooks.transform ? hooks.transform(section) : identity()),
             calibration: copy(section.meta && section.meta.world_coords), otsu:copy(section.meta && section.meta.otsu),
             referenceTransforms:hooks.referenceTransforms ? {...copy(hooks.referenceTransforms(section)),
                 registeredPitch:copy(section.meta && section.meta.world_coords && section.meta.world_coords.msi_um_per_px),
@@ -268,6 +287,15 @@
             if (current !== app || current.project !== project || current.shareMode !== session
                 || shareSignature(current, project) !== shareState
                 || (project.sections || []).length !== sections.length) throw staleError();
+            if (ratioDefinitions.length && (JSON.stringify(app.getRatioDefinitions()) !== ratioDefinitionSignature
+                || JSON.stringify(project.rois || []) !== ratioRoiSignature)) throw staleError();
+            for (const input of ratioInputs) for (const section of sections) {
+                if (typeof app.ratioSignature === 'function' && app.ratioSignature(section,input.key) !== input.signatures.get(section.id))
+                    throw staleError();
+                if(input.style && input.style.otsu && JSON.stringify(section.meta && section.meta.otsu)!==
+                    JSON.stringify(sectionStates.find(state=>state.section===section).otsu))throw staleError();
+            }
+            for (const guard of ratioGuards) guard();
             for (let i = 0; i < sectionStates.length; i++) {
                 const state = sectionStates[i];
                 if (project.sections[i] !== state.section || current.panels.get(state.section.id) !== state.panel
@@ -351,7 +379,7 @@
                 }
             }
             completed++;
-            if (options.onProgress) options.onProgress({ phase: 'load', index: completed, total: jobs.length,
+            if (options.onProgress) options.onProgress({ phase: 'load', index: completed, total: jobs.length+ratioInputs.length*sections.length,
                 moleculeName: label(job.key, job.meta), sectionName: result.name });
             if (hooks.yieldControl) await hooks.yieldControl();
             assertCurrent();
@@ -409,6 +437,99 @@
                     }
                     return references;
                 } };
+        const cleanRatioText = value => includeCeCv ? String(value || '') : String(value || '').split(/\s+\/\s+/)
+            .map(part => voltageFreeText(part,voltagePairs,true)).join(' / ');
+        for (const ratioInput of ratioInputs) {
+            const definition=ratioInput.definition, ratioStyle=ratioInput.style, first=Object.values(definition.bindings || {})[0] || {};
+            const formula=cleanRatioText(first.numerator && first.numerator.labelHint || 'X')+' / '
+                +cleanRatioText(first.denominator && first.denominator.labelHint || 'Y');
+            const ratio={id:definition.id,formula,denominatorMin:definition.denominatorMin || 0,
+                calculationVersion:definition.calculationVersion || 'msi-ratio-v1'};
+            input.molecules.push({kind:'ratio',key:ratioInput.key,layerKey:ratioInput.key,
+                displayStyle:ratioStyle,
+                name:cleanRatioText(definition.name || formula) || 'Ratio',
+                subtitle:formula+'  |  Y > '+ratio.denominatorMin,ratio,metadata:{formula,denominatorMin:ratio.denominatorMin,
+                    calculationVersion:ratio.calculationVersion},async loadEntries() {
+                    assertCurrent();
+                    const entries=[];
+                    for (const state of sectionStates) {
+                        const section=state.section, entry={sectionId:section.id,name:sectionName(section),
+                            stats:{mean:null,max:null,n:null},ratioStatistics:null,ratioRois:[],metadata:{formula},
+                            transform:copy(state.ratioTransform)};
+                        if (typeof app.resolveRatio !== 'function') entry.missingReason='比の数値データを読み込めません。';
+                        else {
+                            let resolved;
+                            try { resolved=await app.resolveRatio(section,ratioInput.key,{signal:options.signal}); }
+                            catch(error) {
+                                assertCurrent();
+                                if(error && error.name==='AbortError')throw error;
+                                entry.missingReason='この切片の比の元データを読み込めませんでした。';
+                            }
+                            assertCurrent();
+                            if (resolved && typeof resolved.assertCurrent === 'function') {
+                                resolved.assertCurrent();ratioGuards.push(resolved.assertCurrent);
+                            }
+                            if(resolved && resolved.formula)entry.metadata.formula=cleanRatioText(resolved.formula);
+                            const raster=resolved && resolved.raster;
+                            if (!raster || !(raster.W>0 && raster.H>0) || !raster.values || raster.values.length!==raster.W*raster.H)
+                                entry.missingReason=entry.missingReason || cleanRatioText(resolved && resolved.reason || 'この切片で比を利用できません。');
+                            else {
+                                entry.raster={W:raster.W,H:raster.H,values:raster.values.slice()};
+                                const mask=raster.measuredMask || raster.validMask;
+                                if(mask)entry.raster.measuredMask=mask.slice();
+                                entry.ratioStatistics=copy(resolved.statistics || resolved.summary || null);
+                                entry.ratioRois=(resolved.roiStats || []).map(row=>({roiId:row.roiId || row.id,
+                                    name:cleanRatioText(row.name || 'ROI'),status:row.status || 'ready',
+                                    reason:cleanRatioText(row.reason || ''),statistics:copy(row.statistics || row.summary || null)}));
+                                const geometry=raster.sourceGeometry || resolved.sourceGeometry;
+                                const calibration=state.calibration || {};
+                                if(root.MsiDisplayGeometry) {
+                                    entry.frame=root.MsiDisplayGeometry.createFrame({width:raster.W,height:raster.H,
+                                        sourceWidth:geometry && geometry.legacy && geometry.legacy.W,
+                                        sourceHeight:geometry && geometry.legacy && geometry.legacy.H,
+                                        registeredPitch:calibration.msi_um_per_px,orientation:entry.transform,
+                                        aspectMode:ratioStyle && ratioStyle.aspectMode || displaySettings.aspectMode});
+                                    entry.transform=entry.frame.matrix;
+                                    entry.pixelPitch=entry.frame.calibrated?entry.frame.displayPitch:null;
+                                }
+                                if(ratioStyle) {
+                                    let maximum=0;
+                                    for(let i=0;i<raster.values.length;i++) {
+                                        if(i%262144===0){assertCurrent();if(hooks.yieldControl)await hooks.yieldControl();}
+                                        if((!mask || mask[i]) && Number.isFinite(raster.values[i]))maximum=Math.max(maximum,raster.values[i]);
+                                    }
+                                    const auto=resolved.displayAuto;
+                                    const rawMaximum=resolved.statistics && resolved.statistics.max;
+                                    const upper=ratioStyle.outlierClip && finite(resolved.robustMax)!=null?resolved.robustMax:
+                                        auto && finite(auto.max) != null?auto.max:
+                                        ratioStyle.rangePolicy==='maximum' && finite(rawMaximum)!=null?rawMaximum:maximum;
+                                    entry.displayAuto={max:upper,rawRange:auto && copy(auto.rawRange) || [0,upper]};
+                                    entry.manualWindow=copy(ratioManualWindow(ratioStyle,section,ratioInput.key));
+                                    const keep=resolved.keepGrid;
+                                    if(ratioStyle.otsu && keep && keep.W===raster.W && keep.H===raster.H)
+                                        entry.keepGrid={W:keep.W,H:keep.H,keep:keep.keep.slice()};
+                                }
+                            }
+                        }
+                        entries.push(entry);
+                        if(options.onProgress)options.onProgress({phase:'load',index:++completed,
+                            total:jobs.length+ratioInputs.length*sections.length,moleculeName:cleanRatioText(definition.name || formula),sectionName:entry.name});
+                        if(hooks.yieldControl)await hooks.yieldControl();
+                        assertCurrent();
+                    }
+                    if(ratioStyle) {
+                        const sharedMaximum=Math.max(0,...entries.filter(e=>e.displayAuto).map(e=>e.displayAuto.max));
+                        for(const entry of entries)if(entry.displayAuto) {
+                            const automatic=ratioStyle.mode==='individual'?entry.displayAuto.max:sharedMaximum;
+                            const manual=entry.manualWindow || {},min=finite(manual.min) ?? 0;
+                            let max=finite(manual.max) ?? (automatic>0?automatic:1);
+                            if(!(max>min))max=min+1;
+                            entry.displayWindow={min,max};
+                        }
+                    }
+                    return entries;
+                }});
+        }
         assertCurrent();
         return input;
     }
@@ -419,7 +540,7 @@
         if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(clean)) clean = '_' + clean;
         return clean + '_report.pptx';
     }
-    function selectReportOptions(doc, canIncludeCeCv) {
+    function selectReportOptions(doc, canIncludeCeCv, hasRatios = false) {
         return new Promise(resolve => {
             const focused = doc.activeElement;
             const overlay = doc.createElement('div');
@@ -441,6 +562,9 @@
             styleLabel.style.cssText = 'display:flex;align-items:center;gap:8px;font-weight:600;margin:14px 0';
             const style = doc.createElement('input'); style.type='checkbox';style.id='project-report-use-display-style';style.checked=false;
             styleLabel.append(style,doc.createTextNode('表示スタイルを使う'));
+            const ratioLabel=doc.createElement('label');ratioLabel.style.cssText=styleLabel.style.cssText;
+            const ratios=doc.createElement('input');ratios.type='checkbox';ratios.id='project-report-include-ratios';ratios.checked=hasRatios;
+            ratioLabel.append(ratios,doc.createTextNode('比の画像・ROI集計を含める（このタブの比を含む）'));
             const help = doc.createElement('p'); help.id = 'project-report-options-help';
             help.textContent = '初期設定は従来の共通p99.8配色です。表示スタイルを選ぶと配色・範囲・補間・Otsu表示を使用します。出力は画面の絞り込みによらず全切片・全分子で、Sameの自動上限は全出力切片から再計算します。手動Rangeは生強度値で優先します。';
             help.style.cssText = 'font-size:13px;line-height:1.6;margin:12px 0 20px';
@@ -455,16 +579,18 @@
                 resolve(result);
             };
             cancel.addEventListener('click', () => close(null));
-            create.addEventListener('click', () => close({ includeCeCv: canIncludeCeCv && checkbox.checked,useDisplayStyle:style.checked }));
+            create.addEventListener('click', () => close({ includeCeCv: canIncludeCeCv && checkbox.checked,useDisplayStyle:style.checked,
+                includeRatios:hasRatios && ratios.checked }));
             overlay.addEventListener('keydown', event => {
                 if (event.key === 'Escape') { event.preventDefault(); close(null); }
                 if (event.key === 'Tab') {
-                    const controls = [...(canIncludeCeCv?[checkbox]:[]),style,cancel,create], index = controls.indexOf(doc.activeElement);
+                    const controls = [...(canIncludeCeCv?[checkbox]:[]),style,...(hasRatios?[ratios]:[]),cancel,create], index = controls.indexOf(doc.activeElement);
                     event.preventDefault(); controls[(index + (event.shiftKey ? controls.length-1 : 1)) % controls.length].focus();
                 }
             });
             actions.append(cancel, create); dialog.append(title);
             if(canIncludeCeCv)dialog.append(label);
+            if(hasRatios)dialog.append(ratioLabel);
             dialog.append(styleLabel, help, actions); overlay.appendChild(dialog);
             doc.body.appendChild(overlay); (canIncludeCeCv?checkbox:style).focus();
         });
@@ -515,7 +641,8 @@
             try {
                 const getApp = () => typeof App !== 'undefined' ? App : root.App;
                 const context = captureExportContext(getApp);
-                const selected = await selectReportOptions(doc,context.canIncludeCeCv);
+                const selected = await selectReportOptions(doc,context.canIncludeCeCv,
+                    typeof getApp().getRatioDefinitions==='function' && getApp().getRatioDefinitions().length>0);
                 if (!selected) return null;
                 const includeCeCv = selected.includeCeCv === true;
                 context.assertCurrent();
@@ -556,7 +683,8 @@
                     findCompoundMeta: (project, key) => findCompoundMeta(project, key),
                     formatDisplayName: key => formatDisplayName(key),
                     yieldControl: () => new Promise(resolve => setTimeout(resolve, 0)) },
-                { includeCeCv, useDisplayStyle:selected.useDisplayStyle, signal: controller.signal, onProgress: event => progress && progress.update(event) });
+                { includeCeCv, includeRatios:selected.includeRatios,useDisplayStyle:selected.useDisplayStyle,
+                    signal: controller.signal, onProgress: event => progress && progress.update(event) });
                 progress = openProgress(doc, () => controller.abort());
                 if (button) { button.disabled = true; button.setAttribute('aria-busy', 'true'); }
                 const libs = root.LAZY_LIBS || {};

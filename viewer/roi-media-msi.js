@@ -78,15 +78,17 @@
   // normalization is not reimplemented. Native values, when available, bypass
   // the 8-bit PNG round trip in exactly the same way as renderComposite.
   function colorize(source, options) {
-    const o = options || {}, {width,height} = dimensions(source);
+    const o = options || {}, {width,height} = dimensions(source || (o.numericOnly && o.valueRaster
+      ? {width:o.valueRaster.W,height:o.valueRaster.H}:null));
     if (typeof o.evaluateValue !== 'function' || typeof o.evaluateLuminance !== 'function'
         || !Array.isArray(o.lut) || o.lut.length !== 256) throw new Error('MSIの配色設定が不正です。');
     const canvas = newCanvas(o.createCanvas,width,height), ctx = canvas.getContext('2d', {willReadFrequently:true});
     ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(source,0,0);
+    if(source)ctx.drawImage(source,0,0);
     const pixels = ctx.getImageData(0,0,width,height), d = pixels.data;
     const vr = o.valueRaster, keep = o.keepGrid;
     const useValues = !!(vr && vr.W === width && vr.H === height && vr.values && vr.values.length === width*height);
+    if(o.numericOnly && !useValues)throw new Error('比の元の数値に対応するラスターがありません。');
     const useKeep = !!(keep && keep.W === width && keep.H === height && keep.keep && keep.keep.length === width*height);
     const strength=o.smoothing==='median'?MsiSmoothing.normalizeLevel(o.smoothingStrength):0;
     const valid=strength>0?new Uint8Array(width*height):null;
@@ -96,7 +98,9 @@
     const fallbackMax = Number.isFinite(o.fallbackMax) ? o.fallbackMax : (rawRange ? rawRange[1] : 255);
     for (let i=0;i<d.length;i+=4) {
       let color = bg;
-      if (d[i+3] !== 0 && !(useKeep && keep.keep[i/4] === 0)) {
+      const numericValid=!o.numericOnly || Number.isFinite(vr.values[i/4])
+        && (!vr.measuredMask || !!vr.measuredMask[i/4]) && (!vr.validMask || !!vr.validMask[i/4]);
+      if ((o.numericOnly || d[i+3] !== 0) && numericValid && !(useKeep && keep.keep[i/4] === 0)) {
         const value = useValues ? vr.values[i/4] : NaN;
         const ev = Number.isFinite(value) ? o.evaluateValue(value,o.window,fallbackMax)
           : o.evaluateLuminance(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2],rawRange,o.window);

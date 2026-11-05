@@ -3,7 +3,9 @@
 <head>
 <script src="runtime-config.js"></script>
 <script src="app-runtime.js"></script>
+<link rel="stylesheet" href="help.css">
 <script src="offline/offline.js"></script>
+<script defer src="help.js"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
@@ -151,6 +153,7 @@
       <p class="text-xs text-gray-500 mt-1">測定に使えるMRM (プリカーサー / フラグメント / CE / CV) を化合物・タグ別に登録し、使用したプロジェクト/サンプルへ遡れます</p>
     </div>
     <div class="flex items-center gap-2">
+      <button id="btn-help" class="btn" onclick="GuidedHelp.open({role:'manage',mode:window.DESI_OFFLINE?'offline':'online',chapter:'mrm'})">Help</button>
       <button id="btn-back" class="btn">← Projects</button>
     </div>
   </header>

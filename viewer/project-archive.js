@@ -8,6 +8,11 @@
     const bases = new Set(['registered-source', 'legacy-v1-file', 'legacy-v2-file', 'legacy-derived-csv', 'unknown']);
     const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
     const activeJobs = new Set();
+    function ratioModel() {
+        const model=typeof module==='object'&&module.exports?require('./msi-ratio-model.js'):root.MsiRatioModel;
+        if(!model)throw new Error('比の保存形式を検証できません。アプリを再読み込みしてください。');
+        return model;
+    }
     const identifier = value => typeof value === 'string' && value.length > 0
         && !['__proto__', 'constructor', 'prototype'].includes(value);
     function cancelled(signal) {
@@ -64,6 +69,10 @@
     }
     async function prepareImport(zip, originalDoc, options = {}) {
         const doc = clone(object(originalDoc, 'manifest')), overrides = new Map(), required = new Set();
+        // Inputs and section IDs are reconstructed later. Validate only the
+        // metadata contract here; unresolved references remain visible to users.
+        for(const meta of [doc.meta,doc.offlineSettings && doc.offlineSettings.meta])
+            if(meta && meta.msiRatios!=null)meta.msiRatios=ratioModel().normalizeRegistry(meta.msiRatios);
         const sectionIds = new Set(), counts = {registered: 0, legacyFiles: 0, legacyCsv: 0, unknown: 0, variants: 0};
         function requireFile(value, label) {
             const p = path(value);
@@ -265,9 +274,28 @@
         });
     }
     const derived = new Set(['rawRange', 'rawMean', 'rawTrueMax', 'rawDispMax', 'statMax', 'diag', 'sourceStats', 'sourceGeometry', 'rasterW', 'rasterH', 'legacyQuantAudit', 'quantVersion', 'sourceReference', 'storageRevision', 'updatedAt']);
-    function fingerprint(project) { return JSON.stringify(project, (key, value) => derived.has(key) ? undefined : value); }
+    function fingerprint(project) {
+        // Source references are derived for measured entries, but are binding
+        // identity inside a ratio. Capture the whole registry separately so a
+        // source-only edit cannot escape an in-flight archive's change guard.
+        return JSON.stringify([JSON.stringify(project, (key, value) => derived.has(key) ? undefined : value),
+            project && project.meta && project.meta.msiRatios || null]);
+    }
     async function beginExport(project, storage, options = {}) {
         const snapshot = clone(project), signature = fingerprint(project), records = new Map(), media = new Map(), missing = [];
+        if(options.ratioRegistry!==undefined) {
+            snapshot.meta=snapshot.meta || {};
+            snapshot.meta.msiRatios=clone(options.ratioRegistry);
+        }
+        const currentRatioRegistry=options.ratioRegistry!==undefined && options.currentRatioRegistry;
+        const ratioSignature=currentRatioRegistry
+            ? JSON.stringify(snapshot.meta && snapshot.meta.msiRatios || null) : null;
+        if(snapshot.meta && snapshot.meta.msiRatios!=null) {
+            const model=ratioModel();
+            const check=model.validateProjectReferences(snapshot);
+            if(!check.valid)throw new Error('比の入力参照を確認してください。修復または除外してからZIPへ保存してください: '+check.errors.join('; '));
+            snapshot.meta.msiRatios=model.normalizeRegistry(snapshot.meta.msiRatios);
+        }
         const job = {id: id(), kind: 'zip-export', state: 'staging', ownedBlobIds: [], createdAt: Date.now()};
         // Hold the Web Lock until close; recovery in another tab cannot reclaim a running export.
         let release, ready;
@@ -279,6 +307,8 @@
             cancelled(options.signal);
             if ((options.currentProject && options.currentProject() !== project) || fingerprint(project) !== signature)
                 throw new Error('ZIP 作成中にプロジェクトが変更されました。再実行してください / Project changed during ZIP export');
+            if(currentRatioRegistry && JSON.stringify(currentRatioRegistry() || null)!==ratioSignature)
+                throw new Error('ZIP 作成中にこのタブの比が変更されました。再実行してください / Ratios changed during ZIP export');
         }
         async function close() {
             try { await cleanup(storage, job); }

@@ -10,6 +10,12 @@
 <script src="../offline/offline.js"></script>
 <script src="msi-smoothing.js"></script>
 <script src="msi-roi-range.js"></script>
+<script src="msi-ratio-core.js"></script>
+<script src="msi-ratio-model.js"></script>
+<script src="msi-ratio-app.js"></script>
+<link rel="stylesheet" href="msi-ratio.css">
+<link rel="stylesheet" href="../help.css">
+<script defer src="../help.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
@@ -1250,11 +1256,55 @@ function getMsiColor(key) {
 
 function formatDisplayName(key) {
     if (!key) return '';
+    if (isRatioDisplayKey(key) && window.MsiRatioRuntime) {
+        const def = window.MsiRatioRuntime.definitions().find(d => MsiRatioModel.displayKey(d.id) === key);
+        if (def) return ratioSafeName(def.name);
+    }
     if (/^MSI_/i.test(key)) return key.substring(4);
     if (key === 'HE_STAIN_TIC') return 'TIC backdrop (auto)';
     if (/HE_STAIN/i.test(key)) return 'HE Stain';
     if (/IF_STAIN/i.test(key)) return 'IF Stain';
     return String(key).replace(/_/g, ' ');
+}
+
+// Virtual display layers are never inserted into the measured msiSeries registry.
+function isRatioDisplayKey(key) {
+    return typeof MsiRatioModel !== 'undefined' && !!window.MsiRatioRuntime
+        && MsiRatioModel.isRatioKey(key,{schemaVersion:1,definitions:window.MsiRatioRuntime.definitions()});
+}
+function displayMsiEntry(section, key) {
+    return section && section.msiSeries && section.msiSeries[key]
+        || (window.MsiRatioRuntime && isRatioDisplayKey(key) ? window.MsiRatioRuntime.entry(section,key) : null);
+}
+function displayMsiKeys(section) {
+    return [...Object.keys(section && section.msiSeries || {}),
+        ...(window.MsiRatioRuntime ? window.MsiRatioRuntime.definitions()
+            .filter(d => d.bindings && (d.bindings[MsiRatioModel.canonicalSectionId(section)] || d.bindings[section.id]))
+            .map(d => MsiRatioModel.displayKey(d.id)) : [])];
+}
+function ratioSafeName(name) {
+    if (typeof App !== 'undefined' && (App.shareMode || App.project && App.project.__share)
+        && !(App.shareMode && App.shareMode.role === 'admin')) {
+        return String(name || '').split(' / ').map(part => splitCeCv(part).base
+            .replace(/\b(?:CE|CV)\s*[:=]?\s*[+-]?\d+(?:\.\d+)?\s*(?:eV|V)?/gi,'').trim()).join(' / ');
+    }
+    return String(name || '');
+}
+function ratioInputDetails(section, key) {
+    const entry = section.msiSeries[key], meta = entry.compoundMeta || {};
+    if ((App.shareMode || App.project && App.project.__share) && App.shareMode?.role !== 'admin') {
+        const publicDetails = ['候補 ' + (Object.keys(section.msiSeries).indexOf(key) + 1)];
+        if (meta.precursor != null || meta.product != null) publicDetails.push((meta.precursor ?? '—') + ' → ' + (meta.product ?? '—'));
+        return publicDetails.join(' · ');
+    }
+    const details = [entry.filename, entry.sheet, entry.kind === 'raw' ? 'Function ' + (entry.func || 1) + ' / channel ' + (entry.channel || 0)
+        : entry.v || entry.col_v || (Number.isFinite(entry.colIdx) ? 'column ' + entry.colIdx : '')];
+    if (meta.precursor != null || meta.product != null) details.push((meta.precursor ?? '—') + ' → ' + (meta.product ?? '—'));
+    if (!App.shareMode || App.shareMode.role === 'admin') {
+        if (meta.ce != null) details.push('CE ' + meta.ce);
+        if (meta.cv != null) details.push('CV ' + meta.cv);
+    }
+    return ratioSafeName(details.filter(Boolean).join(' · '));
 }
 
 // Strip the trailing _<int>_<int> (CE / CV) from a compound label.
@@ -1877,6 +1927,8 @@ function msiDisplayContextKey(app) {
         : ['local', project.id]);
 }
 function msiDisplayMeasurementSignature(project, key) {
+    if (isRatioDisplayKey(key) && typeof App !== 'undefined' && App.ratioSignature)
+        return JSON.stringify((project.sections || []).map(sec => [sec.id, App.ratioSignature(sec, key)]));
     return JSON.stringify((project.sections || []).filter(sec => sec.msiSeries && sec.msiSeries[key])
         .map(sec => {
             const e = sec.msiSeries[key];
@@ -1940,7 +1992,7 @@ function resolveMsiPhysicalCalibration(section, key) {
         unit: 'um/display-pixel', registeredPitch: pitch, reason,
         evidence: { basis: 'registered-raster-pixel', sourceRef: sourceRef || null } });
     if (!pitch) return result('unknown', null, 'missing-or-invalid-calibration');
-    const ent = section && section.msiSeries && section.msiSeries[key];
+    const ent = section && displayMsiEntry(section, key);
     const g = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section, key) : null;
     if (!g) return ent && ['raw','parquet','txt','txt-analyte','xlsx'].includes(ent.kind)
         ? result('pending', null, 'source-geometry-not-loaded')
@@ -1975,7 +2027,7 @@ function resolveMsiCoordinateCalibration(section, key) {
         unit: 'um/display-pixel', registeredPitch: pitch, reason,
         evidence: { basis: 'registered-legacy-pixel', sourceRef: sourceRef || null } });
     if (!pitch) return result('unknown', null, 'missing-or-invalid-calibration');
-    const ent = section && section.msiSeries && section.msiSeries[key];
+    const ent = section && displayMsiEntry(section, key);
     const g = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section, key) : null;
     if (!g) return ent && ['raw','parquet','txt','txt-analyte','xlsx'].includes(ent.kind)
         ? result('pending', null, 'source-geometry-not-loaded')
@@ -3838,7 +3890,23 @@ function msiSourceReference(ent) {
 // its intensity column. Keep the complete canonical key (rather than a hash)
 // so distinct coordinates cannot collide and accidentally reuse landmarks.
 function alignmentFrameDescriptor(section, key, panel) {
-    const e=(section&&section.msiSeries&&section.msiSeries[key])||{};
+    if(isRatioDisplayKey(key)) {
+        try {
+            const inputs=window.MsiRatioRuntime.inputs(section,key);
+            const numerator=alignmentFrameDescriptor(section,inputs.x.key,panel);
+            const denominator=alignmentFrameDescriptor(section,inputs.y.key,panel);
+            // A ratio uses X's native frame, but HE/IF registration must also
+            // agree with Y. Keep both confirmed bases for the read-only resolver.
+            return {...numerator,ratioInputs:{numerator:{key:inputs.x.key,frame:numerator},
+                denominator:{key:inputs.y.key,frame:denominator}}};
+        } catch (_) {
+            return {version:'msi-alignment-frame-v1',key:JSON.stringify(['ratio-unresolved',key]),
+                measurementKey:null,readerKey:null,sourceFileId:null,coordinateKey:null,
+                confirmed:false,reason:'ratio-input-unavailable',geometry:null};
+        }
+    }
+    const sourceKey=key;
+    const e=(section&&section.msiSeries&&section.msiSeries[sourceKey])||{};
     let frozen=null;
     try { const v=JSON.parse(e.sourceReference||'null'); if(Array.isArray(v)&&v.length>=6)frozen=v; } catch (_) {}
     const sourceId=(frozen&&frozen[0])||e.sourceFileId||e.sourceReference||e.blobId||e.storagePath||e.sourceUrl||'';
@@ -3987,6 +4055,22 @@ function resolveHeMsiAlignment(section, heKey, msiKey, panel, knownFrame) {
         Object.keys(r.byFrame||{}).length||Object.keys(r.sharedByCoordinate||{}).length));
     const result=(T,record,origin,reason)=>({T,record,origin,reason,frame,
         status:T?'ready':reason==='loading'?'loading':'unavailable'});
+    if(isRatioDisplayKey(msiKey)) {
+        const inputs=frame.ratioInputs;
+        if(!inputs)return result(null,null,'ratio','ratio-input-unavailable');
+        const x=inputs.numerator,y=inputs.denominator;
+        // The affine is expressed in legacy MSI pixel edges. Equal raster
+        // sizes or equal raw coordinate sets alone cannot establish that basis.
+        if(!x.frame.confirmed||!y.frame.confirmed||x.frame.coordinateKey!==y.frame.coordinateKey)
+            return result(null,null,'ratio','ratio-coordinate-mismatch');
+        const a=resolveHeMsiAlignment(section,layerKey,x.key,panel,x.frame);
+        const b=resolveHeMsiAlignment(section,layerKey,y.key,panel,y.frame);
+        if(!a.T||!b.T)return result(null,null,'ratio',!a.T?a.reason:b.reason);
+        const same=a.T.every((row,i)=>row.every((value,j)=>Math.abs(value-b.T[i][j])
+            <=1e-9*Math.max(1,Math.abs(value),Math.abs(b.T[i][j]))));
+        if(!same)return result(null,null,'ratio','ratio-transform-mismatch');
+        return result(a.T,a.record,'ratio',null);
+    }
     if(!managed) {
         const fid=frame.sourceFileId,bySource=wc.T_he_to_msi_by_source||{};
         let T=wc.T_he_to_msi||null;
@@ -4039,6 +4123,9 @@ function alignmentUnavailableReason(section, heKey, msiKey, panel) {
         'unsupported-basis':'保存済みの座標系を確認できません',
         'invalid-record':'保存済みの位置合わせ設定を確認できません',
         'invalid-transform':'保存済みの変換設定を確認できません',
+        'ratio-input-unavailable':'比のX/Yの位置合わせを確認できません',
+        'ratio-coordinate-mismatch':'比のX/Yの座標配置が異なるためHE/IFを重ねられません',
+        'ratio-transform-mismatch':'比のX/YでHE/IFの位置合わせが一致しません',
         'no-alignment':'このソースの位置合わせが保存されていません'})[resolved.reason]||'';
 }
 function createMsiSourceGeometry(rows, ent, legacyColumns) {
@@ -4540,6 +4627,7 @@ function _roiGridCacheSet(key, val) {
 // 同時に materialize する列は LRU 上限まで — 1 ソースに数千 feature がある構成で
 // メモリを線形に食わないため。要求されたレイヤーを必ず先頭に置く。
 async function _ensureRoiRawGrid(section, layerKey) {
+    if (isRatioDisplayKey(layerKey) && App.ratioRawGrid) return App.ratioRawGrid(section, layerKey);
     const series = (section && section.msiSeries) || {};
     const ent = series[layerKey];
     // ★ blobId の有無だけで弾いてはいけない。**共有先の parquet は blobId が null**
@@ -4604,6 +4692,58 @@ async function _ensureRoiRawGrid(section, layerKey) {
         if(col.layerKey===layerKey)want=grid;
     }
     return want;
+}
+
+// A ratio may request two columns from one original table. Share only the parse
+// and original positions; build each feature's ordinary ROI geometry/statistics
+// independently so legacy-coordinate and precision guards stay unchanged.
+const _ratioInputGridInFlight = new WeakMap();
+async function _ensureRatioInputGrids(section, numeratorKey, denominatorKey) {
+    if(numeratorKey===denominatorKey){const grid=await _ensureRoiRawGrid(section,numeratorKey);return [grid,grid];}
+    const series=section&&section.msiSeries||{},x=series[numeratorKey],y=series[denominatorKey];
+    const fallback=()=>Promise.all([_ensureRoiRawGrid(section,numeratorKey),_ensureRoiRawGrid(section,denominatorKey)]);
+    if(!x||!y||!x.blobId||x.blobId!==y.blobId||x.kind==='parquet'||y.kind==='parquet'
+        ||msiOtsuSourceKey(x)!==msiOtsuSourceKey(y))return fallback();
+    try {
+        const xr=MsiRatioModel.makeInputRef(x,numeratorKey),yr=MsiRatioModel.makeInputRef(y,denominatorKey);
+        if(MsiRatioModel.fingerprint(xr.reader)!==MsiRatioModel.fingerprint(yr.reader)
+            ||((x.kind==='raw'||y.kind==='raw')&&(x.snap!==false)!==(y.snap!==false)))return fallback();
+    }catch(_){return fallback();}
+    const xCacheKey=_roiGridKey(section,numeratorKey,x),yCacheKey=_roiGridKey(section,denominatorKey,y);
+    const xHit=_roiGridCacheGet(xCacheKey),yHit=_roiGridCacheGet(yCacheKey);
+    if(xHit||yHit)return [xHit||await _ensureRoiRawGrid(section,numeratorKey),yHit||await _ensureRoiRawGrid(section,denominatorKey)];
+    let pending=_ratioInputGridInFlight.get(section);
+    if(!pending){pending=new Map();_ratioInputGridInFlight.set(section,pending);}
+    const pairKey=JSON.stringify([xCacheKey,yCacheKey].sort());
+    if(pending.has(pairKey)){const grids=await pending.get(pairKey);return [grids.get(numeratorKey)||null,grids.get(denominatorKey)||null];}
+    const owner=App.project,blobId=x.blobId;
+    const current=()=>App.project===owner&&section.msiSeries===series&&series[numeratorKey]===x&&series[denominatorKey]===y
+        &&x.blobId===blobId&&y.blobId===blobId&&_roiGridKey(section,numeratorKey,x)===xCacheKey&&_roiGridKey(section,denominatorKey,y)===yCacheKey;
+    const job=(async()=>{
+        const out=new Map();
+        try {
+            const record=await ensureLocalBlob(x,owner);
+            if(!record||!record.blob||!current())return out;
+            const matrix=await extractSourceMatrixForExport(await record.blob.arrayBuffer(),x,
+                [{layerKey:numeratorKey,ent:x},{layerKey:denominatorKey,ent:y}]);
+            if(!current()||!matrix||!matrix.positions||!matrix.positions.length||!matrix.cols)return out;
+            for(const [key,ent,cacheKey] of [[numeratorKey,x,xCacheKey],[denominatorKey,y,yCacheKey]]){
+                const col=matrix.cols.find(item=>item.layerKey===key);if(!col)return new Map();
+                const sourceGeometry=createMsiSourceGeometry(matrix.positions,ent,[col]);
+                const rows=msiMatrixRows(matrix.positions,col,matrix.rowIds);
+                const grid={W:sourceGeometry.displayGeometry.W,H:sourceGeometry.displayGeometry.H,
+                    rows,sourceGeometry,sourceStats:msiSourceStats(rows)};
+                out.set(key,grid);
+                if(!current())return new Map();
+            }
+            // Commit both only after both ordinary grids succeeded.
+            _roiGridCacheSet(xCacheKey,out.get(numeratorKey));_roiGridCacheSet(yCacheKey,out.get(denominatorKey));
+        }catch(error){console.warn('[ratio] paired source read failed',error);return new Map();}
+        return out;
+    })();
+    pending.set(pairKey,job);
+    try{const grids=await job;return [grids.get(numeratorKey)||null,grids.get(denominatorKey)||null];}
+    finally{if(pending.get(pairKey)===job)pending.delete(pairKey);}
 }
 
 // 1 切片の全ソースファイルについて TIC ベースの Otsu マスクを計算する(非破壊)。
@@ -4793,6 +4933,7 @@ function otsuKeepGridForLayer(section, layerKey) {
 // ★ 描画経路は必ず otsuKeepGridForLayer のほうを使うこと。こちらを描画で使うと
 //   ユーザが背景除去を OFF にしても背景が消えてしまう。
 function _otsuKeepGridRaw(section, layerKey) {
+    if (isRatioDisplayKey(layerKey) && App.ratioKeepGrid) return App.ratioKeepGrid(section, layerKey);
     const otsu = section && section.meta && section.meta.otsu;
     if (!otsu || !otsu.bySource) return null;
     const ent = section.msiSeries && section.msiSeries[layerKey];
@@ -7766,7 +7907,7 @@ class SectionPanel {
     // ため在庫の列挙に imageSources を使っている箇所が多数ある。ここを境界にして、
     // 在庫は section.images / section.msiSeries から引く。
     registeredMsiKeys() {
-        return Object.keys(this.section.msiSeries || {}).filter(k => /^MSI_/i.test(k));
+        return displayMsiKeys(this.section).filter(k => /^MSI_/i.test(k));
     }
     // 登録済みの全レイヤーキー。合成 TIC (HE_STAIN_TIC) は section.images に
     // 意図的に書かれない (ensureTicBackdrop のコメント参照) ので imageSources から拾う。
@@ -7784,7 +7925,7 @@ class SectionPanel {
     msiRasterSize(key) {
         const img = this.imageSources[key];
         if (img && img.naturalWidth > 0) return { w: img.naturalWidth, h: img.naturalHeight };
-        const ent = (this.section.msiSeries || {})[key];
+        const ent = displayMsiEntry(this.section, key);
         if (ent && Number.isFinite(ent.rasterW) && Number.isFinite(ent.rasterH)
             && ent.rasterW > 0 && ent.rasterH > 0) return { w: ent.rasterW, h: ent.rasterH };
         return null;
@@ -7793,7 +7934,8 @@ class SectionPanel {
     // 表示に必要になった MSI レイヤーだけを読み込む。同じキーへの同時要求は 1 本の
     // Promise にまとめる (サムネイルの可視化と本描画が同時に要求しうるため)。
     _msiLoadIdentity(key) {
-        const e = (this.section.msiSeries || {})[key] || {};
+        if (isRatioDisplayKey(key) && App.ratioSignature) return App.ratioSignature(this.section,key);
+        const e = displayMsiEntry(this.section, key) || {};
         return JSON.stringify([this._loadEpoch || 0, e.blobId, e.sourceUrl, e.sourceFileId,
             e.sourceRevision, e.sourceHash, e.kind, e.sheet, e.func, e.col_x, e.col_y,
             e.x, e.y, e.col_v, e.v, e.colIdx, e.channel, e.compound_index, e.v_index,
@@ -7809,12 +7951,17 @@ class SectionPanel {
     }
 
     ensureMsiLayerLoaded(key, options = {}) {
+        if (isRatioDisplayKey(key) && App.loadRatioLayer) {
+            if (this._destroyed) return Promise.resolve(false);
+            if (options.retry === false && this._msiLoadErrors.get(key)?.identity === this._msiLoadIdentity(key)) return Promise.resolve(false);
+            return App.loadRatioLayer(this,key);
+        }
         if (this._destroyed || !key || !/^MSI_/i.test(key)) return Promise.resolve(false);
         const identity = this._msiLoadIdentity(key);
         const inflight = this._msiLoadInFlight.get(key);
         if (inflight && inflight.identity === identity) return inflight;
         if (this.isMsiLayerReady(key)) { this._touchMsiLru(key); return Promise.resolve(true); }
-        const ent = (this.section.msiSeries || {})[key];
+        const ent = displayMsiEntry(this.section, key);
         if (!ent || (!ent.blobId && !ent.sourceUrl)) return Promise.resolve(false);
         const errors = this._msiLoadErrors || (this._msiLoadErrors = new Map());
         if (options.retry === false && errors.get(key)?.identity === identity) return Promise.resolve(false);
@@ -7933,8 +8080,8 @@ class SectionPanel {
         for (const key of this._drawableMsiKeys) {
             if (this.isMsiLayerReady(key)) continue;
             const identity = this._msiLoadIdentity(key);
-            const ent = (this.section.msiSeries || {})[key];
-            if (!ent || (!ent.blobId && !ent.sourceUrl)) continue;
+            const ent = displayMsiEntry(this.section, key);
+            if (!ent || (ent.kind !== 'ratio' && !ent.blobId && !ent.sourceUrl)) continue;
             if (this._msiLoadErrors?.get(key)?.identity === identity) continue;
             if (waiters.get(key)?.identity === identity) continue;
             const promise = this.ensureMsiLayerLoaded(key, { retry:false });
@@ -7965,9 +8112,9 @@ class SectionPanel {
         const failed = [], loading = [], missing = [], unavailable = [];
         for (const key of keys) {
             if (this.isMsiLayerReady(key)) continue;
-            const ent = (this.section.msiSeries || {})[key];
+            const ent = displayMsiEntry(this.section, key);
             if (!ent) missing.push(key);
-            else if (!ent.blobId && !ent.sourceUrl) unavailable.push(key);
+            else if (ent.kind !== 'ratio' && !ent.blobId && !ent.sourceUrl) unavailable.push(key);
             else if (this._msiLoadErrors?.has(key)) failed.push(key);
             else loading.push(key);
         }
@@ -8047,7 +8194,7 @@ class SectionPanel {
 
     async loadMsiLayer(key, ent) {
         const identity = this._msiLoadIdentity(key);
-        const current = () => !this._destroyed && (this.section.msiSeries || {})[key] === ent
+        const current = () => !this._destroyed && displayMsiEntry(this.section, key) === ent
             && identity === this._msiLoadIdentity(key);
         // ★ ここは無言で return してはいけない。
         //   以前は「登録は在るのに元データが無い」ときに黙って返していたので、
@@ -8137,7 +8284,7 @@ class SectionPanel {
         // 旧プロジェクトには無いので、初回読み込み時にバックフィルする。
         const rasterW = (result && typeof result === 'object' && Number.isFinite(result.width)) ? result.width : null;
         const rasterH = (result && typeof result === 'object' && Number.isFinite(result.height)) ? result.height : null;
-        if (this.section.msiSeries && this.section.msiSeries[key]) {
+        if (displayMsiEntry(this.section, key)) {
             const entRef = this.section.msiSeries[key];
             // ★ 「欠けていたか」ではなく「実際に変わったか」で判断する。
             //
@@ -8395,6 +8542,7 @@ class SectionPanel {
     //   バイト単位で一致する** (tic_speed_test.js で固定)。PNG のデコードと
     //   キャンバス読み戻しがまるごと不要になる。
     async _generateSyntheticTic(msiKeys) {
+        msiKeys = msiKeys.filter(key => !isRatioDisplayKey(key));
         // 基準寸法。ent の記録から取れるので、まだ 1 枚も読んでいなくても決まる。
         let ref = null;
         for (const k of msiKeys) { ref = this.msiRasterSize(k); if (ref) break; }
@@ -8410,7 +8558,7 @@ class SectionPanel {
                 try { await this.ensureMsiLayerLoaded(key); } catch (e) { continue; }
             }
             const vr = this.msiValueRasters.get(key);
-            const ent = (this.section.msiSeries || {})[key];
+            const ent = displayMsiEntry(this.section, key);
             const rr = ent && ent.rawRange;
             if (vr && vr.W === w && vr.H === h && vr.values
                 && Array.isArray(rr) && Number.isFinite(rr[0]) && rr[1] > rr[0]) {
@@ -8518,6 +8666,7 @@ class SectionPanel {
             && this.msiRasterSize(App.focusCompoundKey)) {
             return App.focusCompoundKey;
         }
+        if (this.activeMsiKey && this.msiRasterSize(this.activeMsiKey)) return this.activeMsiKey;
         const loaded = Object.keys(this.imageSources).find(k => /^MSI_/i.test(k));
         if (loaded) return loaded;
         return this.registeredMsiKeys().find(k => this.msiRasterSize(k)) || null;
@@ -8526,7 +8675,8 @@ class SectionPanel {
     _refSourceFileId() {
         const refKey = this._pickRefMsiKey();
         if (!refKey) return null;
-        const ent = this.section.msiSeries && this.section.msiSeries[refKey];
+        const sourceKey = isRatioDisplayKey(refKey) && App.ratioSourceKey ? App.ratioSourceKey(this.section, refKey) : refKey;
+        const ent = this.section.msiSeries && this.section.msiSeries[sourceKey];
         return (ent && ent.sourceFileId) || null;
     }
 
@@ -8841,7 +8991,7 @@ class SectionPanel {
             // rotate-90 path below.
             const isHeLike = /HE_STAIN|IF_STAIN/i.test(key) && !isTicBackdrop;
             const T = isHeLike ? this._resolveTHeToMsi(key) : null;
-            if(isHeLike&&hasMsiRef&&alignmentManaged&&!T) {
+            if(isHeLike&&hasMsiRef&&(alignmentManaged||isRatioDisplayKey(this._pickRefMsiKey()))&&!T) {
                 const name=(this.section.images&&this.section.images[key]&&this.section.images[key].filename)||key;
                 alignmentUnavailable.push(name+'（'+alignmentUnavailableReason(this.section,key,this._pickRefMsiKey(),this)+'）');
                 // A frame-managed image with no verified transform must never
@@ -8859,8 +9009,8 @@ class SectionPanel {
                 // Per-section display window (raw units, HDI style): rrC is this
                 // layer's raw range; winC defaults to that range (auto-scale) or
                 // the user's manual min/max. msiWindowEval maps each pixel into it.
-                const rrC = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
-                const entC = (this.section.msiSeries && this.section.msiSeries[key]) || {};
+                const rrC = (displayMsiEntry(this.section, key)) ? displayMsiEntry(this.section, key).rawRange : null;
+                const entC = (displayMsiEntry(this.section, key)) || {};
                 const winC = App.getMsiWindow(key, rrC, entC.rawDispMax, entC.rawTrueMax, this.section);
                 const ovColor = overlay ? (overlayColor[key] || '#ffffff') : null;
                 const ovScale = (overlay && overlayScale) ? (overlayScale[ovColor] || 1) : 1;
@@ -9416,7 +9566,7 @@ class SectionPanel {
                 ensure('__images__', 'HE / IF').keys.push(key);
                 continue;
             }
-            const ent = (this.section.msiSeries || {})[key];
+            const ent = displayMsiEntry(this.section, key);
             const fid = ent && ent.sourceFileId;
             if (fid) {
                 const file = (this.section.msiFiles || {})[fid];
@@ -9430,7 +9580,7 @@ class SectionPanel {
             const chip = document.createElement('div');
             const isMsiKey = /^MSI_/i.test(key);
             chip.className = 'layer-chip' + (this.visibleLayers.has(key) ? ' on' : '') + (isMsiKey ? ' msi' : '');
-            const ent = (this.section.msiSeries || {})[key];
+            const ent = displayMsiEntry(this.section, key);
             const meta = ent && ent.compoundMeta;
             const fullLabel = (meta && meta.base) || formatDisplayName(key);
             // Show a colour dot. For MSI layers the marker colour wins (if set);
@@ -9511,7 +9661,7 @@ class SectionPanel {
                 cBtn.addEventListener('click', (ev) => {
                     ev.preventDefault(); ev.stopPropagation();
                     const targets = group.keys.slice().filter(k => {
-                        const e = (this.section.msiSeries || {})[k];
+                        const e = displayMsiEntry(this.section, k);
                         return e && e.compoundMeta && e.compoundMeta.legacy === true;
                     });
                     if (!targets.length) return;
@@ -9625,7 +9775,7 @@ class SectionPanel {
         const cell = this.dom && this.dom.canvasCell;
         if (!cell) return;
         const key = this.activeMsiKey;
-        const ent = key && this.section.msiSeries && this.section.msiSeries[key];
+        const ent = key && displayMsiEntry(this.section, key);
         const color = ent && ent.markerColor ? ent.markerColor : null;
         if (color) {
             cell.style.outline = '3px solid ' + color;
@@ -9642,7 +9792,7 @@ class SectionPanel {
     effectiveActiveMsiKey() {
         if (App.viewMode === 'compound' && App.focusCompoundKey) {
             const k = App.focusCompoundKey;
-            if ((this.section.msiSeries || {})[k] || this.imageSources[k]) return k;
+            if (displayMsiEntry(this.section, k) || this.imageSources[k]) return k;
         }
         return this.activeMsiKey;
     }
@@ -9653,7 +9803,7 @@ class SectionPanel {
     getRangeState() {
         const key = this.effectiveActiveMsiKey();
         if (!key || !this.imageSettings[key]) return { available: false };
-        const ent = (this.section.msiSeries || {})[key] || {};
+        const ent = displayMsiEntry(this.section, key) || {};
         const meta = ent.compoundMeta;
         const baseLabel = (meta && meta.base) || formatDisplayName(key);
         // Display window in raw units (per-section): default = the section's own
@@ -9669,6 +9819,7 @@ class SectionPanel {
     applyRangeRaw(edge, rawValue) {
         const key = this.effectiveActiveMsiKey();
         if (!key) return;
+        if (isRatioDisplayKey(key) && App.updateRatioRange) { App.updateRatioRange(key, this.section, edge, rawValue); return; }
         ensureMsiDisplayContext(App, key);
         const v = parseFloat(rawValue);
         if (!Number.isFinite(v)) return;
@@ -9703,6 +9854,7 @@ class SectionPanel {
     resetRange() {
         const key = this.effectiveActiveMsiKey();
         if (!key) return;
+        if (isRatioDisplayKey(key) && App.updateRatioRange) { App.updateRatioRange(key, this.section, 'reset'); return; }
         ensureMsiDisplayContext(App, key);
         const windows = App.roiOnlyMode ? App.msiRoiUserWindow : App.msiUserWindow;
         if (windows) delete windows[key];
@@ -9838,7 +9990,7 @@ class SectionPanel {
     // keepBlob = IndexedDB の実体は残す。位置合わせの master/共有 切り替えで
     // レイヤーを載せ降ろしするときに使う (毎回 Storage から取り直すのは無駄)。
     removeLayer(key, skipConfirm, keepBlob) {
-        const ent0 = (this.section.images || {})[key] || (this.section.msiSeries || {})[key];
+        const ent0 = (this.section.images || {})[key] || displayMsiEntry(this.section, key);
         // ★ 共有先が画面から消そうとしたとき (skipConfirm 無し = レイヤーの × ):
         //   自分たちが登録した画像はサーバからも消す。master が登録したものは
         //   共有先からは消させない (共有ドキュメントは master のもの)。
@@ -10175,7 +10327,7 @@ class SectionPanel {
         const outside = (ev) => { if (!pop.contains(ev.target)) onClose(); };
         setTimeout(() => document.addEventListener('mousedown', outside), 0);
 
-        const ent = (this.section.msiSeries || {})[key] || (this.section.images || {})[key];
+        const ent = displayMsiEntry(this.section, key) || (this.section.images || {})[key];
         const meta = ent && ent.compoundMeta;
         const title = (meta && meta.base) || formatDisplayName(key);
         const head = document.createElement('div');
@@ -10288,7 +10440,7 @@ class SectionPanel {
             // vmin/vmax window no longer affects rendering. Keep the inputs (the
             // change handlers below query .vmin/.vmax) but disable them and show
             // the observed raster range for reference.
-            const ent = (this.section.msiSeries && this.section.msiSeries[key]) || {};
+            const ent = (displayMsiEntry(this.section, key)) || {};
             const _win = App.getMsiWindow(key, ent.rawRange, ent.rawDispMax, ent.rawTrueMax, this.section);
             const rangeRow = mkRow('表示ウィンドウ (生単位 — ツールバーの Range で調整)',
                 '<div style="display:flex;gap:4px;"><input type="number" value="' + formatRawForInput(_win.min) + '" class="vmin" disabled title="表示ウィンドウ下限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"><input type="number" value="' + formatRawForInput(_win.max) + '" class="vmax" disabled title="表示ウィンドウ上限。ツールバーの Range で調整します" style="flex:1;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;background:#f1f5f9;color:#9ca3af;"></div>');
@@ -10300,7 +10452,7 @@ class SectionPanel {
             // compounds get baked differently and silently break cross-section
             // brightness). What stays here is the per-layer FACT the toolbar cannot
             // show: how many pixels of THIS image are actually sitting on the ceiling.
-            const _entB = (this.section.msiSeries && this.section.msiSeries[key]) || {};
+            const _entB = (displayMsiEntry(this.section, key)) || {};
             const clipOn = _entB.bakeMode !== 'full';
             const _d = _entB.diag || null;
             const clippedNote = (_d && _d.clippedHigh > 0)
@@ -10363,7 +10515,7 @@ class SectionPanel {
         } else {
             const vmin = pop.querySelector('.vmin');
             const vmax = pop.querySelector('.vmax');
-            const entR = (this.section.msiSeries || {})[key] || {};
+            const entR = displayMsiEntry(this.section, key) || {};
             const rawRangeR = entR.rawRange || null;
             // ② Persist + broadcast the full window so a per-layer Range edit in
             // the gear popover also keeps every same-MRM section identical.
@@ -10437,7 +10589,7 @@ class SectionPanel {
         }
         for (const k of allKeys) {
             if (!/^MSI_/i.test(k)) continue;
-            const ent = (this.section.msiSeries || {})[k];
+            const ent = displayMsiEntry(this.section, k);
             const fid = ent && ent.sourceFileId;
             if (fid) {
                 const file = (this.section.msiFiles || {})[fid];
@@ -10505,7 +10657,7 @@ class SectionPanel {
             cell.appendChild(box);
             const cap = document.createElement('div');
             cap.className = 'thumb-cap';
-            const ent = (this.section.msiSeries || {})[key];
+            const ent = displayMsiEntry(this.section, key);
             const meta = ent && ent.compoundMeta;
             cap.textContent = (meta && meta.base) || formatDisplayName(key);
             cap.title = formatDisplayName(key);
@@ -10525,7 +10677,7 @@ class SectionPanel {
                 }
             }
             this.dom.thumbCells.set(key, cell);
-            const ent2 = (this.section.msiSeries || {})[key];
+            const ent2 = displayMsiEntry(this.section, key);
             if (ent2 && ent2.markerColor) {
                 cell.style.outline = '3px solid ' + ent2.markerColor;
                 cell.style.outlineOffset = '-1px';
@@ -10640,8 +10792,8 @@ class SectionPanel {
         const data = ctx.getImageData(0, 0, c.width, c.height);
         const d = data.data;
         // Per-section display window (raw units), matching renderComposite.
-        const rrT = (this.section.msiSeries && this.section.msiSeries[key]) ? this.section.msiSeries[key].rawRange : null;
-        const entT = (this.section.msiSeries && this.section.msiSeries[key]) || {};
+        const rrT = (displayMsiEntry(this.section, key)) ? displayMsiEntry(this.section, key).rawRange : null;
+        const entT = (displayMsiEntry(this.section, key)) || {};
         const winT = App.getMsiWindow(key, rrT, entT.rawDispMax, entT.rawTrueMax, this.section);
         const lut = getActiveColormap();
         const bg = getColormapBackground();
@@ -18128,6 +18280,30 @@ function roiMediaRegistryFromDoc(doc) {
     return registry;
 }
 
+function ratioRegistryFromDoc(doc) {
+    const ids = Object.create(null);
+    for (const section of (doc.sections || [])) {
+        const id = MsiRatioModel.canonicalSectionId(section);
+        ids[section.id] = id;
+        if (section.client_id) ids[section.client_id] = id;
+        if (section.meta && section.meta.client_id) ids[section.meta.client_id] = id;
+    }
+    return MsiRatioModel.remapSections(doc.meta && doc.meta.project_meta && doc.meta.project_meta.msiRatios, ids);
+}
+
+async function ratioZipOptions() {
+    if (!App.shareMode || !App.getRatioDefinitions || !App.getRatioDefinitions().length) return {includePersonal:false};
+    const pending = openModal('<h2>比の設定をZIPに保存 / Ratio settings in ZIP</h2>'
+        + '<p>このタブの比・表示設定を含めると、ZIPから復元後も利用できます。共有先の設定は変更されません。</p>'
+        + '<label><input type="checkbox" data-ratio-zip-personal checked> このタブの比・表示設定を含める / Include this tab’s ratios and display settings</label>'
+        + '<p>チェックを外すと、公開済みの比定義のみを保存します。</p>'
+        + '<button class="btn" data-modal-cancel>キャンセル / Cancel</button> '
+        + '<button class="btn" data-modal-ok>ZIP作成 / Export ZIP</button>');
+    const card = document.querySelector('#modal-host .modal-backdrop:last-child .modal-card');
+    card._collect = () => ({includePersonal:card.querySelector('[data-ratio-zip-personal]').checked});
+    return pending;
+}
+
 async function exportProjectAsZip() {
     if (_exportInProgress) { showToast('Export already running'); return; }
     _exportInProgress = true;
@@ -18137,9 +18313,13 @@ async function exportProjectAsZip() {
         try { await loadScript(LAZY_LIBS.jszip); } catch (e) { alert('JSZip の読み込みに失敗しました'); return; }
         if (typeof JSZip === 'undefined') { alert('JSZip not loaded'); return; }
         if (!App.project) return;
+        const ratioOptions = await ratioZipOptions();
+        if (!ratioOptions) return;
+        const ratioRegistry = App.ratioExportRegistry ? App.ratioExportRegistry(ratioOptions.includePersonal) : undefined;
         const exportDisplaySettings = {otsuBgRemove: !!App.otsuBgRemove, otsuStrength: App.otsuStrength, otsuManualThreshold: App.otsuManualThreshold};
         exportSession = await ProjectArchive.beginExport(App.project, ProjectStorage, {
-            currentProject: () => App.project, readMedia: item => roiMediaReadOriginal(item)
+            currentProject: () => App.project, readMedia: item => roiMediaReadOriginal(item), ratioRegistry,
+            currentRatioRegistry: () => App.ratioExportRegistry ? App.ratioExportRegistry(ratioOptions.includePersonal) : undefined
         });
         const project = exportSession.project, snapshotStorage = exportSession.storage;
         freezeMsiSourceReferences(project);
@@ -19133,6 +19313,9 @@ function _readHelpAudience() {
 }
 
 async function openHelpModal(audience, lang) {
+    if (window.GuidedHelp) return GuidedHelp.open({audience,lang,
+        role:App.shareMode ? App.shareMode.role : 'master',
+        mode:window.DESI_OFFLINE ? 'offline' : 'online',chapter:'display'});
     const offline = typeof window !== 'undefined' && window.DESI_OFFLINE === true;
     const isShare = !!(typeof App !== 'undefined' && App && App.shareMode);
     if (isShare) {
@@ -19823,7 +20006,7 @@ const SharePreview = {
 
         const allKeys = new Set();
         for (const sec of project.sections) {
-            for (const k of Object.keys(sec.msiSeries || {})) {
+            for (const k of displayMsiKeys(sec)) {
                 if (/^MSI_/i.test(k)) allKeys.add(k);
             }
         }
@@ -19832,7 +20015,7 @@ const SharePreview = {
         // Preview Method panel agrees with the column-arrow indicator.
         const findEnt = (k) => {
             for (const sec of project.sections) {
-                const e = (sec.msiSeries || {})[k]; if (e) return e;
+                const e = displayMsiEntry(sec, k); if (e) return e;
             }
             return null;
         };
@@ -20219,7 +20402,7 @@ const SharePreview = {
                 // already-queued batch of worker jobs.
                 if (!this.isOpen() || project !== App.project || loadSeq !== this._focusLoadSeq || App.activeOverlay) return;
                 const panel = App.panels && App.panels.get(sec.id);
-                const ent = (sec.msiSeries || {})[nextKey];
+                const ent = displayMsiEntry(sec, nextKey);
                 if (!panel || !ent || panel.isMsiLayerReady(nextKey)) continue;
                 if (!ent.blobId && !ent.sourceUrl) continue;
                 try { await panel.ensureMsiLayerLoaded(nextKey); } catch (e) {}
@@ -20276,10 +20459,10 @@ const SharePreview = {
         for (const sec of (App.project.sections || [])) {
             const sid = String(sec.id);
             const panel = App.panels.get(sec.id);
-            const ent = (sec.msiSeries || {})[key];
+            const ent = displayMsiEntry(sec, key);
             if (!ent || !panel) continue;
             if (panel.isMsiLayerReady(key)) status.set(sid, 'ready');
-            else if (ent.blobId || ent.sourceUrl) {
+            else if (ent.kind === 'ratio' || ent.blobId || ent.sourceUrl) {
                 status.set(sid, 'loading');
                 pending.push({ sid, panel });
             } else status.set(sid, 'failed');
@@ -20342,6 +20525,10 @@ const SharePreview = {
         const apply = (edge, raw) => {
             const focusKey = App.focusCompoundKey;
             if (!focusKey) return;
+            if (isRatioDisplayKey(focusKey) && App.updateRatioRange) {
+                App.updateRatioRange(focusKey, App.panels.get(App.activeSectionId)?.section, edge, raw);
+                repaint(focusKey); return;
+            }
             const v = parseFloat(raw);
             if (!Number.isFinite(v)) return;
             ensureMsiDisplayContext(App, focusKey);
@@ -20361,6 +20548,10 @@ const SharePreview = {
         if (resetEl) resetEl.addEventListener('click', () => {
             const focusKey = App.focusCompoundKey;
             if (!focusKey) return;
+            if (isRatioDisplayKey(focusKey) && App.updateRatioRange) {
+                App.updateRatioRange(focusKey, App.panels.get(App.activeSectionId)?.section, 'reset');
+                repaint(focusKey); return;
+            }
             const windows = App.roiOnlyMode ? App.msiRoiUserWindow : App.msiUserWindow;
             if (windows) delete windows[focusKey];
             repaint(focusKey);
@@ -20445,7 +20636,7 @@ const SharePreview = {
             const active = App.panels.get(App.activeSectionId);
             for (const p of [active, ...App.panels.values()]) {
                 if (!p || (App._organInScope && !App._organInScope(p.section))) continue;
-                const ent = ((p.section && p.section.msiSeries) || {})[focusKey];
+                const ent = displayMsiEntry(p.section, focusKey);
                 if (ent && Array.isArray(ent.rawRange)) { rangeSection = p.section; rawRange = ent.rawRange; rawDispMax = ent.rawDispMax; rawTrueMax = ent.rawTrueMax; break; }
             }
         }
@@ -20460,7 +20651,8 @@ const SharePreview = {
         const win = App.getMsiWindow(focusKey, rawRange, rawDispMax, rawTrueMax, rangeSection);
         minEl.disabled = false; maxEl.disabled = false;
         const windows = App.roiOnlyMode ? App.msiRoiUserWindow : App.msiUserWindow;
-        if (resetEl) resetEl.disabled = !(windows && windows[focusKey]);
+        if (resetEl) resetEl.disabled = isRatioDisplayKey(focusKey) && App.getRatioManualRange
+            ? !App.getRatioManualRange(focusKey, rangeSection) : !(windows && windows[focusKey]);
         const roiStatus = App.roiOnlyMode && App.roiRangeStatusText ? App.roiRangeStatusText(rangeSection, focusKey) : '';
         minEl.title = '表示ウィンドウ 下限 (生単位)' + roiStatus;
         maxEl.title = '表示ウィンドウ 上限 (生単位)' + roiStatus;
@@ -20564,7 +20756,7 @@ const SharePreview = {
         // navigation (which uses this.compoundKeys.indexOf) all agree.
         const findEnt = (k) => {
             for (const sec of (project.sections || [])) {
-                const e = (sec.msiSeries || {})[k]; if (e) return e;
+                const e = displayMsiEntry(sec, k); if (e) return e;
             }
             return null;
         };
@@ -20594,7 +20786,7 @@ const SharePreview = {
         const rows = this.compoundKeys.map(key => {
             let meta = null;
             for (const sec of project.sections) {
-                const ent = (sec.msiSeries || {})[key];
+                const ent = displayMsiEntry(sec, key);
                 if (ent && ent.compoundMeta) { meta = ent.compoundMeta; break; }
             }
             const base = (meta && meta.base) || formatDisplayName(key);
@@ -20778,7 +20970,7 @@ const SharePreview = {
                 : null;
             const hasContent = _ov
                 ? (_ov.layers || []).some(l => (sec.msiSeries || {})[l.key])
-                : !!(sec.msiSeries || {})[focusKey];
+                : !!displayMsiEntry(sec, focusKey);
             const pitchRaw = formatPixelPitchLabel(sec);
             const safePitch = String(pitchRaw || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
             const caption = safePitch ? (safeName + ' · ' + safePitch) : safeName;
@@ -20923,7 +21115,7 @@ const SharePreview = {
         const panel = sec && App.panels && App.panels.get(sec.id);
         const hasContent = sec && (App.activeOverlay
             ? (App.activeOverlay.layers || []).some(l => l && (sec.msiSeries || {})[l.key])
-            : !!(App.focusCompoundKey && (sec.msiSeries || {})[App.focusCompoundKey]));
+            : !!(App.focusCompoundKey && displayMsiEntry(sec, App.focusCompoundKey)));
         const hasImage = !!wrap.querySelector('[data-cell-img]');
         const calibration = sec && resolveMsiPhysicalCalibration(sec, panel && panel._pickRefMsiKey());
         const base = panel && hasContent && hasImage
@@ -21077,7 +21269,7 @@ const SharePreview = {
             const _ov = App.activeOverlay;
             const hasContent = _ov
                 ? (_ov.layers || []).some(l => l && (sec.msiSeries || {})[l.key])
-                : !!(focusKey && (sec.msiSeries || {})[focusKey]);
+                : !!(focusKey && displayMsiEntry(sec, focusKey));
             if (!hasContent) return;
             try {
                 const rotDeg = (this._sectionRotations[String(sec.id)] || 0) - 90;
@@ -21105,6 +21297,25 @@ const SharePreview = {
         head.innerHTML = '<tr><th class="row-label-head"></th>'
             + sections.map(s => `<th>${safe(s.displayName || '')}</th>`).join('')
             + '</tr>';
+
+        const statsEpoch = this._ratioStatsEpoch = (this._ratioStatsEpoch || 0) + 1;
+        if (isRatioDisplayKey(focusKey)) {
+            body.innerHTML = '<tr><th>比 / Ratio</th>' + sections.map(() => '<td>計算中…</td>').join('') + '</tr>';
+            Promise.allSettled(sections.map(sec => App.resolveRatio(sec, focusKey, {roiStats:false}))).then(results => {
+                if (!this.isOpen() || this._ratioStatsEpoch !== statsEpoch || App.project !== project || App.focusCompoundKey !== focusKey) return;
+                const cells = pick => results.map(result => {
+                    if (result.status !== 'fulfilled') return '<td>利用不可 / Unavailable</td>';
+                    const value = pick(result.value);
+                    return '<td>' + (typeof value === 'number' ? formatScientific(value) : safe(value == null ? '—' : value)) + '</td>';
+                }).join('');
+                body.innerHTML = '<tr><th>X / Y · τ</th>' + cells(r => r.formula + ' · ' + r.denominatorMin) + '</tr>'
+                    + '<tr><th>総信号比 / Total ratio</th>' + cells(r => r.statistics.totalRatio) + '</tr>'
+                    + '<tr><th>個別比平均 / Mean ratio</th>' + cells(r => r.statistics.mean) + '</tr>'
+                    + '<tr><th>個別比中央値 / Median ratio</th>' + cells(r => r.statistics.median) + '</tr>'
+                    + '<tr><th>有効 / 全候補測定点</th>' + cells(r => r.statistics.nValid + ' / ' + r.statistics.nCandidate) + '</tr>';
+            });
+            return;
+        }
 
         const cellsFor = (extract) => sections.map(sec => {
             const ent = (sec.msiSeries || {})[focusKey];
@@ -21489,6 +21700,13 @@ async function importZipFile(file, options = {}) {
     }
 
     const sectionsBySrcId = {};
+    const ratioSectionsBySrcId = Object.create(null);
+    const mapRatioSection = (source, target) => {
+        const id = MsiRatioModel.canonicalSectionId(target);
+        ratioSectionsBySrcId[source.id] = id;
+        if (source.client_id) ratioSectionsBySrcId[source.client_id] = id;
+        if (source.meta && source.meta.client_id) ratioSectionsBySrcId[source.meta.client_id] = id;
+    };
     if (projDoc.format === 'desi_data_share_v2') {
         // ---- v2: flat HE_IF/ + Data/ with inline sections[] in the manifest.
         // Paths are ROOT-relative, so ensureBlob resolves zip.file(relPath)
@@ -21525,6 +21743,7 @@ async function importZipFile(file, options = {}) {
                 images: {}, msiSeries: {}, msiFiles: {},
             };
             sectionsBySrcId[sEnt.id] = newSec.id;
+            mapRatioSection(sEnt, newSec);
             // HE/IF full originals (aligned PNGs are derived artifacts; the app
             // re-derives the overlay from the full image + meta.world_coords).
             for (const [layerKey, img] of Object.entries(sEnt.images || {})) {
@@ -21640,6 +21859,7 @@ async function importZipFile(file, options = {}) {
                 msiFiles: {},
             };
             sectionsBySrcId[atlas.id] = newSec.id;
+            mapRatioSection(atlas, newSec);
             const dir = ap.replace(/atlas\.json$/, '');
 
             // Path-keyed cache so any number of msiSeries entries (and the
@@ -21704,6 +21924,12 @@ async function importZipFile(file, options = {}) {
         newProject.sections.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
     }
     for (let i = 0; i < newProject.sections.length; i++) newProject.sections[i].ordinal = i + 1;
+    const ratioDoc = newProject.meta && newProject.meta.msiRatios
+        || projDoc.meta && projDoc.meta.msiRatios;
+    if (ratioDoc != null) {
+        newProject.meta = newProject.meta || {};
+        newProject.meta.msiRatios = MsiRatioModel.remapSections(ratioDoc, ratioSectionsBySrcId);
+    }
     for (const r of (projDoc.rois || [])) {
         const newPolys = {};
         for (const [srcSecId, poly] of Object.entries(r.polysBySection || {})) {
@@ -21922,6 +22148,7 @@ const Toolbar = {
                         try { p.renderComposite(); p.markAllThumbsDirty(); } catch (e) {}
                     }
                 }
+                if (isRatioDisplayKey(this.activePanel()?.effectiveActiveMsiKey())) return;
                 if (App.shareMode) {
                     try {
                         const slug = App.shareMode.slug || '';
@@ -22187,7 +22414,8 @@ const Toolbar = {
         this.rangeMax.title = '表示ウィンドウ 上限 (生単位): ' + st.baseLabel + (st.roiStatus || '');
         // Reset enabled only when a manual override exists for this molecule.
         const windows = App.roiOnlyMode ? App.msiRoiUserWindow : App.msiUserWindow;
-        if (this.rangeResetBtn) this.rangeResetBtn.disabled = !(st.key && windows && windows[st.key]);
+        if (this.rangeResetBtn) this.rangeResetBtn.disabled = isRatioDisplayKey(st.key) && App.getRatioManualRange
+            ? !App.getRatioManualRange(st.key, p.section) : !(st.key && windows && windows[st.key]);
     },
 
     refreshOpacity() {
@@ -22266,6 +22494,7 @@ const Toolbar = {
     },
 
     refreshAll() {
+        App.refreshMsiDisplayControls();
         this.refreshSectionPicker();
         this.refreshRange();
         this.refreshOpacity();
@@ -22770,6 +22999,13 @@ const App = {
     },
     refreshMsiDisplayControls() {
         const settings = this.getMsiDisplaySettings();
+        const scale = document.getElementById('msi-scale-mode'), color = document.getElementById('tb-colormap');
+        if (scale) scale.value = settings.scaleMode || this.msiScaleMode;
+        if (color) color.value = settings.colormap;
+        this.msiSmoothing = settings.interpolation;
+        this.msiSmoothingStrength = settings.smoothingStrength;
+        this.msiLinearStrength = settings.linearStrength;
+        setActiveColormap(settings.colormap);
         const style = document.getElementById('tb-msi-style'), aspect = document.getElementById('tb-msi-physical');
         if (style) style.value = settings.preset;
         if (aspect) aspect.checked = settings.aspectMode === 'physical';
@@ -23314,7 +23550,7 @@ const App = {
         const target = (mode === 'full') ? 'full' : 'robust';
         const jobs = [];
         for (const panel of this.panels.values()) {
-            const ent = (panel.section.msiSeries || {})[msiKey];
+            const ent = displayMsiEntry(panel.section, msiKey);
             if (!ent) continue;
             ent.bakeMode = target;
             jobs.push({ panel, key: msiKey, ent });
@@ -23349,7 +23585,8 @@ const App = {
         const jobs = [];
         let fresh = 0;
         for (const panel of this.panels.values()) {
-            for (const [key, ent] of Object.entries(panel.section.msiSeries || {})) {
+            for (const key of displayMsiKeys(panel.section)) {
+                const ent = displayMsiEntry(panel.section, key);
                 if (!/^MSI_/i.test(key) || !ent) continue;
                 // diag is the record of how the CURRENT pixels were baked; bakeMode
                 // is the request. Only skip when both already agree with the target.
@@ -23389,7 +23626,7 @@ const App = {
             if (panel === exceptPanel) continue;
             const s = panel.imageSettings && panel.imageSettings[msiKey];
             if (!s || !Number.isFinite(s.vmin) || !Number.isFinite(s.vmax)) continue;
-            const ent = (panel.section.msiSeries || {})[msiKey] || {};
+            const ent = displayMsiEntry(panel.section, msiKey) || {};
             const rr = ent.rawRange || null;
             const rawMin = rr ? lumToRaw(s.vmin, rr) : s.vmin;
             const rawMax = rr ? lumToRaw(s.vmax, rr) : s.vmax;
@@ -23424,7 +23661,7 @@ const App = {
             : (this.msiUserWindow || (this.msiUserWindow = {}));
     },
     _roiDisplayRangeRequest(section, key) {
-        const ent = section && (section.msiSeries || {})[key];
+        const ent = section && displayMsiEntry(section, key);
         if (!this.project || !ent) return null;
         const panel = this.panels && this.panels.get(section.id);
         const rois = (this.project.rois || []).filter(roi => !(this.project.roiHidden || {})[roi.id]
@@ -23566,7 +23803,7 @@ const App = {
             const keys = new Set(this.viewMode === 'compound' ? [this.focusCompoundKey] : [...(panel.visibleLayers || [])]);
             if (panel.activeMsiKey) keys.add(panel.activeMsiKey);
             for (const layer of (this.activeOverlay && this.activeOverlay.layers || [])) keys.add(layer.key);
-            for (const key of keys) if ((panel.section.msiSeries || {})[key]) jobs.push(this.ensureRoiDisplayRange(panel.section, key));
+            for (const key of keys) if (displayMsiEntry(panel.section, key)) jobs.push(this.ensureRoiDisplayRange(panel.section, key));
         }
         await Promise.all(jobs);
         if (this.project === project && this.roiOnlyMode) this.repaintRoiRangeViews();
@@ -23605,7 +23842,7 @@ const App = {
                     // Valid negative measurements still need one comparable Same window.
                     let lower = Infinity;
                     for (const panel of this.panels.values()) {
-                        if (!this._organInScope(panel.section) || !(panel.section.msiSeries || {})[key]) continue;
+                        if (!this._organInScope(panel.section) || !displayMsiEntry(panel.section, key)) continue;
                         const r = this.getRoiDisplayRange(panel.section, key).raster;
                         if (r && r.status === 'ready') lower = Math.min(lower, r.displayMin);
                     }
@@ -23656,7 +23893,7 @@ const App = {
         if (this.roiOnlyMode && this.roiDisplayCeiling) {
             let max = this.getMsiDisplaySettings().rangePolicy === 'maximum' ? 0 : -Infinity;
             for (const panel of this.panels.values()) {
-                if (!this._organInScope(panel.section) || !(panel.section.msiSeries || {})[key]) continue;
+                if (!this._organInScope(panel.section) || !displayMsiEntry(panel.section, key)) continue;
                 const ceiling = this.roiDisplayCeiling(panel.section, key);
                 if (Number.isFinite(ceiling) && ceiling > max) max = ceiling;
             }
@@ -23665,7 +23902,7 @@ const App = {
         let mx = 0;
         for (const panel of this.panels.values()) {
             if (!this._organInScope(panel.section)) continue;
-            const ent = (panel.section.msiSeries || {})[key];
+            const ent = displayMsiEntry(panel.section, key);
             const rr = ent && ent.rawRange;
             // 適応共有上限: 各切片の表示分位点(rawDispMax)を優先、無ければ
             // 堅牢ベイク上限(rawRange[1])にフォールバック。
@@ -23782,7 +24019,7 @@ const App = {
         for (const panel of this.panels.values()) {
             const keys = new Set([...(panel.visibleLayers || []), ...(panel.msiThumbRefs ? panel.msiThumbRefs.keys() : [])]);
             for (const key of keys) {
-                if (!(panel.section.msiSeries && panel.section.msiSeries[key])) continue;
+                if (!displayMsiEntry(panel.section, key)) continue;
                 const image = panel.imageSources && panel.imageSources[key];
                 if (image) pixels += (image.naturalWidth || 0) * (image.naturalHeight || 0);
                 if (pixels > 500000) return true;
@@ -24620,7 +24857,7 @@ const App = {
             rois: [],
             roiHidden: {},
             overlays: _overlaysFromSections(doc.sections),
-            meta: Object.assign({}, projectMeta, { roiMedia: roiMediaRegistryFromDoc(doc) }),
+            meta: Object.assign({}, projectMeta, { roiMedia: roiMediaRegistryFromDoc(doc), msiRatios: ratioRegistryFromDoc(doc) }),
             memo: ensureMemoShape(projectMeta.memo || doc.memo),
             createdAt: doc.created_at || nowIso(),
             updatedAt: doc.updated_at || nowIso(),
@@ -24844,7 +25081,7 @@ const App = {
             // fields automatically round-trip without a hydrate-side patch.
             // Photographs remain remote here and are loaded only when opened.
             // Their section IDs are stable client IDs, matched by sectionKey.
-            meta: Object.assign({}, projectMeta, { roiMedia: roiMediaRegistryFromDoc(doc) }),
+            meta: Object.assign({}, projectMeta, { roiMedia: roiMediaRegistryFromDoc(doc), msiRatios: ratioRegistryFromDoc(doc) }),
             memo: ensureMemoShape(projectMeta.memo || doc.memo),
             createdAt: doc.created_at || nowIso(),
             updatedAt: doc.updated_at || nowIso(),
@@ -27614,7 +27851,26 @@ async function renderFolderIndex(slug) {
     await attempt();
 }
 
-document.addEventListener('DOMContentLoaded', () => { App.init().catch(e => { console.error(e); alert('Init failed: ' + (e.message || e)); }); setupMobileUI(); });
+document.addEventListener('DOMContentLoaded', () => {
+    window.MsiRatioRuntime = MsiRatioApp.install({app:App, viewerBase:new URL('./',location.href),
+        uid,toast:showToast,contextKey:()=>msiDisplayContextKey(App),
+        sourceReference:msiSourceReference,frameKey:msiOtsuSourceKey,
+        sourceIdentity:(section,key)=>App.panels.get(section.id)?._msiLoadIdentity(key)
+            || JSON.stringify((section.msiSeries||{})[key]),
+        readGrid:_ensureRoiRawGrid,readPair:_ensureRatioInputGrids,roiMeta:msiRoiGeometryMeta,roiContains:roiContainsSourcePoint,
+        otsuGrid:_otsuKeepGridRaw,otsuStamp:section=>JSON.stringify(section.meta&&section.meta.otsu||null),
+        inputLabel:(section,key)=>ratioSafeName((section.msiSeries?.[key]?.compoundMeta?.base)
+            || (section.msiSeries?.[key]?.compoundMeta?.name) || splitCeCv(formatDisplayName(key)).base),
+        safeName:ratioSafeName,Panel:SectionPanel,currentColormap:()=>_activeColormapName,
+        inputDetails:ratioInputDetails,
+        rangeContext:key=>ensureMsiDisplayContext(App,key),
+        colormap:name=>{const old=_activeColormapName;setActiveColormap(name);const lut=getActiveColormap();setActiveColormap(old);return lut;},
+        setColormap:name=>setActiveColormap(name),refreshToolbar:()=>Toolbar.refreshAll(),
+        download:(blob,name)=>{const url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+    });
+    App.init().then(()=>window.MsiRatioRuntime?.refreshControls()).catch(e => { console.error(e); alert('Init failed: ' + (e.message || e)); });
+    setupMobileUI();
+});
 
 </script>
 

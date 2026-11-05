@@ -26,7 +26,7 @@ const helperStart = html.indexOf('function displayAffineMultiply(');
 const helpers = html.slice(helperStart, html.indexOf('// ---- HE↔MSI registration math', helperStart));
 const preview = block('const SharePreview = {', '\n};');
 assert.ok(preview.includes('_syncCellScalebar('), 'Preview updates calibration without rebuilding every cell');
-const source = [helpers, ...['formatPixelPitchLabel', 'pickPreviewScalebarLength', 'msiSourceReference',
+const source = [fs.readFileSync(path.join(root,'viewer/msi-ratio-model.js'),'utf8'),helpers, ...['isRatioDisplayKey','displayMsiEntry','displayMsiKeys','formatPixelPitchLabel', 'pickPreviewScalebarLength', 'msiSourceReference',
   'msiLayerSourceGeometry', 'openModal'].map(standalone),
   block('class SectionPanel {', '\n}'), preview,
   'const TestAppMethods = {' + block('    setFocusCompoundKey(', '\n    },') + '};',

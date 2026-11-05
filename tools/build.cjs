@@ -11,6 +11,7 @@ const ROOT = path.resolve(__dirname, '..');
 const OWNER_FILE = '.share-test-build.json';
 const GENERATOR = 'Share_Test distribution builder';
 const VIEWER_FILES = [
+  'msi-ratio-core.js', 'msi-ratio-model.js', 'msi-ratio-worker.js', 'msi-ratio-app.js', 'msi-ratio.css',
   'msi-display-settings.js', 'msi-display-geometry.js', 'msi-smoothing.js', 'msi-roi-range.js',
   'alignment-session.js', 'alignment-workspace.css', 'alignment-workspace.js',
   'fixed-colors.js', 'index.html', 'roi-cursor.svg', 'roi-media-app.js',
@@ -21,7 +22,7 @@ const VIEWER_FILES = [
 const MRM_FILES = ['exp-core.mjs', 'exp-editor.mjs', 'exp-editor.css', 'exp-library-import.mjs']
   .map(file => 'mrm/' + file);
 const COMMON_FILES = ['.nojekyll', 'index.html', 'mrm.html', 'version.js', 'runtime-config.js',
-  'app-runtime.js', 'project-store-safety.js', 'project-navigation.js', 'offline/offline.js', 'offline/local-mrm.js', 'vendor/SOURCES.json',
+  'help.html', 'help.js', 'help.css', 'app-runtime.js', 'project-store-safety.js', 'project-navigation.js', 'offline/offline.js', 'offline/local-mrm.js', 'vendor/SOURCES.json',
   'docs/EXP_EDITOR.md', 'docs/LOCAL_STORAGE_UPGRADE.md', 'docs/ARCHIVE_COMPATIBILITY.md', 'docs/ARCHIVE_COMPATIBILITY.en.md', ...VIEWER_FILES, ...MRM_FILES];
 const OFFLINE_FILES = ['offline/server.cjs', 'offline/config.cjs', 'offline/make-manifest.cjs',
   'START_HERE.txt', 'DISTRIBUTION_NOTE.txt', 'OFFLINE_GUIDE.md'];
@@ -52,7 +53,13 @@ function readLock(root) {
 function commonFiles(root, lock) {
   const guides = fs.readdirSync(root).filter(file => /^USER_GUIDE(?:\.[a-z]+)*\.(?:md|pdf)$/.test(file));
   const optional = ['OFFLINE_GUIDE.md', 'VALIDATION.txt', 'REGRESSION_RESULTS.txt'].filter(file => fs.existsSync(path.join(root, file)));
-  return [...new Set([...COMMON_FILES, ...guides, ...optional, ...lock.vendor.map(entry => entry.file)])].sort();
+  const help = JSON.parse(readFile(root, 'docs/help/manifest.json'));
+  const helpFiles = ['docs/help/manifest.json', 'docs/help/capture-manifest.json', ...help.screenshots.map(shot => shot.path)];
+  for (const file of helpFiles) {
+    if (!/^docs\/help\/(?:[\w.-]+\.json|images\/[\w.-]+\.png)$/.test(file)) throw new Error('Invalid Help asset: ' + file);
+    readFile(root, file);
+  }
+  return [...new Set([...COMMON_FILES, ...helpFiles, ...guides, ...optional, ...lock.vendor.map(entry => entry.file)])].sort();
 }
 function writeFile(root, rel, value) {
   const absolute = path.join(root, rel);

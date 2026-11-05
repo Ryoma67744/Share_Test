@@ -1,4 +1,5 @@
 'use strict';
+const {displayContext}=require('./viewer-runtime.cjs');
 const assert = require('node:assert/strict');
 const vm = require('node:vm');
 const {html, standalone} = require('./viewer-runtime.cjs');
@@ -47,7 +48,7 @@ function fixture(initial = project('A')) {
     let stamp = 0;
     const stamps = new WeakMap();
     const environment = {readGrid:section => Promise.resolve(grid(section)), repaints:0};
-    const context = vm.createContext({console, MsiRoiRange, MSI_DEFAULT_DISPLAY_PERCENTILE:0.999,
+    const context = displayContext({console, MsiRoiRange, MSI_DEFAULT_DISPLAY_PERCENTILE:0.999,
         document:{getElementById:() => null},
         identStamp(value) { if (!value) return 0; if (!stamps.has(value)) stamps.set(value,++stamp); return stamps.get(value); },
         _ensureRoiRawGrid:(section,key) => environment.readGrid(section,key),

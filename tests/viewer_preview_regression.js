@@ -1,4 +1,5 @@
 'use strict';
+const {displayContext}=require('./viewer-runtime.cjs');
 
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
@@ -105,7 +106,7 @@ function makePreviewContext(extra = {}) {
     app.sectionVisibility = () => visibility;
     visibility.ensure();
   }
-  const context = vm.createContext({
+  const context = displayContext({
     console,
     setTimeout,
     clearTimeout,
@@ -537,7 +538,7 @@ function testForcedHeBackdropDoesNotPersist() {
 // それを existing として openOverlayModal に渡すと編集分岐に入り、その場限りの
 // オブジェクトを書き換えて登録しないまま終わる。
 function testOverlayForEditingIgnoresUnregistered() {
-  const context = vm.createContext({ App: {} });
+  const context = displayContext({ App: {} });
   vm.runInContext(
     extractTopLevelFunction('isShareOverlayMode') + '\n'
     + extractTopLevelFunction('isViewerOverlay') + '\n'
@@ -677,7 +678,7 @@ function testOverlayPanelRendersInRightColumn() {
 // 削除は主画面のチップとプレビューの一覧の両方から呼ぶので、確認・後始末を
 // 1 か所 (deleteOverlayById) に置く。片方だけ直して食い違うのを防ぐ。
 async function testDeleteOverlayIsShared() {
-  const context = vm.createContext({});
+  const context = displayContext({});
   let confirmed = true;
   const cleared = [];
   const saves = [];
@@ -815,7 +816,7 @@ async function testWorkerXlsxDecodeCache() {
   const extractedColumns = [];
   const posts = [];
   const self = { postMessage(message) { posts.push(message); } };
-  const context = vm.createContext({
+  const context = displayContext({
     self,
     parseXlsxSheet() { parseCalls++; return { aoa: [[1, 2, 3]] }; },
     rowsFromParsedXlsx(parsed, def) { extractedColumns.push(def.col_v); return [{ x: 0, y: 0, v: 1 }]; },
@@ -856,7 +857,7 @@ async function testWorkerXlsxColumnsAwaitsInspection() {
   // Real Worker.postMessage cannot clone a Promise. Simulate that boundary,
   // including the handler's normal error envelope, instead of retaining refs.
   const self = { postMessage(message) { posts.push(structuredClone(message)); } };
-  const context = vm.createContext({
+  const context = displayContext({
     self,
     async inspectXlsxColumns() {
       await Promise.resolve();
@@ -880,7 +881,7 @@ async function testWorkerXlsxColumnsAwaitsInspection() {
 // rows" heuristic used to latch onto the padding, reject every column for
 // precursor <= 0, and throw "no compounds detected". Both header shapes must work.
 function testAnalyteHeaderShapes() {
-  const context = vm.createContext({ TextDecoder, Number, String, Error });
+  const context = displayContext({ TextDecoder, Number, String, Error });
   vm.runInContext(
     `${extractFunction(html, 'splitCeCv')};${extractFunction(html, 'parseAnalyteHeader')};`
     + 'this.parse = (text) => parseAnalyteHeader(text);',
@@ -1176,7 +1177,7 @@ function assembleWorkerFns(wanted, extraNames) {
     assert.ok(m, 'missing constant ' + name);
     return m[1];
   };
-  const context = vm.createContext({
+  const context = displayContext({
     console, TextDecoder, TextEncoder, Blob, Response, DecompressionStream, out: {},
   });
   vm.runInContext(
@@ -1278,7 +1279,7 @@ function testFunctionTypeFlagsAreMasked() {
   const maxCh = /const RAW_MAX_CHANNELS = (\d+);/.exec(html);
   assert.ok(maxCh, 'missing RAW_MAX_CHANNELS');
 
-  const context = vm.createContext({ DataView, Math, console });
+  const context = displayContext({ DataView, Math, console });
   vm.runInContext(
     'const RAW_MAX_CHANNELS = ' + maxCh[1] + ';\n'
     + extractTopLevelFunction('rawRoundMz') + '\n'
@@ -1345,7 +1346,7 @@ function testFunctionTypeFlagsAreMasked() {
 // POS_Acetylcholine to "ACh_146_87" turned CE=10/CV=15 into 146/87 (the
 // transition m/z) and pushed that to the MRM library, silently.
 function testRenameKeepsInstrumentCeCv() {
-  const context = vm.createContext({});
+  const context = displayContext({});
   vm.runInContext(
     extractTopLevelFunction('splitCeCv') + '\n' + extractTopLevelFunction('ceCvAfterRename')
     + '\nthis.api = { splitCeCv, ceCvAfterRename };',
@@ -1379,7 +1380,7 @@ function testRenameKeepsInstrumentCeCv() {
 // 「publish が置いたのと同じパス」を組み立て直せることが前提なので、
 // storagePathForEnt と publish 側の組み立てが食い違うと復旧が黙って効かなくなる。
 function testStoragePathRule() {
-  const ctx = vm.createContext({ console });
+  const ctx = displayContext({ console });
   vm.runInContext(
     `${extractFunction(html, 'sanitizeStorageKeySegment')}\n`
     + `${extractFunction(html, 'storageExtOf')}\n`
@@ -1468,7 +1469,7 @@ function testDisplayAndBakePercentilesMoveTogether() {
 // 0.99 に戻すと 1.0% になって落ちる (実測で確認済み)。
 function testDefaultWindowClipsOneTenthOfAPercent() {
   const constOf = (name) => Number(new RegExp('const ' + name + ' = ([0-9.]+);').exec(html)[1]);
-  const context = vm.createContext({ Number, Math, Float64Array, out: {} });
+  const context = displayContext({ Number, Math, Float64Array, out: {} });
   vm.runInContext(
     'const MSI_ROBUST_PERCENTILE = ' + constOf('MSI_ROBUST_PERCENTILE') + ';\n'
     + 'const MSI_DEFAULT_DISPLAY_PERCENTILE = ' + constOf('MSI_DEFAULT_DISPLAY_PERCENTILE') + ';\n'
@@ -1501,7 +1502,7 @@ function testDefaultWindowClipsOneTenthOfAPercent() {
 // 相対輝度と「明るさを揃える」倍率。①の根拠そのものなので数値で縛る。
 function testOverlayBrightnessMatching() {
   const constOf = (name) => new RegExp('const ' + name + ' = ([0-9.]+);').exec(html)[1];
-  const context = vm.createContext({ Math, Number, String, out: {} });
+  const context = displayContext({ Math, Number, String, out: {} });
   vm.runInContext(
     'const OVERLAY_MATCH_MIN_SCALE = ' + constOf('OVERLAY_MATCH_MIN_SCALE') + ';\n'
     + ['_hexToRgb', '_srgbLinear', '_srgbEncode', '_srgbLuminance',
@@ -1545,7 +1546,7 @@ function testOverlayBrightnessMatching() {
 
 // LUT キャッシュと署名。どちらも「静かに古い絵を返す」種類の壊れ方をする。
 function testOverlayScaleReachesTheBake() {
-  const context = vm.createContext({ Math, Number, String, Array, out: {} });
+  const context = displayContext({ Math, Number, String, Array, out: {} });
   vm.runInContext(
     ['buildLut', '_hexToRgb', '_srgbLinear', '_srgbEncode', 'scaleColorLuminance', 'monoLut']
       .map(extractTopLevelFunction).join('\n')
@@ -1582,7 +1583,7 @@ function testOverlayScaleReachesTheBake() {
 // 分子だけ何も出ない。invisible で報告してモーダルが注意を出せるようにしてある。
 function testBlackOverlayColorIsReported() {
   const constOf = (name) => new RegExp('const ' + name + ' = ([0-9.]+);').exec(html)[1];
-  const context = vm.createContext({ Math, Number, String, out: {} });
+  const context = displayContext({ Math, Number, String, out: {} });
   vm.runInContext(
     'const OVERLAY_MATCH_MIN_SCALE = ' + constOf('OVERLAY_MATCH_MIN_SCALE') + ';\n'
     + ['_hexToRgb', '_srgbLinear', '_srgbEncode', '_srgbLuminance',
@@ -1638,7 +1639,7 @@ function testMatchedOverlayUsesOneOpacity() {
 // vm へ渡す輝度ヘルパー一式 (SharePreview から呼ばれるのでコンテキストに要る)。
 function luminanceApi() {
   const constOf = (name) => new RegExp('const ' + name + ' = ([0-9.]+);').exec(html)[1];
-  const context = vm.createContext({ Math, Number, String, out: {} });
+  const context = displayContext({ Math, Number, String, out: {} });
   vm.runInContext(
     'const OVERLAY_MATCH_MIN_SCALE = ' + constOf('OVERLAY_MATCH_MIN_SCALE') + ';\n'
     + ['_hexToRgb', '_srgbLinear', '_srgbEncode', '_srgbLuminance',
@@ -1743,7 +1744,7 @@ function testLegendFollowsBrightnessMatching() {
 //   なっていた。表示ラスタ (loadMsiLayer) と同じ判定に揃えたことを縛る。
 async function testRoiStatsReadSharedParquet() {
   const calls = [];
-  const ctx = vm.createContext({
+  const ctx = displayContext({
     console, Promise, Map, Set, Number, Float64Array,
     App: { project: {} },
     ProjectStorage: { getBlob: async () => { calls.push('getBlob'); return null; } },
@@ -1850,7 +1851,7 @@ function testHeStaysSharpUnderMsiOverlay() {
 function testShareOverlaysPersistLocally() {
   const store = new Map();
   const warns = [];
-  const ctx = vm.createContext({
+  const ctx = displayContext({
     console: { warn: (...a) => warns.push(a.join(' ')), log() {}, info() {} },
     JSON, Array, Object,
     localStorage: {
@@ -1949,7 +1950,7 @@ async function testShareOverlaysAreSharedWithEveryone() {
     },
   };
   let listRows = [];
-  const ctx = vm.createContext({
+  const ctx = displayContext({
     JSON, Array, Object, Promise, Map, Number,
     console: { warn() {}, log() {}, info() {} },
     localStorage: {
@@ -2093,7 +2094,7 @@ function testShareOverlayModuleVarsAreDeclared() {
 //   絵は出るのに気づけない壊れ方になるので、対象キーの一覧を実装から取って
 //   突き合わせる。
 function testSectionAlignmentRoundTrips() {
-  const ctx = vm.createContext({ JSON, Object });
+  const ctx = displayContext({ JSON, Object });
   vm.runInContext(
     /const SECTION_ALIGN_WC_KEYS = \[[^\]]*\];/.exec(html)[0] + '\n'
     + /const SECTION_ALIGN_META_KEYS = \[[^\]]*\];/.exec(html)[0] + '\n'
@@ -2180,7 +2181,7 @@ async function testShareAlignmentsAreSharedWithEveryone() {
     deleteShareAlignment(token, sectionId) { calls.push(['delete', sectionId]); return Promise.resolve(); },
   };
   let rows = [];
-  const ctx = vm.createContext({
+  const ctx = displayContext({
     JSON, Object, Map, Array, Promise,
     console: { warn() {}, log() {}, info() {} },
     showToast: (m) => toasts.push(String(m)),
@@ -2301,7 +2302,7 @@ function testShareAlignmentEditingIsLocked() {
 //   まま ROI を描く、という重なりが起きるので、素朴に取り直すと heartbeat の
 //   setInterval が二重に走り、内側の解放だけで鍵が返って外側が無防備になる。
 async function testRoiLockIsReentrant() {
-  const ctx = vm.createContext({ console, Date, setInterval: () => 1, clearInterval: () => {} });
+  const ctx = displayContext({ console, Date, setInterval: () => 1, clearInterval: () => {} });
   const calls = [];
   const App = {
     shareMode: { token: 'tok', label: null },
@@ -2369,7 +2370,7 @@ async function testShareImagesAreSharedWithEveryone() {
     deleteStorageObjectAsShare(bucket, path) { calls.push(['obj-delete', path]); return Promise.resolve(); },
   };
   let rows = [];
-  const ctx = vm.createContext({
+  const ctx = displayContext({
     JSON, Object, Map, Set, Array, Promise,
     console: { warn() {}, log() {}, info() {} },
     showToast: (m) => toasts.push(String(m)),
@@ -2488,7 +2489,7 @@ function testWorkerAssetsFollowApplicationBase() {
   const parquet = html.slice(parquetStart, html.indexOf('\n};', parquetStart) + 3);
   for (const base of ['http://127.0.0.1:8765/', 'https://example.invalid/Share_Test/']) {
     for (const withRuntime of [true, false]) {
-      const ctx = vm.createContext({ URL, location: { href: base + 'viewer/index.html' },
+      const ctx = displayContext({ URL, location: { href: base + 'viewer/index.html' },
         window: withRuntime ? { DesiRuntime: { asset: name => new URL('vendor/' + name, base).href } } : {} });
       vm.runInContext(parse + '\n' + parquet + '\nglobalThis.assets = { parse: PARSE_WORKER_LIBS, parquet: PARQUET_LIBS };', ctx);
       assert.deepEqual(Array.from(ctx.assets.parse), ['xlsx.full.min.js', 'pako.min.js', 'UTIF.js'].map(name => base + 'vendor/' + name));

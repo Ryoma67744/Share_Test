@@ -1,4 +1,4 @@
-(function(root,factory){'use strict';const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;if(root)root.PublishSafety=api;})(typeof globalThis!=='undefined'?globalThis:this,function(){
+(function(root,factory){'use strict';const api=factory(root);if(typeof module==='object'&&module.exports)module.exports=api;if(root)root.PublishSafety=api;})(typeof globalThis!=='undefined'?globalThis:this,function(root){
  'use strict';
  const copy=value=>JSON.parse(JSON.stringify(value));
  const revision=value=>Number.isSafeInteger(value)&&value>=0;
@@ -56,6 +56,13 @@
    if(overwrite&&oldPending&&oldPending.slug!==job.slug)
      throw error('PUBLISH_PENDING_CONFLICT','別の共有URLへの公開処理が未確認です。その処理を確認してから上書きしてください。');
    hooks.freezeSources(snapshot);
+   if(snapshot.meta && snapshot.meta.msiRatios!=null){
+     const model=typeof module==='object'&&module.exports?require('./msi-ratio-model.js'):root.MsiRatioModel;
+     if(!model)throw error('PUBLISH_RATIO_MODEL_MISSING','比の保存形式を検証できません。アプリを再読み込みしてください。');
+     const check=model.validateProjectReferences(snapshot);
+     if(!check.valid)throw error('PUBLISH_RATIO_SOURCE_MISSING','比の入力参照を確認してください。修復または除外してから公開してください: '+check.errors.join('; '));
+     snapshot.meta.msiRatios=model.normalizeRegistry(snapshot.meta.msiRatios);
+   }
    let resumedCreate=false;
    if(oldPending&&oldPending.slug===job.slug){
      // A lost commit response is reconciled before a fresh request. Never attach
@@ -155,6 +162,7 @@
        _meta:{anatomyPalette:snapshot.anatomyPalette||{},memo:snapshot.memo||{},roiMedia:{version:1,items:photoItems},
          colormap:snapshot.meta?.colormap||null,msiSmoothing:['linear','median'].includes(snapshot.meta?.msiSmoothing)?snapshot.meta.msiSmoothing:'none',
          ...(snapshot.meta?.msiDisplay ? {msiDisplay:copy(snapshot.meta.msiDisplay)} : {}),
+         ...(snapshot.meta?.msiRatios ? {msiRatios:copy(snapshot.meta.msiRatios)} : {}),
          otsuBgRemove:!!snapshot.meta?.otsuBgRemove,otsuStrength:Number.isFinite(snapshot.meta?.otsuStrength)?snapshot.meta.otsuStrength:0}};
      const commitArgs={...args};delete commitArgs._publish_token;
      await hooks.intent({...intent,...assets,commitArgs});hooks.assertActive();
