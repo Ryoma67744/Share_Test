@@ -338,7 +338,11 @@ Three groups in each section's toolbar:
 
 > **Rotate HE only / MSI only**: pick "HE only" or "MSI only" in the **target selector** left of Rotation to rotate **just one layer** on that section. Use it when HE and MSI were imported at different orientations and don't line up — rotate one of them to match. "Both" rotates the whole canvas as before. HE/MSI-only rotation is per-section and is not affected by the 🔗 sync.
 
-> **Colormap dropdown**: The toolbar's **Colormap** lets you swap the MSI heatmap palette (Plasma / Viridis / Inferno / Hot / Jet / Grayscale). The choice is **kept inside this tab** (sessionStorage). Closing the tab reverts to the master's default. The same dropdown lives inside the Preview overlay and stays in sync, so you can keep adjusting colour after closing Preview.
+> **Colormap dropdown**: Choose Plasma / Viridis / Inferno / Hot / HotMetal (HDI) / Jet / Grayscale. Shared-view choices stay in this tab and do not modify the master's settings. Palette changes made inside Preview revert when Preview closes.
+
+**表示 → HDIに近い表示** selects HotMetal, a linear 0-to-maximum intensity window, Same scaling across displayed sections of each molecule, interpolation None and Otsu OFF. It does not normalize or rewrite measurements. **従来** restores Plasma and p99.9. Selecting a preset clears manual Range; subsequent manual Range takes priority.
+
+**画素サイズを反映** applies the registered X/Y pixel sizes to the image aspect ratio: 100×100 pixels at 30×60 µm occupy 3×6 mm. Rotation follows this correction without changing stored ROI or HE coordinates. New projects enable this; older projects without settings retain their previous display. Unknown pixel size or source dimensions retain legacy geometry. Shared overrides are tab-local and separated by viewer/Admin role.
 
 ---
 
@@ -473,7 +477,7 @@ Each CSV has a `.source-cells.json` sidecar recording source row IDs, coordinate
 
 ## PowerPoint report
 
-Select **PPTレポート** beside **Export ZIP** at the top of the shared view to download the current project as a `.pptx`. **Regular viewers create the report directly without an options dialog, and CV/CE is omitted. No Admin login is required.**
+Select **PPTレポート** beside **Export ZIP** at the top of the shared view, then **作成** (Create) in the options dialog to download the current project as a `.pptx`. **Regular viewers can choose the display style, but never see the CV/CE option and cannot include CV/CE. No Admin login is required.**
 
 The report uses molecule and section names, precursor/product values and other viewable image labels. It contains only black-background section-by-molecule image matrices and white-background molecule detail pages. Project information pages, Memo, detailed instrument acquisition conditions and source filenames are omitted. Each detail page has an editable Max/Mean table at the top, up to two section images below, and a vertical color bar on the right.
 
@@ -481,7 +485,9 @@ To choose whether to include CV/CE, first sign in using the existing **🔑 Admi
 
 Public and viewer reports omit CV/CE. Admins can turn the option ON to include the registered transition's CV/CE in the molecule detail subtitle. Passwords and authentication tokens are never included in the PowerPoint file.
 
-All project sections and molecules are included regardless of section visibility or Method filters, with additional pages for large collections. Images use a common display-raster p99.8 upper limit across sections with the same molecule and measurement conditions, using a black/blue/purple/red/yellow palette. Saved rotation and reflection are retained. Viewer Range, palette, Otsu removal and zoom do not affect the report. An individual scale bar is added only when an image’s physical dimensions can be calculated from calibrated pixel pitch and its display transform. Images with unknown dimensions omit the scale bar; different images do not share one.
+All project sections and molecules are included regardless of section visibility or Method filters, with additional pages for large collections. The default remains a common display-raster p99.8 upper limit and black/blue/purple/red/yellow palette across sections with the same molecule and measurement conditions. **表示スタイルを使う** (use display style) starts OFF for every export. Turning it ON captures the palette, Same/Individual mode, manual raw-intensity Range, upper-limit policy, interpolation and available Otsu masks at generation start. Same recalculates its automatic upper limit across all output sections. The HDI-like maximum policy prefers the original measurement-row maximum; explicit manual Range endpoints take precedence. Individual reports show each image's range, with a 0–100% colour bar when ranges differ on the same page.
+
+Both colour modes capture orientation and aspect settings at generation start. Physical aspect uses registered X/Y pitch and the source image footprint; turning it OFF preserves the legacy raster ratio. Calibrated detail images receive individual scale bars; unknown dimensions omit them. Screen zoom and pan are not exported. Later setting changes do not alter an export already in progress.
 
 Max/Mean use original measurement-row statistics. Display p99.8 uses raster representatives, including the display's averaging of duplicate coordinates. Missing sources or images are marked as unavailable rather than measured zero. **ROI statistical charts are not included.** Generation shows progress and supports cancellation.
 

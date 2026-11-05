@@ -695,6 +695,63 @@ const tests = [
         f.sections[0].msiSeries.MSI_DA.archiveProvenance = Archive.registeredSource();
         assert.throws(input.assertCurrent, {code: 'REPORT_SOURCE_CHANGED'});
     }],
+    ['display style freezes all-section ranges, colour, masks and registered physical geometry', async () => {
+        const previous=global.MsiDisplayGeometry;
+        try {
+            global.MsiDisplayGeometry=require('../viewer/msi-display-geometry.js');
+            const f=sharedFixture('viewer');
+            f.app.msiScaleMode='same';f.app.msiUserWindow={MSI_DA:{min:5}};
+            f.app.getMsiDisplaySettings=()=>({aspectMode:'physical',rangePolicy:'maximum'});
+            const lut=Array.from({length:256},(_,i)=>[i,0,0]);
+            f.hooks.displayStyle=()=>({mode:f.app.msiScaleMode,rangePolicy:'maximum',lut,background:[0,0,0],smoothing:'none',otsu:true,colormap:'test-red'});
+            f.hooks.sourceGeometry=()=>({legacy:{W:2,H:1}});
+            f.sections.forEach(section=>{section.meta.otsu={value:17};section.msiSeries.MSI_DA.rawRange=[0,10];section.msiSeries.MSI_DA.rawDispMax=10;});
+            f.sections[1].msiSeries.MSI_DA.rawTrueMax=800;
+            f.hooks.keepGrid=section=>{assert.equal(section.meta.otsu.value,17);return {W:2,H:1,keep:Uint8Array.from([1,0])};};
+            const right=f.app.panels.get('right');right.ensureMsiLayerLoaded=async key=>{right.msiValueRasters.set(key,{W:2,H:1,values:Float64Array.from([60,400])});return true;};
+            const input=report.createAdapter(f.hooks,{useDisplayStyle:true,includeCeCv:true});
+            f.app.msiUserWindow.MSI_DA={max:2};f.app.msiScaleMode='individual';lut[255][0]=0;
+            f.sections[0].meta.world_coords.msi_um_per_px={x:999,y:999};f.sections[0].meta.otsu.value=999;
+            const entries=await input.molecules[0].loadEntries();
+            assert.deepEqual(entries.map(e=>e.displayWindow),[{min:5,max:800},{min:5,max:800}],'Same includes every section and retains original-row max above duplicate-coordinate raster averages');
+            assert.deepEqual(entries[0].frame.sourceBoundsUm,{x:0,y:0,width:100,height:75});
+            assert.equal(entries[0].frame.aspectMode,'physical');assert.deepEqual(entries[0].pixelPitch,{x:50,y:75});
+            const ticGeometry={legacy:{W:2,H:1},displayGeometry:{W:2,H:1}};
+            const ticOptions={width:2,height:1,geometries:[ticGeometry,ticGeometry],registeredPitch:{x:50,y:75},orientation:f.transform,aspectMode:'physical'};
+            assert.deepEqual(report.referenceFrame(ticOptions).sourceBoundsUm,{x:0,y:0,width:100,height:75});
+            assert.equal(report.referenceFrame({...ticOptions,geometries:[ticGeometry,null]}),null,'TIC does not invent calibration for an unknown contributing source');
+            assert.equal(report.referenceFrame({...ticOptions,geometries:[ticGeometry,{legacy:{W:3,H:1},displayGeometry:{W:2,H:1}}]}),null,'mixed source footprints cannot share a physical TIC frame');
+            assert.deepEqual(input.displayStyle.lut[255],[255,0,0]);assert.equal(input.displayStyle.mode,'same');
+            assert.deepEqual(Array.from(entries[0].keepGrid.keep),[1,0]);
+            assert.equal(entries[0].stats.mean,140/3);assert.equal(entries[0].stats.max,100);
+            assertPublicReport({...input,entries});
+            const actual=f.app.panels.get('left').msiValueRasters.get('MSI_DA');actual.values[0]=999;
+            assert.equal(entries[0].raster.values[0],20,'captured report pixels do not alias the live numeric cache');
+        } finally {if(previous===undefined)delete global.MsiDisplayGeometry;else global.MsiDisplayGeometry=previous;}
+    }],
+    ['Individual display windows preserve explicit raw limits and legacy per-layer clipping', async () => {
+        const f=fixture();f.app.msiUserWindow={MSI_DA:{max:75}};
+        f.sections[0].msiSeries.MSI_DA.rawRange=[-2,100];f.sections[0].msiSeries.MSI_DA.rawDispMax=60;
+        f.sections[1].msiSeries.MSI_DA.rawRange=[-4,100];f.sections[1].msiSeries.MSI_DA.rawDispMax=80;
+        f.hooks.displayStyle=()=>({mode:'individual',rangePolicy:'legacy',lut:Array.from({length:256},(_,i)=>[i,i,i]),smoothing:'linear',otsu:false});
+        const input=report.createAdapter(f.hooks,{useDisplayStyle:true}),entries=await input.molecules[0].loadEntries();
+        assert.deepEqual(entries.map(e=>e.displayWindow),[{min:-2,max:75},{min:-4,max:75}]);
+        assert.equal(entries[0].keepGrid,undefined);
+    }],
+    ['maximum display uses a unit range for all nonpositive measurements without changing negative source statistics', async () => {
+        for(const mode of ['same','individual']) {
+            const f=fixture();f.app.msiUserWindow={};
+            f.sections.forEach(section=>{Object.assign(section.msiSeries.MSI_DA,{rawRange:[-9,-5],rawDispMax:-5,rawTrueMax:-5,rawMean:-7});});
+            for(const panel of f.app.panels.values())panel.ensureMsiLayerLoaded=async key=>{panel.msiValueRasters.set(key,{W:2,H:1,values:Float64Array.from([-9,-5])});return true;};
+            f.hooks.displayStyle=()=>({mode,rangePolicy:'maximum',lut:Array.from({length:256},(_,i)=>[i,i,i]),smoothing:'none',otsu:false});
+            const input=report.createAdapter(f.hooks,{useDisplayStyle:true}),entries=await input.molecules[0].loadEntries();
+            assert.deepEqual(entries.map(e=>e.displayWindow),[{min:0,max:1},{min:0,max:1}]);
+            assert.equal(entries[0].stats.max,-5);assert.equal(entries[0].stats.mean,-7);
+            f.app.msiUserWindow.MSI_DA={min:-9,max:-3};
+            const manual=await report.createAdapter(f.hooks,{useDisplayStyle:true}).molecules[0].loadEntries();
+            assert.deepEqual(manual[0].displayWindow,{min:-9,max:-3});
+        }
+    }],
     ['report filename is portable', async () => {
         assert.equal(report.safeFileName('../測定:<project>?'), '.._測定__project___report.pptx');
         assert.equal(report.safeFileName('CON'), '_CON_report.pptx');

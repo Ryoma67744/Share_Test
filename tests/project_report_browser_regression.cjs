@@ -23,7 +23,7 @@ function sharedFixture() {
   for (let y = 0; y < 8; y++) for (let x = 0; x < 16; x++) {
     const value = y * 16 + x + 1;
     // Synthetic rounded TXT coordinates intentionally fail the old RAW-only
-    // tolerance. Registered 30 µm/pixel is authoritative, not inferred from
+    // tolerance. Registered 30×60 µm/pixel is authoritative, not inferred from
     // the coordinate spelling or from the 0.030005 source-coordinate step.
     rows.push([(-12.3456 + x * 0.030005).toPrecision(6), (-4.3 + y * 0.03).toPrecision(6), value, value * 2].join(','));
   }
@@ -39,10 +39,17 @@ function sharedFixture() {
         msMethod: 'PRIVATE_METHOD_SENTINEL', sourceFile: 'PRIVATE_SOURCE_SENTINEL.csv'}
     };
   }
-  return {sourcePath, source: rows.join('\n') + '\n', doc: {
+  const source = rows.join('\n') + '\n';
+  const secondSourcePath = 'synthetic/PRIVATE_SOURCE_SENTINEL_second.csv';
+  const secondSource = [rows[0], ...rows.slice(1).map(row => {
+    const cells = row.split(','); cells[2] = Number(cells[2]) * 4; cells[3] = Number(cells[3]) * 4;
+    return cells.join(',');
+  })].join('\n') + '\n';
+  const fixture = {sourcePath, source, sources: {[sourcePath]:source, [secondSourcePath]:secondSource}, doc: {
     id: 'synthetic-shared-project', slug: sharedSlug,
     meta: {display_name: '共有PPT合成プロジェクト', project_meta: {
-      colormap: 'plasma', msiSmoothing: 'none',
+      colormap: 'hotmetal', msiSmoothing: 'none',
+      msiDisplay: {version:1, preset:'hdi', aspectMode:'physical', rangePolicy:'maximum'},
       memo: {sample: '公開試料メモ', machine: '公開装置メモ', freeNote: '公開解析メモ', experimentDate: '2026-10-28'}
     }},
     anatomy_palette: {}, sections: [{id: 'synthetic-server-section', client_id: 'synthetic-shared-section',
@@ -51,10 +58,19 @@ function sharedFixture() {
         ce: 137.875, cv: 246.625,
         source: {coneV: '351.3125', msCe: '452.6875', msmsCe: '553.8125', capillaryKv: '0.654321'}},
         displayTransform: {version: 2, baseOrientation: 'native-raster'},
-        world_coords: {msi_um_per_px: {x: '30', y: '3e1'}}},
+        world_coords: {msi_um_per_px: {x: '30', y: '6e1'}}},
       storage_paths: {images: {}, msiSeries: series}
     }]
   }};
+  const second = structuredClone(fixture.doc.sections[0]);
+  second.id = 'synthetic-server-section-second'; second.client_id = 'synthetic-shared-section-second';
+  second.ordinal = 2; second.display_name = '共有切片B';
+  for (const entry of Object.values(second.storage_paths.msiSeries)) {
+    entry.path = secondSourcePath; entry.sourceFileId = 'synthetic-source-second';
+    entry.sourceReference = 'synthetic-source-second-revision';
+  }
+  fixture.doc.sections.push(second);
+  return fixture;
 }
 
 async function readDeck(download) {
@@ -82,7 +98,7 @@ function assertImageReportPages(deck, detailCount, context) {
   assert.doesNotMatch(deck.xml, /Project information/, context + ' omits project information pages');
 }
 
-function assertNativeScaleBars(deck, context, label = '50 µm', physicalWidthUm) {
+function assertNativeScaleBars(deck, context, label = '50 µm', physicalWidthUm, sectionCount = 1) {
   const slideSize = deck.xml.match(/<p:sldSz cx="(\d+)" cy="(\d+)"/);
   assert.ok(slideSize, context + ' declares slide dimensions');
   for (const xml of deck.slideXml.slice(1)) {
@@ -90,44 +106,116 @@ function assertNativeScaleBars(deck, context, label = '50 µm', physicalWidthUm)
     // native label paired with a horizontal native rectangle on each detail.
     const shapes = xml.match(/<p:sp>[\s\S]*?<\/p:sp>/g) || [];
     const labels = shapes.map((shape, index) => shape.includes('<a:t>' + label + '</a:t>') ? index : -1).filter(index => index >= 0);
-    assert.equal(labels.length, 1, context + ' has a calibrated native ' + label + ' label per section image');
-    const bar = shapes[labels[0] - 1] || '';
-    assert.match(bar, /<a:prstGeom prst="rect"/, context + ' scale is a native editable bar');
-    const size = bar.match(/<a:ext cx="(\d+)" cy="(\d+)"/);
-    assert.ok(size && Number(size[1]) > Number(size[2]) && Number(size[2]) > 0,
-      context + ' scale bar has a nonzero horizontal extent');
-    const position = bar.match(/<a:off x="(\d+)" y="(\d+)"/);
-    assert.ok(position && Number(position[1]) + Number(size[1]) <= Number(slideSize[1])
-      && Number(position[2]) + Number(size[2]) <= Number(slideSize[2]), context + ' scale bar stays inside the slide');
-    assert.match(bar, /<a:solidFill><a:srgbClr val="000000"/, context + ' black scale bar is visible on the white detail page');
-    if (physicalWidthUm) {
-      const pictures = xml.match(/<p:pic>[\s\S]*?<\/p:pic>/g) || [];
-      assert.equal(pictures.length, 1, context + ' detail contains one calibrated source image');
-      const imageSize = pictures[0].match(/<a:ext cx="(\d+)" cy="(\d+)"/);
-      assert.ok(imageSize, context + ' image declares its actual slide dimensions');
-      const lengthUm = Number.parseFloat(label) * (label.endsWith(' mm') ? 1000 : 1);
-      assert.ok(Math.abs(Number(size[1]) / Number(imageSize[1]) - lengthUm / physicalWidthUm) < 2 / Number(imageSize[1]),
-        context + ' native bar/image ratio equals labelled distance / registered physical image width');
+    assert.equal(labels.length, sectionCount, context + ' has a calibrated native ' + label + ' label per section image');
+    for (const [imageIndex, labelIndex] of labels.entries()) {
+      const bar = shapes[labelIndex - 1] || '';
+      assert.match(bar, /<a:prstGeom prst="rect"/, context + ' scale is a native editable bar');
+      const size = bar.match(/<a:ext cx="(\d+)" cy="(\d+)"/);
+      assert.ok(size && Number(size[1]) > Number(size[2]) && Number(size[2]) > 0,
+        context + ' scale bar has a nonzero horizontal extent');
+      const position = bar.match(/<a:off x="(\d+)" y="(\d+)"/);
+      assert.ok(position && Number(position[1]) + Number(size[1]) <= Number(slideSize[1])
+        && Number(position[2]) + Number(size[2]) <= Number(slideSize[2]), context + ' scale bar stays inside the slide');
+      assert.match(bar, /<a:solidFill><a:srgbClr val="000000"/, context + ' black scale bar is visible on the white detail page');
+      if (physicalWidthUm) {
+        const pictures = xml.match(/<p:pic>[\s\S]*?<\/p:pic>/g) || [];
+        assert.equal(pictures.length, sectionCount, context + ' detail contains each calibrated source image');
+        const imageSize = pictures[imageIndex].match(/<a:ext cx="(\d+)" cy="(\d+)"/);
+        assert.ok(imageSize, context + ' image declares its actual slide dimensions');
+        const lengthUm = Number.parseFloat(label) * (label.endsWith(' mm') ? 1000 : 1);
+        assert.ok(Math.abs(Number(size[1]) / Number(imageSize[1]) - lengthUm / physicalWidthUm) < 2 / Number(imageSize[1]),
+          context + ' native bar/image ratio equals labelled distance / registered physical image width');
+      }
     }
   }
 }
 
-async function sharedSourceSnapshot(load) {
-  const section = App.project.sections[0], panel = App.panels.get(section.id), expected = [];
-  for (const key of Object.keys(section.msiSeries)) {
-    if (load && !await panel.ensureMsiLayerLoaded(key)) throw new Error('Shared synthetic numeric source failed to load');
-    const entry = section.msiSeries[key], raster = panel.msiValueRasters.get(key);
-    const record = await ProjectStorage.getBlob(entry.blobId);
-    const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await record.blob.arrayBuffer())),
-      byte => byte.toString(16).padStart(2, '0')).join('');
-    expected.push({key, mean: msiQuantMean(entry), max: msiMaxIntensity(entry).value,
-      blobId: entry.blobId, storagePath: entry.storagePath, sourceHash: hash,
-      width: raster.W, height: raster.H, pitch: msiDisplayPhysicalPitch(section, key),
-      sourceGeometry: JSON.stringify(raster.sourceGeometry), values: Array.from(raster.values)});
+function assertImageAspect(deck, ratio, context) {
+  for (const xml of deck.slideXml.slice(1)) for (const picture of xml.match(/<p:pic>[\s\S]*?<\/p:pic>/g) || []) {
+    const size = picture.match(/<a:ext cx="(\d+)" cy="(\d+)"/);
+    assert.ok(size && Math.abs(Number(size[1]) / Number(size[2]) - ratio) < 0.002,
+      context + ' image aspect uses registered physical pitch, not raster columns / rows');
   }
-  return {expected, projectId: App.project.id, settings: JSON.stringify(section.meta),
+}
+
+async function installReportObservation(page) {
+  await page.evaluate(async () => {
+    await loadScript((window.LAZY_LIBS || {}).projectReportDeck || 'project-report-deck.js');
+    const originalDeck = window.ProjectReportDeck;
+    window.ProjectReportDeck = {...originalDeck, async create(report, options) {
+      window.__reportTestModel = {displayStyle:report.displayStyle, molecules:report.molecules.map(molecule => ({
+        upper:molecule.upper, intensityScale:molecule.intensityScale,
+        sections:molecule.sections.map(section => ({sectionId:section.sectionId, displayWindow:section.displayWindow,
+          width:section.image && section.image.width, height:section.image && section.image.height,
+          physicalWidthUm:section.image && section.image.physicalWidthUm,
+          physicalHeightUm:section.image && section.image.physicalHeightUm}))}))};
+      return originalDeck.create(report, options);
+    }};
+  });
+}
+
+async function installReportLoadGate(page) {
+  await page.evaluate(() => {
+    const panel = App.panels.get(App.project.sections[0].id), original = panel.ensureMsiLayerLoaded;
+    window.__reportGateEntered = false;
+    panel.ensureMsiLayerLoaded = async function (...args) {
+      panel.ensureMsiLayerLoaded = original;
+      window.__reportGateEntered = true;
+      await new Promise(resolve => {window.__releaseReportGate = resolve;});
+      return original.apply(this, args);
+    };
+  });
+}
+
+async function checkRoiPhysicalComparison(page) {
+  const result = await page.evaluate(async () => {
+    await loadScript('roi-media-msi.js'); await loadScript('roi-media-app.js');
+    const project = App.project, section = project.sections[0], key = Object.keys(section.msiSeries)[0];
+    const saved = project.rois, polygon = [[1,1],[3,1],[3,3],[1,3]], source = msiLayerSourceGeometry(section,key);
+    const roi = {id:'synthetic-physical-comparison',polysBySection:{[section.id]:polygon},
+      geometryBySection:{[section.id]:{version:'msi-source-v1',sourceRef:msiSourceReference(section.msiSeries[key]),
+        displayGeometry:structuredClone(source.displayGeometry)}}};
+    project.rois = [...(saved || []),roi];
+    try {
+      const adapter = RoiMediaApp.createAdapter(project,roi), frame = await adapter.loadMsi(project,roi,section.id,key);
+      const canvas = document.createElement('canvas'), rendered = RoiMediaMsi.draw(canvas,frame,{width:400,height:400,mode:'whole'});
+      const matrix = rendered.imageMatrix;
+      return {sourceBounds:frame.physicalFrame.sourceBoundsUm,
+        expected:polygon.map(([x,y])=>[matrix[0][0]*(x+.5)+matrix[0][1]*(y+.5)+matrix[0][2],
+          matrix[1][0]*(x+.5)+matrix[1][1]*(y+.5)+matrix[1][2]]),
+        actual:rendered.screenPolygon,bar:rendered.scaleBar,
+        pitch:frame.pixelPitch,matrix};
+    } finally {project.rois=saved;}
+  });
+  assert.deepEqual(result.sourceBounds,{x:0,y:0,width:480,height:480},'The real ROI comparison adapter preserves the registered physical footprint');
+  for (let i=0;i<result.expected.length;i++) for (let axis=0;axis<2;axis++)
+    assert.ok(Math.abs(result.expected[i][axis]-result.actual[i][axis])<1e-9,'ROI overlay uses one half-pixel centre correction');
+  assert.ok(result.bar && result.bar.pixels>0 && result.bar.length>0);
+  const matrix=result.matrix,det=matrix[0][0]*matrix[1][1]-matrix[0][1]*matrix[1][0];
+  const umPerPixel=Math.hypot(matrix[1][1]*result.pitch.x/det,matrix[1][0]*result.pitch.y/det);
+  assert.ok(Math.abs(result.bar.length/result.bar.pixels-umPerPixel)<1e-9,'ROI comparison ruler consumes physical pitch once');
+  console.log('ROI physical comparison adapter, source footprint, overlay centre and scale bar browser regression passed.');
+}
+
+async function sharedSourceSnapshot(load) {
+  const expected = [];
+  for (const section of App.project.sections) {
+    const panel = App.panels.get(section.id);
+    for (const key of Object.keys(section.msiSeries)) {
+      if (load && !await panel.ensureMsiLayerLoaded(key)) throw new Error('Shared synthetic numeric source failed to load');
+      const entry = section.msiSeries[key], raster = panel.msiValueRasters.get(key);
+      const record = await ProjectStorage.getBlob(entry.blobId);
+      const hash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', await record.blob.arrayBuffer())),
+        byte => byte.toString(16).padStart(2, '0')).join('');
+      expected.push({sectionId:section.id, key, mean: msiQuantMean(entry), max: msiMaxIntensity(entry).value,
+        blobId: entry.blobId, storagePath: entry.storagePath, sourceHash: hash,
+        width: raster.W, height: raster.H, pitch: msiDisplayPhysicalPitch(section, key),
+        sourceGeometry: JSON.stringify(raster.sourceGeometry), values: Array.from(raster.values)});
+    }
+  }
+  return {expected, projectId: App.project.id, settings: JSON.stringify(App.project.sections.map(section=>section.meta)),
     rois: JSON.stringify(App.project.rois),
-    metadata: JSON.stringify(Object.values(section.msiSeries).map(entry => entry.compoundMeta))};
+    metadata: JSON.stringify(App.project.sections.flatMap(section=>Object.values(section.msiSeries).map(entry => entry.compoundMeta)))};
 }
 
 function assertNoVoltages(deck, context) {
@@ -166,7 +254,7 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
     async function waitForSharedRole(expectedRole) {
       await page.waitForFunction(expected => typeof App !== 'undefined' && !App.offline
         && App.project && App.project.__share && App.shareMode && App.shareMode.role === expected
-        && App.panels.size === 1, expectedRole, {timeout:60000});
+        && App.panels.size === 2, expectedRole, {timeout:60000});
       await page.waitForFunction(() => typeof SharePreview !== 'undefined' && SharePreview.isOpen(), undefined, {timeout:30000});
       await page.locator('[data-preview-close]').click();
       await page.locator('#btn-export-ppt').waitFor({state:'visible'});
@@ -200,11 +288,15 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
     // Decode before the invariant snapshot; exporting must not alter original
     // bytes, the rounded coordinate geometry, numerical values or calibration.
     const before = await page.evaluate(sharedSourceSnapshot, true);
-    assert.deepEqual(before.expected.map(entry => [entry.mean, entry.max]), [[64.5, 128], [129, 256]],
+    assert.deepEqual(before.expected.map(entry => [entry.mean, entry.max]), [[64.5, 128], [129, 256], [258, 512], [516, 1024]],
       'shared Storage CSV is parsed into authoritative source-row statistics');
     for (const entry of before.expected) {
       assert.deepEqual([entry.width, entry.height], [16, 8], 'Rounded TXT retains its measured raster dimensions');
-      assert.deepEqual(entry.pitch, {x: 30, y: 30}, 'Registered numeric strings are normalized without coordinate inference');
+      assert.deepEqual(entry.pitch, {x: 30, y: 60}, 'Registered numeric strings are normalized without coordinate inference');
+    }
+    if (role === 'viewer') {
+      await checkRoiPhysicalComparison(page);
+      assert.deepEqual(await page.evaluate(sharedSourceSnapshot,false),before,'ROI comparison preserves source data and stored ROI state');
     }
     let downloadCount = 0;
     page.on('download', () => downloadCount++);
@@ -217,23 +309,29 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
         return result;
       };
     });
+    await installReportObservation(page);
     async function assertSharedUnchanged(stage) {
       const after = await page.evaluate(sharedSourceSnapshot, false);
       assert.deepEqual(after, before, stage + ' leaves shared source values, settings and metadata unchanged');
       assert.equal(await page.evaluate(() => App.shareMode.role), role, 'PPT export does not change the share role');
     }
-    async function openOptions(includeCeCv) {
+    async function openOptions(includeCeCv, useDisplayStyle = false) {
       await page.locator('#btn-export-ppt').click();
       await page.getByRole('dialog', {name:'PPT レポートの設定', exact:true}).waitFor({state:'visible'});
       const checkbox = page.locator('#project-report-include-ce-cv');
-      assert.equal(await checkbox.isChecked(), false, 'Shared Admin CV/CE starts OFF for every export');
+      const style = page.locator('#project-report-use-display-style');
+      assert.equal(await style.isChecked(), false, 'Display-style mode starts OFF for every shared export');
+      if (role === 'viewer') assert.equal(await checkbox.count(), 0, 'Viewer is never offered CV/CE');
+      else assert.equal(await checkbox.isChecked(), false, 'Shared Admin CV/CE starts OFF for every export');
       assert.equal(await page.locator('#project-report-master-password').count(), 0, 'Existing Admin login needs no extra master-password input');
       if (includeCeCv) await checkbox.check();
+      if (useDisplayStyle) await style.check();
     }
     function assertSharedDeck(deck, includeCeCv) {
       assertImageReportPages(deck, 2, 'Shared ' + role);
-      assertNativeScaleBars(deck, 'Shared ' + role, '100 µm', 16 * 30);
-      for (const label of ['共有PPT合成プロジェクト', '共有乳酸', '共有切片A']) {
+      assertNativeScaleBars(deck, 'Shared ' + role, '100 µm', 16 * 30, 2);
+      assertImageAspect(deck, 1, 'Shared ' + role + ' 30×60 µm');
+      for (const label of ['共有PPT合成プロジェクト', '共有乳酸', '共有切片A', '共有切片B']) {
         assert.ok(deck.xml.includes(label), role + ' includes public registered label: ' + label);
       }
       assert.ok(deck.xml.includes('89 → 43'), role + ' retains the public precursor/product transition');
@@ -257,40 +355,84 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
       assert.equal(deck.xml.includes('0.1234567'), role === 'admin', 'Dwell remains in authorized transition subtitles only');
       assertNoSessionTokens(deck);
     }
-    async function createReport(includeCeCv) {
+    async function createReport(includeCeCv, useDisplayStyle = false, mutateAfterStart = false) {
+      if (mutateAfterStart) await installReportLoadGate(page);
       const downloadPromise = page.waitForEvent('download', {timeout:90000});
-      await page.locator(role === 'viewer' ? '#btn-export-ppt' : '[data-report-create]').click();
-      if (role === 'viewer') {
-        assert.equal(await page.locator('.project-report-options').count(), 0, 'Viewer exports directly without a settings dialog');
-        assert.equal(await page.locator('#project-report-include-ce-cv').count(), 0, 'Viewer is never offered a CV/CE setting');
-        assert.equal(await page.locator('#project-report-master-password').count(), 0, 'Viewer is never offered extra authentication');
+      await page.locator('[data-report-create]').click();
+      if (mutateAfterStart) {
+        await page.waitForFunction(() => window.__reportGateEntered);
+        await page.evaluate(() => {
+          window.__reportRestoreDisplay = {meta:structuredClone(App.project.meta), mode:App.msiScaleMode,
+            pitches:App.project.sections.map(section=>structuredClone(section.meta.world_coords))};
+          App.project.meta.colormap = 'viridis'; App.project.meta.msiSmoothing = 'linear';
+          App.project.meta.msiDisplay = {...App.project.meta.msiDisplay, rangePolicy:'percentile', aspectMode:'legacy'};
+          App.msiScaleMode = 'individual';
+          for (const section of App.project.sections) section.meta.world_coords.msi_um_per_px = {x:90,y:90};
+          window.__releaseReportGate();
+        });
       }
       const download = await downloadPromise, deck = await readDeck(download);
       await page.evaluate(() => window.__reportTestRun);
+      if (mutateAfterStart) await page.evaluate(() => {
+        const saved = window.__reportRestoreDisplay;
+        App.project.meta = saved.meta; App.msiScaleMode = saved.mode;
+        App.project.sections.forEach((section,index)=>{section.meta.world_coords=saved.pitches[index];});
+        delete window.__reportRestoreDisplay;
+      });
       assert.match(download.suggestedFilename(), /\.pptx$/);
       assertSharedDeck(deck, includeCeCv);
+      const report = await page.evaluate(() => window.__reportTestModel);
+      assert.equal(report.molecules.length, 2, 'Both measured molecular transitions are exported');
+      for (const [index, molecule] of report.molecules.entries()) {
+        assert.equal(molecule.sections.length, 2, 'Both output sections contribute to every molecule');
+        const maximum = 512 * (index + 1);
+        if (useDisplayStyle) {
+          assert.equal(report.displayStyle.mode, 'same', 'The captured Same mode is used');
+          assert.equal(report.displayStyle.rangePolicy, 'maximum');
+          assert.equal(report.displayStyle.colormap, 'hotmetal');
+          assert.equal(report.displayStyle.smoothing, 'none');
+          assert.equal(molecule.intensityScale.basis, 'display-style');
+          assert.deepEqual(molecule.sections.map(section => section.displayWindow),
+            [{min:0,max:maximum},{min:0,max:maximum}], 'Same includes the stronger second section without mixing molecules');
+        } else {
+          assert.equal(molecule.intensityScale.percentile, 99.8, 'OFF retains the legacy report percentile');
+          assert.equal(molecule.intensityScale.upperBasis, 'percentile');
+          assert.ok(molecule.upper > 0 && molecule.upper < maximum, 'Legacy p99.8 does not silently become maximum');
+        }
+        for (const section of molecule.sections) {
+          assert.ok(Math.abs(section.width / section.height - 1) < 0.002, 'Embedded pixels preserve the 30×60 physical aspect');
+          assert.ok(Math.abs(section.physicalWidthUm - 480) < 1e-6);
+          assert.ok(Math.abs(section.physicalHeightUm - 480) < 1e-6);
+        }
+      }
       await assertSharedUnchanged('Shared ' + role + ' CV/CE ' + (includeCeCv ? 'ON' : 'OFF'));
       if (role === 'viewer' && process.env.PPT_REPORT_SHARED_SAMPLE_PATH) {
         await fs.writeFile(process.env.PPT_REPORT_SHARED_SAMPLE_PATH, deck.bytes);
       }
-      console.log('Shared ' + role + ' CV/CE ' + (includeCeCv ? 'ON' : 'OFF') + ' browser regression passed (' + deck.slides.length + ' slides, ' + deck.bytes.length + ' bytes).');
+      console.log('Shared ' + role + ' CV/CE ' + (includeCeCv ? 'ON' : 'OFF') + ', display style '
+        + (useDisplayStyle ? 'ON' : 'OFF') + ' browser regression passed (' + deck.slides.length + ' slides, ' + deck.bytes.length + ' bytes).');
     }
-    if (role === 'viewer') {
-      await createReport(false);
-      assert.equal(downloadCount, 1, 'The viewer downloads directly without a settings step');
-    } else {
-      await openOptions(true);
-      await page.locator('[data-report-cancel]').click();
-      await page.evaluate(() => window.__reportTestRun);
-      await page.locator('.project-report-options').waitFor({state:'detached'});
-      assert.equal(downloadCount, 0, 'Cancelling Admin settings does not download a report');
-      await assertSharedUnchanged('Cancelled Admin export');
-      for (const includeCeCv of [false, true, false]) {
-        await openOptions(includeCeCv);
-        await createReport(includeCeCv);
-      }
-      assert.equal(downloadCount, 3, 'Admin OFF, ON and next-default-OFF exports download only when requested');
+    await openOptions(role === 'admin', true);
+    await page.locator('[data-report-cancel]').click();
+    await page.evaluate(() => window.__reportTestRun);
+    await page.locator('.project-report-options').waitFor({state:'detached'});
+    assert.equal(downloadCount, 0, 'Cancelling shared settings does not download a report');
+    await assertSharedUnchanged('Cancelled shared export');
+    await openOptions(false, true);
+    await installReportLoadGate(page);
+    await page.locator('[data-report-create]').click();
+    await page.waitForFunction(() => window.__reportGateEntered);
+    await page.getByRole('dialog', {name:'PPT レポートを作成',exact:true}).getByRole('button', {name:'中止',exact:true}).click();
+    await page.evaluate(() => window.__releaseReportGate());
+    await page.evaluate(() => window.__reportTestRun);
+    await page.locator('.project-report-progress').waitFor({state:'detached'});
+    assert.equal(downloadCount, 0, 'Cancelling an active display-style export never downloads a partial deck');
+    await assertSharedUnchanged('Cancelled running display-style export');
+    for (const [includeCeCv, useDisplayStyle] of [[false,false],[role === 'admin',true],[false,false]]) {
+      await openOptions(includeCeCv, useDisplayStyle);
+      await createReport(includeCeCv, useDisplayStyle, useDisplayStyle);
     }
+    assert.equal(downloadCount, 3, 'OFF, ON and next-default-OFF exports download only when requested');
     assert.equal(logins.length, loginCountBeforeExport, 'PPT export never asks for another Admin or master password');
     assert.ok(!traffic.slice(trafficStart).some(item => item.path === '/rest/v1/rpc/unlock_project_master'), 'Shared PPT never invokes master authentication');
     assert.ok(traffic.slice(trafficStart).some(item => item.path === '/rest/v1/rpc/get_project_doc'), 'production shared document read was exercised');
@@ -413,8 +555,9 @@ async function main() {
       if (req.method !== 'GET' && req.method !== 'HEAD') {
         forbidden.push({method: req.method, path: pathname}); res.writeHead(405); res.end('Read only fixture server'); return;
       }
-      if (pathname === '/storage/v1/object/public/atlases/' + fixture.sourcePath) {
-        res.setHeader('Content-Type', 'text/csv'); res.end(fixture.source); return;
+      const fixturePath = pathname.slice('/storage/v1/object/public/atlases/'.length);
+      if (pathname.startsWith('/storage/v1/object/public/atlases/') && Object.hasOwn(fixture.sources, fixturePath)) {
+        res.setHeader('Content-Type', 'text/csv'); res.end(fixture.sources[fixturePath]); return;
       }
       const file = path.resolve(root, '.' + pathname + (pathname.endsWith('/') ? 'index.html' : ''));
       if (!file.startsWith(root + path.sep)) { res.writeHead(403); res.end(); return; }
@@ -488,6 +631,7 @@ async function main() {
       await page.getByRole('dialog', {name:'PPT レポートの設定', exact:true}).waitFor({state:'visible'});
       const checkbox = page.locator('#project-report-include-ce-cv');
       assert.equal(await checkbox.isChecked(), false, 'CV/CE starts OFF for every export');
+      assert.equal(await page.locator('#project-report-use-display-style').isChecked(), false, 'Display style starts OFF for every local export');
       assert.equal(await page.locator('#project-report-master-password').isVisible(), false, 'Local master export does not request a share master password');
       return checkbox;
     }

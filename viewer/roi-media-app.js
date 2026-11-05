@@ -149,25 +149,28 @@
     }
 
     function createAdapter(project, roi) {
-        const frameCache = new Map(), windows = new Map(), masks = new Map(), orientations = new Map();
+        const frameCache = new Map(), windows = new Map(), masks = new Map(), orientations = new Map(), calibrations=new Map();
         const thumbnails = new Map();
         let selectedPhoto = null;
         const focus = App.focusCompoundKey || '';
         const lut = getActiveColormap().map(c => c.slice()), background = getColormapBackground().slice();
         const colormapName = typeof _activeColormapName === 'string' ? _activeColormapName : '';
         const otsuOn = !!App.otsuBgRemove;
+        const displaySettings=copy(App.getMsiDisplaySettings ? App.getMsiDisplaySettings() : {rangePolicy:'legacy'});
         const absolute = new Map();
         for (const section of project.sections || []) {
             if (!App._organInScope(section)) continue;
             for (const [key,ent] of Object.entries(section.msiSeries || {})) {
-                const value = Number.isFinite(ent.rawDispMax) ? ent.rawDispMax : (ent.rawRange || [])[1];
+                const value = displaySettings.rangePolicy==='maximum' && Number.isFinite(ent.rawTrueMax) ? ent.rawTrueMax
+                    : Number.isFinite(ent.rawDispMax) ? ent.rawDispMax : (ent.rawRange || [])[1];
                 if (Number.isFinite(value)) absolute.set(key, Math.max(absolute.get(key) || 0,value));
             }
         }
         const windowContext = { msiScaleMode:App.msiScaleMode, msiUserWindow:copy(App.msiUserWindow || {}),
-            getMsiAbsMax:key => absolute.get(key) || 0 };
+            getMsiAbsMax:key => absolute.get(key) || 0,getMsiDisplaySettings:()=>displaySettings };
         for (const section of project.sections || []) {
             orientations.set(section.id, sectionLayerViewLinear(section,'msi'));
+            calibrations.set(section.id,copy(section.meta && section.meta.world_coords));
             if (otsuOn) masks.set(section.id, copy(section.meta && section.meta.otsu));
         }
         const valid = () => current(project,roi);
@@ -261,7 +264,7 @@
                 const polygon = roiPolygonForDisplay(r,section,key,(r.polysBySection || {})[id]);
                 if (!polygon || polygon.length < 3) throw new Error('ROIとMSIの対応座標を確認できません。');
                 const cacheKey = id+'|'+key;
-                if (!windows.has(cacheKey)) windows.set(cacheKey,App.getMsiWindow.call(windowContext,key,ent.rawRange,ent.rawDispMax));
+                if (!windows.has(cacheKey)) windows.set(cacheKey,App.getMsiWindow.call(windowContext,key,ent.rawRange,ent.rawDispMax,ent.rawTrueMax));
                 const win = windows.get(cacheKey);
                 const signature = identity+'|'+JSON.stringify(win);
                 let cached = frameCache.get(cacheKey);
@@ -277,11 +280,24 @@
                     // Only retain the current colored frame, not every molecule visited.
                     frameCache.clear(); frameCache.set(cacheKey,cached);
                 }
-                const pitch = msiDisplayPhysicalPitch(section,key);
+                const snapshotSection={...section,meta:{...section.meta,world_coords:calibrations.get(id)}};
+                let pitch = msiDisplayPhysicalPitch(snapshotSection,key),physicalFrame=null,drawingRects=null;
                 const aspect = pitch ? [[pitch.x/Math.min(pitch.x,pitch.y),0,0],[0,pitch.y/Math.min(pitch.x,pitch.y),0],[0,0,1]]
                     : [[1,0,0],[0,1,0],[0,0,1]];
+                if(root.MsiDisplayGeometry) {
+                    const geometry=typeof msiLayerSourceGeometry==='function'?msiLayerSourceGeometry(section,key):null;
+                    const size=panel.msiValueRasters.get(key),original=geometry && geometry.legacy;
+                    // ROI comparison has always respected physical aspect,
+                    // including projects without the new display preference.
+                    physicalFrame=root.MsiDisplayGeometry.createFrame({width:size.W,height:size.H,
+                        sourceWidth:original?original.W:pitch?size.W:undefined,sourceHeight:original?original.H:pitch?size.H:undefined,
+                        registeredPitch:original?(calibrations.get(id)||{}).msi_um_per_px:pitch,
+                        orientation:orientations.get(id),aspectMode:'physical'});
+                    pitch=physicalFrame.displayPitch;drawingRects=root.MsiDisplayGeometry.drawingRects(physicalFrame);
+                }
                 const c = r.rgba || [200,200,200,255];
-                return { canvas:cached.canvas,polygon,transform:displayAffineMultiply(orientations.get(id),aspect),
+                return { canvas:cached.canvas,polygon,transform:physicalFrame?physicalFrame.matrix:displayAffineMultiply(orientations.get(id),aspect),
+                    physicalFrame,drawingRects,
                     roiColor:'rgb('+c.slice(0,3).join(',')+')',background:'rgb('+background.join(',')+')',pixelPitch:pitch,
                     status:formatDisplayName(key)+' ／ '+colormapName+' ／ 強度 '+win.min+'–'+win.max+(otsuOn?' ／ Otsu表示':'') };
             },

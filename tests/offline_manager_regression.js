@@ -110,8 +110,8 @@ async function main() {
     for (const file of ['index.html', 'mrm.html']) {
         const source = fs.readFileSync(path.join(root, file), 'utf8');
         const sources = [...source.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(m => m[1]);
-        assert.deepEqual(sources.slice(0, file === 'index.html' ? 5 : 3), file === 'index.html'
-            ? ['runtime-config.js', 'app-runtime.js', 'project-store-safety.js', 'project-navigation.js', 'offline/offline.js']
+        assert.deepEqual(sources.slice(0, file === 'index.html' ? 6 : 3), file === 'index.html'
+            ? ['runtime-config.js', 'app-runtime.js', 'project-store-safety.js', 'project-navigation.js', 'viewer/msi-display-settings.js', 'offline/offline.js']
             : ['runtime-config.js', 'app-runtime.js', 'offline/offline.js']);
         assert.ok(sources.includes('vendor/supabase.min.js'));
         for (const src of sources) assert.ok(new URL(src, 'https://example.invalid/Share_Test/' + file).pathname.startsWith('/Share_Test/'), src + ' escapes the app subpath');

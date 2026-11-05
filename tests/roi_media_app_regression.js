@@ -73,6 +73,7 @@ function fixture() {
   }
   const context = runtime({
     Uint8Array,DataView,ArrayBuffer,Blob,URL,Map,Set,_testApp:app,RoiMediaModel:model,RoiMediaService:service,
+    MsiDisplayGeometry:require('../viewer/msi-display-geometry.js'),
     getActiveColormap:() => lut,getColormapBackground:() => background,
     formatDisplayName:key => key.replace(/^MSI_/,''),
     RoiMediaMsi:{colorize(image, options) { colorCalls.push({image,options}); return msi.colorize(image,{...options,createCanvas}); }},
@@ -88,7 +89,7 @@ function fixture() {
     'createMsiSourceGeometry','msiSourceCell','msiSourceRow','msiSourceStats','calcStats',
     'roiContainsSourcePoint','pointInPolygon']);
   vm.runInContext('const App = _testApp; const _activeColormapName = "TestMap";',context);
-  const start = html.indexOf('    getMsiWindow(key, rawRange, dispMax) {');
+  const start = html.indexOf('    getMsiWindow(key, rawRange, dispMax, trueMax) {');
   assert.ok(start > 0);
   app.getMsiWindow = vm.runInContext('({' + html.slice(start,html.indexOf('\n    },',start)+7) + '}).getMsiWindow',context);
   vm.runInContext(source,context,{filename:'roi-media-app.js'});

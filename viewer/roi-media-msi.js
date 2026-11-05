@@ -50,18 +50,18 @@
     const transform = affine(frame.transform);
     const polygon = frame.polygon.map(p=>[p[0]+0.5,p[1]+0.5]);
     const nativeBounds = bounds(polygon), pad = marginValue(margin);
+    const whole = frame.physicalFrame && frame.physicalFrame.sampleBounds || {x:0,y:0,width:size.width,height:size.height};
     if (nativeBounds.x > size.width || nativeBounds.y > size.height
         || nativeBounds.x+nativeBounds.width < 0 || nativeBounds.y+nativeBounds.height < 0) {
       throw new Error('ROIがMSI画像の範囲外です。');
     }
     // Floor/ceil are image edges, not resampled intensities. Degenerate tiny
     // polygons still produce a positive crop and never request a 0px canvas.
-    const left = clamp(Math.floor(nativeBounds.x)-pad, 0, size.width-1);
-    const top = clamp(Math.floor(nativeBounds.y)-pad, 0, size.height-1);
-    const right = clamp(Math.ceil(nativeBounds.x+nativeBounds.width)+pad, left+1, size.width);
-    const bottom = clamp(Math.ceil(nativeBounds.y+nativeBounds.height)+pad, top+1, size.height);
+    const left = clamp(Math.floor(nativeBounds.x)-pad, whole.x, whole.x+whole.width-Math.min(1,whole.width));
+    const top = clamp(Math.floor(nativeBounds.y)-pad, whole.y, whole.y+whole.height-Math.min(1,whole.height));
+    const right = clamp(Math.ceil(nativeBounds.x+nativeBounds.width)+pad, left+Math.min(1,whole.width), whole.x+whole.width);
+    const bottom = clamp(Math.ceil(nativeBounds.y+nativeBounds.height)+pad, top+Math.min(1,whole.height), whole.y+whole.height);
     const crop = {x:left,y:top,width:right-left,height:bottom-top};
-    const whole = {x:0,y:0,width:size.width,height:size.height};
     const worldPolygon = polygon.map(p=>point(transform,p));
     const cropPolygon = corners(crop).map(p=>point(transform,p));
     return {size,transform,polygon,worldPolygon,nativeBounds,crop,whole,cropPolygon,
@@ -159,7 +159,11 @@
     ctx.transform(imageMatrix[0][0],imageMatrix[1][0],imageMatrix[0][1],imageMatrix[1][1],imageMatrix[0][2],imageMatrix[1][2]);
     ctx.imageSmoothingEnabled = false;
     const sourceRect = whole ? g.whole : g.crop;
-    ctx.drawImage(frame.canvas,sourceRect.x,sourceRect.y,sourceRect.width,sourceRect.height,
+    if(frame.drawingRects) {
+      ctx.beginPath();ctx.rect(sourceRect.x,sourceRect.y,sourceRect.width,sourceRect.height);ctx.clip();
+      for(const rect of frame.drawingRects)ctx.drawImage(frame.canvas,rect.source.x,rect.source.y,rect.source.width,rect.source.height,
+        rect.dest.x,rect.dest.y,rect.dest.width,rect.dest.height);
+    } else ctx.drawImage(frame.canvas,sourceRect.x,sourceRect.y,sourceRect.width,sourceRect.height,
       sourceRect.x,sourceRect.y,sourceRect.width,sourceRect.height);
     ctx.restore();
     const screenPolygon = g.worldPolygon.map(screen);

@@ -154,6 +154,7 @@
        _sections:sections,_rois:rois,_is_public:!!settings.isPublic,
        _meta:{anatomyPalette:snapshot.anatomyPalette||{},memo:snapshot.memo||{},roiMedia:{version:1,items:photoItems},
          colormap:snapshot.meta?.colormap||null,msiSmoothing:snapshot.meta?.msiSmoothing==='linear'?'linear':'none',
+         ...(snapshot.meta?.msiDisplay ? {msiDisplay:copy(snapshot.meta.msiDisplay)} : {}),
          otsuBgRemove:!!snapshot.meta?.otsuBgRemove,otsuStrength:Number.isFinite(snapshot.meta?.otsuStrength)?snapshot.meta.otsuStrength:0}};
      const commitArgs={...args};delete commitArgs._publish_token;
      await hooks.intent({...intent,...assets,commitArgs});hooks.assertActive();

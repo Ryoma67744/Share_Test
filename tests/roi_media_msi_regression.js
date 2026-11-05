@@ -92,6 +92,21 @@ for(const angle of [0,37,90]) {
   assert.ok(Math.abs(bar.pixels*bar.umPerPixel-bar.length)<1e-9);
 }
 assert.equal(Msi.scaleBar(identity,null,400),null,'uncalibrated data has no invented scale bar');
+const Geometry=require('../viewer/msi-display-geometry.js');
+const physical=Geometry.createFrame({width:4,height:2,sourceWidth:3,sourceHeight:2,
+  registeredPitch:{x:30,y:60},aspectMode:'physical'});
+const physicalInput={canvas:src,polygon:[[0,0],[2,0],[2,1],[0,1]],transform:physical.matrix,
+  physicalFrame:physical,drawingRects:Geometry.drawingRects(physical),pixelPitch:physical.displayPitch};
+const originalPhysical=JSON.stringify(physicalInput.polygon);
+const physicalOut=Msi.draw(createCanvas(400,400),physicalInput,{width:400,height:400,mode:'whole'});
+assert.equal(physical.sourceBoundsUm.width,90);assert.equal(physical.sourceBoundsUm.height,120);
+assert.ok(Math.abs(physicalOut.geometry.wholeBounds.width/physicalOut.geometry.wholeBounds.height-0.75)<1e-10,
+  'comparison framing uses the source footprint even when the display raster has a different number of samples');
+const first=physicalOut.screenPolygon[0],M=physicalOut.imageMatrix;
+assert.ok(Math.abs(first[0]-(M[0][0]*0.5+M[0][1]*0.5+M[0][2]))<1e-8);
+assert.ok(Math.abs(first[1]-(M[1][0]*0.5+M[1][1]*0.5+M[1][2]))<1e-8);
+assert.ok(Math.abs(physicalOut.scaleBar.pixels*physicalOut.scaleBar.umPerPixel-physicalOut.scaleBar.length)<1e-8);
+assert.equal(JSON.stringify(physicalInput.polygon),originalPhysical,'physical fitting never rewrites saved ROI vertices');
 
 // The real canvas viewport remains independent of the application's viewer.
 const handlers=new Map();let removed=false,disconnected=false;
