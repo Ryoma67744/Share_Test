@@ -348,7 +348,13 @@ Three groups in each section's toolbar:
 
 ## 7-bis. Per-layer display settings (gear ⚙)
 
-Select **補間 → Linear** in the toolbar, then adjust **強さ** (strength, 0–100) to smooth MSI appearance. **0 preserves the original Linear display**; higher values add stronger smoothing. None disables the slider. Original measurements, ROI membership/mean/maximum/count and numerical CSV exports do not change. Shared choices apply only to this tab and viewer/Admin role. Select **表示スタイルを使う** to include the strength in a PPT report.
+Choose **None / Linear / Median** in the toolbar's **Smoothing** selector, then use **強さ** (strength) to select one of ten levels, 1–10.
+
+- **None** applies neither interpolation nor median filtering. The slider is disabled, but each method retains its level.
+- **Linear** starts with a small interpolation amount at level 1; **level 10 matches the original Linear display**. These levels affect resampling, so they may look identical when the image is displayed at its native pixel size.
+- **Median** uses neighboring median values to reduce speckled noise while retaining boundaries. Level 1 uses 3×3 pixels, level 2 uses 5×5, and level 10 uses 21×21. This extends the SCiLS-style median approach to ten custom levels. Missing, transparent and Otsu-hidden pixels are excluded.
+
+Linear and Median retain separate levels. Large images update when you release the slider. Display presets reset the mode to None, Median to 1 and Linear to 10. Original measurements, ROI membership/mean/maximum/count and numerical CSV exports do not change. Shared choices apply only to this tab and viewer/Admin role. Select **表示スタイルを使う** to include the selected method and level in a PPT report.
 
 Click the **gear ⚙** at the right edge of any layer chip to open a per-layer popover. **Right-clicking** the layer thumbnail opens the same settings popover (in Compound mode, a **left-click** switches the focus compound instead).
 
@@ -487,7 +493,7 @@ To choose whether to include CV/CE, first sign in using the existing **🔑 Admi
 
 Public and viewer reports omit CV/CE. Admins can turn the option ON to include the registered transition's CV/CE in the molecule detail subtitle. Passwords and authentication tokens are never included in the PowerPoint file.
 
-All project sections and molecules are included regardless of section visibility or Method filters, with additional pages for large collections. The default remains a common display-raster p99.8 upper limit and black/blue/purple/red/yellow palette across sections with the same molecule and measurement conditions. **表示スタイルを使う** (use display style) starts OFF for every export. Turning it ON captures the palette, Same/Individual mode, manual raw-intensity Range, upper-limit policy, interpolation and available Otsu masks at generation start. Same recalculates its automatic upper limit across all output sections. The HDI-like maximum policy prefers the original measurement-row maximum; explicit manual Range endpoints take precedence. Individual reports show each image's range, with a 0–100% colour bar when ranges differ on the same page.
+All project sections and molecules are included regardless of section visibility or Method filters, with additional pages for large collections. The default remains a common display-raster p99.8 upper limit and black/blue/purple/red/yellow palette across sections with the same molecule and measurement conditions. **表示スタイルを使う** (use display style) starts OFF for every export. Turning it ON captures the palette, Same/Individual mode, manual raw-intensity Range, upper-limit policy, Smoothing method/level and available Otsu masks at generation start. Same recalculates its automatic upper limit across all output sections. The HDI-like maximum policy prefers the original measurement-row maximum; explicit manual Range endpoints take precedence. Individual reports show each image's range, with a 0–100% colour bar when ranges differ on the same page.
 
 Both colour modes capture orientation and aspect settings at generation start. Physical aspect uses registered X/Y pitch and the source image footprint; turning it OFF preserves the legacy raster ratio. Calibrated detail images receive individual scale bars; unknown dimensions omit them. Screen zoom and pan are not exported. Later setting changes do not alter an export already in progress.
 

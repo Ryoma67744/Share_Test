@@ -6,7 +6,7 @@ const clone=x=>JSON.parse(JSON.stringify(x));
 const original=new Blob(['immutable source'],{type:'text/plain'});
 function setup(){
  const project={id:'a',displayName:'Snapshot',storageRevision:4,publishEditEpoch:2,__publishPending:true,memo:{text:'before'},
-  meta:{msiDisplay:{version:1,preset:'hdi',aspectMode:'physical',rangePolicy:'maximum'},colormap:'hotmetal',msiSmoothing:'none'},
+  meta:{msiDisplay:{version:2,preset:'custom',aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:6,linearStrength:4},colormap:'hotmetal',msiSmoothing:'median'},
   sections:[{id:'s',displayName:'S',images:{HE:{blobId:'image',filename:'h.png'}},msiSeries:{MSI_A:{blobId:'raw',filename:'original.txt',archiveProvenance:{version:1,basis:'registered-source'},archiveGeometryUnconfirmed:true}},msiFiles:{raw:{blobId:'raw',filename:'registered-other-name.txt'},unused:{blobId:'unused'}}}],rois:[]};
  let seq=0;const logs={uploads:[],intents:[],receipts:[],pins:[],releases:[],commits:[],sessions:[],states:[]},records=new Map(['image','raw','unused'].map(k=>[k,{blob:original,mime:'text/plain'}]));
  const hooks={uuid:()=>`00000000-0000-4000-8000-${String(++seq).padStart(12,'0')}`,freezeSources(){},media:()=>({items:[]}),publicPhoto:x=>clone(x),imageIdentity:()=>null,viewerOverlay:()=>false,encodeRoi:()=>[],url:slug=>'https://example.invalid/#share='+slug,
@@ -107,10 +107,12 @@ async function main(){
  const run=Safety.run(a.project,a.meta,a.hooks);
  a.project.memo.text='new edit';a.project.sections[0].msiSeries.MSI_A.blobId='replacement';a.project.publishEditEpoch++;
  a.project.meta.msiDisplay.aspectMode='legacy';a.project.meta.colormap='plasma';
+ a.project.meta.msiDisplay.smoothingStrength=2;a.project.meta.msiDisplay.linearStrength=9;a.project.meta.msiSmoothing='linear';
  sessionRelease();await run;
  assert.equal(a.logs.commits[0]._meta.memo.text,'before');assert.equal(a.logs.receipts[0].publishedEditEpoch,2);
  assert.deepEqual(a.logs.commits[0]._meta.msiDisplay,before.meta.msiDisplay,'Publication snapshots display settings before asynchronous uploads');
- assert.equal(a.logs.commits[0]._meta.colormap,'hotmetal');checks+=2;
+ assert.equal(a.logs.commits[0]._meta.colormap,'hotmetal');
+ assert.equal(a.logs.commits[0]._meta.msiSmoothing,'median','Median mode survives publication with the captured independent levels');checks+=3;
  assert.equal(a.logs.uploads.length,3);assert.ok(a.logs.uploads.every(x=>x.path.startsWith('new_slug/publish-v2/')&&x.blob===original));
  assert.equal(a.logs.commits[0]._sections[0].storagePaths.msiFiles.raw.path,a.logs.commits[0]._sections[0].storagePaths.msiSeries.MSI_A.path);
  assert.equal(a.logs.commits[0]._sections[0].storagePaths.msiFiles.raw.filename,'registered-other-name.txt');

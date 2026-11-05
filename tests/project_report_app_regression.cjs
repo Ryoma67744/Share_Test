@@ -701,8 +701,8 @@ const tests = [
             global.MsiDisplayGeometry=require('../viewer/msi-display-geometry.js');
             const f=sharedFixture('viewer');
             f.app.msiScaleMode='same';f.app.msiUserWindow={MSI_DA:{min:5}};
-            let strength=63;
-            f.app.getMsiDisplaySettings=()=>({aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:strength});
+            let strength=6,linearStrength=4;
+            f.app.getMsiDisplaySettings=()=>({aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:strength,linearStrength});
             const lut=Array.from({length:256},(_,i)=>[i,0,0]);
             f.hooks.displayStyle=()=>({mode:f.app.msiScaleMode,rangePolicy:'maximum',lut,background:[0,0,0],smoothing:'none',otsu:true,colormap:'test-red'});
             f.hooks.sourceGeometry=()=>({legacy:{W:2,H:1}});
@@ -711,7 +711,7 @@ const tests = [
             f.hooks.keepGrid=section=>{assert.equal(section.meta.otsu.value,17);return {W:2,H:1,keep:Uint8Array.from([1,0])};};
             const right=f.app.panels.get('right');right.ensureMsiLayerLoaded=async key=>{right.msiValueRasters.set(key,{W:2,H:1,values:Float64Array.from([60,400])});return true;};
             const input=report.createAdapter(f.hooks,{useDisplayStyle:true,includeCeCv:true});
-            strength=100;
+            strength=10;linearStrength=10;
             f.app.msiUserWindow.MSI_DA={max:2};f.app.msiScaleMode='individual';lut[255][0]=0;
             f.sections[0].meta.world_coords.msi_um_per_px={x:999,y:999};f.sections[0].meta.otsu.value=999;
             const entries=await input.molecules[0].loadEntries();
@@ -724,7 +724,8 @@ const tests = [
             assert.equal(report.referenceFrame({...ticOptions,geometries:[ticGeometry,null]}),null,'TIC does not invent calibration for an unknown contributing source');
             assert.equal(report.referenceFrame({...ticOptions,geometries:[ticGeometry,{legacy:{W:3,H:1},displayGeometry:{W:2,H:1}}]}),null,'mixed source footprints cannot share a physical TIC frame');
             assert.deepEqual(input.displayStyle.lut[255],[255,0,0]);assert.equal(input.displayStyle.mode,'same');
-            assert.equal(input.displayStyle.smoothingStrength,63,'PPT strength is captured before asynchronous source loading');
+            assert.equal(input.displayStyle.smoothingStrength,6,'PPT median strength is captured before asynchronous source loading');
+            assert.equal(input.displayStyle.linearStrength,4,'PPT Linear strength is captured independently');
             assert.equal(report.createAdapter(f.hooks).displayStyle,null,'default reports do not opt into display smoothing');
             assert.deepEqual(Array.from(entries[0].keepGrid.keep),[1,0]);
             assert.equal(entries[0].stats.mean,140/3);assert.equal(entries[0].stats.max,100);

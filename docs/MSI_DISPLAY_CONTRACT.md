@@ -200,8 +200,9 @@ resolution does not mutate source coordinates, intensities, polygons or HE trans
 
 ## 7. Physical aspect and HDI-like presentation
 
-`meta.msiDisplay` version 1 stores `preset` (`current`, `hdi`, `custom`),
-`aspectMode` (`legacy`, `physical`) and `rangePolicy` (`legacy`, `maximum`).
+`meta.msiDisplay` version 2 stores `preset` (`current`, `hdi`, `custom`),
+`aspectMode` (`legacy`, `physical`), `rangePolicy` (`legacy`, `maximum`), and the
+independent Median and Linear levels described below. Version 1 remains readable.
 The existing `meta.colormap` and `meta.msiSmoothing` fields continue to carry colour
 and interpolation. New projects start with physical aspect, HotMetal, a linear
 0-to-original-maximum intensity window, Same scaling and nearest-neighbour display.
@@ -210,7 +211,7 @@ it does not reproduce proprietary import, preprocessing or last-point-wins rules
 Duplicate display cells retain their existing mean representative.
 
 Absent or unrecognised versioned settings resolve to legacy presentation without
-writing settings during load. An explicit user change may store version 1. Old
+writing settings during load. An explicit user change stores version 2. Old
 projects do not silently acquire a new aspect mode. Shared-view overrides live in
 tab-local session storage, isolated by project and viewer/admin role; they do not
 change published master metadata. Master settings round-trip through project save,
@@ -246,32 +247,62 @@ selected aspect mode. Quantitative tables always use original rows. Ordinary
 shared viewers never receive a CV/CE option; authenticated shared Admin and master
 retain the existing explicitly selected, default-off option.
 
-### Additional smoothing strength
+### Display-only Median and ten-level Linear
 
-`meta.msiDisplay.smoothingStrength` is an optional version-1 display preference,
-normalized to an integer from 0 to 100 (missing/nonfinite/non-numeric values become
-0). Existing `none`/`linear` projects load with strength 0 and keep their prior
-appearance. The slider is enabled only for Linear; None retains its value without
-applying it. Display presets reset it to 0. Master settings use the existing
-project/ZIP/publication path; shared overrides remain tab-local and role-specific.
+The Smoothing selector offers `none`, `linear` and `median`. A single integer
+slider from 1 to 10 edits the selected method's level. None disables the slider
+without discarding either saved level. Version 2 stores the Median level in
+`meta.msiDisplay.smoothingStrength` (default 1), and the independent Linear level
+in `meta.msiDisplay.linearStrength` (default 10). Finite numeric levels are rounded
+and clamped to 1–10; missing, nonfinite or nonnumeric levels use their respective
+defaults. `meta.msiSmoothing` continues to store the selected method. Both display
+presets reset to None, Median 1 and Linear 10.
 
-For Linear and strength above 0, apply a masked separable Gaussian to a temporary
-native-resolution RGB display raster after colour mapping and before orientation,
-physical-aspect correction, zoom or output resampling. Sigma is `3 * strength / 100`
-display-raster pixels and the kernel radius is `ceil(3 * sigma)`. This changes
-appearance, not source intensity units. Missing/transparent and Otsu-hidden pixels
-do not contribute to the kernel and retain their original background/alpha. No
-filtered pixel array is written back to measurements or used for ROI statistics,
-CSV, source exports, automatic Range or coordinate/registration calculations.
+Version 1 used an additional Gaussian strength from 0 to 100 under Linear. Reading
+that setting maps a finite positive amount to `ceil(clamp(amount, 0, 100) / 10)`
+and changes an active Linear mode to Median. A zero or missing legacy amount
+keeps the old Linear appearance at Linear 10. An inactive None mode stays None,
+while its legacy amount is retained as the corresponding Median level (at least
+1). Gaussian processing is removed; migrated positive amounts intentionally use
+the replacement Median method. Loading resolves these preferences without writing
+measurement data. Master settings use the existing project/ZIP/publication path;
+shared overrides remain tab-local and role-specific.
 
-The same filter is used for the main MSI image, thumbnails, alignment MSI images,
-ROI microscope comparisons, and optional display-style PPT. Preview reuses the
-already filtered main image and must not filter it twice. HE/IF and microscope
-photographs are not filtered. Synthetic TIC alignment references keep their prior
-appearance. ROI comparisons preserve their historical nearest rendering at strength
-0. PPT's default p99.8 style remains unchanged; display-style exports freeze the
-chosen strength at generation start and record it in the image note. Display caches
-include effective strength; changing it never changes measurement cache keys.
+Median filters a temporary native-resolution raster of ordered display-intensity
+indices before applying the colour palette, orientation, physical aspect or zoom.
+It is a true square 2-D median, not successive row and column medians and not a
+channel-wise RGB median. Level `n` has radius `n`, so levels 1–10 use 3×3, 5×5,
+7×7, 9×9, 11×11, 13×13, 15×15, 17×17, 19×19 and 21×21 pixels. This follows the
+SCiLS-style median approach with ten custom levels; it does not reproduce SCiLS's
+complete numerical implementation. A clipped or masked neighborhood with an even
+valid count uses its lower middle index, retaining an existing palette index.
+Missing/transparent and Otsu-hidden pixels do not contribute to the median and
+retain their original background/alpha. The source index raster and validity mask
+remain unchanged. A sliding histogram bounds auxiliary working memory.
+
+Linear level `n` crossfades nearest-neighbour and Linear resampling with a Linear
+fraction of `n / 10`: level 1 is 10%, and level 10 uses the previous full Linear
+interpolation operation. The blend adds premultiplied RGBA in a temporary display canvas and applies
+the caller's opacity once, preserving alpha, clipping, rotation and physical-pitch
+transforms. The temporary canvas is cropped to the transformed draw bounds.
+Interpolation changes appear only when the raster is resampled; a native-size
+one-to-one draw can look identical across levels. Linear does not run Median,
+and Median does not apply Linear interpolation.
+
+Neither method writes filtered arrays back to measurements or uses them for ROI
+membership/statistics, numerical CSV, source exports, automatic Range or
+coordinate/registration calculations. Colour palettes remain display choices:
+Median operates on scalar display indices, preserving their order even for
+nonmonotonic palettes.
+
+The same methods and levels are used for the main MSI image, thumbnails,
+alignment MSI images, ROI microscope comparisons, and optional display-style PPT.
+Preview reuses the main image and must not filter it twice. HE/IF and microscope
+photographs are not filtered. Synthetic TIC alignment references are not
+median-filtered. PPT's default p99.8 style remains unchanged; display-style exports
+freeze the selected method and both levels at generation start and record the
+active level in the image note. Display caches include the effective method and
+level; changing them never changes measurement cache keys.
 
 Small loaded image sets repaint on slider input, coalesced by animation frame.
 Above 500,000 native pixels across visible MSI layers and thumbnails, dragging

@@ -269,32 +269,58 @@ const sortedPercentile = (values, p) => {
   const smooth=await Data.render(raster([0,30]),30,{createCanvas,displayStyle:{...displayStyle,smoothing:'linear'},displayWindow:{min:0,max:30}});
   const smoothPixels=await decode(smooth),middle=pixel(smoothPixels,499,100)[0];
   assert.ok(middle>100&&middle<150,'linear display interpolation blends colours without changing measurements');
-  const pulse=raster([0,0,0,0,100,0,0,0,0]),pulseBefore=Array.from(pulse.values);
-  const pulseOptions={...nativeOptions,displayWindow:{min:0,max:100},displayStyle:{...displayStyle,smoothing:'linear'}};
-  const legacyLinear=await Data.render(pulse,100,pulseOptions);
-  const zeroLinear=await Data.render(pulse,100,{...pulseOptions,displayStyle:{...pulseOptions.displayStyle,smoothingStrength:0}});
-  assert.equal(zeroLinear.data,legacyLinear.data,'zero strength preserves the existing linear PPT pixels exactly');
-  const weak=await decode(await Data.render(pulse,100,{...pulseOptions,displayStyle:{...pulseOptions.displayStyle,smoothingStrength:20}}));
-  const strong=await decode(await Data.render(pulse,100,{...pulseOptions,displayStyle:{...pulseOptions.displayStyle,smoothingStrength:100}}));
-  assert.ok(pixel(strong,4,0)[0]<pixel(weak,4,0)[0],'increasing strength spreads a native colour impulse');
-  assert.ok(pixel(strong,1,0)[0]>pixel(weak,1,0)[0],'strong smoothing reaches farther measured neighbours');
+  const linearOptions={createCanvas,maxDimension:20,displayWindow:{min:0,max:30},displayStyle:{...displayStyle,smoothing:'linear'}};
+  const legacyLinear=await Data.render(raster([0,30]),30,linearOptions);
+  const fullLinear=await Data.render(raster([0,30]),30,{...linearOptions,displayStyle:{...linearOptions.displayStyle,linearStrength:10}});
+  assert.equal(fullLinear.data,legacyLinear.data,'level 10 preserves the existing linear PPT pixels exactly');
+  let previousLinear=-1;
+  for(let level=1;level<=10;level++) {
+    const stepped=await decode(await Data.render(raster([0,30]),30,{...linearOptions,
+      displayStyle:{...linearOptions.displayStyle,linearStrength:level}}));
+    const value=pixel(stepped,9,3)[0];
+    assert.ok(value>previousLinear,'every Linear level moves from nearest towards full interpolation');
+    previousLinear=value;
+  }
+  // The report's inverse sampler has opaque measurement/background colours.
+  // Only the exterior of the transformed footprint is transparent; changing
+  // interpolation strength must not move that crop or its alpha boundary.
+  const smoothingAngle=37*Math.PI/180;
+  const slantedTransform=[[Math.cos(smoothingAngle),-Math.sin(smoothingAngle),0],[Math.sin(smoothingAngle),Math.cos(smoothingAngle),0],[0,0,1]];
+  let footprintAlpha;
+  for(const level of [1,5,10]) {
+    const image=await Data.render(raster([0,30]),30,{...linearOptions,transform:slantedTransform,
+      displayStyle:{...linearOptions.displayStyle,linearStrength:level}});
+    const output=await decode(image),bytes=output.getContext('2d').getImageData(0,0,image.width,image.height).data;
+    const alpha=Array.from(bytes).filter((_,index)=>index%4===3);
+    assert.ok(alpha.includes(0)&&alpha.includes(255),'rotated report retains a bounded opaque footprint on transparent exterior');
+    if(footprintAlpha)assert.deepEqual(alpha,footprintAlpha,'Linear level does not change report crop/alpha under rotation');
+    footprintAlpha=alpha;
+  }
+  const pulse=raster([0,0,0,100,100,100,0,0,0]),pulseBefore=Array.from(pulse.values);
+  const pulseOptions={...nativeOptions,displayWindow:{min:0,max:100},displayStyle:{...displayStyle,smoothing:'median'}};
+  const weak=await decode(await Data.render(pulse,100,{...pulseOptions,displayStyle:{...pulseOptions.displayStyle,smoothingStrength:1}}));
+  const strong=await decode(await Data.render(pulse,100,{...pulseOptions,displayStyle:{...pulseOptions.displayStyle,smoothingStrength:10}}));
+  assert.deepEqual(pixel(weak,4,0),[255,0,0,255],'3 x 3 median preserves the interior of a wider signal');
+  assert.deepEqual(pixel(strong,4,0),[0,0,0,255],'21 x 21 median suppresses a narrow signal without spreading blur');
   assert.deepEqual(Array.from(pulse.values),pulseBefore,'PPT smoothing never rewrites measurement values');
   const noInterpolation={...pulseOptions,displayStyle:{...displayStyle,smoothing:'none'}};
-  assert.equal((await Data.render(pulse,100,{...noInterpolation,displayStyle:{...noInterpolation.displayStyle,smoothingStrength:100}})).data,
+  assert.equal((await Data.render(pulse,100,{...noInterpolation,displayStyle:{...noInterpolation.displayStyle,smoothingStrength:10}})).data,
     (await Data.render(pulse,100,noInterpolation)).data,'disabled Smoothing ignores remembered strength');
   const maskedPulse=raster([50,10000,10000,50]);maskedPulse.measuredMask=Uint8Array.from([1,0,1,1]);
   const maskedOptions={...nativeOptions,displayWindow:{min:0,max:100},keepGrid:{W:4,H:1,keep:Uint8Array.from([1,1,0,1])},
-    displayStyle:{...displayStyle,smoothing:'linear',smoothingStrength:100,background:[9,10,11]}};
+    displayStyle:{...displayStyle,smoothing:'median',smoothingStrength:10,background:[9,10,11]}};
   const masked=await decode(await Data.render(maskedPulse,100,maskedOptions));
   assert.deepEqual(pixel(masked,0,0),[128,0,0,255],'unmeasured and Otsu-hidden high values cannot bleed into valid pixels');
   assert.deepEqual(pixel(masked,3,0),[128,0,0,255]);
   assert.deepEqual(pixel(masked,1,0),[9,10,11,255]);assert.deepEqual(pixel(masked,2,0),[9,10,11,255]);
   assert.deepEqual(Array.from(maskedPulse.measuredMask),[1,0,1,1]);
   assert.deepEqual(Array.from(maskedOptions.keepGrid.keep),[1,1,0,1]);
-  const smoothStats=await Data.prepare({...styledInput,displayStyle:{...displayStyle,smoothing:'linear',smoothingStrength:75}},nativeOptions);
-  const smoothStatsEntry=smoothStats.molecules[0].sections[0];
-  assert.deepEqual([smoothStatsEntry.mean,smoothStatsEntry.max,smoothStatsEntry.n],[123,999,7],'PPT statistics stay on original measurement rows');
-  assert.equal(smoothStats.displayStyle.smoothingStrength,75);
+  for(const smoothing of ['linear','median'])for(let level=1;level<=10;level++) {
+    const smoothStats=await Data.prepare({...styledInput,displayStyle:{...displayStyle,smoothing,smoothingStrength:level,linearStrength:level}},nativeOptions);
+    const smoothStatsEntry=smoothStats.molecules[0].sections[0];
+    assert.deepEqual([smoothStatsEntry.mean,smoothStatsEntry.max,smoothStatsEntry.n],[123,999,7],`${smoothing} ${level}: PPT statistics stay on original measurement rows`);
+    assert.equal(smoothStats.displayStyle.smoothingStrength,level);assert.equal(smoothStats.displayStyle.linearStrength,level);
+  }
   assert.ok(Data.geometry({W: 700, H: 1, values: new Float64Array(700)}, null, 1400, true).width <= 1400);
   const controller = new AbortController();
   await assert.rejects(() => Data.prepare({...source, molecules: [{loadEntries: async () => {controller.abort(); return [];}}]},
