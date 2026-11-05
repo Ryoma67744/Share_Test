@@ -244,12 +244,13 @@ async function main() {
         assertCurrent() { if (++freshnessChecks > 5) throw new Error('Project changed'); }
     }), /Project changed/, 'Changed project snapshots abort page assembly');
     const styleSample=fixture(2,1);
-    styleSample.displayStyle={mode:'individual',colormap:'test-green',smoothing:'linear',otsu:true,
+    styleSample.displayStyle={mode:'individual',colormap:'test-green',smoothing:'linear',smoothingStrength:63,otsu:true,
         lut:Array.from({length:256},(_,i)=>[0,i,0])};
     styleSample.molecules[0].sections.forEach((entry,i)=>{entry.displayWindow={min:i?2:-4,max:i?80:40};});
     const styleDeck=await unzip(styleSample),styleXml=styleDeck.all;
     assert.match(styleXml,/Range -4 – 40/);assert.match(styleXml,/Range 2 – 80/);
     assert.match(styleXml,/100%/);assert.match(styleXml,/Display style: test-green/);
+    assert.match(styleXml,/linear \(strength 63\/100\)/,'PPT records the applied smoothing strength');
     assert.doesNotMatch(styleXml,/Shared display p99\.8/,'display-style reports do not claim the reference percentile');
     if (process.argv.includes('--sample')) {
         const sample = fixture(7, 2);

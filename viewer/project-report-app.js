@@ -1,9 +1,9 @@
 /* Project PowerPoint export: adapt registered data without changing display state. */
 (function (root, factory) {
-    const api = factory(root);
+    const api = factory(root, typeof module === 'object' && module.exports ? require('./msi-smoothing.js') : root.MsiSmoothing);
     if (typeof module === 'object' && module.exports) module.exports = api;
     else root.ProjectReportApp = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function (root) {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function (root, MsiSmoothing) {
     'use strict';
     const identity = () => [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
     const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
@@ -173,6 +173,7 @@
         const displaySettings = copy(app.getMsiDisplaySettings ? app.getMsiDisplaySettings()
             : root.MsiDisplaySettings ? root.MsiDisplaySettings.resolve(project) : {aspectMode:'legacy'});
         const displayStyle = options.useDisplayStyle ? copy(hooks.displayStyle ? hooks.displayStyle() : null) : null;
+        if(displayStyle)displayStyle.smoothingStrength=MsiSmoothing.normalizeStrength(displaySettings.smoothingStrength);
         if (options.useDisplayStyle && (!displayStyle || !Array.isArray(displayStyle.lut) || displayStyle.lut.length !== 256))
             throw new Error('表示スタイルを取得できません。');
         const manualWindows = copy(app.msiUserWindow || {});

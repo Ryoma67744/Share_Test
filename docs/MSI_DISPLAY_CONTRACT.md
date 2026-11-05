@@ -245,3 +245,37 @@ not copied from the currently visible subset. Both report styles follow the
 selected aspect mode. Quantitative tables always use original rows. Ordinary
 shared viewers never receive a CV/CE option; authenticated shared Admin and master
 retain the existing explicitly selected, default-off option.
+
+### Additional smoothing strength
+
+`meta.msiDisplay.smoothingStrength` is an optional version-1 display preference,
+normalized to an integer from 0 to 100 (missing/nonfinite/non-numeric values become
+0). Existing `none`/`linear` projects load with strength 0 and keep their prior
+appearance. The slider is enabled only for Linear; None retains its value without
+applying it. Display presets reset it to 0. Master settings use the existing
+project/ZIP/publication path; shared overrides remain tab-local and role-specific.
+
+For Linear and strength above 0, apply a masked separable Gaussian to a temporary
+native-resolution RGB display raster after colour mapping and before orientation,
+physical-aspect correction, zoom or output resampling. Sigma is `3 * strength / 100`
+display-raster pixels and the kernel radius is `ceil(3 * sigma)`. This changes
+appearance, not source intensity units. Missing/transparent and Otsu-hidden pixels
+do not contribute to the kernel and retain their original background/alpha. No
+filtered pixel array is written back to measurements or used for ROI statistics,
+CSV, source exports, automatic Range or coordinate/registration calculations.
+
+The same filter is used for the main MSI image, thumbnails, alignment MSI images,
+ROI microscope comparisons, and optional display-style PPT. Preview reuses the
+already filtered main image and must not filter it twice. HE/IF and microscope
+photographs are not filtered. Synthetic TIC alignment references keep their prior
+appearance. ROI comparisons preserve their historical nearest rendering at strength
+0. PPT's default p99.8 style remains unchanged; display-style exports freeze the
+chosen strength at generation start and record it in the image note. Display caches
+include effective strength; changing it never changes measurement cache keys.
+
+Small loaded image sets repaint on slider input, coalesced by animation frame.
+Above 500,000 native pixels across visible MSI layers and thumbnails, dragging
+updates the number only and the native change event applies/persists the value.
+This avoids repeated synchronous filtering while dragging large images; a single
+large image can still take time to render. Zoomed canvas size and HE images do not
+count toward this threshold.

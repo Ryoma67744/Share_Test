@@ -74,6 +74,7 @@ function fixture() {
   const context = runtime({
     Uint8Array,DataView,ArrayBuffer,Blob,URL,Map,Set,_testApp:app,RoiMediaModel:model,RoiMediaService:service,
     MsiDisplayGeometry:require('../viewer/msi-display-geometry.js'),
+    MsiSmoothing:require('../viewer/msi-smoothing.js'),
     getActiveColormap:() => lut,getColormapBackground:() => background,
     formatDisplayName:key => key.replace(/^MSI_/,''),
     RoiMediaMsi:{colorize(image, options) { colorCalls.push({image,options}); return msi.colorize(image,{...options,createCanvas}); }},
@@ -213,6 +214,22 @@ async function registeredCalibrationChecks() {
     assert.equal(JSON.stringify({rows,geometry,values:Array.from(raster.values)}),sourceBefore,'Original coordinates and intensity raster remain unchanged');
     assert.equal(await f.blobs.get(ent.blobId).text(),original,'Original TXT bytes are preserved');
   }
+}
+
+async function smoothingSnapshotChecks() {
+  const f=fixture(),{app,project,roi}=f;
+  let strength=73;
+  app.msiSmoothing='linear';app.getMsiDisplaySettings=()=>({rangePolicy:'legacy',smoothingStrength:strength});
+  const adapter=f.api.createAdapter(project,roi);
+  app.msiSmoothing='none';strength=0;
+  const frame=await adapter.loadMsi(project,roi,'toxo4','MSI_A');
+  assert.equal(frame.smoothing,'linear');assert.equal(frame.smoothingStrength,73);
+  assert.equal(f.colorCalls[0].options.smoothingStrength,73,'native colour filtering receives the captured strength');
+  assert.match(frame.status,/Smoothing 73\/100/);
+  assert.equal((await adapter.loadMsi(project,roi,'toxo4','MSI_A')).canvas,frame.canvas,'comparison cache reuses its immutable smoothing snapshot');
+  const next=await f.api.createAdapter(project,roi).loadMsi(project,roi,'toxo4','MSI_A');
+  assert.equal(next.smoothing,'none');assert.equal(next.smoothingStrength,0);
+  assert.equal(app.msiSmoothing,'none');assert.equal(app.getMsiDisplaySettings().smoothingStrength,0);
 }
 
 async function asynchronousChecks() {
@@ -450,7 +467,7 @@ function listHooks() {
 }
 
 (async () => {
-  await preflight(); await adapterChecks(); await registeredCalibrationChecks(); await asynchronousChecks(); await legacyPhotoSourceChecks();
+  await preflight(); await adapterChecks(); await registeredCalibrationChecks(); await smoothingSnapshotChecks(); await asynchronousChecks(); await legacyPhotoSourceChecks();
   await persistenceAndUnloadChecks(); listHooks();
   console.log('ROI media app regression: preflight, section/source association, display isolation, async guards, persisted rollback, unload protection and ROI list entry points passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

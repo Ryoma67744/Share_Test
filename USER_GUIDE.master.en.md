@@ -409,6 +409,8 @@ New projects start with HDI-like presentation and physical aspect. Loading an ol
 
 > **Click a column header to sort**: Click any of the Compound / Precursor / Fragment / CE / CV / Mean / Max headers to reorder the rows. 1st click applies the column's default direction (Compound = A→Z, numeric columns = High→Low), 2nd click reverses it, 3rd click clears the sort and falls back to the legacy source-file → name order. Empty cells (`—`) always sink to the bottom. Sort is session-only and shared with the SharePreview Method panel; ↑/↓ keys also follow the displayed order.
 
+Adjust MSI smoothness using **補間 → Linear → 強さ** (strength, 0–100) in the toolbar. **0 preserves the original Linear display**; higher values add stronger smoothing. None retains the strength but disables its effect. Original measurements, ROI membership/statistics and numerical CSV exports remain unchanged. Master settings round-trip through save, publication and ZIP; shared overrides remain isolated by tab and role. PPT uses the strength only when **表示スタイルを使う** is selected. Selecting a display preset resets interpolation to None and strength to 0.
+
 ---
 
 ## 9. Renaming sections / compounds

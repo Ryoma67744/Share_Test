@@ -8,6 +8,7 @@
 <script src="msi-display-settings.js"></script>
 <script src="msi-display-geometry.js"></script>
 <script src="../offline/offline.js"></script>
+<script src="msi-smoothing.js"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
@@ -1030,6 +1031,11 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
                         <option value="none">None</option>
                         <option value="linear">Linear</option>
                     </select>
+                    <label for="tb-smoothing-strength" class="tb-label">強さ</label>
+                    <input id="tb-smoothing-strength" type="range" min="0" max="100" step="1" value="0" disabled
+                        aria-label="Smoothingの強さ" aria-describedby="tb-smoothing-strength-value"
+                        title="0＝従来のLinear。値を上げるほど滑らかに表示します。大きな画像ではスライダーを離すと反映します。元データ・ROI集計値は変わりません。" style="width:86px">
+                    <output id="tb-smoothing-strength-value" for="tb-smoothing-strength" style="min-width:24px;text-align:right;font-variant-numeric:tabular-nums">0</output>
                 </span>
                 <span class="tb-group" id="tb-he-mono-group" title="HE/IF をモノクロ表示">
                     <label style="display:inline-flex;align-items:center;gap:3px;cursor:pointer;font-size:11px;">
@@ -8862,17 +8868,17 @@ class SectionPanel {
                 //  - img / 値ラスタ / keep グリッドは作り直されたら必ず別オブジェクト
                 //    になるので、同一性スタンプで足りる。
                 //
-                // 意図的に入れていないもの (= ここが効く): settings.opacity は
-                // ctx.globalAlpha、settings.grayscale は HE 系の分岐、msiSmoothing は
-                // imageSmoothingEnabled。どれも色付きキャンバスの中身に影響しない。
-                // 透明度スライダーのドラッグが合成だけで済むようになる。
+                // Opacity is applied at composition; only the additional Gaussian
+                // strength changes the native colour raster. Never filter source values.
+                const smoothingStrength = App.msiSmoothing === 'linear' ? (App.msiSmoothingStrength || 0) : 0;
                 const lutSig = identStamp(img) + '|' + img.naturalWidth + 'x' + img.naturalHeight
                     + '|' + identStamp(vrCache)
                     + '|' + (rrC ? (rrC[0] + ',' + rrC[1]) : '-')
                     + '|' + (winC ? (winC.min + ',' + winC.max) : '-')
                     + '|' + (overlay ? ('o' + ovColor + '@' + ovScale) : ('c' + _activeColormapName))
                     + '|' + (App.otsuBgRemove ? '1' : '0')
-                    + '|' + identStamp(keepGrid && keepGrid.keep);
+                    + '|' + identStamp(keepGrid && keepGrid.keep)
+                    + '|smooth:' + smoothingStrength;
                 this._msiLutCache = this._msiLutCache || new Map();
                 const cached = this._msiLutCache.get(key);
                 if (cached && cached.sig === lutSig) {
@@ -8889,6 +8895,7 @@ class SectionPanel {
                 const data = tctx.getImageData(0, 0, tc.width, tc.height);
                 const d = data.data;
                 const useKeep = keepGrid && keepGrid.W === tc.width && keepGrid.H === tc.height;
+                const smoothMask = smoothingStrength > 0 ? new Uint8Array(tc.width * tc.height) : null;
                 // 生強度ラスタ (段階A で保持) があれば 8bit PNG への往復を挟まず、値を
                 // そのまま窓へ写して色にする。8bit は 1 LSB = (rawRange の幅)/255 の
                 // 粗さがあり、Range を低信号側へ寄せると数階調に潰れていた。
@@ -8912,6 +8919,8 @@ class SectionPanel {
                         d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; d[i+3] = 255;
                     } else {
                         const vRaw = useValsC ? vrC.values[i >> 2] : NaN;
+                        if (smoothMask) smoothMask[i >> 2] = !useValsC || (Number.isFinite(vRaw)
+                            && (!vrC.measuredMask || vrC.measuredMask[i >> 2])) ? 1 : 0;
                         const ev = Number.isFinite(vRaw)
                             ? msiValueEval(vRaw, winC, fbC)
                             : msiWindowEval(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2], rrC, winC);
@@ -8919,6 +8928,7 @@ class SectionPanel {
                         d[i] = c[0]; d[i+1] = c[1]; d[i+2] = c[2]; d[i+3] = 255;
                     }
                 }
+                if (smoothMask) d.set(MsiSmoothing.smoothRgba(d, tc.width, tc.height, smoothingStrength, smoothMask));
                 tctx.putImageData(data, 0, 0);
                 drawSource = tc;
                 // 焼き上がりを署名つきで保存。上限を超えたぶんは挿入順(= 使った
@@ -10609,16 +10619,21 @@ class SectionPanel {
         const vrT = this.msiValueRasters && this.msiValueRasters.get(key);
         const useValsT = !!(vrT && vrT.W === c.width && vrT.H === c.height);
         const fbT = msiRawFallbackMax(rrT);
+        const smoothingStrength = App.msiSmoothing === 'linear' ? (App.msiSmoothingStrength || 0) : 0;
+        const smoothMask = smoothingStrength > 0 ? new Uint8Array(c.width * c.height) : null;
         for (let i = 0; i < d.length; i += 4) {
             if (d[i+3] === 0) continue;
             if (useKeepT && keepGridT.keep[i >> 2] === 0) { d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; continue; }
             const vRaw = useValsT ? vrT.values[i >> 2] : NaN;
+            if (smoothMask) smoothMask[i >> 2] = !useValsT || (Number.isFinite(vRaw)
+                && (!vrT.measuredMask || vrT.measuredMask[i >> 2])) ? 1 : 0;
             const ev = Number.isFinite(vRaw)
                 ? msiValueEval(vRaw, winT, fbT)
                 : msiWindowEval(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2], rrT, winT);
             const cm = lut[Math.round(ev.n * 255)];
             d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
         }
+        if (smoothMask) d.set(MsiSmoothing.smoothRgba(d, c.width, c.height, smoothingStrength, smoothMask));
         ctx.putImageData(data, 0, 0);
         const orientation=sectionLayerViewLinear(this.section,'msi');
         const frame=sectionMsiPhysicalFrame(this.section,key,c.width,c.height,orientation);
@@ -15925,16 +15940,21 @@ const Wizards = {
             // ここだけ抜けており、背景除去 ON のとき共有プレビューにだけ背景が残っていた。
             const keepGrid = layerKey ? otsuKeepGridForLayer(sec, layerKey) : null;
             const useKeep = !!(keepGrid && keepGrid.W === c.width && keepGrid.H === c.height);
+            const smoothingStrength = layerKey && App.msiSmoothing === 'linear' ? (App.msiSmoothingStrength || 0) : 0;
+            const smoothMask = smoothingStrength > 0 ? new Uint8Array(c.width * c.height) : null;
             for (let i = 0; i < d.length; i += 4) {
                 if (d[i+3] === 0) continue;
                 if (useKeep && keepGrid.keep[i >> 2] === 0) { d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; continue; }
                 const vRaw = useVals ? vr.values[i >> 2] : NaN;
+                if (smoothMask) smoothMask[i >> 2] = !useVals || (Number.isFinite(vRaw)
+                    && (!vr.measuredMask || vr.measuredMask[i >> 2])) ? 1 : 0;
                 const ev = Number.isFinite(vRaw)
                     ? msiValueEval(vRaw, win, fb)
                     : msiWindowEval(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2], rawRange, win);
                 const cm = lut[Math.round(ev.n * 255)];
                 d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
             }
+            if (smoothMask) d.set(MsiSmoothing.smoothRgba(d, c.width, c.height, smoothingStrength, smoothMask));
             cctx.putImageData(data, 0, 0);
             return c;
         };
@@ -16141,6 +16161,7 @@ const Wizards = {
             const ent = sec.msiSeries[key] || {};
             const win = isTicKey(key) ? null : App.getMsiWindow(key, ent.rawRange || null, ent.rawDispMax, ent.rawTrueMax);
             const cacheKey = JSON.stringify([key, activeFrame && activeFrame.key, t.matrix, t.frame&&t.frame.bounds, win, App.msiSmoothing,
+                App.msiSmoothingStrength || 0,
                 typeof getActiveColormap === 'function' ? getActiveColormap() : null,
                 !!App.otsuBgRemove, ent.rawRange || null]);
             let cached = coloredCache.get(cacheKey);
@@ -21850,6 +21871,20 @@ const Toolbar = {
                 App.setMsiSmoothing(this.smoothingSel.value);
             });
         }
+        const smoothingStrength = document.getElementById('tb-smoothing-strength');
+        if (smoothingStrength) {
+            smoothingStrength.addEventListener('input', () => {
+                const value = Number(smoothingStrength.value);
+                if (App.deferMsiSmoothingDrag()) {
+                    // Keep the native slider responsive for large sets of images.
+                    // The final change event applies/persists the selected value.
+                    const output = document.getElementById('tb-smoothing-strength-value');
+                    if (output) output.textContent = String(value);
+                    smoothingStrength.setAttribute('aria-valuetext', String(value));
+                } else App.setMsiSmoothingStrength(value);
+            });
+            smoothingStrength.addEventListener('change', () => App.setMsiSmoothingStrength(Number(smoothingStrength.value)));
+        }
 
         const msiUmBtn = document.getElementById('tb-msi-um');
         const styleSelect = document.getElementById('tb-msi-style');
@@ -22640,6 +22675,7 @@ const App = {
                                // = each section auto-scales to its own range.
     msiSmoothing: 'none',      // MSI display interpolation: 'none' = nearest
                                // (pixelated), 'linear' = bilinear (HDI Smoothing).
+    msiSmoothingStrength: 0,   // Additional display-only Gaussian, 0 preserves legacy Linear.
     otsuBgRemove: false,       // 背景を非表示（Otsu）: TIC ベースの背景スポットを全イオン
                                // 像から一括で非表示にする(生データ非破壊)。
     otsuManualThreshold: null, // 手動閾値(生 TIC 単位)。null なら Otsu 自動。
@@ -22666,6 +22702,17 @@ const App = {
         const style = document.getElementById('tb-msi-style'), aspect = document.getElementById('tb-msi-physical');
         if (style) style.value = settings.preset;
         if (aspect) aspect.checked = settings.aspectMode === 'physical';
+        const smoothing = document.getElementById('tb-smoothing');
+        const strength = document.getElementById('tb-smoothing-strength');
+        const value = document.getElementById('tb-smoothing-strength-value');
+        const amount = settings.smoothingStrength || 0;
+        if (smoothing) smoothing.value = settings.interpolation;
+        if (strength) {
+            strength.value = amount;
+            strength.disabled = settings.interpolation !== 'linear';
+            strength.setAttribute('aria-valuetext', amount === 0 ? '0（従来のLinear）' : String(amount));
+        }
+        if (value) value.textContent = String(amount);
     },
     updateMsiDisplaySettings(patch, redraw = true) {
         if (!this.project || typeof MsiDisplaySettings === 'undefined') return;
@@ -22682,10 +22729,12 @@ const App = {
             if (patch.interpolation) meta.msiSmoothing = next.interpolation;
             this.queueSave();
         }
+        this.msiSmoothing = next.interpolation === 'linear' ? 'linear' : 'none';
+        this.msiSmoothingStrength = stored.smoothingStrength || 0;
         this.refreshMsiDisplayControls();
         if (redraw) {
             for (const panel of this.panels.values()) {
-                if (patch.aspectMode) panel.setupCanvasSize();
+                if (patch.aspectMode || patch.interpolation) panel.setupCanvasSize();
                 panel.renderComposite(); panel.markAllThumbsDirty(); panel.drawAllRois();
                 if (patch.aspectMode && panel._scheduleThumbRebake) panel._scheduleThumbRebake();
             }
@@ -23441,20 +23490,36 @@ const App = {
         if (this.msiSmoothing === next) return;
         this.msiSmoothing = next;
         if (this.project && typeof MsiDisplaySettings !== 'undefined')
-            this.updateMsiDisplaySettings({interpolation:next,preset:'custom'}, false);
-        // The MSI backing resolution depends on the mode (Linear renders the
-        // canvas near display size so imageSmoothingEnabled can interpolate),
-        // so re-run setupCanvasSize per panel — it resizes cdisp/croi and
-        // re-renders + redraws ROIs. Fall back to a plain repaint if it no-ops.
-        for (const p of this.panels.values()) {
-            try { p.setupCanvasSize(); } catch (e) { try { p.renderComposite(); } catch (e2) {} }
+            this.updateMsiDisplaySettings({interpolation:next,preset:'custom'});
+    },
+    deferMsiSmoothingDrag() {
+        let pixels = 0;
+        for (const panel of this.panels.values()) {
+            const keys = new Set([...(panel.visibleLayers || []), ...(panel.msiThumbRefs ? panel.msiThumbRefs.keys() : [])]);
+            for (const key of keys) {
+                if (!(panel.section.msiSeries && panel.section.msiSeries[key])) continue;
+                const image = panel.imageSources && panel.imageSources[key];
+                if (image) pixels += (image.naturalWidth || 0) * (image.naturalHeight || 0);
+                if (pixels > 500000) return true;
+            }
         }
-        try { Toolbar.refreshRange(); } catch (e) {}
-        if (!this.shareMode && this.project) {
-            this.project.meta = this.project.meta || {};
-            this.project.meta.msiSmoothing = next;
-            this.queueSave();
-        }
+        return false;
+    },
+    setMsiSmoothingStrength(value) {
+        const next = MsiSmoothing.normalizeStrength(value);
+        if (!this.project || this.msiSmoothing !== 'linear' || this.msiSmoothingStrength === next) return;
+        this.updateMsiDisplaySettings({smoothingStrength:next,preset:'custom'}, false);
+        // Persist the latest value immediately through the normal debounced save,
+        // but coalesce costly display work while dragging. A queued frame never
+        // updates another project's image or overrides a later mode/preset.
+        if (this._smoothingRepaintRaf) cancelAnimationFrame(this._smoothingRepaintRaf);
+        const project = this.project, context = this._msiPresentationKey;
+        this._smoothingRepaintRaf = requestAnimationFrame(() => {
+            this._smoothingRepaintRaf = 0;
+            if (this.project !== project || this._msiPresentationKey !== context) return;
+            this.repaintAllMsi();
+            try { if (SharePreview.isOpen()) SharePreview.refresh(project); } catch (_) {}
+        });
     },
 
     // ---- 背景除去 (Otsu) ----
@@ -24698,6 +24763,7 @@ const App = {
             const sel = document.getElementById('tb-colormap');
             if (sel) sel.value = _activeColormapName;
             App.msiSmoothing = displaySettings.interpolation;
+            App.msiSmoothingStrength = displaySettings.smoothingStrength || 0;
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
             this.refreshMsiDisplayControls();
@@ -25030,6 +25096,7 @@ const App = {
             const sel = document.getElementById('tb-colormap');
             if (sel) sel.value = _activeColormapName;
             App.msiSmoothing = displaySettings.interpolation;
+            App.msiSmoothingStrength = displaySettings.smoothingStrength || 0;
             const smSel = document.getElementById('tb-smoothing');
             if (smSel) smSel.value = App.msiSmoothing;
             this.refreshMsiDisplayControls();

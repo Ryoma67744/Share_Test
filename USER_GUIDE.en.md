@@ -348,6 +348,8 @@ Three groups in each section's toolbar:
 
 ## 7-bis. Per-layer display settings (gear ⚙)
 
+Select **補間 → Linear** in the toolbar, then adjust **強さ** (strength, 0–100) to smooth MSI appearance. **0 preserves the original Linear display**; higher values add stronger smoothing. None disables the slider. Original measurements, ROI membership/mean/maximum/count and numerical CSV exports do not change. Shared choices apply only to this tab and viewer/Admin role. Select **表示スタイルを使う** to include the strength in a PPT report.
+
 Click the **gear ⚙** at the right edge of any layer chip to open a per-layer popover. **Right-clicking** the layer thumbnail opens the same settings popover (in Compound mode, a **left-click** switches the focus compound instead).
 
 <div style="border:1px solid #cbd5e1;border-radius:6px;padding:10px;background:#fff;margin:10px 0;font-size:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">

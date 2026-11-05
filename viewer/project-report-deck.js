@@ -242,7 +242,8 @@
                     stops:style && style.lut.map(c=>c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join(''))});
                 const basis = molecule.intensityScale && molecule.intensityScale.upperBasis;
                 const scaleNote = style ? 'Display style: '+style.colormap+' / '+(style.mode==='individual'?'Individual':'Same (all sections)')
-                    +' / '+style.smoothing+(style.otsu?' / Otsu (available masks)':'') : basis === 'percentile' ? 'Shared display p99.8' :
+                    +' / '+style.smoothing+(style.smoothing==='linear'?' (strength '+(style.smoothingStrength || 0)+'/100)':'')
+                    +(style.otsu?' / Otsu (available masks)':'') : basis === 'percentile' ? 'Shared display p99.8' :
                     basis === 'positive-maximum-fallback' ? 'Shared positive maximum (fallback)' :
                     basis === 'unit-fallback' ? 'Upper bound 1 (no positive range)' : 'Common scale for this molecule';
                 const qualityNotes = [...new Set(sectionPage.map(section => entryFor(molecule, section).qualityNote).filter(Boolean))];

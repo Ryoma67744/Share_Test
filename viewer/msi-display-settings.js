@@ -7,19 +7,24 @@
     'use strict';
     const VERSION = 1;
     const maps = ['plasma','viridis','inferno','hot','hotmetal','jet','grayscale'];
+    function normalizeStrength(value) {
+        return typeof value === 'number' && Number.isFinite(value)
+            ? Math.max(0, Math.min(100, Math.round(value))) : 0;
+    }
     function normalize(value) {
         if (!value || value.version !== VERSION) return null;
         return {version:VERSION,
             preset:['current','hdi','custom'].includes(value.preset) ? value.preset : 'current',
             aspectMode:value.aspectMode === 'physical' ? 'physical' : 'legacy',
-            rangePolicy:value.rangePolicy === 'maximum' ? 'maximum' : 'legacy'};
+            rangePolicy:value.rangePolicy === 'maximum' ? 'maximum' : 'legacy',
+            smoothingStrength:normalizeStrength(value.smoothingStrength)};
     }
     function resolve(project, override) {
         const meta = project && project.meta || {};
         const saved = normalize(meta.msiDisplay);
         const transient = normalize(override);
         if (!transient) override = null;
-        const value = transient || saved || {version:VERSION,preset:'current',aspectMode:'legacy',rangePolicy:'legacy'};
+        const value = transient || saved || {version:VERSION,preset:'current',aspectMode:'legacy',rangePolicy:'legacy',smoothingStrength:0};
         const fallbackMap = value.preset === 'hdi' ? 'hotmetal' : 'plasma';
         return {...value, explicit:!!(transient || saved),
             colormap:maps.includes(override && override.colormap) ? override.colormap
@@ -29,7 +34,7 @@
     function preset(name, aspectMode) {
         const hdi = name === 'hdi';
         return {version:VERSION,preset:hdi?'hdi':'current',aspectMode:aspectMode || (hdi?'physical':'legacy'),
-            rangePolicy:hdi?'maximum':'legacy',colormap:hdi?'hotmetal':'plasma',interpolation:'none'};
+            rangePolicy:hdi?'maximum':'legacy',colormap:hdi?'hotmetal':'plasma',interpolation:'none',smoothingStrength:0};
     }
     function newProjectMeta() {
         return {msiDisplay:normalize(preset('hdi')),colormap:'hotmetal',msiSmoothing:'none'};
