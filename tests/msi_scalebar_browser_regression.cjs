@@ -224,7 +224,13 @@ async function main() {
 
     // Exercise the actual quick editor and modal click path, including the
     // Preview refresh and label update, without saving to a real database.
-    await page.evaluate(() => {window.editorPromise=Wizards.openMsiUmPxModal(App.panels.get(fixture.project.sections[0].id));});
+    const earlyFocus = await page.evaluate(async () => {
+      window.editorPromise=Wizards.openMsiUmPxModal(App.panels.get(fixture.project.sections[0].id));
+      document.querySelector('#modal-host [name="y"]').focus();
+      await new Promise(resolve=>setTimeout(resolve,60));
+      return document.activeElement.name;
+    });
+    assert.equal(earlyFocus,'y','Delayed initial focus must not steal a field already selected by the user');
     await page.locator('#modal-host [name="x"]').fill('45');
     await page.locator('#modal-host [name="y"]').fill('75');
     await page.locator('#modal-host [data-modal-ok]').click();

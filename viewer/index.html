@@ -14793,7 +14793,9 @@ function openModal(html) {
         const form = card.querySelector('form');
         if (form) form.addEventListener('submit', (e) => { e.preventDefault(); if (submit) submit.click(); });
         const focusEl = card.querySelector('input, select, textarea');
-        if (focusEl) setTimeout(() => focusEl.focus(), 30);
+        if (focusEl) setTimeout(() => {
+            if (!settled && !card.contains(document.activeElement)) focusEl.focus();
+        }, 30);
         // expose card to caller via window for advanced wiring
         openModal._card = card;
     });
