@@ -40,6 +40,15 @@ async function main(){
   await page.goto(origin+'/viewer/?project='+encodeURIComponent(seed));
   await page.waitForFunction(()=>typeof App!=='undefined'&&!App.offline&&App.project);
   await page.evaluate(async()=>{
+   // Project preparation can finish while the following publish modal starts.
+   // Keep its completion/result in the page, rather than relying on CDP to
+   // retain the short-lived evaluate promise during that UI transition.
+   window.publishBrowserTasks=Object.create(null);
+   window.startPublishBrowserTask=(name,action)=>{
+    const state=publishBrowserTasks[name]={done:false,value:null,error:null};
+    state.promise=Promise.resolve().then(action).then(value=>{state.value=value;state.done=true;},
+     error=>{state.error={message:String(error.message||error),stack:String(error.stack||'')};state.done=true;});
+   };
    // Exercise manual publishes at controlled barriers; background timers have
    // their own scheduler regression and must not consume the synthetic ticket.
    App._scheduleAutoPublish=()=>{};
@@ -67,6 +76,14 @@ async function main(){
    await App.createNewProject('Synthetic A');window.fixtureA=App.project.id;
    startFixturePublish();
   });
+  async function completedBrowserTask(name){
+   await page.waitForFunction(name=>window.publishBrowserTasks[name]?.done,name,{timeout:15000});
+   const state=await page.evaluate(name=>{
+    const {value,error}=publishBrowserTasks[name];delete publishBrowserTasks[name];return {value,error};
+   },name);
+   if(state.error)throw new Error(state.error.stack||state.error.message);
+   return state.value;
+  }
   await page.waitForFunction(()=>typeof fixturePublish.release==='function');
   const edited=await page.evaluate(async()=>{
    App.project.memo.freeNote='edited while the first publish was committing';App.queueSave(60000);await App._flushSave();
@@ -160,7 +177,12 @@ async function main(){
    };
   });
   async function prepareComparison(slug,revision){
-   const id=await page.evaluate(async({slug,revision})=>{const id=await overwriteFixture.prepare(slug,revision);overwriteFixture.compare();return id;},{slug,revision});
+   await page.evaluate(({slug,revision})=>{
+    startPublishBrowserTask('prepare-comparison',async()=>{
+     const id=await overwriteFixture.prepare(slug,revision);overwriteFixture.compare();return id;
+    });
+   },{slug,revision});
+   const id=await completedBrowserTask('prepare-comparison');
    await page.locator('[data-publish-overwrite]').waitFor({state:'visible'});
    assert.equal(await page.locator('[data-publish-overwrite]').isEnabled(),true);
    const roiRow=page.locator('#modal-host tr').filter({has:page.locator('th',{hasText:'ROI'})});
@@ -177,11 +199,14 @@ async function main(){
 
   // Enter through the real Publish button flow once to exercise the cached
   // password and initial unknown-baseline guard, before explicit permission.
-  const cancelledId=await page.evaluate(async()=>{
-   const id=await overwriteFixture.prepare('overwrite-cancel',4);
-   overwriteFixture.promise=publishProjectToShare().catch(error=>{overwriteFixture.error={code:error.code,message:error.message};})
-    .finally(()=>{overwriteFixture.done=true;});return id;
+  await page.evaluate(()=>{
+   startPublishBrowserTask('prepare-cancel',async()=>{
+    const id=await overwriteFixture.prepare('overwrite-cancel',4);
+    overwriteFixture.promise=publishProjectToShare().catch(error=>{overwriteFixture.error={code:error.code,message:error.message};})
+     .finally(()=>{overwriteFixture.done=true;});return id;
+   });
   });
+  const cancelledId=await completedBrowserTask('prepare-cancel');
   await page.locator('#modal-host [name="slug"]').waitFor({state:'visible'});
   await page.locator('#modal-host [data-modal-ok]').click();
   await page.locator('[data-publish-overwrite]').waitFor({state:'visible'});
