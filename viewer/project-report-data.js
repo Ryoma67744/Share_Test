@@ -1,9 +1,9 @@
 (function(root, factory) {
   'use strict';
-  const api = factory();
+  const api = factory(typeof module === 'object' && module.exports ? require('./msi-smoothing.js') : root.MsiSmoothing);
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.ProjectReportData = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function() {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function(MsiSmoothing) {
   'use strict';
 
   // Report colour clipping is a display operation. Quantitative table values
@@ -222,15 +222,34 @@
     const m = g.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
     const style=o.displayStyle,win=o.displayWindow;
     const bounds=o.frame && o.frame.sampleBounds || {x:0,y:0,width:raster.W,height:raster.H};
+    const strength=style && style.smoothing==='linear' ? MsiSmoothing.normalizeStrength(style.smoothingStrength) : 0;
+    let smoothed=null;
     const sample=(x,y)=>{
       const index=Math.max(0,Math.min(raster.H-1,y))*raster.W+Math.max(0,Math.min(raster.W-1,x));
       if(!measured(raster,index)||o.keepGrid && !o.keepGrid.keep[index])return style ? style.background || [0,0,0] : null;
+      if(smoothed)return [smoothed[index*4],smoothed[index*4+1],smoothed[index*4+2]];
       if(!style)return colorAt(raster.values[index],upper);
       const t=Math.max(0,Math.min(1,(raster.values[index]-win.min)/(win.max-win.min)));
       return style.lut[Math.round(t*(style.lut.length-1))];
     };
-    // Rasterize the bounded output directly. No unbounded source RGBA canvas
-    // is allocated, and nearest sampling cannot invent measurement values.
+    if(strength>0) {
+      // Smooth native display colours before output resampling. Never filter
+      // source intensities or allow missing/Otsu-excluded cells into the kernel.
+      const native=new Uint8ClampedArray(raster.W*raster.H*4),valid=new Uint8Array(raster.W*raster.H);
+      for(let y=0;y<raster.H;y++) {
+        if(y%128===0) { if(o.assertCurrent)o.assertCurrent();await yieldTask(); }
+        for(let x=0;x<raster.W;x++) {
+          const index=y*raster.W+x,color=sample(x,y),offset=index*4;
+          native[offset]=color[0];native[offset+1]=color[1];native[offset+2]=color[2];native[offset+3]=255;
+          valid[index]=measured(raster,index) && !(o.keepGrid && !o.keepGrid.keep[index]) ? 1 : 0;
+        }
+      }
+      smoothed=MsiSmoothing.smoothRgba(native,raster.W,raster.H,strength,valid);
+      if(o.assertCurrent)o.assertCurrent();
+    }
+    // Rasterize the bounded output directly. Positive smoothing alone adds a
+    // native byte array bounded by MAX_SAMPLES; its filter uses a row buffer.
+    // Source measurements stay unchanged in either sampling mode.
     for (let y = 0; y < g.height; y++) {
       if (y % 128 === 0) { if (o.assertCurrent) o.assertCurrent(); await yieldTask(); }
       const py = g.top + (y + 0.5 - g.padY) / g.scale - m[1][2];

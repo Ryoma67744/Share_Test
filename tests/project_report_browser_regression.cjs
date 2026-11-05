@@ -48,8 +48,8 @@ function sharedFixture() {
   const fixture = {sourcePath, source, sources: {[sourcePath]:source, [secondSourcePath]:secondSource}, doc: {
     id: 'synthetic-shared-project', slug: sharedSlug,
     meta: {display_name: '共有PPT合成プロジェクト', project_meta: {
-      colormap: 'hotmetal', msiSmoothing: 'none',
-      msiDisplay: {version:1, preset:'hdi', aspectMode:'physical', rangePolicy:'maximum'},
+      colormap: 'hotmetal', msiSmoothing: 'linear',
+      msiDisplay: {version:1, preset:'custom', aspectMode:'physical', rangePolicy:'maximum',smoothingStrength:63},
       memo: {sample: '公開試料メモ', machine: '公開装置メモ', freeNote: '公開解析メモ', experimentDate: '2026-10-28'}
     }},
     anatomy_palette: {}, sections: [{id: 'synthetic-server-section', client_id: 'synthetic-shared-section',
@@ -184,10 +184,11 @@ async function checkRoiPhysicalComparison(page) {
         expected:polygon.map(([x,y])=>[matrix[0][0]*(x+.5)+matrix[0][1]*(y+.5)+matrix[0][2],
           matrix[1][0]*(x+.5)+matrix[1][1]*(y+.5)+matrix[1][2]]),
         actual:rendered.screenPolygon,bar:rendered.scaleBar,
-        pitch:frame.pixelPitch,matrix};
+        pitch:frame.pixelPitch,matrix,smoothing:frame.smoothing,smoothingStrength:frame.smoothingStrength};
     } finally {project.rois=saved;}
   });
   assert.deepEqual(result.sourceBounds,{x:0,y:0,width:480,height:480},'The real ROI comparison adapter preserves the registered physical footprint');
+  assert.equal(result.smoothing,'linear');assert.equal(result.smoothingStrength,63,'ROI comparison captures shared smoothing through browser globals');
   for (let i=0;i<result.expected.length;i++) for (let axis=0;axis<2;axis++)
     assert.ok(Math.abs(result.expected[i][axis]-result.actual[i][axis])<1e-9,'ROI overlay uses one half-pixel centre correction');
   assert.ok(result.bar && result.bar.pixels>0 && result.bar.length>0);
@@ -365,7 +366,7 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
           window.__reportRestoreDisplay = {meta:structuredClone(App.project.meta), mode:App.msiScaleMode,
             pitches:App.project.sections.map(section=>structuredClone(section.meta.world_coords))};
           App.project.meta.colormap = 'viridis'; App.project.meta.msiSmoothing = 'linear';
-          App.project.meta.msiDisplay = {...App.project.meta.msiDisplay, rangePolicy:'percentile', aspectMode:'legacy'};
+          App.project.meta.msiDisplay = {...App.project.meta.msiDisplay, rangePolicy:'percentile', aspectMode:'legacy',smoothingStrength:3};
           App.msiScaleMode = 'individual';
           for (const section of App.project.sections) section.meta.world_coords.msi_um_per_px = {x:90,y:90};
           window.__releaseReportGate();
@@ -390,7 +391,9 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
           assert.equal(report.displayStyle.mode, 'same', 'The captured Same mode is used');
           assert.equal(report.displayStyle.rangePolicy, 'maximum');
           assert.equal(report.displayStyle.colormap, 'hotmetal');
-          assert.equal(report.displayStyle.smoothing, 'none');
+          assert.equal(report.displayStyle.smoothing, 'linear');
+          assert.equal(report.displayStyle.smoothingStrength,63,'PPT retains strength captured before asynchronous settings changes');
+          assert.match(deck.xml,/linear \(strength 63\/100\)/);
           assert.equal(molecule.intensityScale.basis, 'display-style');
           assert.deepEqual(molecule.sections.map(section => section.displayWindow),
             [{min:0,max:maximum},{min:0,max:maximum}], 'Same includes the stronger second section without mixing molecules');

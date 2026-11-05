@@ -29,8 +29,16 @@ async function sourceSnapshot(page) {
       const panel=App.panels.get(section.id);await panel.ensureMsiLayerLoaded(key);
       const raster=panel.msiValueRasters.get(key),record=await ProjectStorage.getBlob(entry.blobId);
       const hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',await record.blob.arrayBuffer())),b=>b.toString(16).padStart(2,'0')).join('');
+      const geometry=raster.sourceGeometry,half=Math.max(1,Math.floor(raster.W/2));
+      const polygon=[[-.5,-.5],[half-.5,-.5],[half-.5,raster.H-.5],[-.5,raster.H-.5]];
+      const roi={geometryBySection:{[section.id]:{version:'msi-source-v1',sourceRef:geometry.sourceRef,
+        displayGeometry:geometry.displayGeometry}}};
+      const quant=await extractRoiRawFromSection(panel,key,polygon,roi);
+      if(quant.unavailable||!quant.values.length)throw new Error('Synthetic ROI must quantify original source rows');
       sources.push({id:section.id,key,hash,values:Array.from(raster.values),geometry:JSON.stringify(raster.sourceGeometry),
-        pitch:section.meta.world_coords&&section.meta.world_coords.msi_um_per_px});
+        pitch:section.meta.world_coords&&section.meta.world_coords.msi_um_per_px,
+        statistics:{mean:msiQuantMean(entry),max:msiMaxIntensity(entry).value},
+        roi:{stats:calcStats(quant.values),rowIds:quant.rowIds,n:quant.values.length}});
     }
     return {sources,rois:JSON.stringify(App.project.rois)};
   });
@@ -40,13 +48,40 @@ async function style(page,name) {
   await page.waitForFunction(expected=>!document.getElementById('tb-msi-style').disabled
     && App.getMsiDisplaySettings().preset===expected,name);
 }
+async function strength(page,value) {
+  const slider=page.locator('#tb-smoothing-strength');
+  await slider.fill(String(value));
+  await slider.dispatchEvent('change');
+  await page.waitForFunction(expected=>App.msiSmoothingStrength===expected
+    && App.getMsiDisplaySettings().smoothingStrength===expected,value);
+  assert.match(await page.locator('#tb-smoothing-strength-value').innerText(),new RegExp('\\b'+value+'\\b'));
+}
+async function displayedImage(page) {
+  return page.evaluate(async()=>{
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    const panel=App.panels.get(App.project.sections[0].id),canvas=panel.dom.cdisp;
+    const pixels=panel.displayCtx.getImageData(0,0,canvas.width,canvas.height).data;
+    if(!pixels.some((value,index)=>index%4!==3&&value>0))throw new Error('MSI display must contain visible colour');
+    return canvas.toDataURL('image/png');
+  });
+}
+async function displayRanges(page) {
+  return page.evaluate(()=>App.project.sections.flatMap(section=>Object.entries(section.msiSeries||{}).map(([key,entry])=>({
+    id:section.id,key,window:App.getMsiWindow(key,entry.rawRange,entry.rawDispMax,entry.rawTrueMax)}))));
+}
+async function screenshot(page,name) {
+  const directory=process.env.MSI_DISPLAY_SCREENSHOT_DIR;
+  if(!directory)return;
+  await fs.mkdir(directory,{recursive:true});
+  await page.screenshot({path:path.join(directory,name+'.png'),fullPage:false});
+}
 async function prepare(page) {
   await page.waitForFunction(()=>typeof App!=='undefined'&&App.project&&App.panels.size>0);
   await page.evaluate(async()=>{
     for(const section of App.project.sections)for(const key of Object.keys(section.msiSeries||{}))
       if(!await App.panels.get(section.id).ensureMsiLayerLoaded(key))throw new Error('Synthetic source failed');
     const section=App.project.sections[0],key=Object.keys(section.msiSeries)[0];
-    App.setActiveSection(section.id);App.setFocusCompoundKey(key);App.recomputeMsiAbsScale();
+    App.setActiveSection(section.id);App.setViewMode('compound');App.setFocusCompoundKey(key);App.recomputeMsiAbsScale();
   });
 }
 async function sharedReady(page,role) {
@@ -97,14 +132,65 @@ async function main() {
     assert.equal(initial.settings.aspectMode,'legacy');assert.equal(initial.settings.explicit,false);
     assert.equal(initial.meta.msiDisplay,undefined);assert.equal(initial.savedMeta.msiDisplay,undefined,
       'Opening an old ZIP does not persist an automatic style migration');
+    assert.equal(initial.settings.smoothingStrength,0,'Old archives default to the unchanged Linear interpolation');
+    const slider=page.locator('#tb-smoothing-strength');
+    assert.equal(await slider.getAttribute('min'),'0');assert.equal(await slider.getAttribute('max'),'100');
+    assert.equal(await slider.getAttribute('step'),'1');
     await style(page,'hdi');
     assert.equal(await page.locator('#tb-msi-physical').isChecked(),true);
     assert.equal(await page.locator('#tb-colormap').inputValue(),'hotmetal');
     assert.equal(await page.locator('#tb-smoothing').inputValue(),'none');
+    assert.equal(await slider.isDisabled(),true,'None disables the strength slider');
+    const originalNone=await displayedImage(page),originalRanges=await displayRanges(page);
+    await page.locator('#tb-smoothing').selectOption('linear');
+    assert.equal(await slider.isEnabled(),true);assert.equal(await slider.inputValue(),'0');
+    const originalLinear=await displayedImage(page);
+    assert.equal(await page.evaluate(()=>App.deferMsiSmoothingDrag()),false,'The small synthetic source uses live updates');
+    await slider.evaluate(element=>{element.value='40';element.dispatchEvent(new Event('input',{bubbles:true}));});
+    assert.equal(await page.evaluate(()=>App.msiSmoothingStrength),40,'Small images respond to input without waiting for change');
+    assert.notEqual(await displayedImage(page),originalLinear);
+    await strength(page,0);
+    // Exercise the large-image event path without allocating a giant test image.
+    // Only the workload predicate is replaced; the real input/change handlers,
+    // state/persistence path and canvas renderer remain in use.
+    await page.evaluate(()=>{
+      window.__originalSmoothingDragPredicate=App.deferMsiSmoothingDrag;
+      App.deferMsiSmoothingDrag=()=>true;
+    });
+    try {
+      await slider.evaluate(element=>{element.value='90';element.dispatchEvent(new Event('input',{bubbles:true}));});
+      assert.equal(await page.locator('#tb-smoothing-strength-value').innerText(),'90','Dragging a large image updates the displayed value');
+      assert.equal(await page.evaluate(()=>App.msiSmoothingStrength),0,'Large-image input does not commit strength');
+      assert.equal(await page.evaluate(()=>App.project.meta.msiDisplay.smoothingStrength),0,'Large-image input does not change saved preferences');
+      assert.equal(await displayedImage(page),originalLinear,'Large-image input leaves rendered pixels unchanged until release');
+      await slider.dispatchEvent('change');
+      await page.waitForFunction(()=>App.msiSmoothingStrength===90);
+      assert.equal(await page.evaluate(()=>App.project.meta.msiDisplay.smoothingStrength),90,'Release commits the final strength');
+      assert.notEqual(await displayedImage(page),originalLinear,'Release redraws the large-image path');
+      assert.deepEqual(await sourceSnapshot(page),before,'Deferred smoothing preserves source data and ROI quantification');
+    } finally {
+      await page.evaluate(()=>{App.deferMsiSmoothingDrag=window.__originalSmoothingDragPredicate;delete window.__originalSmoothingDragPredicate;});
+    }
+    await strength(page,0);
+    await strength(page,100);
+    assert.notEqual(await displayedImage(page),originalLinear,'Increasing strength changes rendered MSI pixels');
+    assert.deepEqual(await sourceSnapshot(page),before,'Smoothing leaves source bytes, values, ROI quantification and geometry intact');
+    assert.deepEqual(await displayRanges(page),originalRanges,'Strength changes do not adjust intensity windows');
+    await page.locator('#tb-smoothing').selectOption('none');
+    assert.equal(await slider.isDisabled(),true);
+    assert.equal(await displayedImage(page),originalNone,'None ignores the remembered strength and restores original pixels');
+    await page.locator('#tb-smoothing').selectOption('linear');
+    assert.equal(await slider.inputValue(),'100','Returning to Linear preserves the chosen strength');
+    await strength(page,0);
+    assert.equal(await displayedImage(page),originalLinear,'Zero strength restores the original Linear pixels exactly');
+    await strength(page,65);
+    await screenshot(page,'smoothing-local-65');
     await page.evaluate(async()=>{if(await App._flushSave()===false)throw new Error('Save failed');});
     await page.reload();await prepare(page);
     assert.deepEqual(await page.evaluate(()=>App.project.meta.msiDisplay),
-      {version:1,preset:'hdi',aspectMode:'physical',rangePolicy:'maximum'},'Saved style survives a real IndexedDB reload');
+      {version:1,preset:'custom',aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:65},'Saved style and strength survive a real IndexedDB reload');
+    assert.equal(await slider.inputValue(),'65');
+    assert.equal(await page.evaluate(()=>App.msiSmoothingStrength),65);
     assert.deepEqual(await sourceSnapshot(page),before,'Style save/reload preserves original bytes, raster values, calibration and ROI');
     const downloadReady=page.waitForEvent('download',{timeout:60000});
     await page.locator('#btn-export-zip').click();
@@ -116,14 +202,15 @@ async function main() {
     }
     assert.ok(manifest,'The actual Export ZIP contains its portable project manifest');
     assert.deepEqual(manifest.offlineSettings.meta.msiDisplay,
-      {version:1,preset:'hdi',aspectMode:'physical',rangePolicy:'maximum'});
+      {version:1,preset:'custom',aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:65});
     assert.equal(manifest.offlineSettings.meta.colormap,'hotmetal');
-    assert.equal(manifest.offlineSettings.meta.msiSmoothing,'none');
+    assert.equal(manifest.offlineSettings.meta.msiSmoothing,'linear');
     await page.locator('#hidden-import-input').setInputFiles({name:'synthetic-hdi-roundtrip.zip',mimeType:'application/zip',buffer:archiveBytes});
     await page.getByRole('button',{name:'復元 / Restore',exact:true}).click();
     await page.waitForFunction(id=>App.project&&App.project.id!==id,oldId);await prepare(page);
     assert.deepEqual(await page.evaluate(()=>App.project.meta.msiDisplay),manifest.offlineSettings.meta.msiDisplay,
-      'Real ZIP import restores HDI metadata without changing measurements');
+      'Real ZIP import restores display strength without changing measurements');
+    assert.equal(await slider.inputValue(),'65');
     const roundtrip=await sourceSnapshot(page);
     assert.deepEqual(roundtrip.sources.map(({hash,values,pitch})=>({hash,values,pitch})),
       before.sources.map(({hash,values,pitch})=>({hash,values,pitch})),'ZIP roundtrip preserves source bytes, values and calibration');
@@ -137,7 +224,7 @@ async function main() {
     await page.locator('[data-modal-ok]').click();
     await page.waitForFunction(id=>App.project&&App.project.id!==id&&App.project.displayName==='Synthetic new HDI project',oldId);
     assert.deepEqual(await page.evaluate(()=>App.project.meta),
-      {msiDisplay:{version:1,preset:'hdi',aspectMode:'physical',rangePolicy:'maximum'},colormap:'hotmetal',msiSmoothing:'none'},
+      {msiDisplay:{version:1,preset:'hdi',aspectMode:'physical',rangePolicy:'maximum',smoothingStrength:0},colormap:'hotmetal',msiSmoothing:'none'},
       'The real New Project UI starts with HDI physical display preferences');
     await context.close();console.log('Local settings: old ZIP untouched, presets, physical toggle, save/reopen, ZIP roundtrip and New Project defaults PASS.');
 
@@ -165,19 +252,29 @@ async function main() {
     await style(viewer,'hdi');assert.deepEqual((await windows()).map(value=>value.max),[20000,20000],'Applying the preset resets manual windows');
     await viewer.locator('#tb-smoothing').selectOption('linear');
     assert.equal(await viewer.evaluate(()=>App.getMsiDisplaySettings().interpolation),'linear');
+    assert.equal(await viewer.locator('#tb-smoothing-strength').inputValue(),'0');
+    const sharedLinear=await displayedImage(viewer);
+    await strength(viewer,80);
+    assert.notEqual(await displayedImage(viewer),sharedLinear,'Shared viewer strength reaches the real MSI canvas');
+    await screenshot(viewer,'smoothing-shared-80');
     assert.equal(await viewer.evaluate(()=>JSON.stringify(App.project.meta)),sharedMeta,'Viewer preferences never mutate shared metadata');
     await viewer.reload();await sharedReady(viewer,'viewer');
     assert.equal(await viewer.evaluate(()=>App.getMsiDisplaySettings().preset),'custom','Viewer custom style restores after reload');
     assert.equal(await viewer.evaluate(()=>App.msiSmoothing),'linear','The restored preference reaches the actual renderer');
     assert.equal(await viewer.locator('#tb-smoothing').inputValue(),'linear');
+    assert.equal(await viewer.evaluate(()=>App.msiSmoothingStrength),80);
+    assert.equal(await viewer.locator('#tb-smoothing-strength').inputValue(),'80');
     await viewer.evaluate(slug=>{const key='desi:share:'+slug,session=JSON.parse(sessionStorage.getItem(key));session.role='admin';session.token='synthetic-admin-token';sessionStorage.setItem(key,JSON.stringify(session));},slug);
     await viewer.reload();await sharedReady(viewer,'admin');
     assert.equal(await viewer.evaluate(()=>App.getMsiDisplaySettings().preset),'current','Admin has independent preferences');
     assert.equal(await viewer.evaluate(()=>App.msiSmoothing),'none','Viewer interpolation does not leak into the admin role');
+    assert.equal(await viewer.evaluate(()=>App.msiSmoothingStrength),0,'Viewer strength does not leak into the admin role');
+    assert.equal(await viewer.locator('#tb-smoothing-strength').isDisabled(),true);
     await viewer.evaluate(slug=>{const key='desi:share:'+slug,session=JSON.parse(sessionStorage.getItem(key));session.role='viewer';session.token='synthetic-viewer-token';sessionStorage.setItem(key,JSON.stringify(session));},slug);
     await viewer.reload();await sharedReady(viewer,'viewer');
     assert.equal(await viewer.evaluate(()=>App.getMsiDisplaySettings().preset),'custom');
     assert.equal(await viewer.evaluate(()=>App.msiSmoothing),'linear');
+    assert.equal(await viewer.evaluate(()=>App.msiSmoothingStrength),80,'Returning to viewer restores its strength');
     assert.equal(await viewer.locator('#tb-colormap').inputValue(),'hotmetal');
     assert.deepEqual(await sourceSnapshot(viewer),sharedSource,'Shared style/ranges/role changes preserve original bytes and source geometry');
     assert.equal(await viewer.evaluate(()=>JSON.stringify(App.project.meta)),sharedMeta);

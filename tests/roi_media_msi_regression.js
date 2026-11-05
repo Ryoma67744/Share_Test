@@ -32,6 +32,26 @@ const legacy=Msi.colorize(src,{...options,valueRaster:{W:9,H:9,values},keepGrid:
 assert.deepEqual(colorAt(legacy,0,0),[...lut[0],255],'mismatched native-value dimensions use production luminance evaluator');
 assert.throws(()=>Msi.colorize(src,{...options,evaluateValue:null}),/配色/);
 
+const zeroSmooth=Msi.colorize(src,{...options,smoothing:'linear',smoothingStrength:0});
+assert.deepEqual(Buffer.from(zeroSmooth.getContext('2d').getImageData(0,0,4,2).data),
+  Buffer.from(colored.getContext('2d').getImageData(0,0,4,2).data),'zero strength preserves all comparison colours');
+const blurred=Msi.colorize(src,{...options,smoothing:'linear',smoothingStrength:100});
+assert.notDeepEqual(colorAt(blurred,0,0),colorAt(colored,0,0),'positive strength smooths the MSI colour image');
+assert.deepEqual(colorAt(blurred,1,1),[9,10,11,255],'Otsu-excluded cells keep their background');
+assert.deepEqual(colorAt(blurred,3,1),[9,10,11,255],'transparent source cells keep their background');
+assert.deepEqual(Buffer.from(srcCtx.getImageData(0,0,4,2).data),beforeSource);
+assert.deepEqual([...values],[1,2,3,4,5,6,7,8]);
+assert.deepEqual([...keep],[1,1,1,1,1,0,1,1]);
+const disabledSmooth=Msi.colorize(src,{...options,smoothing:'none',smoothingStrength:100});
+assert.deepEqual(Buffer.from(disabledSmooth.getContext('2d').getImageData(0,0,4,2).data),
+  Buffer.from(colored.getContext('2d').getImageData(0,0,4,2).data),'remembered strength is inactive when Smoothing is off');
+const maskedValues=Float64Array.from([4,100000,100000,4,4,4,4,4]);
+const maskedSource=createCanvas(4,2);maskedSource.getContext('2d').fillRect(0,0,4,2);
+const maskedColor=Msi.colorize(maskedSource,{...options,smoothing:'linear',smoothingStrength:100,
+  valueRaster:{W:4,H:2,values:maskedValues,measuredMask:Uint8Array.from([1,0,1,1,1,1,1,1])},
+  keepGrid:{W:4,H:2,keep:Uint8Array.from([1,1,0,1,1,1,1,1])}});
+assert.deepEqual(colorAt(maskedColor,0,0),[...lut[128],255],'unmeasured and Otsu-excluded values do not enter the smoothing kernel');
+
 const raster=createCanvas(16,12), ctx=raster.getContext('2d'), pixels=ctx.createImageData(16,12);
 for(let y=0;y<12;y++)for(let x=0;x<16;x++)pixels.data.set([10*x,12*y,100+x+y,255],4*(y*16+x));
 ctx.putImageData(pixels,0,0);

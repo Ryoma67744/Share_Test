@@ -1,9 +1,9 @@
 (function(root, factory) {
   'use strict';
-  const api = factory();
+  const api = factory(typeof module === 'object' && module.exports ? require('./msi-smoothing.js') : root.MsiSmoothing);
   if (typeof module === 'object' && module.exports) module.exports = api;
   if (root) root.RoiMediaMsi = api;
-})(typeof globalThis !== 'undefined' ? globalThis : this, function() {
+})(typeof globalThis !== 'undefined' ? globalThis : this, function(MsiSmoothing) {
   'use strict';
 
   // This module owns only a comparison viewport. Neither quantitative ROI
@@ -88,6 +88,8 @@
     const vr = o.valueRaster, keep = o.keepGrid;
     const useValues = !!(vr && vr.W === width && vr.H === height && vr.values && vr.values.length === width*height);
     const useKeep = !!(keep && keep.W === width && keep.H === height && keep.keep && keep.keep.length === width*height);
+    const strength=o.smoothing==='linear'?MsiSmoothing.normalizeStrength(o.smoothingStrength):0;
+    const valid=strength>0?new Uint8Array(width*height):null;
     const bg = Array.isArray(o.background) && o.background.length >= 3 ? o.background : [0,0,0];
     const rawRange = Array.isArray(o.rawRange) && o.rawRange.length === 2 && o.rawRange.every(Number.isFinite) ? o.rawRange : null;
     const fallbackMax = Number.isFinite(o.fallbackMax) ? o.fallbackMax : (rawRange ? rawRange[1] : 255);
@@ -99,9 +101,11 @@
           : o.evaluateLuminance(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2],rawRange,o.window);
         if (!ev || !Number.isFinite(ev.n)) throw new Error('MSIの強度範囲を確認できません。');
         color = o.lut[Math.round(clamp(ev.n,0,1)*255)];
+        if(valid)valid[i/4]=(!useValues || Number.isFinite(value)) && (!useValues || !vr.measuredMask || !!vr.measuredMask[i/4]) ? 1 : 0;
       }
       d[i]=color[0]; d[i+1]=color[1]; d[i+2]=color[2]; d[i+3]=255;
     }
+    if(strength>0)d.set(MsiSmoothing.smoothRgba(d,width,height,strength,valid));
     ctx.putImageData(pixels,0,0);
     return canvas;
   }
@@ -157,7 +161,9 @@
     ctx.save();
     ctx.beginPath(); ctx.rect(0,0,width,height); ctx.clip();
     ctx.transform(imageMatrix[0][0],imageMatrix[1][0],imageMatrix[0][1],imageMatrix[1][1],imageMatrix[0][2],imageMatrix[1][2]);
-    ctx.imageSmoothingEnabled = false;
+    // Strength zero preserves this comparison's historical nearest display.
+    ctx.imageSmoothingEnabled = frame.smoothing==='linear' && MsiSmoothing.normalizeStrength(frame.smoothingStrength)>0;
+    ctx.imageSmoothingQuality = 'high';
     const sourceRect = whole ? g.whole : g.crop;
     if(frame.drawingRects) {
       ctx.beginPath();ctx.rect(sourceRect.x,sourceRect.y,sourceRect.width,sourceRect.height);ctx.clip();

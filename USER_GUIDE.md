@@ -353,6 +353,8 @@ ROI LIST ヘッダの **「ROIのみ」** チェックを ON にすると、**�
 
 ## 7-bis. レイヤー個別の表示設定 (歯車 ⚙)
 
+ツールバーの **補間 → Linear** を選ぶと、**強さ** スライダー（0〜100）でMSI表示を滑らかにできます。**0は従来のLinear**、大きいほど追加の平滑化が強くなります。Noneではスライダーは無効です。元データ、ROIの範囲・平均・最大値・件数、数値CSVは変わりません。共有画面ではこのタブ・閲覧役割だけの設定です。PPTへ反映するときは **表示スタイルを使う** を選んでください。
+
 各レイヤーチップ右端の **歯車 ⚙** をクリックすると、そのレイヤー専用のポップオーバーが開きます。サムネイル画像を **右クリック** しても同じ設定が出ます (Compound モードでの **左クリック** はフォーカス化合物の切替です)。
 
 <div style="border:1px solid #cbd5e1;border-radius:6px;padding:10px;background:#fff;margin:10px 0;font-size:12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
