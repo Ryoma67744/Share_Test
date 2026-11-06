@@ -5,6 +5,15 @@
     else root.ProjectReportApp = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, MsiSmoothing) {
     'use strict';
+    // Keep these three report modules and their viewer URLs on one revision.
+    const REPORT_REVISION = 'ppt-20261106-1';
+    function assertReportModules(data, deck) {
+        if (!data || !deck || data.REPORT_REVISION !== REPORT_REVISION || deck.REPORT_REVISION !== REPORT_REVISION) {
+            const error = new Error('レポート機能が更新されました。ページを再読み込みしてから作成し直してください。');
+            error.code = 'REPORT_VERSION_MISMATCH';
+            throw error;
+        }
+    }
     const identity = () => [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
     const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
     const finite = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
@@ -564,7 +573,7 @@
             const ratios=doc.createElement('input');ratios.type='checkbox';ratios.id='project-report-include-ratios';ratios.checked=hasRatios;
             ratioLabel.append(ratios,doc.createTextNode('比の画像・ROI集計を含める（このタブの比を含む）'));
             const help = doc.createElement('p'); help.id = 'project-report-options-help';
-            help.textContent = '初期設定は従来の共通p99.8配色です。表示スタイルを選ぶと配色・範囲・補間・Otsu表示を使用します。出力は画面の絞り込みによらず全切片・全分子で、Sameの自動上限は全出力切片から再計算します。手動Rangeは生強度値で優先します。';
+            help.textContent = '初期設定は従来の共通p99.8配色です。表示スタイルを選ぶと配色・範囲・補間・Otsu表示を使用します。画面の絞り込みによらずプロジェクト内の全分子を出力し、各分子は登録のある切片だけを掲載します。まとめ表は対象切片の組合せごとに作成します。比の利用不可表示は残します。Sameの自動上限は各分子の全出力切片から再計算し、手動Rangeは生強度値で優先します。';
             help.style.cssText = 'font-size:13px;line-height:1.6;margin:12px 0 20px';
             const actions = doc.createElement('div'); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
             const cancel = doc.createElement('button'); cancel.type = 'button'; cancel.className = 'btn';
@@ -688,8 +697,9 @@
                 const libs = root.LAZY_LIBS || {};
                 await root.loadScript(libs.jszip || '../vendor/jszip.min.js'); input.assertCurrent();
                 await root.loadScript(libs.pptxgen || '../vendor/pptxgen.min.js'); input.assertCurrent();
-                await root.loadScript(libs.projectReportData || 'project-report-data.js'); input.assertCurrent();
-                await root.loadScript(libs.projectReportDeck || 'project-report-deck.js'); input.assertCurrent();
+                await root.loadScript(libs.projectReportData || 'project-report-data.js?v=' + REPORT_REVISION); input.assertCurrent();
+                await root.loadScript(libs.projectReportDeck || 'project-report-deck.js?v=' + REPORT_REVISION); input.assertCurrent();
+                assertReportModules(root.ProjectReportData, root.ProjectReportDeck);
                 const report = await root.ProjectReportData.prepare(input, { createCanvas: () => doc.createElement('canvas'),
                     signal: controller.signal, onProgress: event => progress.update(event) });
                 input.assertCurrent();
@@ -715,5 +725,5 @@
         activeExport = run();
         try { return await activeExport; } finally { activeExport = null; }
     }
-    return { createAdapter, captureExportContext, moleculeIdentity, safeFileName, exportCurrent,referenceFrame };
+    return { REPORT_REVISION, assertReportModules, createAdapter, captureExportContext, moleculeIdentity, safeFileName, exportCurrent,referenceFrame };
 });

@@ -37,6 +37,47 @@ function fixture(sectionCount = 8, moleculeCount = 5) {
                 max: s === 0 ? 0 : 1000.1234 + m + s, mean: s === 0 ? 0 : 300.98765 + m + s,
                 image: s === 2 ? null : image, missingReason: s === 2 ? 'Registered layer unavailable' : '' })) })) };
 }
+function assertMatrixCoverage(report) {
+    const before = JSON.stringify(report), pages = deck.planMatrices(report.molecules, report.sections);
+    const expected = [], actual = [];
+    report.molecules.forEach((molecule, index) => {
+        for (const section of report.sections) if (molecule.sections.some(entry => entry.sectionId === section.id)) {
+            expected.push(JSON.stringify([index, section.id]));
+        }
+    });
+    for (const page of pages) {
+        assert.ok(page.sections.length > 0 && page.sections.length <= 4);
+        assert.ok(page.blocks.length > 0 && page.blocks.length <= (page.sections.length <= 2 ? 3 : page.sections.length === 3 ? 2 : 1));
+        assert.deepEqual(Array.from(page.sections, section => section.id),
+            report.sections.filter(section => page.sections.includes(section)).map(section => section.id),
+            'Matrix columns preserve project order');
+        for (const block of page.blocks) {
+            assert.ok(block.length > 0 && block.length <= 8);
+            for (const molecule of block) {
+                assert.equal(page.kind, molecule.kind === 'ratio' ? 'ratio' : 'msi');
+                for (const section of page.sections) {
+                    assert.ok(molecule.sections.some(entry => entry.sectionId === section.id),
+                        'Every matrix cell has a registered entry, including unavailable images');
+                    actual.push(JSON.stringify([report.molecules.indexOf(molecule), section.id]));
+                }
+            }
+        }
+    }
+    assert.equal(new Set(actual).size, actual.length, 'Registered pairs never appear twice in the matrix');
+    assert.deepEqual(actual.sort(), expected.sort(), 'All registered pairs appear in the matrix exactly once');
+    assert.equal(JSON.stringify(report), before, 'Planning does not mutate the input or statistics');
+    return pages;
+}
+function assertMatrixLabels(report, xml) {
+    const pages = assertMatrixCoverage(report), matrices = xml.filter(slide => /MSI matrix \d/.test(slide));
+    assert.equal(matrices.length, pages.length);
+    pages.forEach((page, index) => {
+        for (const section of report.sections) assert.equal(matrices[index].includes(section.name), page.sections.includes(section),
+            'Matrix ' + (index + 1) + ' labels only its registered section group: ' + section.name);
+        for (const molecule of report.molecules) assert.equal(matrices[index].includes(molecule.name), page.blocks.some(block => block.includes(molecule)),
+            'Matrix ' + (index + 1) + ' contains only the planned molecule rows: ' + molecule.name);
+    });
+}
 async function unzip(report) {
     const bytes = await deck.create(report, { type: 'nodebuffer' });
     assert.ok(Buffer.isBuffer(bytes), 'Node output is a buffer');
@@ -191,20 +232,54 @@ async function main() {
     partial.molecules[3].sections = partial.molecules[3].sections.slice(0, 2);
     const partialBefore = JSON.stringify(partial), compact = await unzip(partial);
     assert.equal(JSON.stringify(partial), partialBefore, 'Filtering export layout never changes the report or its statistics');
-    assert.equal(compact.xml.length, 6, 'Two matrix pages and four compact detail pages, without empty slides');
+    assert.equal(compact.xml.length, 7, 'Three registration groups and four compact detail pages, without empty slides');
     assert.ok(!compact.all.includes(partial.sections[3].name), 'A section without any registration is omitted');
     assert.ok(!compact.all.includes(partial.molecules[2].name), 'A molecule without registrations has no row or slide');
-    assert.ok(!compact.xml[0].includes(partial.molecules[0].name), 'A molecule absent from a section page has no matrix row');
-    assert.ok(compact.xml[1].includes(partial.molecules[0].name), 'The molecule is retained on its registered section page');
-    assert.ok(!compact.xml[1].includes(partial.molecules[1].name), 'Empty rows do not spill onto another matrix page');
-    assert.equal((compact.xml[2].match(/<p:pic>/g) || []).length, 1, 'A lone registered section occupies its own detail page');
-    assert.equal((compact.xml[2].match(/<a:gridCol /g) || []).length, 2);
-    assert.ok(compact.xml[3].includes(partial.molecules[1].name + ' (1/2)'), 'Page numbering follows registered sections');
-    assert.ok(compact.xml[4].includes(partial.molecules[1].name + ' (2/2)'));
-    assert.equal((compact.xml[4].match(/<a:gridCol /g) || []).length, 2, 'The final odd section has no empty table column');
-    assert.match(compact.xml[3], /Registered layer unavailable/, 'Registered load failures stay visible');
-    assert.match(compact.xml[5], /<a:t>0<\/a:t>/, 'Valid zero-valued measurements are retained');
+    assertMatrixLabels(partial, compact.xml);
+    assert.ok(compact.xml[0].includes(partial.molecules[0].name), 'Matrix groups follow molecule first appearance');
+    assert.equal((compact.xml[3].match(/<p:pic>/g) || []).length, 1, 'A lone registered section occupies its own detail page');
+    assert.equal((compact.xml[3].match(/<a:gridCol /g) || []).length, 2);
+    assert.ok(compact.xml[4].includes(partial.molecules[1].name + ' (1/2)'), 'Page numbering follows registered sections');
+    assert.ok(compact.xml[5].includes(partial.molecules[1].name + ' (2/2)'));
+    assert.equal((compact.xml[5].match(/<a:gridCol /g) || []).length, 2, 'The final odd section has no empty table column');
+    assert.match(compact.xml[1], /Registered layer unavailable/, 'Read failures remain in the matrix');
+    assert.match(compact.xml[4], /Registered layer unavailable/, 'Registered load failures stay visible');
+    assert.match(compact.xml[6], /<a:t>0<\/a:t>/, 'Valid zero-valued measurements are retained');
     assert.doesNotMatch(compact.all, /No registered MSI layer|この分子・測定条件は切片に登録されていません/);
+
+    const overlapping = fixture(4, 5);
+    for (const [index, ids] of [[0, [2, 0]], [1, [1, 3]], [2, [0, 1]], [3, [1, 2]], [4, [0, 2]]]) {
+        overlapping.molecules[index].sections = ids.map(i => overlapping.molecules[index].sections[i]);
+    }
+    const overlapPages = assertMatrixCoverage(overlapping);
+    assert.equal(overlapPages.length, 4, 'Non-contiguous identical sets coalesce; partially overlapping sets stay separate');
+    assert.deepEqual(Array.from(overlapPages[0].blocks[0], molecule => molecule.key), ['m0', 'm4']);
+    assertMatrixLabels(overlapping, (await unzip(overlapping)).xml);
+
+    const mixedKinds = fixture(2, 2);
+    mixedKinds.molecules[1].kind = 'ratio';
+    mixedKinds.molecules[1].sections[1].image = null;
+    mixedKinds.molecules[1].sections[1].missingReason = 'Ratio inputs unavailable';
+    const kindPages = assertMatrixCoverage(mixedKinds), kindDeck = await unzip(mixedKinds);
+    assert.deepEqual(Array.from(kindPages, page => page.kind), ['msi', 'ratio'], 'Ratio diagnostics are separate from acquired molecules');
+    assertMatrixLabels(mixedKinds, kindDeck.xml);
+    assert.match(kindDeck.xml[1], /Ratio inputs unavailable/);
+
+    const large = fixture(7, 25), largePages = assertMatrixCoverage(large);
+    assert.equal(largePages.length, 6, 'Four-column and three-column matrix pages retain existing density limits');
+    assertMatrixCoverage(approvedMatrix);
+    assertMatrixCoverage(fixture(0, 0));
+
+    const mixedMeasurements = fixture(6, 48), measuredImage = fixtureImage();
+    mixedMeasurements.molecules.forEach((molecule, index) => {
+        const start = index < 16 ? 0 : index < 33 ? 2 : 4;
+        molecule.sections = molecule.sections.slice(start, start + 2).map(entry => ({...entry, image: measuredImage, missingReason: ''}));
+    });
+    const mixedDeck = await unzip(mixedMeasurements);
+    assert.equal(mixedDeck.xml.length, 51, 'Six sections with 16/17/15 conditions produce three matrices and 48 details');
+    assertMatrixLabels(mixedMeasurements, mixedDeck.xml);
+    assert.doesNotMatch(mixedDeck.all, /No image|No registered MSI/);
+    assert.equal(mixedDeck.xml.filter(xml => xml.includes('Max Intensity')).length, 48);
     const extra = fixture(1, 1);
     extra.molecules[0].sections.push({ sectionId: 'extra', name: 'Extra registered section', max: 9, mean: 4, image: null });
     assert.match((await unzip(extra)).all, /Extra registered section/, 'A molecule-only section is not silently discarded');
@@ -308,6 +383,9 @@ async function main() {
         const scaleTarget = path.resolve(root, '../report-scale-geometry-sample.pptx');
         fs.writeFileSync(scaleTarget, geometryResult.bytes);
         console.log('Tall/wide calibrated image sample: ' + scaleTarget);
+        const mixedTarget = path.resolve(root, '../report-mixed-registration-sample.pptx');
+        fs.writeFileSync(mixedTarget, mixedDeck.bytes);
+        console.log('Mixed registration groups sample: ' + mixedTarget);
     }
     console.log('Project report deck regression: PASS (MSI-only PPTX, editable statistics, omitted metadata, calibrated scale bars, image geometry)');
 }

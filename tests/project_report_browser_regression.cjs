@@ -649,6 +649,34 @@ async function main() {
     assert.equal(downloadCount, 0, 'Cancelling the options dialog does not download a report');
     assert.equal(await page.locator('.project-report-progress').count(), 0, 'Cancelling does not begin generation');
     await assertMasterUnchanged('Cancelled export');
+    // A page can outlive a deployment. Cached or late-loaded modules from a
+    // different revision must stop before preparing images or downloading a
+    // file, and the next export must remain usable after the page is repaired.
+    for (const moduleName of ['ProjectReportData', 'ProjectReportDeck']) {
+      await page.evaluate(async name => {
+        for (const lib of ['projectReportData', 'projectReportDeck']) await loadScript(LAZY_LIBS[lib]);
+        window.revisionOriginalModule = window[name];
+        window.revisionOriginalToast = showToast;
+        window.revisionMessages = [];
+        window.revisionWorkStarted = false;
+        showToast = message => window.revisionMessages.push(message);
+        window[name] = {...window[name], REPORT_REVISION: 'previous-report',
+          prepare() { window.revisionWorkStarted = true; throw new Error('Unexpected preparation'); },
+          create() { window.revisionWorkStarted = true; throw new Error('Unexpected generation'); }};
+      }, moduleName);
+      await openMasterOptions();
+      await page.locator('[data-report-create]').click();
+      await page.waitForFunction(() => window.revisionMessages.some(message => /再読み込み/.test(message))
+        && !document.getElementById('btn-export-ppt').disabled && !document.querySelector('.project-report-progress'));
+      assert.equal(downloadCount, 0, 'Mismatched ' + moduleName + ' does not download a report');
+      assert.equal(await page.evaluate(() => window.revisionWorkStarted), false, 'Version mismatch stops before report work');
+      await assertMasterUnchanged('Mismatched ' + moduleName);
+      await page.evaluate(name => {
+        window[name] = window.revisionOriginalModule;
+        showToast = window.revisionOriginalToast;
+        delete window.revisionOriginalModule; delete window.revisionOriginalToast;
+      }, moduleName);
+    }
     let sampleDeck;
     for (const [includeCeCv, calibrated] of [[false, false], [true, false], [false, true]]) {
       if (calibrated) {
