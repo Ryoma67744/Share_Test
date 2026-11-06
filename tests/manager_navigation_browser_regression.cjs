@@ -23,11 +23,12 @@ async function main(){
    if(location.pathname==='/Share_Test/index.html')sessionStorage.setItem('desi:masterUnlocked',JSON.stringify({expiresAt:Date.now()+3600000}));
    window.navigationCalls=[];
    window.ProjectNavigation={resumeMasterDestination:()=>false,shareUrl:slug=>new URL('viewer/index.html#share='+encodeURIComponent(slug),location.href).href,
-    openMaster:destination=>{window.navigationCalls.push(destination);if(window.blockNavigation)return false;const key=destination.projectId?'project':'import',value=destination.projectId||destination.importSlug;return !!window.open(new URL('viewer/index.html?'+key+'='+encodeURIComponent(value),location.href),'_blank');}};
+    openMaster:(destination,options={})=>{window.navigationCalls.push({destination,options});if(window.blockNavigation)return false;const key=destination.projectId?'project':'import',value=destination.projectId||destination.importSlug;return !!window.open(new URL('viewer/index.html?'+key+'='+encodeURIComponent(value)+(options.refreshShare?'&refresh=share':''),location.href),'_blank');}};
   });
   await page.goto(origin+'/Share_Test/index.html');await page.waitForFunction(()=>typeof _lastListRows!=='undefined'&&_lastListRows==='[]');
   await page.evaluate(async()=>{
    await ProjectStorage.putProject({id:'local-copy',displayName:'Local project',sections:[],createdAt:'2026-11-01T00:00:00Z'},{createOnly:true});
+   await ProjectStorage.putProject({id:'shared-local-copy',displayName:'Shared local edits',sections:[{id:'local-section'}],shareInfo:{slug:'linked-share'},__publishPending:true,createdAt:'2026-11-02T00:00:00Z'},{createOnly:true});
    for(let i=0;i<18;i++)await ProjectStorage.putProject({id:'filler-'+i,displayName:'Shared sample '+i,sections:[],createdAt:'2026-10-01T00:00:00Z'},{createOnly:true});
    serverRowsCache=[{slug:'server-one',display_name:'Shared one'},{slug:'server-two',display_name:'Shared two'}];
    workspaceTree={version:1,children:[{type:'folder',id:'folder-a',name:'Expanded folder',children:[{type:'project',localId:'local-copy'}]}]};_openFolders.add('folder-a');
@@ -35,8 +36,22 @@ async function main(){
    await renderList();
   });
   const parentUrl=page.url();
+  assert.match(await page.locator('#sharing-description').textContent(),/同じ Google アカウントでも他のPCへ自動同期されません/);
+  assert.match(await page.locator('[data-local-id="local-copy"] .badge.local').textContent(),/このPCのみ／未公開/);
+  assert.equal(await page.locator('[data-local-id="local-copy"] [data-action="refresh-share"]').count(),0);
+  assert.equal(await page.locator('[data-slug="server-one"] [data-action="refresh-share"]').count(),0);
   let childPromise=context.waitForEvent('page');await page.locator('[data-local-id="local-copy"] [data-action="open-local"]').click();let child=await childPromise;await child.waitForLoadState();
   assert.equal(child.url(),origin+'/Share_Test/viewer/index.html?project=local-copy');assert.equal(page.url(),parentUrl);assert.equal(await page.locator('[data-folder-body="folder-a"]').isVisible(),true);await child.close();await page.bringToFront();
+  // A shared local copy can check for changes even while it has unpublished
+  // edits, and even when the current server listing does not contain its slug.
+  const beforeRefresh=await page.evaluate(()=>ProjectStorage.getProject('shared-local-copy'));
+  childPromise=context.waitForEvent('page');await page.locator('[data-local-id="shared-local-copy"] [data-action="refresh-share"]').click();child=await childPromise;await child.waitForLoadState();
+  assert.equal(child.url(),origin+'/Share_Test/viewer/index.html?project=shared-local-copy&refresh=share');assert.equal(page.url(),parentUrl);
+  assert.deepEqual(await page.evaluate(()=>ProjectStorage.getProject('shared-local-copy')),beforeRefresh,'checking never overwrites local edits in the manager');
+  assert.deepEqual(await page.evaluate(()=>navigationCalls.at(-1)),{destination:{projectId:'shared-local-copy'},options:{refreshShare:true}});
+  await child.close();await page.bringToFront();
+  await page.evaluate(async()=>{await ProjectStorage.patchProject('shared-local-copy',project=>{project.__publishPending=false;});await renderList();});
+  assert.equal(await page.locator('[data-local-id="shared-local-copy"] [data-action="refresh-share"]').count(),1,'checking is also available without pending edits');
   const share=page.locator('[data-slug="server-one"] [data-action="open-share"]');assert.equal(await share.getAttribute('target'),'_blank');assert.equal(await share.getAttribute('rel'),'noopener');
   await page.evaluate(()=>sessionStorage.setItem('desi:test-share-admin','parent-only'));
   childPromise=context.waitForEvent('page');await share.click();child=await childPromise;await child.waitForLoadState();assert.equal(child.url(),origin+'/Share_Test/viewer/index.html#share=server-one');assert.equal(page.url(),parentUrl);

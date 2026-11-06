@@ -178,7 +178,7 @@ async function main() {
     assert.equal(localRows.length, 1); assert.equal(localRows[0].local.shareInfo, null);
     manager.TEST_ROW = localRows[0];
     const html = vm.runInContext('rowHtml(TEST_ROW)', manager);
-    assert.match(html, /open-local/); assert.doesNotMatch(html, /change-pw|copy-url|open-server|open-share|delete-server/);
+    assert.match(html, /open-local/); assert.doesNotMatch(html, /change-pw|copy-url|open-server|open-share|refresh-share|delete-server/);
     const mrm = context(storage()); vm.runInContext(appScript('mrm.html'), mrm);
     assert.equal(await vm.runInContext('requireMasterUnlock()', mrm), true);
     assert.equal(vm.runInContext('SupabaseClient.configured()', mrm), false);

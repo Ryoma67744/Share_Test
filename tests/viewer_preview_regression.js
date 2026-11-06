@@ -530,7 +530,7 @@ function testForcedHeBackdropDoesNotPersist() {
     'プレビューの強制表示は永続化してはいけない (persist:false を渡すこと)');
 
   // toggleLayer 側がその指示を実際に見ていること
-  assert.match(html, /if \(!opts \|\| opts\.persist !== false\) this\._persistVisibleLayers\(\);/,
+  assert.match(html, /if \(!opts \|\| opts\.persist !== false\) this\._persistVisibleLayers\(opts\);/,
     'toggleLayer が persist:false を尊重すること');
 }
 
@@ -2503,7 +2503,7 @@ function testWorkerAssetsFollowApplicationBase() {
     }
   }
   const scriptSources = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(scriptSources.slice(0, 7), ['../runtime-config.js', '../app-runtime.js', '../project-store-safety.js', '../project-navigation.js', 'msi-display-settings.js', 'msi-display-geometry.js', '../offline/offline.js']);
+  assert.deepEqual(scriptSources.slice(0, 8), ['../runtime-config.js', '../app-runtime.js', '../project-store-safety.js', '../project-navigation.js', 'share-refresh.js', 'msi-display-settings.js', 'msi-display-geometry.js', '../offline/offline.js']);
   assert.ok(scriptSources.includes('../vendor/supabase.min.js'));
   assert.ok(!scriptSources.some(src => src.startsWith('/') || /^https?:/.test(src)), 'viewer assets must work under a project Pages path');
   assert.doesNotMatch(html, /window\.SUPABASE_(?:URL|ANON_KEY)\s*=/, 'shared runtime owns cloud configuration');

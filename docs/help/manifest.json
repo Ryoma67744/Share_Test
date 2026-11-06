@@ -128,8 +128,8 @@
             "en": "Organise the list"
           },
           "body": {
-            "ja": "フォルダーを作成し、プロジェクトを移動します。Local / Server の表示で、ブラウザー内か公開済みかを確認します。",
-            "en": "Create folders and move projects. Local / Server badges indicate browser data and published copies."
+            "ja": "フォルダーを作成し、プロジェクトを移動します。Local / Server の表示で保存先を区別します。未公開のプロジェクトの保存状態は「このPCのみ・未公開」です。",
+            "en": "Create folders and move projects. Local / Server badges distinguish storage locations. An unpublished project's save status reads このPCのみ・未公開 (This PC only, unpublished)."
           }
         },
         {
@@ -138,8 +138,18 @@
             "en": "Open the required copy"
           },
           "body": {
-            "ja": "ローカルデータは Open で編集します。サーバー一覧から閲覧 URL を開くか、ローカルへ取り込んで編集を再開できます。",
-            "en": "Use Open to edit local data. From the server list, open the shared URL or import a local copy for editing."
+            "ja": "ローカルデータは Open で編集します。初めて使う別 PC では「サーバから一覧取得」→ Open (master) で公開済みの内容を取り込みます。閲覧するだけなら共有 URL を開きます。",
+            "en": "Use Open to edit local data. On another PC, first retrieve the server list and choose Open (master) to import the published content. For viewing, open the shared URL."
+          }
+        },
+        {
+          "title": {
+            "ja": "共有の最新版を確認する",
+            "en": "Check the shared version"
+          },
+          "body": {
+            "ja": "共有先のあるローカルプロジェクトで「共有の最新版を確認」を押し、この PC とサーバーの公開版番号・切片数を比較します。「このプロジェクトに反映」または「別コピーで取得」を選びます。未公開の変更や公開結果の確認待ちがある場合は、別コピーでの取得だけが利用できます。",
+            "en": "For a local project linked to a share, choose 共有の最新版を確認 (Check the latest shared version) and compare this PC's publication revision and section count with the server. Choose このプロジェクトに反映 (Apply to this project) or 別コピーで取得 (Get a separate copy). If local changes are unpublished or a publish result is unresolved, only the separate-copy option is available."
           }
         },
         {
@@ -167,6 +177,14 @@
         {
           "ja": "ブラウザーデータの削除・端末故障に備え、ZIP を別の保存場所へ定期的に書き出します。",
           "en": "Export ZIP backups regularly to another location in case browser storage is cleared or a device fails."
+        },
+        {
+          "ja": "既存プロジェクトへの反映が成功すると、同じプロジェクトの内容を更新し、直前の版を Projects に「サーバー版取り込み前 ...」という別のローカルコピーとして残します。このコピーは共有先との関連を外して保存され、回復用下書きの自動作成が OFF でも作られます。",
+          "en": "A successful application updates the same local project and retains its previous version as a separate Projects entry named サーバー版取り込み前 ... (Before server import). This backup is detached from the share and is created even when automatic recovery drafts are OFF."
+        },
+        {
+          "ja": "原本や ROI を取得できない場合、取得中に別タブの内容やサーバーの公開版番号が変わった場合は、既存版への反映を中止します。同じ Google アカウントでログインしても、PC やブラウザー間のローカルプロジェクトは自動同期されません。",
+          "en": "Application stops without replacing the existing project if a source or ROI cannot be retrieved, another tab changes the local record, or the server publication revision changes during retrieval. Signing in with the same Google account does not automatically synchronise local projects between PCs or browsers."
         }
       ],
       "features": [
@@ -175,8 +193,8 @@
           "en": "Create, Open, folders, names and Delete"
         },
         {
-          "ja": "Local / Server バッジ・サーバー一覧取得・URL コピー",
-          "en": "Local / Server badges, server list and URL copy"
+          "ja": "Local / Server バッジ・サーバー一覧取得・共有の最新版確認・URL コピー",
+          "en": "Local / Server badges, server list, shared-version checks and URL copy"
         },
         {
           "ja": "保存競合・回復用下書き・ビルド番号",
@@ -971,8 +989,8 @@
             "en": "Check Memo and save status"
           },
           "body": {
-            "ja": "実験条件や気付きを Memo に残します。保存状態・競合表示を確認し、エラーのまま画面を閉じないでください。",
-            "en": "Record conditions and observations in Memo. Check save and conflict status before closing the page."
+            "ja": "実験条件や気付きを Memo に残し、保存状態を確認します。「このPCのみ・未公開」はブラウザー内の保存、「このPCに保存・公開待ち」は共有先への反映待ちです。保存エラーがあるときは内容を確認してから閉じてください。",
+            "en": "Record conditions and observations in Memo and check storage status. このPCのみ・未公開 means browser-only, unpublished data; このPCに保存・公開待ち means saved on this PC and awaiting publication. Review any save error before closing the page."
           }
         },
         {
@@ -1018,8 +1036,16 @@
           "en": "Local saving uses this browser; Export ZIP creates a file you save; Publish updates shared server content. These are separate destinations."
         },
         {
-          "ja": "Auto-publish on save と Sync 表示を確認します。再 Publish は共有側への影響を確認して行い、大容量アップロードは完了するまで進捗を確認します。",
-          "en": "Review Auto-publish on save and Sync status. Check the consequences before republishing, and monitor large uploads until completion."
+          "ja": "「✓ 公開版 vN を保存済み」は、この PC が保存した公開版の基準番号です。別 PC の変更まで含めた最新版との一致を保証する表示ではありません。他 PC の公開内容を取り込むときは「共有の最新版を確認」を使います。",
+          "en": "✓ 公開版 vN を保存済み identifies the publication revision saved as this PC's baseline. It does not guarantee that this copy matches the latest changes published from another PC. Use 共有の最新版を確認 to retrieve shared content."
+        },
+        {
+          "ja": "Auto-publish は公開済みプロジェクトのローカル変更を共有先へ送る処理です。共有版との競合や基準番号が未確認のときは停止します。比較・再公開を明示するまで、ローカル保存だけで自動再公開は再開しません。再 Publish は共有側への影響を確認し、大容量アップロードは完了まで進捗を確認します。",
+          "en": "Auto-publish sends local edits from a published project to its share. It stops when the shared revision conflicts or the baseline is unknown. Local saving alone does not resume publication; explicitly compare and republish. Review the effect on the share and monitor large uploads until completion."
+        },
+        {
+          "ja": "同じ Google アカウントでもローカルデータは PC ごと・ブラウザーごとに独立しています。初回の別 PC ではサーバー一覧から Open (master) で取り込むか、閲覧用の共有 URL を開きます。未公開の内容は Export ZIP / Import で移せます。",
+          "en": "Local data remains separate on each PC and browser, even with the same Google account. On another PC, import through the server list with Open (master), or open the shared URL for viewing. Transfer unpublished work with Export ZIP / Import."
         },
         {
           "ja": "共有の表示設定と比の個人変更は、公開元への保存ではありません。共有 ROI・位置合わせ・重ね合わせの保存は各機能の権限とロックに従います。共有画面の Memo 編集は一時的で、再読み込みで破棄されます。",

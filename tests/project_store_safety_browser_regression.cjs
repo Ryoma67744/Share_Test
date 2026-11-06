@@ -13,6 +13,36 @@ window.recoveryUi=ProjectStoreSafety.mountRecoveryUi(storage);
 window.addEventListener('project-storage-conflict',()=>recoveryUi.notify());
 </script>`;
 
+// Playwright's injected waitForFunction poll treats an async predicate's Promise
+// as truthy, even when it eventually resolves to false. Await each result here.
+async function waitForAsyncCondition(page,predicate,arg,{timeout=30000,pollMs=50}={}) {
+ const deadline=Date.now()+timeout;
+ const timedOut=()=>new Error('Async browser condition did not become true within '+timeout+'ms');
+ for(;;){
+  const remaining=deadline-Date.now();if(remaining<=0)throw timedOut();
+  let timer,result;
+  try {
+   result=await Promise.race([page.evaluate(predicate,arg),new Promise((_,reject)=>{timer=setTimeout(()=>reject(timedOut()),remaining);})]);
+  } finally {clearTimeout(timer);}
+  if(Date.now()>=deadline)throw timedOut();
+  if(result===true)return;
+  await new Promise(resolve=>setTimeout(resolve,Math.min(pollMs,Math.max(0,deadline-Date.now()))));
+ }
+}
+
+async function asyncConditionScenario(browser) {
+ const page=await browser.newPage();
+ try {
+  await page.setContent('<!doctype html>');
+  await page.evaluate(()=>{window.conditionCalls=0;});
+  await waitForAsyncCondition(page,async target=>++window.conditionCalls>=target,3);
+  assert.equal(await page.evaluate(()=>window.conditionCalls),3,'Async false results must continue polling');
+  await assert.rejects(waitForAsyncCondition(page,async()=>false,null,{timeout:150,pollMs:10}),/did not become true/,'Persistent false must time out');
+  await assert.rejects(waitForAsyncCondition(page,async()=>({ready:false}),null,{timeout:150,pollMs:10}),/did not become true/,'Only literal true completes the wait');
+  await assert.rejects(waitForAsyncCondition(page,()=>{window.pendingCondition=new Promise(()=>{});return window.pendingCondition;},null,{timeout:150,pollMs:10}),/did not become true/,'An unresolved evaluation must also time out');
+ } finally {await page.close();}
+}
+
 async function openRecovery(page) {
  await page.locator('#local-recovery-button').waitFor({state:'visible'});
  await page.locator('#local-recovery-button').click();
@@ -25,7 +55,7 @@ async function closeRecovery(page) {
 async function setRecoveryThroughUi(page,enabled) {
  await openRecovery(page);
  await page.getByRole('radio',{name:enabled?'自動作成する':'自動作成しない',exact:true}).check();
- await page.waitForFunction(async value=>(await storage.getRecoveryEnabled())===value,enabled);
+ await waitForAsyncCondition(page,async value=>(await storage.getRecoveryEnabled())===value,enabled);
  await page.waitForFunction(value=>document.querySelector('input[name="recovery-enabled"][value="'+value+'"]:checked:not(:disabled)'),String(enabled));
  assert.equal(await page.getByRole('radio',{name:enabled?'自動作成する':'自動作成しない',exact:true}).isChecked(),true);
  await closeRecovery(page);
@@ -119,7 +149,7 @@ async function optionalRecoveryScenario(browser,origin,errors) {
   assert.equal(await active.evaluate(async()=>(await storage.getBlob('off-added')).blob.text()),'new original before save');
   const pinsBeforeClose=await pinRows(manager,'off-project');
   await active.close();
-  await manager.waitForFunction(async()=>{await storage.listRecoveries();const db=await storage.open();return new Promise((resolve,reject)=>{
+  await waitForAsyncCondition(manager,async()=>{await storage.listRecoveries();const db=await storage.open();return new Promise((resolve,reject)=>{
    const r=db.transaction('blob_pins','readonly').objectStore('blob_pins').getAll();r.onsuccess=()=>resolve(!r.result.some(row=>row.kind==='editing-session'&&row.projectId==='off-project'));r.onerror=()=>reject(r.error);
   });});
   assert.deepEqual((await manager.evaluate(()=>storage.listRecoveries())).map(row=>row.id),existingDrafts.map(row=>row.id),'Closing an OFF tab creates no phantom recovery');
@@ -132,7 +162,7 @@ async function optionalRecoveryScenario(browser,origin,errors) {
    'Closed OFF sessions reclaim both unreferenced originals'+(cleanupDiagnostics?'\n'+JSON.stringify(cleanupDiagnostics):''));
 
   await openRecovery(manager);await manager.getByRole('button',{name:'別コピーとして復元',exact:true}).click();
-  await manager.waitForFunction(async()=>(await storage.listRecoveries()).length===0);await closeRecovery(manager);
+  await waitForAsyncCondition(manager,async()=>(await storage.listRecoveries()).length===0);await closeRecovery(manager);
   const restored=await manager.evaluate(async()=>(await storage.listProjects()).find(project=>project.id!=='retained'));
   assert.equal(restored.displayName,'Existing recovery (recovered)');
   assert.equal(await viewer.evaluate(async()=>(await storage.getBlob('retained-original')).blob.text()),'retained draft bytes');
@@ -155,7 +185,7 @@ async function optionalRecoveryScenario(browser,origin,errors) {
    const project=await storage.getProject('normal',{activate:true});project.displayName='Saved normally';await storage.putProject(project);
   });
   await normal.close();
-  await manager.waitForFunction(async()=>{await storage.listRecoveries();const db=await storage.open();return new Promise((resolve,reject)=>{
+  await waitForAsyncCondition(manager,async()=>{await storage.listRecoveries();const db=await storage.open();return new Promise((resolve,reject)=>{
    const r=db.transaction('blob_pins','readonly').objectStore('blob_pins').getAll();r.onsuccess=()=>resolve(!r.result.some(row=>row.kind==='editing-session'&&row.projectId==='normal'));r.onerror=()=>reject(r.error);
   });});
   assert.deepEqual((await manager.evaluate(()=>storage.listRecoveries())).map(row=>row.id),beforeNormalClose.map(row=>row.id),'Normally saved closed tabs do not add recovery drafts');
@@ -206,6 +236,7 @@ async function main(){
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port;let browser;
  try{
   browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH||undefined});
+  await asyncConditionScenario(browser);
   const context=await browser.newContext(),a=await context.newPage(),b=await context.newPage(),errors=[];
   for(const p of [a,b])p.on('pageerror',e=>errors.push(e.message));
   // Seed DB4 before the real wrappers first open their connection.
@@ -244,7 +275,7 @@ async function main(){
   const restored=await c.evaluate(id=>storage.restoreRecovery(id),draft.id);assert.equal(restored.displayName,'Stale edit survives (recovered)');
   assert.equal(await c.evaluate(async()=>(await storage.getBlob('active-original')).blob.text()),'only original');
   // No timer releases a crashed tab's pin. A new tab can explicitly recover or discard it.
-  await a.close();await c.waitForFunction(async()=> (await storage.listRecoveries()).some(r=>r.kind==='editing-session'));const sessions=await c.evaluate(()=>storage.listRecoveries());const session=sessions.find(r=>r.kind==='editing-session');assert.ok(session);
+  await a.close();await waitForAsyncCondition(c,async()=> (await storage.listRecoveries()).some(r=>r.kind==='editing-session'));const sessions=await c.evaluate(()=>storage.listRecoveries());const session=sessions.find(r=>r.kind==='editing-session');assert.ok(session);
   await c.evaluate(id=>storage.discardRecovery(id),session.id);assert.equal(await c.evaluate(async()=>(await storage.getBlob('active-original')).blob.text()),'only original','discard retains the restored copy original');
   await context.close();
   await optionalRecoveryScenario(browser,origin,errors);

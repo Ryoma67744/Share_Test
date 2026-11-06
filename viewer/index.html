@@ -5,6 +5,7 @@
 <script src="../app-runtime.js"></script>
 <script src="../project-store-safety.js"></script>
 <script src="../project-navigation.js"></script>
+<script src="share-refresh.js"></script>
 <script src="msi-display-settings.js"></script>
 <script src="msi-display-geometry.js"></script>
 <script src="../offline/offline.js"></script>
@@ -817,13 +818,13 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
 <body class="text-gray-800">
 <div class="h-screen flex flex-col overflow-hidden">
     <!-- Top bar -->
-    <header class="flex items-center justify-between px-3 py-1 bg-white border-b shrink-0 gap-2">
-        <div class="flex items-center gap-3 min-w-0 flex-1">
+    <header class="flex flex-wrap items-center justify-between px-3 py-1 bg-white border-b shrink-0 gap-2">
+        <div class="flex items-center gap-3 min-w-0 flex-1" style="flex-basis:480px;">
             <h1 id="app-title" class="text-base font-bold text-gray-900 whitespace-nowrap">DESI Data Share</h1>
-            <select id="project-picker" class="text-xs border border-gray-300 rounded px-2 py-1 bg-white max-w-[260px] truncate" title="Switch project"></select>
+            <select id="project-picker" class="text-xs border border-gray-300 rounded px-2 py-1 bg-white min-w-0 max-w-[260px] truncate" title="Switch project"></select>
             <input id="project-name-input" type="text" class="text-xs border border-gray-300 rounded px-2 py-1 bg-white min-w-0 flex-1 max-w-[300px]" placeholder="Project name" />
         </div>
-        <div class="flex items-center gap-2 shrink-0">
+        <div class="flex flex-wrap items-center justify-end gap-2 shrink-0" style="max-width:100%;margin-left:auto;">
             <div id="share-mode-banner" title="Read-only Share mode. ROI editing requires acquiring an exclusive lock.">
                 <span>🔒</span><span>Share view</span>
             </div>
@@ -845,6 +846,7 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
             <span id="sync-status" class="sync-status" style="display:none;" title="クリックで強制再同期"></span>
             <button id="btn-publish-share" class="btn" title="Upload this project to Supabase and get a shareable URL">Publish to share</button>
             <button id="btn-share-info" class="btn" title="View the share URL and passwords from the last publish" style="display:none;">Share info</button>
+            <button id="btn-refresh-share" class="btn" title="サーバーの公開版と比較し、このPCのプロジェクトを更新します" style="display:none;">共有の最新版を確認</button>
             <button id="btn-add-section" class="btn primary" title="Add a tissue section panel">+ Section</button>
             <button id="btn-add-parquet" class="btn" title="TIMS ノンターゲット (parquet) を登録。annotation ごとに切片を自動生成します">+ parquet</button>
             <button id="btn-replace-parquet" class="btn" title="登録済みの parquet を、中身が同じ別ファイル (再パック版など) に差し替えます。切片・ROI・背景除去・表示設定はそのまま残ります">parquet 差し替え</button>
@@ -3221,6 +3223,7 @@ const ProjectStorage = (() => {
 
     const patchProject = (...args) => storeSafety().patchProject(...args);
     const recordPublishReceipt = (...args) => storeSafety().recordPublishReceipt(...args);
+    const replaceProjectFromServer = (...args) => storeSafety().replaceProjectFromServer(...args);
     const listRecoveries = (...args) => storeSafety().listRecoveries(...args);
     const getRecoveryEnabled = (...args) => storeSafety().getRecoveryEnabled(...args);
     const setRecoveryEnabled = (...args) => storeSafety().setRecoveryEnabled(...args);
@@ -3237,7 +3240,7 @@ const ProjectStorage = (() => {
     const finishBlobLease = (...args) => storeSafety().finishBlobLease(...args);
     const reclaimInactiveBlobLeases = (...args) => storeSafety().reclaimInactiveBlobLeases(...args);
     return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, renameBlob, deleteBlob, pruneShareOrphans,
-             patchProject, recordPublishReceipt, listRecoveries, getRecoveryEnabled, setRecoveryEnabled, restoreRecovery, discardRecovery, releaseProject, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
+             patchProject, recordPublishReceipt, replaceProjectFromServer, listRecoveries, getRecoveryEnabled, setRecoveryEnabled, restoreRecovery, discardRecovery, releaseProject, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
              beginBlobLease, pinBlobLease, finishBlobLease, reclaimInactiveBlobLeases, getPqIndex, putPqIndex, deletePqIndex };
 })();
 
@@ -7809,6 +7812,7 @@ class SectionPanel {
 
     // ---- Layer loading ----
     async loadAllLayers() {
+        const initialVisibility={derivedSave:!!App._hydratingServerProjectId&&App._hydratingServerProjectId===App.project?.id};
         // HE/IF は 1 切片に数枚しかないので従来どおり全部読む。MSI は数千になりうるので
         // 「最初に画面へ出すもの」だけ読む。何を出すかは visibleLayers で決まるが、その
         // 復元は従来この後だった (= 全部読んでから決めていた) ので、先に前倒しする。
@@ -7862,17 +7866,17 @@ class SectionPanel {
             const msiKeys = registeredMsi;
             const heKeys  = Object.keys(this.section.images || {})
                                   .filter(k => /HE_STAIN|IF_STAIN/i.test(k));
-            if (msiKeys.length) this.toggleLayer(msiKeys[0], true);
-            for (const k of heKeys) this.toggleLayer(k, true);
+            if (msiKeys.length) this.toggleLayer(msiKeys[0], true,initialVisibility);
+            for (const k of heKeys) this.toggleLayer(k, true,initialVisibility);
             // Auto-enable the synthetic TIC backdrop on first load. It only
             // exists in imageSources (ensureTicBackdrop never touches
             // section.images), so the heKeys filter above can't see it.
             if (this.imageSources && this.imageSources['HE_STAIN_TIC']) {
-                this.toggleLayer('HE_STAIN_TIC', true);
+                this.toggleLayer('HE_STAIN_TIC', true,initialVisibility);
             }
             if (!msiKeys.length && !heKeys.length) {
                 const first = this.firstLayerKey();
-                if (first) this.toggleLayer(first, true);
+                if (first) this.toggleLayer(first, true,initialVisibility);
             }
         } else {
             this.renderComposite();
@@ -9681,10 +9685,12 @@ class SectionPanel {
         }
     }
 
-    _persistVisibleLayers() {
+    _persistVisibleLayers(options) {
         if (!this.section.meta) this.section.meta = {};
         this.section.meta.visibleLayers = [...this.visibleLayers];
-        if (typeof App !== 'undefined' && App && App.queueSave) App.queueSave();
+        if (typeof App !== 'undefined' && App && App.queueSave) {
+            if(options?.derivedSave)App.queueSaveDerived();else App.queueSave();
+        }
     }
 
     // opts.persist === false: 表示だけ変えて section.meta.visibleLayers に書かず
@@ -9697,7 +9703,7 @@ class SectionPanel {
             if (want) this.activeMsiKey = key;
             else if (this.activeMsiKey === key) this.activeMsiKey = this.fallbackActiveMsiKey();
         }
-        if (!opts || opts.persist !== false) this._persistVisibleLayers();
+        if (!opts || opts.persist !== false) this._persistVisibleLayers(opts);
         this.rebuildLayerBar();
         this.renderComposite();
         this.drawAllRois();
@@ -11152,7 +11158,7 @@ async function fetchAllShareRois(token, sections, options = {}) {
     const tasks = sections.map(async (sec) => {
         if (!sec || !sec.id) return [];
         try {
-            const rows = await SupabaseClient.listRois(token, sec.id);
+            const rows = await SupabaseClient.listRois(token, sec.id, options.network);
             return rows || [];
         } catch (e) {
             // A master import must not turn a failed ROI download into an
@@ -18902,7 +18908,9 @@ function openPublishProgressModal(totalCount, opts) {
     const statsEl = card && card.querySelector('[data-stats]');
     const noteEl = card && card.querySelector('[data-note]');
     // Suppress backdrop click / cancel button while uploading.
-    if (card && card._back) card._back.addEventListener('click', (ev) => { ev.stopPropagation(); });
+    if (card && card._back) card._back.addEventListener('click', (ev) => {
+        if(ev.target===card._back)ev.stopImmediatePropagation();
+    },true);
     let onCancel = null;
     const cancelBtn = card && card.querySelector('[data-progress-cancel]');
     if (cancelBtn) cancelBtn.addEventListener('click', () => {
@@ -18915,6 +18923,10 @@ function openPublishProgressModal(totalCount, opts) {
         // 中断ボタンが押されたときに呼ばれる関数を差す。ボタンを出していない
         // ときは何も起きない (呼び出し側で分岐しなくていいように黙って無視する)。
         setCancelHandler(fn) { onCancel = fn; },
+        beginCommit() {
+            onCancel=null;
+            if(cancelBtn){cancelBtn.disabled=true;cancelBtn.textContent='保存を確定中…';}
+        },
         // 進捗バーの下に 1 行出す。アップロードが終わってから RPC が返るまでの
         // 「何も動いていないように見える」区間を説明するために使う。
         setNote(text) { if (noteEl) noteEl.textContent = String(text || ''); },
@@ -19156,6 +19168,7 @@ async function _comparePublishedProject(project, slug, masterPw, options = {}) {
     }
     } finally {
         ctx.inflight=wasInflight;
+        if(!ctx.inflight&&App.project?.id===project.id&&App.project.shareInfo?.slug===slug&&App._syncState==='uploading')App.refreshShareInfoButton();
         if(!wasInflight&&App.project===project&&project.__publishPending&&ctx.state==='local-saved')App._scheduleAutoPublish();
     }
 }
@@ -19165,7 +19178,9 @@ async function publishProjectToShare() {
     if(!SupabaseClient.configured()){alert(serverUnavailableReason()||'サーバに接続できません。');return;}
     const meta=await openPublishMetaModal(project);if(!meta)return;
     let masterPw=_readCachedMasterPw();if(!masterPw)masterPw=(prompt('Master password を入力してください')||'').trim();if(!masterPw)return;
-    const ctx=_publishContext(project,meta.slug);if(ctx.timer){clearTimeout(ctx.timer);ctx.timer=0;}ctx.paused=false;ctx.inflight=true;
+    const ctx=_publishContext(project,meta.slug);
+    if(ctx.refreshing){showToast('共有版の確認・取得が終わってから公開してください。');return;}
+    if(ctx.timer){clearTimeout(ctx.timer);ctx.timer=0;}ctx.paused=false;ctx.inflight=true;
     try{
         if(App.project===project&&await App._flushSave()===false)return;
         const receipt=await _publishCore(project,meta,masterPw,{silent:false});_saveCachedMasterPw(masterPw);
@@ -19183,7 +19198,13 @@ async function publishProjectToShare() {
             _publishStatus(project,meta.slug,'conflict');
             try{await _comparePublishedProject(project,meta.slug,masterPw,{meta});}catch(c){alert(c.message||String(c));}
         }else{_publishStatus(project,meta.slug,'error',e.userMessage||e.message);alert(e.userMessage||e.message||String(e));}
-    }finally{ctx.inflight=false;if(!ctx.paused&&App.project===project&&project.__publishPending)App._scheduleAutoPublish();}
+    }finally{
+        ctx.inflight=false;
+        // Success dialogs refresh the badge while this task still owns the
+        // publish context. Reconcile it after release, retaining any error.
+        if(App.project?.id===project.id&&App.project.shareInfo?.slug===meta.slug&&App._syncState==='uploading')App.refreshShareInfoButton();
+        if(!ctx.paused&&App.project===project&&project.__publishPending)App._scheduleAutoPublish();
+    }
 }
 
 // 表示名から slug を作れなかったときの代替。
@@ -22573,7 +22594,7 @@ const SupabaseClient = (() => {
         return client;
     }
 
-    async function rpc(name, args) {
+    async function rpc(name, args, options) {
         if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
             if (['list_mrm_library', 'register_from_result', 'register_from_result_batch'].includes(name)
                     && window.DesiLocalMrm) return window.DesiLocalMrm.rpc(name, args || {});
@@ -22581,7 +22602,9 @@ const SupabaseClient = (() => {
         }
         const c = _client();
         if (!c) throw new Error('supabase_not_configured');
-        const { data, error } = await c.rpc(name, args || {});
+        const { data, error } = options
+            ? await ShareRefresh.withDeadline(signal=>c.rpc(name,args||{}).abortSignal(signal),options)
+            : await c.rpc(name, args || {});
         if (error) { lastError = error; throw error; }
         return data;
     }
@@ -22595,13 +22618,13 @@ const SupabaseClient = (() => {
         // publish conflict check that just needs projects.updated_at.
         _rawClient() { return _client(); },
         // Auth -------------------------------------------------
-        unlockProject(slug, password) { return rpc('unlock_project', { p_slug: slug, p_password: password }); },
+        unlockProject(slug, password, options) { return rpc('unlock_project', { p_slug: slug, p_password: password }, options); },
         // Public-link unlock: returns a token only when the project's
         // is_public flag is true. Throws otherwise (caller falls back to
         // password modal).
         unlockPublicProject(slug) { return rpc('unlock_public_project', { _slug: slug }); },
         // Master-pw read token for ANY project by slug (preview/embed only).
-        unlockProjectMaster(slug, masterPw) { return rpc('unlock_project_master', { _master_pw: masterPw, _slug: slug }); },
+        unlockProjectMaster(slug, masterPw, options) { return rpc('unlock_project_master', { _master_pw: masterPw, _slug: slug }, options); },
         // Probe a slug's is_public flag via column-restricted anon SELECT.
         // Returns { slug, is_public, display_name } or null. bootstrapShareMode
         // uses this to decide between the password modal and the public-link
@@ -22623,8 +22646,8 @@ const SupabaseClient = (() => {
             }
         },
         // Read paths -------------------------------------------
-        fetchProjectDoc(token) { return rpc('get_project_doc', { p_token: token }); },
-        listRois(token, sectionId) { return rpc('list_rois', { p_token: token, p_section_id: sectionId || null }); },
+        fetchProjectDoc(token, options) { return rpc('get_project_doc', { p_token: token }, options); },
+        listRois(token, sectionId, options) { return rpc('list_rois', { p_token: token, p_section_id: sectionId || null }, options); },
         // ROI write paths --------------------------------------
         createRoi(token, payload) { return rpc('create_roi', { p_token: token, ...payload }); },
         // SQL signatures use `p_id` for the ROI uuid; the earlier wrapper
@@ -24485,7 +24508,7 @@ const App = {
             try { await this.openProject(requestedId); opened = !!this.project; }
             catch (e) { console.warn('Failed to open requested project:', e); }
         }
-        const requestedMissing = this.offline && !!requestedId && !opened;
+        const requestedMissing = !!requestedId && !opened;
         if (!opened && last && !requestedMissing) {
             try { await this.openProject(last); opened = !!this.project; }
             catch (e) { console.warn('Failed to open last project:', e); }
@@ -24493,7 +24516,12 @@ const App = {
         if (!opened) this.renderEmpty();
         this.wireUi();
         if (requestedMissing) {
-            showToast('指定されたプロジェクトがこのPCにありません。該当する Export ZIP を取り込んでから、もう一度開いてください。', 12000);
+            showToast(this.offline?'指定されたプロジェクトがこのPCにありません。該当する Export ZIP を取り込んでから、もう一度開いてください。'
+                :'指定されたプロジェクトはこのPCにありません。Projectsでサーバーから一覧を取得して開くか、Share URLを使用してください。同じGoogleアカウントでもローカルデータは同期されません。',12000);
+        }
+        if(!this.offline&&opened&&this.project?.id===requestedId&&params.getAll('refresh').length===1&&params.get('refresh')==='share'){
+            const next=new URL(location.href);next.searchParams.delete('refresh');history.replaceState(history.state,'',next.pathname+next.search+next.hash);
+            this.refreshFromShare().catch(e=>console.warn('requested share refresh failed',e));
         }
         // ?openHelp=<audience> (sent from the manager page's Help button or
         // a direct link) opens the help modal directly after init. Accepts
@@ -24726,7 +24754,119 @@ const App = {
     //   (share_locks.sql)。つまり admin pw を入れずに公開したプロジェクトには
     //   正解のパスワードが存在せず、**どの PC からも永久に取り込めなかった**
     //   (何を入れても unlock_project が 28P01 を返し、一覧へ戻るだけ)。
-    async _openImportSession(slug) {
+    async refreshFromShare() {
+        const project=this.project,slug=project?.shareInfo?.slug;
+        if(this.offline||this.shareMode||!project||project.__share)return;
+        if(!slug){showToast('このプロジェクトはこのPCのみです。Publish to share で公開すると別PCから取得できます。',8000);return;}
+        if(this._shareRefreshOperation)return;
+        const ctx=_publishContext(project,slug);
+        if(ctx.inflight){showToast('公開処理が終わってから、共有の最新版を確認してください。',6000);return;}
+        const operation={project,abort:new AbortController()};this._shareRefreshOperation=operation;
+        ctx.refreshing=true;if(ctx.timer){clearTimeout(ctx.timer);ctx.timer=0;}
+        const button=document.getElementById('btn-refresh-share');
+        if(button){button.disabled=true;button.textContent='共有版を確認中…';}
+        const signal=operation.abort.signal;let lease,progress,finished=false;
+        let capturedEpoch,capturedRevision;
+        const assertCurrent=()=>{
+            ShareRefresh.assertActive(signal);
+            if(this.project!==project||project.shareInfo?.slug!==slug
+                ||(project.publishEditEpoch||0)!==capturedEpoch||project.storageRevision!==capturedRevision)
+                throw new Error('確認中にこのPCの内容が変わりました。既存プロジェクトは更新していません。もう一度確認してください。');
+        };
+        try{
+            if(await this._flushSave()===false)return;
+            capturedEpoch=project.publishEditEpoch||0;capturedRevision=project.storageRevision;
+            const session=await this._openImportSession(slug,{signal});
+            if(!session)return;assertCurrent();
+            const doc=await SupabaseClient.fetchProjectDoc(session.token,{signal});
+            assertCurrent();
+            const comparison=ShareRefresh.compare(project,doc);
+            const safe=value=>String(value==null?'':value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            const names=items=>items.slice(0,8).map(s=>safe(s.displayName||s.display_name||s.id)).join('、')+(items.length>8?'…':'');
+            const blocked=comparison.dirty?'このPCに未公開または結果未確認の変更があります。既存版への反映は行わず、共有版を別コピーで取得できます。'
+                :comparison.older?'サーバーの公開版がこのPCの基準より古いため、既存版へ反映できません。':'';
+            const modal=openModal('<h2>共有の最新版を確認</h2><p>共有先: '+safe(slug)+'</p>'
+                +'<table class="publish-comparison"><thead><tr><th></th><th>このPC</th><th>サーバー</th></tr></thead><tbody>'
+                +'<tr><th>公開版</th><td>'+(comparison.localRevision??'未確認')+'</td><td>'+comparison.revision+'</td></tr>'
+                +'<tr><th>切片数</th><td>'+comparison.localCount+'</td><td>'+comparison.remoteCount+'</td></tr></tbody></table>'
+                +(comparison.added.length?'<p>追加される切片: '+names(comparison.added)+'</p>':'')
+                +(comparison.removed.length?'<p style="color:#b91c1c">共有版にない切片: '+names(comparison.removed)+'。これらは更新前のコピーに保持されます。</p>':'')
+                +(comparison.same?'<p>公開版番号と切片構成は同じです。</p>':'')
+                +'<p>切片・画像・ROI・表示設定などをサーバーの公開版へ更新します。更新前の内容は別のローカルコピーとして残します。</p>'
+                +(blocked?'<p role="status" style="color:#b91c1c">'+blocked+'</p>':'')
+                +'<form><div class="modal-actions" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">'
+                +'<button type="button" class="btn" data-modal-cancel>閉じる</button>'
+                +'<button type="button" class="btn" data-refresh-copy>別コピーで取得</button>'
+                +'<button type="submit" class="btn primary" data-modal-ok'+(blocked?' disabled':'')+'>このプロジェクトに反映</button></div></form>');
+            const card=openModal._card;card._collect=()=> 'replace';
+            card.querySelector('[data-refresh-copy]').addEventListener('click',()=>card._close('copy'));
+            const action=await modal;
+            if(action!=='replace'&&action!=='copy')return;
+            assertCurrent();
+            if(action==='replace'&&blocked)throw new Error(blocked);
+            progress=openPublishProgressModal(doc.sections?.length||0,{title:'共有版を取得中…',unit:'切片',cancelLabel:'中断',
+                subtitle:'必要な原本を取得しています。取得が完了するまで既存プロジェクトは変更しません。'});
+            progress.setCancelHandler(()=>operation.abort.abort());
+            lease=await ProjectStorage.beginBlobLease({kind:'cloud-import',projectId:project.id});
+            const incoming=await this._buildLocalProjectFromDoc(slug,doc,session,lease,{
+                strict:true,signal,reuseProject:project,assertActive:assertCurrent,
+                onSection:(n,total)=>progress.update(n,total),
+                onBytes:(loaded,total)=>progress.setNote('原本を取得中: '+fmtBytesMB(loaded)+(total?' / '+fmtBytesMB(total):'')),
+            });
+            assertCurrent();
+            if(incoming.__importFailures)throw new Error('一部の原本またはROIを取得できなかったため、反映を中止しました。既存プロジェクトは保持しています。');
+            // Ensure the public revision did not move while large originals
+            // were downloading. Never apply a silently stale download.
+            progress.setNote('公開版とローカル保存を確認しています…');
+            const latest=await SupabaseClient.fetchProjectDoc(session.token,{signal});
+            if(ShareRefresh.compare(project,latest).revision!==comparison.revision)throw new Error('取得中に共有版が更新されました。既存プロジェクトは変更していません。もう一度確認してください。');
+            assertCurrent();
+            if(await this._flushSave()===false)return;
+            assertCurrent();
+            let target;
+            operation.committing=true;progress.beginCommit();
+            if(action==='copy'){
+                await ProjectStorage.finishBlobLease(lease,{project:incoming,createOnly:true});
+                target=incoming.id;
+            }else{
+                const result=await ProjectStorage.replaceProjectFromServer(project.id,incoming,{
+                    expectedRevision:capturedRevision,expectedServerRevision:comparison.revision,lease,assertCurrent});
+                target=project.id;
+                // openProject flushes the active object first; use the committed
+                // record so an old in-memory snapshot cannot overwrite it.
+                if(this.project===project&&(project.publishEditEpoch||0)===capturedEpoch&&project.storageRevision===capturedRevision)this.project=result.project;
+                else{
+                    finished=true;operation.finished=true;
+                    this._showSaveError('共有版は保存しましたが、その間に画面の編集が変わりました。画面の編集は保持しています。更新前コピーと共有版を確認してください。','share-refresh');
+                    return;
+                }
+            }
+            finished=true;operation.finished=true;
+            if(action==='replace'){ctx.state='synced';ctx.paused=false;}
+            if(this.project===project||this.project?.id===target){
+                // Only initial layer selection is saved as a derived default;
+                // genuine edits still use queueSave, even during hydration.
+                this._hydratingServerProjectId=target;
+                try{await this.openProject(target);}
+                finally{this._hydratingServerProjectId=null;}
+            }
+            progress.close();progress=null;
+            showToast(action==='copy'?'共有版を別コピーで取得しました。':'共有の公開版を反映しました。更新前のコピーはProjectsに残しています。',8000);
+        }catch(e){
+            if(e.code==='SHARE_REFRESH_CANCELLED')showToast('取得を中断しました。既存プロジェクトは保持しています。',6000);
+            else{console.warn('share refresh failed',e);alert(e.message||String(e));}
+        }finally{
+            if(progress)progress.close();
+            if(lease&&!finished){try{await ProjectStorage.finishBlobLease(lease,{discard:true});}catch(e){console.warn('share refresh cleanup failed',e);}}
+            ctx.refreshing=false;
+            if(this._shareRefreshOperation===operation)this._shareRefreshOperation=null;
+            if(button){button.disabled=false;button.textContent='共有の最新版を確認';}
+            if(this.project===project||finished)this.refreshShareInfoButton();
+            if(this.project===project&&project.__publishPending&&!ctx.paused)this._scheduleAutoPublish();
+        }
+    },
+
+    async _openImportSession(slug, network) {
         // まずマスターパスワードで読み取りトークンを取る。管理画面の入場と
         // 同じ資格情報なので、たいていは入力すら要らない。
         let masterPw = _readCachedMasterPw();
@@ -24743,7 +24883,7 @@ const App = {
                 if (!masterPw) return null;
             }
             try {
-                const raw = await SupabaseClient.unlockProjectMaster(slug, masterPw);
+                const raw = await SupabaseClient.unlockProjectMaster(slug, masterPw, network);
                 const row = Array.isArray(raw) ? raw[0] : raw;
                 if (!row || !row.token) { alert('token を取得できませんでした'); return null; }
                 _saveCachedMasterPw(masterPw);
@@ -24758,6 +24898,7 @@ const App = {
                     break;
                 }
                 const msg = String((e && (e.message || e.details)) || e);
+                if (network && !/28P01|28000|invalid.*password|unauthorized/i.test(String(e.code||'')+' '+msg)) throw e;
                 if (/not_found|P0002/i.test(msg)) {
                     alert('サーバにこのプロジェクトがありません (slug: ' + slug + ')');
                     return null;
@@ -24783,8 +24924,9 @@ const App = {
         ) || '').trim();
         if (!adminPw) return null;
         let raw;
-        try { raw = await SupabaseClient.unlockProject(slug, adminPw); }
+        try { raw = await SupabaseClient.unlockProject(slug, adminPw, network); }
         catch (e) {
+            if(network && !/28P01|28000|invalid.*password|unauthorized/i.test(String(e.code||'')+' '+String(e.message||'')))throw e;
             console.warn('import unlock_project failed', e);
             alert('admin password が違うか、このプロジェクトには admin password が\n'
                 + '設定されていません。管理画面の「🔑 パスワード」で admin を設定してから\n'
@@ -24843,7 +24985,10 @@ const App = {
     // Mirrors _hydrateSharedProject but fills in shareInfo, omits __share,
     // and assigns a fresh local id so the result can sit alongside other
     // master projects in the same IDB.
-    async _buildLocalProjectFromDoc(slug, doc, session, lease) {
+    async _buildLocalProjectFromDoc(slug, doc, session, lease, options) {
+        options=options||{};
+        const ensureActive = () => { if(options.strict||options.signal)ShareRefresh.assertActive(options.signal); options.assertActive?.(); };
+        ensureActive();
         const docMeta = doc.meta || {};
         const projectMeta = docMeta.project_meta || {};
         const project = {
@@ -24893,8 +25038,10 @@ const App = {
         };
 
         const fetchBlob = async (path) => {
+            ensureActive();
             const url = SupabaseClient.publicUrl('atlases', path);
             if (!url) throw new Error('publicUrl returned null for ' + path);
+            if(options.strict)return ShareRefresh.fetchBlob(url,{signal:options.signal,onProgress:options.onBytes});
             let lastErr = null;
             for (let attempt = 0; attempt < 3; attempt++) {
                 try {
@@ -24934,9 +25081,26 @@ const App = {
         //   その数だけ保存してしまう。_hydrateSharedProject には同じ対策が
         //   入っている (blobByPath) が、こちらは漏れていた。
         const importedByPath = new Map();   // path -> { id, mime }
+        const reusable = new Map();
+        for(const [id,ref] of Object.entries(options.reuseProject?.shareInfo?.blobPaths||{})) {
+            if(ref.path?.startsWith(slug+'/publish-v2/'))reusable.set(ref.path,{id,...ref});
+        }
         const ensureImported = async (ref) => {
+            ensureActive();
             if (importedByPath.has(ref.path)) return importedByPath.get(ref.path);
+            const previous = reusable.get(ref.path);
+            if(previous){
+                const stored=await ProjectStorage.getBlob(previous.id);
+                ensureActive();
+                if(stored?.blob){
+                    await ProjectStorage.pinBlobLease(lease,[previous.id]);
+                    const rec={id:previous.id,mime:stored.mime||ref.mime};
+                    project.shareInfo.blobPaths[rec.id]={path:ref.path,mime:rec.mime,size:stored.blob.size};
+                    importedByPath.set(ref.path,rec);return rec;
+                }
+            }
             const blob = await fetchBlob(ref.path);
+            ensureActive();
             const mime = ref.mime || blob.type;
             const id = uid('blob');
             await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() }, {lease});
@@ -24945,7 +25109,20 @@ const App = {
             importedByPath.set(ref.path, rec);
             return rec;
         };
+        const remoteChecked=new Set();
+        const checkRemote=async ref=>{
+            ensureActive();
+            if(!options.strict||remoteChecked.has(ref.path))return;
+            const url=SupabaseClient.publicUrl('atlases',ref.path);
+            if(!url)throw new Error('原本参照がありません。');
+            await ShareRefresh.withDeadline(async signal=>{
+                const response=await fetch(url,{method:'HEAD',signal});
+                if(!response.ok)throw new Error('原本を確認できません (HTTP '+response.status+')。');
+            },{signal:options.signal});
+            remoteChecked.add(ref.path);
+        };
         for (let i = 0; i < project.sections.length; i++) {
+            ensureActive();options.onSection?.(i,project.sections.length);
             const sec = project.sections[i];
             const sp = (doc.sections[i] && doc.sections[i].storage_paths) || (doc.sections[i] && doc.sections[i].storagePaths) || {};
             for (const [key, ref] of Object.entries(sp.images || {})) {
@@ -24956,6 +25133,7 @@ const App = {
                     sec.images[key] = { blobId, mime, filename: ref.filename, storagePath: ref.path,
                         alignmentImageReference:ref.alignmentImageReference };
                 } catch (e) {
+                    if(options.strict)throw e;
                     console.warn('import image fetch failed', key, e);
                     failed.push({ kind: 'image', key, path: ref.path, error: e });
                 }
@@ -24970,6 +25148,7 @@ const App = {
                     //   MSI が 1 枚も出なくなる。共有側は既にこの形
                     //   (_hydrateSharedProject) で、取り込み側だけ漏れていた。
                     if (ref.kind === 'parquet') {
+                        await checkRemote(ref);
                         const url = SupabaseClient.publicUrl('atlases', ref.path);
                         if (!url) throw new Error('publicUrl returned null for ' + ref.path);
                         sec.msiSeries[key] = Object.assign({}, ref, {
@@ -24992,6 +25171,7 @@ const App = {
                         };
                     }
                 } catch (e) {
+                    if(options.strict)throw e;
                     console.warn('import msi fetch failed', key, e);
                     failed.push({ kind: 'msi', key, path: ref.path, error: e });
                 }
@@ -25002,9 +25182,9 @@ const App = {
             const sec=project.sections[i],sp=doc.sections[i].storage_paths||doc.sections[i].storagePaths||{};
             for (const [fid,ref] of Object.entries(sp.msiFiles||{})) {
                 try {
-                    if(ref.kind==='parquet') sec.msiFiles[fid]={...ref,blobId:null,storagePath:ref.path,sourceUrl:SupabaseClient.publicUrl('atlases',ref.path)};
+                    if(ref.kind==='parquet') {await checkRemote(ref);sec.msiFiles[fid]={...ref,blobId:null,storagePath:ref.path,sourceUrl:SupabaseClient.publicUrl('atlases',ref.path)};}
                     else {const {id}=await ensureImported(ref);sec.msiFiles[fid]={...ref,blobId:id,storagePath:ref.path};}
-                } catch(e) {failed.push({kind:'source',key:fid,path:ref.path,error:e});}
+                } catch(e) {if(options.strict)throw e;failed.push({kind:'source',key:fid,path:ref.path,error:e});}
             }
         }
         // Originals must be present before this becomes a local master copy.
@@ -25017,6 +25197,7 @@ const App = {
                 item.blobId = id;
                 item.mime = mime || item.mime;
             } catch (e) {
+                if(options.strict)throw e;
                 throw new Error('ROI写真を取り込めませんでした: ' + (item.title || item.filename) + ' (' + (e.message || e) + ')');
             }
         }
@@ -25041,8 +25222,11 @@ const App = {
             for (const s of (doc.sections || [])) {
                 if (s && s.id) uuidToClient[s.id] = (s.meta && s.meta.client_id) || s.id;
             }
-            const rows = await fetchAllShareRois(session.token, doc.sections || [], {strict:true});
-            project.rois = groupRoiRowsByColor(rows, project.anatomyPalette).map(r => {
+            const rows = await fetchAllShareRois(session.token, doc.sections || [], {strict:true,network:options.strict?{signal:options.signal}:undefined});
+            // Collaborator ROIs remain the read-only overlay maintained by
+            // the master poll; importing them as owned ROIs would re-publish
+            // them as master data and duplicate the overlay.
+            project.rois = groupRoiRowsByColor(rows.filter(r=>r&&r.created_by!=='viewer'), project.anatomyPalette).map(r => {
                 const polys = {}, sids = {};
                 for (const [uuid, poly] of Object.entries(r.polysBySection || {})) {
                     const cid = uuidToClient[uuid];
@@ -25055,9 +25239,10 @@ const App = {
                 return Object.assign({}, r, { polysBySection: polys, serverIdsBySection: sids,
                     geometryBySection: remapRoiGeometry(r.geometryBySection, uuidToClient) });
             });
-        } catch (e) { project.shareInfo.serverRevision=null; project.__importFailures=(project.__importFailures||0)+1; console.warn('import ROI fetch failed', e); }
+        } catch (e) { if(options.strict)throw e;project.shareInfo.serverRevision=null; project.__importFailures=(project.__importFailures||0)+1; console.warn('import ROI fetch failed', e); }
 
         if (project.meta.roiMedia.items.length) roiMediaForTransport(project);
+        ensureActive();options.onSection?.(project.sections.length,project.sections.length);
         return project;
     },
 
@@ -25554,6 +25739,10 @@ const App = {
     },
 
     async openProject(id) {
+        if(this._shareRefreshOperation&&!this._shareRefreshOperation.finished){
+            if(this._shareRefreshOperation.committing){showToast('共有版の保存を確定しています。完了後に切り替えてください。');return;}
+            this._shareRefreshOperation.abort.abort();
+        }
         if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
         if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
         if (SharePreview.isOpen()) SharePreview.close();
@@ -25680,7 +25869,7 @@ const App = {
             }
             for (const p of this.panels.values()) {
                 if (this.focusCompoundKey && p.imageSources[this.focusCompoundKey] && !p.visibleLayers.has(this.focusCompoundKey)) {
-                    p.toggleLayer(this.focusCompoundKey, true);
+                    p.toggleLayer(this.focusCompoundKey, true,{derivedSave:this._hydratingServerProjectId===this.project.id});
                 }
             }
         }
@@ -25713,6 +25902,8 @@ const App = {
         if (!btn) return;
         const has = !this.offline && !!(this.project && this.project.shareInfo && this.project.shareInfo.url);
         btn.style.display = has ? '' : 'none';
+        const refresh=document.getElementById('btn-refresh-share');
+        if(refresh)refresh.style.display=has&&!this.shareMode&&!this.project?.__share?'':'none';
         // Initialise the sync indicator alongside the share-info button.
         // For a fresh-opened project we show "synced" when shareInfo
         // exists with a lastSyncedAt (auto-publish will keep it fresh)
@@ -25722,7 +25913,7 @@ const App = {
             return;
         }
         const project=this.project,slug=project.shareInfo?.slug;
-        if(!slug){this._setSyncStatus('hidden');return;}
+        if(!slug){this._setSyncStatus('local-only');return;}
         const context=_publishContext(project,slug);
         if(context.inflight){this._setSyncStatus('uploading');return;}
         try{PublishSafety.baseline(project,slug);}catch(e){this._setSyncStatus('needs-baseline');return;}
@@ -27158,7 +27349,8 @@ const App = {
                 // Project picker summaries only change on create/delete/rename.
                 // Keep server status unchanged when the server is unavailable.
                 this._setSyncStatus(
-                    this._syncState === 'no-server' ? 'no-server'
+                    !project.shareInfo?.slug ? 'local-only'
+                    : this._syncState === 'no-server' ? 'no-server'
                     : this._publishDirty ? 'local-saved'
                     : (this._syncState === 'synced' ? 'synced' : 'local-saved'));
                 this._scheduleAutoPublish();
@@ -27295,6 +27487,7 @@ const App = {
         const project=this.project;
         if(this.offline||this.shareMode||!project||project.__share||!project.shareInfo?.slug||!project.__publishPending)return;
         const ctx=_publishContext(project);
+        if(ctx.refreshing)return;
         if(ctx.paused){this._setSyncStatus(ctx.state);return;}
         if(ctx.inflight)return;
         if(project.shareInfo.pendingPublish && project.shareInfo.pendingPublish.slug!==project.shareInfo.slug){_publishStatus(project,project.shareInfo.slug,'error','別URLへの公開が未完了です。Publish to share から再試行してください。');return;}
@@ -27305,7 +27498,7 @@ const App = {
     async autoPublishProject() {
         const project=this.project;
         if(this.offline||this.shareMode||!project||project.__share||!project.shareInfo?.slug)return;
-        const slug=project.shareInfo.slug,ctx=_publishContext(project,slug);if(ctx.inflight||ctx.paused)return;
+        const slug=project.shareInfo.slug,ctx=_publishContext(project,slug);if(ctx.inflight||ctx.paused||ctx.refreshing)return;
         try{PublishSafety.baseline(project,slug);}catch(e){_publishStatus(project,slug,'needs-baseline');return;}
         if(!SupabaseClient.configured()){_publishStatus(project,slug,'no-server');return;}
         if(!project.shareInfo.isPublic&&!project.shareInfo.viewerPassword){_publishStatus(project,slug,'needs-share-pw');return;}
@@ -27320,7 +27513,11 @@ const App = {
             if(PublishSafety.isConflict(e)||e.code==='PUBLISH_BASELINE_UNKNOWN'||e.code==='PUBLISH_RECEIPT_LOCAL_CONFLICT')_publishStatus(project,slug,'conflict');
             else if(e.code==='28000'||/unauthorized/i.test(message))_publishStatus(project,slug,'needs-master-pw');
             else _publishStatus(project,slug,'error',message);
-        }finally{ctx.inflight=false;if(this.project===project&&project.__publishPending&&ctx.state==='local-saved')this._scheduleAutoPublish();}
+        }finally{
+            ctx.inflight=false;
+            if(this.project?.id===project.id&&this.project.shareInfo?.slug===slug&&this._syncState==='uploading')this.refreshShareInfoButton();
+            if(this.project===project&&project.__publishPending&&ctx.state==='local-saved')this._scheduleAutoPublish();
+        }
     },
 
     // Update the in-page sync indicator. State machine:
@@ -27347,18 +27544,17 @@ const App = {
         const hidden = state === 'hidden'
             || this.shareMode
             || !this.project
-            || this.project.__share
-            || !this.project.shareInfo
-            || !this.project.shareInfo.slug;
+            || this.project.__share;
         if (hidden) { el.style.display = 'none'; return; }
         el.className = 'sync-status sync-' + state;
         let text = '';
         switch (state) {
-            case 'local-saved':     text = '💾 Local 保存中'; break;
+            case 'local-only':      text = 'このPCのみ・未公開'; break;
+            case 'local-saved':     text = '💾 このPCに保存・公開待ち'; break;
             case 'uploading':       text = '⬆ アップロード中' + (b ? ' (' + a + '/' + b + ')' : ''); break;
             case 'synced': {
-                const t = new Date();
-                text = '✓ Synced (' + String(t.getHours()).padStart(2, '0') + ':' + String(t.getMinutes()).padStart(2, '0') + ')';
+                const revision=this.project.shareInfo?.serverRevision;
+                text = '✓ 公開版'+(Number.isSafeInteger(revision)?' v'+revision:'')+' を保存済み';
                 break;
             }
             case 'conflict':        text = '⚠ 公開版の比較が必要'; break;
@@ -27383,7 +27579,8 @@ const App = {
                  : (state === 'no-server')
                      ? (serverUnavailableReason() || 'サーバに接続できないため公開できていません')
                        + '（この変更はこの端末にだけ保存されています。クリックで再試行）'
-                 : (state === 'synced') ? 'クリックで強制再同期'
+                 : (state === 'synced') ? 'このPCが確認した公開版です。他PCの変更は「共有の最新版を確認」から取得します。クリックするとこのPCの内容を再公開します。'
+                 : (state === 'local-only') ? 'このPCのブラウザにだけ保存されています。クリックしてPublish to shareで公開すると、別PCから取得できます。Googleアカウントによる自動同期はありません。'
                  : '';
         el.style.display = 'inline-flex';
     },
@@ -27391,6 +27588,7 @@ const App = {
     // Click on sync indicator: state-aware recovery actions.
     async _handleSyncStatusClick() {
         const state = this._syncState;
+        if(state==='local-only'){await publishProjectToShare();return;}
         // これはユーザーが明示的に「今すぐ同期して」と押した操作。内容が
         // 変わっていなくても送る (それが強制再同期の目的) ので、内容依存の
         // ガード (_scheduleAutoPublish の _publishDirty 判定) を通す印を立てる。
@@ -27530,6 +27728,8 @@ const App = {
         const syncStatusEl = document.getElementById('sync-status');
         if (syncStatusEl) syncStatusEl.addEventListener('click', () => this._handleSyncStatusClick());
         const shareInfoBtn = document.getElementById('btn-share-info');
+        const refreshShareBtn=document.getElementById('btn-refresh-share');
+        if(refreshShareBtn)refreshShareBtn.addEventListener('click',()=>this.refreshFromShare());
         if (shareInfoBtn) shareInfoBtn.addEventListener('click', () => {
             if (!this.project || !this.project.shareInfo) return;
             openShareInfoModal(this.project.shareInfo);
