@@ -92,6 +92,7 @@ async function main() {
     standalone('roiFixedColorEditable'),
     standalone('msiValidRoiGeometry'),
     standalone('msiLayerSourceGeometry'),
+    standalone('_isStaleVersionError'),
     standalone('populateRoiList'),
     html.slice(appStart, appEnd + 3),
     'globalThis.testApp = App;',
@@ -194,6 +195,30 @@ async function main() {
   assert.equal(await ProjectStorage.getProject('project-a'), null,
     'late IDB write cannot resurrect a deleted project');
   assert.equal(app.project, null);
+  // Both server generations report optimistic conflicts without resending a
+  // rename or losing a newly drawn polygon / its original version token.
+  app.shareMode={token:'synthetic'};app.panels=new Map([[section.id,panel]]);
+  app._tryAcquireRoiLock=async()=>true;app._releaseRoiLock=()=>{};
+  context.encodeRoiPolygon=()=>[];
+  const quietConsole=context.console;context.console={...console,warn(){}};
+  try {
+    for(const code of ['PT409','40001']){
+      const roi={id:'shared-roi',name:'Original name',colorKey:'Red',polysBySection:{},
+        serverIdsBySection:{[section.id]:{id:'remote-roi',version:2}}};
+      app.project={id:'shared-project',sections:[section],rois:[roi],anatomyPalette:{},meta:{}};
+      let calls=0;
+      context.SupabaseClient={updateRoi:async()=>{calls++;throw Object.assign(new Error('optimistic conflict'),{code});}};
+      await app.renameRoi(roi.id,'Changed name');
+      assert.equal(calls,1,code+': rename does not retry');assert.equal(roi.name,'Original name');
+      assert.equal(roi.serverIdsBySection[section.id].version,2);
+      assert.match(toasts.at(-1),/他の人が先に更新/);
+      app.drawing={mode:true,sectionId:section.id,targetRoiId:roi.id,sourceGeometry:geometry,vertices:[[0,0],[2,0],[0,2]]};
+      await app.finalizeDrawing();
+      assert.equal(calls,2,code+': drawing does not retry');assert.equal(roi._unsynced,true);
+      assert.equal(roi.polysBySection[section.id].length,3);assert.equal(roi.serverIdsBySection[section.id].version,2);
+      assert.match(toasts.at(-1),/他の人が先に更新/);assert.match(toasts.at(-1),/未保存として保持/);
+    }
+  }finally{context.console=quietConsole;}
   console.log('ROI save regression: PASS');
 }
 

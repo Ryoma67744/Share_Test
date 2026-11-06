@@ -51,7 +51,8 @@ async function main(){
    };
    // Exercise manual publishes at controlled barriers; background timers have
    // their own scheduler regression and must not consume the synthetic ticket.
-   App._scheduleAutoPublish=()=>{};
+    window.fixtureRealScheduleAutoPublish=App._scheduleAutoPublish;
+    App._scheduleAutoPublish=()=>{};
    window.fixturePublish={hold:true,revisions:{},requests:[],receipts:{},release:null};
    Object.assign(SupabaseClient,{
     configured:()=>true,
@@ -116,9 +117,9 @@ async function main(){
   const dialogStart=dialogs.length;
   await page.evaluate(()=>{
    sessionStorage.setItem('desi:masterPw',JSON.stringify({pw:'cached-overwrite-master',expiresAt:Date.now()+3600000}));
-   window.overwriteFixture={revisions:{},docs:{},tokens:{},sessions:[],requests:[],committed:[],unlocks:[],uploads:[],hold:false,release:null};
+    window.overwriteFixture={revisions:{},docs:{},tokens:{},sessions:[],requests:[],committed:[],unlocks:[],states:[],uploads:[],hold:false,release:null,conflictCode:'PT409'};
    const f=overwriteFixture;
-   const conflict=()=>Object.assign(new Error('publish_conflict'),{code:'40001'});
+    const conflict=()=>Object.assign(new Error('publish_conflict'),{code:f.conflictCode});
    Object.assign(SupabaseClient,{
     unlockProjectMaster:async(slug,pw)=>{
      f.unlocks.push({slug,pw});if(pw!=='cached-overwrite-master')throw new Error('Unexpected master credential');
@@ -140,7 +141,7 @@ async function main(){
      if(job.create?current!==undefined:current!==job.baseServerRevision)throw conflict();
      return {protocol:2,token:'write-'+job.jobId,object_prefix:job.slug+'/publish-v2/'+job.jobId+'/'};
     },
-    getPublishStateV2:async(_pw,slug)=>({protocol:2,exists:f.revisions[slug]!==undefined,server_revision:f.revisions[slug],receipt:null}),
+     getPublishStateV2:async(_pw,slug)=>{f.states.push(slug);return {protocol:2,exists:f.revisions[slug]!==undefined,server_revision:f.revisions[slug],receipt:null};},
     publishProjectDocV2:async args=>{
      f.requests.push(structuredClone(args));
      if(f.hold)await new Promise(resolve=>{f.release=resolve;});
@@ -196,6 +197,21 @@ async function main(){
    await page.locator('#modal-host [data-modal-cancel]').click();
    await page.waitForFunction(()=>overwriteFixture.done);
   }
+   async function assertConflictPaused(){
+    const result=await page.evaluate(async()=>{
+     const f=overwriteFixture,counts=()=>[f.sessions.length,f.requests.length,f.states.length,f.unlocks.length];
+     const before=counts(),stub=App._scheduleAutoPublish;
+     App._scheduleAutoPublish=fixtureRealScheduleAutoPublish;
+     try{
+      App.project.memo.freeNote+=' / edit after conflict';App.queueSave(60000);await App._flushSave();
+      App._scheduleAutoPublish();await App.autoPublishProject();
+      const ctx=_publishContext(App.project);
+      return {before,after:counts(),state:App._syncState,paused:ctx.paused,timer:ctx.timer};
+     }finally{App._scheduleAutoPublish=stub;}
+    });
+    assert.deepEqual(result.after,result.before,'A later edit cannot retry or fetch a receipt after a conflict');
+    assert.equal(result.state,'conflict');assert.equal(result.paused,true);assert.equal(result.timer,0);
+   }
 
   // Enter through the real Publish button flow once to exercise the cached
   // password and initial unknown-baseline guard, before explicit permission.
@@ -246,6 +262,7 @@ async function main(){
    revision:overwriteFixture.revisions['overwrite-stale'],remote:overwriteFixture.docs['overwrite-stale'],status:App._syncState}),staleId);
   assert.equal(stale.requests,beforeStale);assert.equal(stale.revision,13);assert.equal(stale.remote.rois.length,0);
   assert.equal(stale.project.shareInfo.serverRevision,undefined);assert.equal(stale.project.rois.length,2);assert.equal(stale.status,'conflict');
+   await assertConflictPaused();
 
   // Recheck the server revision at commit, after the comparison and ticket.
   const commitRaceId=await prepareComparison('overwrite-commit-race',15);
@@ -255,9 +272,17 @@ async function main(){
   await page.evaluate(()=>{overwriteFixture.revisions['overwrite-commit-race']=16;overwriteFixture.hold=false;overwriteFixture.release();});
   await page.waitForFunction(()=>overwriteFixture.done);
   const commitRace=await page.evaluate(async id=>({project:await ProjectStorage.getProject(id),revision:overwriteFixture.revisions['overwrite-commit-race'],
-   remote:overwriteFixture.docs['overwrite-commit-race'],committed:overwriteFixture.committed.filter(request=>request._slug==='overwrite-commit-race')}),commitRaceId);
+    remote:overwriteFixture.docs['overwrite-commit-race'],requests:overwriteFixture.requests.filter(request=>request._slug==='overwrite-commit-race'),
+    stateReads:overwriteFixture.states.filter(slug=>slug==='overwrite-commit-race'),committed:overwriteFixture.committed.filter(request=>request._slug==='overwrite-commit-race')}),commitRaceId);
   assert.equal(commitRace.revision,16);assert.equal(commitRace.remote.rois.length,0);assert.equal(commitRace.committed.length,0);
   assert.equal(commitRace.project.shareInfo.serverRevision,undefined);assert.equal(commitRace.project.rois.length,2);
+   assert.equal(commitRace.requests.length,1);assert.equal(commitRace.stateReads.length,0);
+   await assertConflictPaused();
+   await prepareComparison('overwrite-legacy-conflict',17);
+   await page.evaluate(()=>{overwriteFixture.conflictCode='40001';overwriteFixture.revisions['overwrite-legacy-conflict']=18;});
+   await page.locator('[data-publish-overwrite]').click();await page.waitForFunction(()=>overwriteFixture.done);
+   await assertConflictPaused();
+   await page.evaluate(()=>{overwriteFixture.conflictCode='PT409';});
 
   // The comparison is bound to the local state that was shown to the user.
   const changedId=await prepareComparison('overwrite-local-changed',20);

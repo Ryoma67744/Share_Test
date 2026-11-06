@@ -7,7 +7,7 @@ if(!['127.0.0.1','localhost','[::1]'].includes(url.hostname) || !/^\/share_test_
  throw new Error('Requires a disposable localhost database named share_test_ci; refuses other databases');
 const sqlString=value=>value===null?'null':"'"+String(value).replace(/'/g,"''")+"'";
 function session(name){
- const p=spawn('psql',['-X','-q','-t','-A','-v','ON_ERROR_STOP=1',url.href],
+ const p=spawn('psql',['-X','-q','-t','-A','-v','ON_ERROR_STOP=1','-v','VERBOSITY=verbose',url.href],
   {env:{...process.env,PGAPPNAME:name,PGOPTIONS:'-c statement_timeout=15000 -c lock_timeout=10000'}});
  let stdout='',stderr='';const readers=[];
  const done=new Promise((resolve,reject)=>{p.once('error',reject);p.once('close',code=>resolve({code,stdout,stderr}));});
@@ -38,7 +38,7 @@ async function race(slug,first,second,secondSucceeds=false){
   const [ra,rb]=await Promise.all([a.finish(first+'\ncommit;'),bDone]);
   assert.equal(ra.code,0,ra.stderr);
   if(secondSucceeds)assert.equal(rb.code,0,rb.stderr);
-  else {assert.notEqual(rb.code,0);assert.match(rb.stderr,/publish_conflict/);}
+  else {assert.notEqual(rb.code,0);assert.match(rb.stderr,/publish_conflict/);assert.match(rb.stderr,/\bPT409\b/);}
   return [ra,rb];
  } finally {a.kill();b.kill();}
 }

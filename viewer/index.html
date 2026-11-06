@@ -13860,7 +13860,7 @@ async function pushShareOverlay(ov) {
         return true;
     } catch (e) {
         if (_isMissingRpc(e)) { _noteShareOverlayServerMissing(); _fallbackShareOverlayToLocal(ov); return true; }
-        // 他の人が先に直していた (update_share_overlay の 40001)。上書きせずに、
+        // 他の人が先に直していた (PT409 / 旧40001)。上書きせずに、
         // 最新をポーリングで拾わせて「やり直してください」と言う。黙って
         // 通すと、あとから開いた人の変更が理由なく消える。
         if (_isStaleVersionError(e)) {
@@ -13879,7 +13879,7 @@ async function pushShareOverlay(ov) {
 // update_share_overlay / update_roi が返す楽観ロックの衝突。
 function _isStaleVersionError(e) {
     if (!e) return false;
-    if (e.code === '40001') return true;
+    if (e.code === 'PT409' || e.code === '40001') return true;
     return /stale_version/i.test(String((e && (e.message || e.details)) || ''));
 }
 
@@ -19010,7 +19010,12 @@ function _publishContext(project, slug) {
     return _publishContexts.get(key);
 }
 function _publishStatus(project, slug, state, a, b) {
-    _publishContext(project, slug).state = state;
+    const ctx=_publishContext(project, slug);
+    ctx.state = state;
+    if(state==='conflict'){
+        ctx.paused=true;
+        if(ctx.timer){clearTimeout(ctx.timer);ctx.timer=0;}
+    }else if(state==='synced'||state==='local-saved')ctx.paused=false;
     if (App.project === project && (!project.shareInfo || project.shareInfo.slug === slug)) App._setSyncStatus(state,a,b);
 }
 function _adoptPublishPatch(project, patch) {
@@ -19137,14 +19142,15 @@ async function _comparePublishedProject(project, slug, masterPw, options = {}) {
         assertUnchanged();
         if(await App._flushSave()===false)return;
         assertUnchanged();
+        ctx.paused=false;
         const receipt=await _publishCore(project,meta,masterPw,{silent:false,assertBeforeStart:assertUnchanged,
             confirmedOverwrite:{slug,serverRevision:revision}});
         _saveCachedMasterPw(masterPw);
         if(App.project===project){App.refreshShareInfoButton();await openShareInfoModal(Object.assign({},project.shareInfo,receipt),{titleSuccess:true});}
     } catch(e) {
-        if(e.code==='40001'||e.code==='PUBLISH_LOCAL_CHANGED'){
+        if(PublishSafety.isConflict(e)||e.code==='PUBLISH_LOCAL_CHANGED'||e.code==='PUBLISH_RECEIPT_LOCAL_CONFLICT'){
             _publishStatus(project,slug,'conflict');
-            showToast(e.code==='40001'?'比較後に共有版が更新されました。もう一度比較してから上書きしてください。':e.message,8000);
+            showToast(PublishSafety.isConflict(e)?'比較後に共有版が更新されました。もう一度比較してから上書きしてください。':e.message,8000);
         }else if(e.cancelled){showToast('公開を中断しました。ローカルの編集は保持されています。');}
         else{_publishStatus(project,slug,'error',e.userMessage||e.message);alert(e.userMessage||e.message||String(e));}
     }
@@ -19166,11 +19172,18 @@ async function publishProjectToShare() {
         if(App.project===project){App.refreshShareInfoButton();await openShareInfoModal(Object.assign({},project.shareInfo,receipt),{titleSuccess:true});}
     }catch(e){
         if(e.cancelled){showToast('公開を中断しました。原本とローカルの編集は保持されています。');return;}
-        if(e.code==='40001'||e.code==='PUBLISH_BASELINE_UNKNOWN'){
+        if(PublishSafety.isConflict(e)||e.code==='PUBLISH_RECEIPT_LOCAL_CONFLICT'){
+            _publishStatus(project,meta.slug,'conflict');
+            showToast(PublishSafety.isConflict(e)
+                ? (project.shareInfo?.slug===meta.slug
+                    ? '共有版が更新されています。同期表示の「公開版の比較が必要」をクリックして確認してください。'
+                    : '公開先URLはすでに使われています。Publish to share で別のURLを指定してください。')
+                : e.message,8000);
+        }else if(e.code==='PUBLISH_BASELINE_UNKNOWN'){
             _publishStatus(project,meta.slug,'conflict');
             try{await _comparePublishedProject(project,meta.slug,masterPw,{meta});}catch(c){alert(c.message||String(c));}
         }else{_publishStatus(project,meta.slug,'error',e.userMessage||e.message);alert(e.userMessage||e.message||String(e));}
-    }finally{ctx.inflight=false;if(App.project===project&&project.__publishPending)App._scheduleAutoPublish();}
+    }finally{ctx.inflight=false;if(!ctx.paused&&App.project===project&&project.__publishPending)App._scheduleAutoPublish();}
 }
 
 // 表示名から slug を作れなかったときの代替。
@@ -26881,7 +26894,9 @@ const App = {
                 // does NOT drop this just-drawn polygon before it reaches the
                 // server. The user can retry (redraw / re-acquire lock).
                 roi._unsynced = true;
-                showToast('ROI のサーバ保存に失敗しました。未保存として保持中です。ロックを取り直してもう一度お試しください。', 4500);
+                showToast(_isStaleVersionError(e)
+                    ? 'このROIは他の人が先に更新しました。描いた内容は未保存として保持しています。最新の共有内容を確認してからやり直してください。'
+                    : 'ROI のサーバ保存に失敗しました。未保存として保持中です。ロックを取り直してもう一度お試しください。', 4500);
             }
         } else {
             this.queueSave(0);
@@ -26973,7 +26988,9 @@ const App = {
                 roi.name = cleaned;
             } catch (e) {
                 console.warn('Share: rename roi failed', e);
-                showToast('ROI 名のサーバ保存に失敗しました');
+                showToast(_isStaleVersionError(e)
+                    ? 'このROIは他の人が先に更新しました。最新の共有内容を確認してから名前を変更してください。'
+                    : 'ROI 名のサーバ保存に失敗しました');
                 this._releaseRoiLock();
                 return;
             }
@@ -27277,7 +27294,9 @@ const App = {
     _scheduleAutoPublish() {
         const project=this.project;
         if(this.offline||this.shareMode||!project||project.__share||!project.shareInfo?.slug||!project.__publishPending)return;
-        const ctx=_publishContext(project);if(ctx.paused||ctx.inflight)return;
+        const ctx=_publishContext(project);
+        if(ctx.paused){this._setSyncStatus(ctx.state);return;}
+        if(ctx.inflight)return;
         if(project.shareInfo.pendingPublish && project.shareInfo.pendingPublish.slug!==project.shareInfo.slug){_publishStatus(project,project.shareInfo.slug,'error','別URLへの公開が未完了です。Publish to share から再試行してください。');return;}
         try{PublishSafety.baseline(project,project.shareInfo.slug);}catch(e){_publishStatus(project,project.shareInfo.slug,'needs-baseline');return;}
         if(ctx.timer)clearTimeout(ctx.timer);
@@ -27298,7 +27317,7 @@ const App = {
                 adminPassword:project.shareInfo.adminPassword},masterPw,{silent:true,onProgress:(a,b)=>_publishStatus(project,slug,'uploading',a,b)});
         }catch(e){
             const message=e.userMessage||e.message||String(e);
-            if(e.code==='40001'||e.code==='PUBLISH_BASELINE_UNKNOWN')_publishStatus(project,slug,'conflict');
+            if(PublishSafety.isConflict(e)||e.code==='PUBLISH_BASELINE_UNKNOWN'||e.code==='PUBLISH_RECEIPT_LOCAL_CONFLICT')_publishStatus(project,slug,'conflict');
             else if(e.code==='28000'||/unauthorized/i.test(message))_publishStatus(project,slug,'needs-master-pw');
             else _publishStatus(project,slug,'error',message);
         }finally{ctx.inflight=false;if(this.project===project&&project.__publishPending&&ctx.state==='local-saved')this._scheduleAutoPublish();}

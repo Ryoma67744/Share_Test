@@ -1,6 +1,8 @@
 -- Publish protocol v2. Apply AFTER schema.sql and share_locks.sql.
 -- Deployment is fail-closed: stop legacy writers, retain every existing object.
 -- Do not reapply an older share_locks.sql after this migration.
+-- Deterministic revision conflicts use PT409 (HTTP 409), never 40001:
+-- older PostgREST versions retry serialization failures inside one RPC.
 begin;
 alter table public.projects add column if not exists publish_revision bigint not null default 0;
 alter table public.publish_sessions add column if not exists protocol integer not null default 1;
@@ -218,9 +220,9 @@ begin
  select * into p from public.projects where slug=_slug for update;
  if _expected_revision is null or _expected_revision<0 then raise exception 'publish_baseline_unknown' using errcode='22023'; end if;
  if coalesce(_create_only,false) then
-   if p.id is not null or _expected_revision<>0 then raise exception 'publish_conflict: slug already exists' using errcode='40001'; end if;
+   if p.id is not null or _expected_revision<>0 then raise exception 'publish_conflict: slug already exists' using errcode='PT409'; end if;
  elsif p.id is null or p.publish_revision<>_expected_revision then
-   raise exception 'publish_conflict: reload and compare the shared copy' using errcode='40001';
+   raise exception 'publish_conflict: reload and compare the shared copy' using errcode='PT409';
  end if;
  t:=encode(gen_random_bytes(24),'hex'); expires:=now()+interval '1 hour';
  insert into public.publish_sessions(token,slug,expires_at,protocol,request_id,base_revision,create_only,object_prefix)
@@ -277,9 +279,9 @@ begin
  if not found then raise exception 'publish_session_expired_or_invalid' using errcode='28000'; end if;
  select * into p from public.projects where slug=_slug for update;
  if coalesce(_create_only,false) then
-   if p.id is not null or _expected_revision<>0 then raise exception 'publish_conflict: slug already exists' using errcode='40001'; end if;
+   if p.id is not null or _expected_revision<>0 then raise exception 'publish_conflict: slug already exists' using errcode='PT409'; end if;
  elsif p.id is null or p.publish_revision<>_expected_revision then
-   raise exception 'publish_conflict: reload and compare the shared copy' using errcode='40001';
+   raise exception 'publish_conflict: reload and compare the shared copy' using errcode='PT409';
  end if;
  -- Validate the complete document before any project/section/ROI write.
  if exists(select 1 from jsonb_array_elements(_sections) s where coalesce(s->>'id','')='' or jsonb_typeof(s->'storagePaths') is distinct from 'object' or exists(select 1 from jsonb_each(s->'storagePaths') field where field.key in ('images','msiSeries','msiFiles') and jsonb_typeof(field.value) is distinct from 'object'))

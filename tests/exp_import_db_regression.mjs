@@ -13,6 +13,10 @@ const scalar = async (sql, params = []) => (await db.query(sql,params)).rows[0].
 const expectError = async (fn, pattern) => {
   await assert.rejects(fn, pattern); checks++;
 };
+const expectConflict = (fn, pattern) => expectError(fn,error=>{
+  assert.equal(error.code,'PT409','Stale previews/documents must not request transaction retries');
+  assert.match(error.message,pattern);return true;
+});
 try {
  await db.exec(`create role anon; create role authenticated; create schema extensions;
  create extension pgcrypto with schema extensions;
@@ -67,7 +71,9 @@ try {
  await expectError(() => register(rows),/Polarity conflict/);
  rows = await preview([row]);
  await db.query('update public.mrm_transitions set ce=99 where id=$1',[tid]);
- await expectError(() => register(rows),/Transitions changed/);
+ const changedTransitionState=await getLibrary();
+ await expectConflict(() => register(rows),/Transitions changed/);
+ assert.deepEqual(await getLibrary(),changedTransitionState);checks++;
  rows = await preview([{...row,name:'Conflicting'},{...row,name:'Conflicting',polarity:'+'}]);
  await expectError(() => register(rows),/Conflicting polarities/);
  rows = await preview([{...row,name:'Conflicting'},{...row,name:'Conflicting',shelf:'archive'}]);
@@ -75,7 +81,18 @@ try {
  // A name created after the preview cannot silently become an existing match.
  rows = await preview([{...row,name:'Raced'}]);
  await scalar("select public.upsert_compound('test-master','Raced') as value");
- await expectError(() => register(rows),/Library changed/);
+ const racedState=await getLibrary();
+ await expectConflict(() => register(rows),/Library changed/);
+ assert.deepEqual(await getLibrary(),racedState);checks++;
+ // The inverse race (an existing compound removed after preview) must also
+ // reject the whole batch before an earlier valid row creates anything.
+ const removed=await register(await preview([{...row,name:'Removed after preview'}]));
+ rows=await preview([{...row,name:'Must not partially create'},{...row,name:'Removed after preview'}]);
+ await scalar("select public.delete_compound('test-master',$1) as value",[removed.results[0].compound_id]);
+ const removedState=await getLibrary();
+ await expectConflict(()=>register(rows),/Library changed/);
+ assert.deepEqual(await getLibrary(),removedState);checks++;
+ assert.equal(await scalar("select count(*)::int as value from public.mrm_compounds where name='Must not partially create'"),0);checks++;
  // Every allocator shares the existing batch lock before reading max().
  for (const name of ['upsert_compound','register_from_result','register_from_result_batch','register_measured_compound']) {
    const body = (await scalar('select prosrc as value from pg_proc where proname=$1',[name])).replace(/--[^\n]*/g,'');
@@ -102,7 +119,9 @@ try {
  assert.equal(restoreDocument((await get()).payload).rows.length,parsed.rows.length); checks++;
  document=await save({...payload,selectedIds:[parsed.rows[1].id]},document.id,1); assert.equal(document.revision,2); checks++;
  assert.deepEqual((await get()).payload.selectedIds,[parsed.rows[1].id]); checks++;
- await expectError(()=>save(payload,document.id,1),/changed or missing/);
+ const savedDocument=await get();
+ await expectConflict(()=>save(payload,document.id,1),/changed or missing/);
+ assert.deepEqual(await get(),savedDocument,'Rejected save preserves original source, selected rows and revision');checks++;
  await expectError(()=>save(payload,null,null,'wrong'),/unauthorized/);
  await expectError(()=>save({...payload,version:2}),/Invalid version/);
  await expectError(()=>save({...payload,parserVersion:1}),/Invalid version/);

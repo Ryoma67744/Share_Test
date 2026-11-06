@@ -51,7 +51,7 @@ async function overwriteChecks(previous){
  await assert.rejects(()=>Safety.run(incomplete.project,incomplete.meta,incomplete.hooks,approval(incomplete)),{code:'PUBLISH_SOURCE_MISSING'});
  quiet(incomplete);assert.deepEqual(incomplete.project,incompleteBefore);checks+=3;
  const newer=fixture();newer.project.shareInfo.serverRevision=6;
- await assert.rejects(()=>Safety.run(newer.project,newer.meta,newer.hooks,approval(newer,5)),{code:'40001'});quiet(newer);checks+=2;
+ await assert.rejects(()=>Safety.run(newer.project,newer.meta,newer.hooks,approval(newer,5)),{code:'PT409'});quiet(newer);checks+=2;
  const missing=fixture();missing.records.delete('unused');
  await assert.rejects(()=>Safety.run(missing.project,missing.meta,missing.hooks,approval(missing)),{code:'PUBLISH_SOURCE_MISSING'});
  assert.equal(missing.logs.uploads.length,0);assert.equal(missing.logs.commits.length,0);assert.equal(missing.project.shareInfo.serverRevision,undefined);checks+=4;
@@ -86,11 +86,11 @@ async function overwriteChecks(previous){
  await Safety.run(edited.project,edited.meta,edited.hooks,approval(edited,1));
  assert.equal(edited.logs.commits[0]._expected_revision,1);assert.equal(edited.logs.commits[0]._meta.memo.text,'newer local edit');checks+=2;
  for(const state of [{protocol:2,exists:true,server_revision:6,receipt:null},{protocol:2,exists:false,server_revision:null,receipt:null}]){
-  const f=pending(state);await assert.rejects(()=>Safety.run(f.project,f.meta,f.hooks,approval(f)),{code:'40001'});
+  const f=pending(state);await assert.rejects(()=>Safety.run(f.project,f.meta,f.hooks,approval(f)),{code:'PT409'});
   assert.equal(f.logs.commits.length,0);assert.equal(f.logs.sessions.length,0);checks+=3;
  }
  const oldApproval=pending({protocol:2,exists:true,server_revision:1,receipt:priorReceipt});
- await assert.rejects(()=>Safety.run(oldApproval.project,oldApproval.meta,oldApproval.hooks,approval(oldApproval,0)),{code:'40001'});
+ await assert.rejects(()=>Safety.run(oldApproval.project,oldApproval.meta,oldApproval.hooks,approval(oldApproval,0)),{code:'PT409'});
  assert.equal(oldApproval.logs.commits.length,0);assert.equal(oldApproval.logs.receipts.length,1,'A genuine old receipt is recovered even when the overwrite approval has expired');checks+=3;
  const different=fixture();different.project.shareInfo.pendingPublish={...clone(previous),slug:'different-target'};
  await assert.rejects(()=>Safety.run(different.project,different.meta,different.hooks,approval(different)),{code:'PUBLISH_PENDING_CONFLICT'});quiet(different);checks+=2;
@@ -131,6 +131,18 @@ async function main(){
  await Safety.run(followed.project,followed.meta,followed.hooks);assert.equal(followed.logs.commits[0]._expected_revision,1);assert.equal(followed.logs.commits[0]._create_only,false);checks+=4;
  const conflict=setup();conflict.hooks.commit=async()=>{conflict.logs.commits.push(1);throw Object.assign(new Error('conflict'),{code:'40001'});};await assert.rejects(()=>Safety.run(conflict.project,conflict.meta,conflict.hooks),{code:'40001'});assert.equal(conflict.logs.commits.length,1);assert.equal(conflict.logs.receipts.length,0);checks+=3;
  checks+=await overwriteChecks(previous);
+ // Both protocol generations stop at the first session/commit conflict. A
+ // saved intent may be read once before resuming, never after a conflict.
+ for(const code of ['PT409','40001'])for(const stage of ['session','commit'])for(const resume of [false,true]){
+  const f=setup(),before=clone(f.project);
+  if(resume)f.project.shareInfo={slug:f.meta.slug,pendingPublish:clone(previous)};
+  f.hooks[stage]=async args=>{f.logs[stage==='session'?'sessions':'commits'].push(clone(args));throw Object.assign(new Error('publish_conflict'),{code});};
+  await assert.rejects(()=>Safety.run(f.project,f.meta,f.hooks),{code});
+  assert.equal(f.logs.sessions.length,1);assert.equal(f.logs.commits.length,stage==='commit'?1:0);
+  assert.equal(f.logs.states.length,resume?1:0,'No receipt lookup follows a conflict');
+  assert.equal(f.logs.receipts.length,0);assert.equal(f.project.storageRevision,before.storageRevision);
+  assert.equal(f.project.shareInfo?.serverRevision,undefined);checks+=7;
+ }
  // Execute production receipt adoption: never advance a stale live storage token.
  const html=fs.readFileSync(require.resolve('../viewer/index.html'),'utf8');const start=html.indexOf('function _adoptPublishPatch('),end=html.indexOf('\n}',start)+2;
  const live={storageRevision:4,shareInfo:{slug:'s'},memo:{text:'new unsaved edit'}};const ctx=vm.createContext({App:{project:live}});vm.runInContext(html.slice(start,end),ctx);
@@ -153,6 +165,53 @@ async function main(){
  let autos=0;ui.ui.autoPublishProject=async()=>{autos++;};ui.ui.project=pa;ui.ui._scheduleAutoPublish();const ta=ui._publishContext(pa).timer;
  ui.ui.project=pb;ui.ui._scheduleAutoPublish();const tb=ui._publishContext(pb).timer;assert.notEqual(ta,tb);
  ui.state='B-local';ui._publishStatus(pa,'a','synced');assert.equal(ui.state,'B-local');timers.get(ta)();assert.equal(autos,0);assert.ok(timers.has(tb));timers.get(tb)();assert.equal(autos,1);checks+=5;
+ // A conflict cancels queued work and later local edits cannot re-arm it.
+ ui.ui.project=pb;ui.ui._scheduleAutoPublish();const pendingTimer=ui._publishContext(pb).timer;
+ ui._publishStatus(pb,'b','conflict');assert.equal(ui._publishContext(pb).paused,true);
+ assert.equal(timers.has(pendingTimer),false);assert.equal(ui._publishContext(pb).timer,0);
+ ui.state='local-saved';ui.ui._scheduleAutoPublish();assert.equal(ui.state,'conflict');
+ assert.equal(ui._publishContext(pb).timer,0);checks+=5;
+ // Refreshing a cancelled publish's local-saved badge must not resume it.
+ const cancelled={id:'cancelled',__publishPending:true,shareInfo:{slug:'cancelled',serverRevision:1}};
+ ui.ui.project=cancelled;const cancelledContext=ui._publishContext(cancelled);
+ cancelledContext.paused=true;cancelledContext.state='local-saved';
+ for(let edit=0;edit<2;edit++){
+  ui.state='other';ui.ui._scheduleAutoPublish();
+  assert.equal(ui.state,'local-saved');assert.equal(cancelledContext.paused,true);assert.equal(cancelledContext.timer,0);checks+=3;
+ }
+ // Run both UI entry points: no automatic comparison RPC or publish retry
+ // follows either error code. Successful explicit publication resumes sync.
+ const autoAt=html.indexOf('    async autoPublishProject(');
+ const autoSource=html.slice(autoAt,html.indexOf('\n    },',autoAt)+6);
+ const manualAt=html.indexOf('async function publishProjectToShare(');
+ const manualSource=html.slice(manualAt,html.indexOf('\n}',manualAt)+2);
+ for(const code of ['PT409','40001','PUBLISH_RECEIPT_LOCAL_CONFLICT'])for(const entry of ['manual','auto']){
+  const p={id:entry+code,__publishPending:true,shareInfo:{slug:'s',serverRevision:1,isPublic:true}};
+  let publishes=0;ui.ui.project=p;ui.ui._flushSave=async()=>true;
+  ui.SupabaseClient={configured:()=>true};ui._readCachedMasterPw=()=> 'synthetic';
+  ui.openPublishMetaModal=async()=>({slug:'s',isPublic:true});ui.showToast=()=>{};
+  ui._comparePublishedProject=()=>assert.fail('A conflict must wait for an explicit comparison');
+  ui._publishCore=async()=>{publishes++;throw Object.assign(new Error('publish_conflict'),{code});};
+  vm.runInContext(manualSource+';ui.autoPublishProject=({'+autoSource+'}).autoPublishProject;',ui);
+  if(entry==='manual')await ui.publishProjectToShare();else await ui.ui.autoPublishProject();
+  assert.equal(publishes,1);assert.equal(ui.state,'conflict');assert.equal(ui._publishContext(p).paused,true);
+  ui.state='local-saved';ui.ui._scheduleAutoPublish();await ui.ui.autoPublishProject();
+  assert.equal(publishes,1);assert.equal(ui.state,'conflict');assert.equal(ui._publishContext(p).timer,0);checks+=6;
+  ui._publishStatus(p,'s','synced');assert.equal(ui._publishContext(p).paused,false);checks++;
+ }
+ // A create/fork collision has no same-URL comparison to offer. It must not
+ // queue publication back to the previous URL while reporting the failure.
+ for(const code of ['PT409','40001'])for(const fork of [false,true]){
+  const p={id:'collision-'+code+'-'+fork,__publishPending:true,
+    ...(fork?{shareInfo:{slug:'previous',serverRevision:1,isPublic:true}}:{})};
+  const notices=[];let publishes=0;ui.ui.project=p;
+  ui.openPublishMetaModal=async()=>({slug:'taken',isPublic:true});ui.showToast=message=>notices.push(message);
+  ui._publishCore=async()=>{publishes++;throw Object.assign(new Error('publish_conflict'),{code});};
+  await ui.publishProjectToShare();
+  assert.equal(publishes,1);assert.equal(ui._publishContext(p,'taken').paused,true);
+  assert.equal(ui._publishContext(p).timer,0);assert.match(notices.at(-1),/別のURL/);
+  assert.doesNotMatch(notices.at(-1),/公開版の比較が必要/);checks+=5;
+ }
  // Comparison counts polygons per section on both grouped local and server rows.
  assert.equal(Safety.summary({rois:[{polysBySection:{s1:[],s2:[]}}]}).rois,2);
  assert.equal(Safety.summary({rois:[{section_id:'s1'},{section_id:'s2'}]}).rois,2);

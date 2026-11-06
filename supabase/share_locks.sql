@@ -1152,7 +1152,8 @@ begin
 end
 $$;
 
--- 楽観ロック。update_roi と同じで、期待した version と食い違えば 40001。
+-- 楽観ロック。update_roi と同じで、期待した version と食い違えば PT409 (HTTP 409)。
+-- 40001 は PostgREST によるトランザクション再試行を招くため使用しない。
 create or replace function public.update_share_overlay(
     p_token text,
     p_id uuid,
@@ -1185,7 +1186,7 @@ begin
      where id = p_id and project_id = v_pid and version = p_expected_version
     returning * into v;
     if v.id is null then
-        raise exception 'stale_version' using errcode = '40001';
+        raise exception 'stale_version' using errcode = 'PT409';
     end if;
     return v;
 end
@@ -1264,9 +1265,9 @@ end
 $$;
 
 -- 切片 1 枚ぶんの位置合わせを置く (無ければ作る)。
--- p_expected_version を渡すと楽観ロック: 食い違えば 40001 で弾き、
+-- p_expected_version を渡すと楽観ロック: 食い違えば PT409 (HTTP 409) で弾き、
 -- 別の人が先に合わせ直した結果を黙って上書きしない。
--- null を渡した場合は「新規のつもり」= 既存行があれば 40001。
+-- null を渡した場合は「新規のつもり」= 既存行があれば PT409。
 create or replace function public.upsert_share_alignment(
     p_token text,
     p_section_id uuid,
@@ -1293,7 +1294,7 @@ begin
      where project_id = v_pid and section_id = p_section_id;
     if v_cur.section_id is null then
         if p_expected_version is not null then
-            raise exception 'stale_version' using errcode = '40001';
+            raise exception 'stale_version' using errcode = 'PT409';
         end if;
         insert into public.share_alignments(project_id, section_id, payload, created_by)
              values (v_pid, p_section_id, coalesce(p_payload, '{}'::jsonb),
@@ -1302,7 +1303,7 @@ begin
         return v;
     end if;
     if p_expected_version is null or v_cur.version <> p_expected_version then
-        raise exception 'stale_version' using errcode = '40001';
+        raise exception 'stale_version' using errcode = 'PT409';
     end if;
     update public.share_alignments
        set payload    = coalesce(p_payload, payload),

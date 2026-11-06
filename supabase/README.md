@@ -4,6 +4,10 @@
 
 > **既存 .exp の編集機能**: ファイル編集とローカル保存にはDB更新は不要です。MRM登録・原本付きメソッドの保存には、`mrm_library.sql` → `mrm_reconcile.sql` → `mrm_exp_import.sql` の順で適用してください。詳細は [EXP_EDITOR.md](../docs/EXP_EDITOR.md) を参照してください。
 
+> **競合エラーと接続枯渇:** 公開版・ROI・共有表示・MRMの版不一致は `PT409`（HTTP 409）を返します。人為的な競合に `40001` を使うと、PostgREST 14では同じ要求のトランザクションが繰り返され、接続プールを占有する場合があります。[Supabase公式の説明](https://supabase.com/kb/troubleshooting/high-cpu-and-infinite-transaction-retries-when-using-custom-error-codes-in-rpc-functions-77326b)を参照してください。既存DBは対象関数の専用修正を適用し、v2導入済みDBに古いベースSQL一式を再適用しないでください。既に繰り返している処理はSQL修正だけでは停止しません。管理者がログの `process_id` と現在の `pg_stat_activity` を照合して対象を確認する必要があります。実際の直列化失敗・デッドロックの扱い、認証、版照合、ロールバックによる原本保護は変更しません。
+
+既存サーバー用: [`conflict_error_hotfix.sql`](./conflict_error_hotfix.sql) と [復旧手順](../docs/CONFLICT_ERROR_RECOVERY.md)。アプリの更新だけではDBの関数は更新されません。
+
 このディレクトリは **共有 ROI / 認証 / 保護コンテンツ配信** を Supabase 上に立てるためのスクリプト一式です。Phase 1 では `cor_slide_1_10` を Supabase に乗せ、ログインモーダルと ROI 共有を動かすところまでをゴールにします。
 
 > 必要なものは Supabase の **無料プラン** だけです。クレジットカード登録なしで試せます。
@@ -374,7 +378,7 @@ select indexname from pg_indexes
 | `public.share_overlays` テーブル | project 単位の重ね合わせ (`name` / `layers` / `bg` / `match_brightness` / `version`)。RLS ON + anon から直接触れないので、下の RPC 経由だけ |
 | `list_share_overlays(p_token)` | 一覧。ROI と同じ session token で読む |
 | `create_share_overlay(p_token, p_name, p_layers, p_bg, p_match_brightness, p_created_by)` | 追加。2 分子未満は `22023` で弾く |
-| `update_share_overlay(p_token, p_id, p_expected_version, ...)` | 更新。version が食い違えば `40001 stale_version` (同時編集で黙って上書きしない) |
+| `update_share_overlay(p_token, p_id, p_expected_version, ...)` | 更新。version が食い違えば `PT409 stale_version` (HTTP 409。同時編集で黙って上書きしない) |
 | `delete_share_overlay(p_token, p_id)` | 削除。ROI と同じで、その共有を開いている人なら誰でも消せる |
 
 master が登録した重ね合わせは従来どおり `sections.meta.overlays` に載って publish で
@@ -408,7 +412,7 @@ select count(*) from public.share_overlays;
 | --- | --- |
 | `public.share_alignments` テーブル | 切片ごと 1 行 (`project_id` + `section_id` が主キー)。`payload` に `world_coords` / `alignment` / `alignmentMsiKey` / `alignmentSourceMode` をそのまま入れる。中身の解釈はフロント側だけなので、項目が増えても SQL は不変 |
 | `list_share_alignments(p_token)` | 一覧。ROI と同じ session token で読む |
-| `upsert_share_alignment(p_token, p_section_id, p_payload, p_expected_version, p_created_by)` | 保存。`p_expected_version` が null = 新規 (既存行があれば `40001`)、値つき = 楽観ロック (食い違えば `40001`) |
+| `upsert_share_alignment(p_token, p_section_id, p_payload, p_expected_version, p_created_by)` | 保存。`p_expected_version` が null = 新規 (既存行があれば `PT409`)、値つき = 楽観ロック (食い違えば `PT409`、HTTP 409) |
 | `delete_share_alignment(p_token, p_section_id)` | 削除 = その切片を master の位置合わせへ戻す |
 
 `upsert_project_doc` は `sections` を client_id で突き合わせて更新するので section の uuid は
