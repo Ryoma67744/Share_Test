@@ -476,7 +476,29 @@ const tests = [
         };
         const entries = await report.createAdapter(f.hooks).molecules[0].loadEntries();
         assert.deepEqual(entries[0].pixelPitch, { x: 25, y: 37.5 });
+        assert.deepEqual(entries[0].registeredPixelPitch, { x: 50, y: 75 }, 'The acquisition label is independent from the effective display pitch');
         assert.equal(entries[1].pixelPitch, null, 'missing or invalid registered calibration is not invented');
+        assert.deepEqual(entries[1].registeredPixelPitch, { x: 50, y: 75 }, 'Registered acquisition pitch remains known when display calibration is unavailable');
+    }],
+    ['registered pixel labels preserve numeric source calibration without aliasing or guessing', async () => {
+        const f = fixture();
+        f.sections[0].meta.world_coords.msi_um_per_px = {x:'25',y:'1.2e2',ce:999};
+        const input = report.createAdapter(f.hooks);
+        f.sections[0].meta.world_coords.msi_um_per_px.x = '60';
+        const entries = await input.molecules[0].loadEntries();
+        assert.deepEqual(entries[0].registeredPixelPitch, {x:25,y:120}, 'Source labels are frozen at export start and only contain x/y');
+        entries[0].registeredPixelPitch.x = 999;
+        assert.equal(f.sections[0].meta.world_coords.msi_um_per_px.x, '60');
+        for (const pitch of [null, {}, {x:0,y:25}, {x:-1,y:25}, {x:Infinity,y:25},
+            {x:'',y:25}, {x:'0x10',y:25}, {x:true,y:25}, {x:25,y:'unknown'}]) {
+            const unknown = fixture(); unknown.sections[0].meta.world_coords.msi_um_per_px = pitch;
+            const output = await report.createAdapter(unknown.hooks).molecules[0].loadEntries();
+            assert.equal(output[0].registeredPixelPitch, null, JSON.stringify(pitch));
+        }
+        const failed = fixture(); failed.app.panels.get('left').ensureMsiLayerLoaded = async () => false;
+        const failedEntry = (await report.createAdapter(failed.hooks).molecules[0].loadEntries())[0];
+        assert.ok(failedEntry.missingReason);
+        assert.deepEqual(failedEntry.registeredPixelPitch, {x:50,y:75}, 'Read failures retain known registration');
     }],
     ['registered string pitch survives rounded TXT geometry without changing source statistics', async () => {
         const f = fixture(), sourceRows = [];
@@ -497,6 +519,7 @@ const tests = [
         const entries = await report.createAdapter(f.hooks).molecules[0].loadEntries();
         for (const entry of entries) {
             assert.deepEqual(entry.pixelPitch, {x:30,y:30});
+            assert.deepEqual(entry.registeredPixelPitch, {x:30,y:30});
             assert.deepEqual(entry.stats, {mean:140/3,max:100,n:3}, 'Calibration does not recalculate or replace source-row statistics');
         }
         assert.equal(JSON.stringify({project:f.project,sourceRows,geometry}), before,
@@ -731,6 +754,21 @@ const tests = [
             assertPublicReport({...input,entries});
             const actual=f.app.panels.get('left').msiValueRasters.get('MSI_DA');actual.values[0]=999;
             assert.equal(entries[0].raster.values[0],20,'captured report pixels do not alias the live numeric cache');
+        } finally {if(previous===undefined)delete global.MsiDisplayGeometry;else global.MsiDisplayGeometry=previous;}
+    }],
+    ['resampling and rotation change display geometry without relabelling acquisition pixels', async () => {
+        const previous=global.MsiDisplayGeometry;
+        try {
+            global.MsiDisplayGeometry=require('../viewer/msi-display-geometry.js');
+            const f=fixture();
+            f.app.getMsiDisplaySettings=()=>({aspectMode:'physical'});
+            f.hooks.sourceGeometry=()=>({legacy:{W:3,H:1},displayGeometry:{W:2,H:1}});
+            const input=report.createAdapter(f.hooks),entries=await input.molecules[0].loadEntries();
+            assert.deepEqual(entries[0].registeredPixelPitch,{x:50,y:75},'labels retain original X/Y even under the fixture rotation');
+            assert.deepEqual(entries[0].pixelPitch,{x:100,y:75},'scale bars retain the effective pitch after 3 to 2 sample resampling');
+            assert.equal(entries[0].frame.calibrated,true);
+            assert.equal(entries[0].stats.mean,140/3);
+            assert.equal(entries[0].stats.max,100);
         } finally {if(previous===undefined)delete global.MsiDisplayGeometry;else global.MsiDisplayGeometry=previous;}
     }],
     ['Individual display windows preserve explicit raw limits and legacy per-layer clipping', async () => {

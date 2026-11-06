@@ -98,6 +98,18 @@ function assertImageReportPages(deck, detailCount, context) {
   assert.doesNotMatch(deck.xml, /Project information/, context + ' omits project information pages');
 }
 
+function assertPixelSizeLabels(deck, pitch, context, sectionCount = 1) {
+  const value = pitch ? pitch.x + ' × ' + pitch.y + ' µm/px' : null;
+  for (const [index, xml] of deck.slideXml.entries()) {
+    const label = value ? (index ? 'Pixel size: ' : '') + value : 'Pixel size: —';
+    const shapes = xml.match(/<p:sp>[\s\S]*?<\/p:sp>/g) || [];
+    assert.equal(shapes.filter(shape => shape.includes('<a:t>' + label + '</a:t>')).length, sectionCount,
+      context + ' has an editable registered pixel-size label per section on ' + (index ? 'detail ' + index : 'the matrix'));
+  }
+  if (!pitch) assert.doesNotMatch(deck.xml, /\d(?:\.\d+)?\s*[µμ]m(?:\/px)?/,
+    context + ' does not invent numerical physical dimensions or a scale bar for unknown pitch');
+}
+
 function assertNativeScaleBars(deck, context, label = '50 µm', physicalWidthUm, sectionCount = 1) {
   const slideSize = deck.xml.match(/<p:sldSz cx="(\d+)" cy="(\d+)"/);
   assert.ok(slideSize, context + ' declares slide dimensions');
@@ -331,6 +343,7 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
     }
     function assertSharedDeck(deck, includeCeCv) {
       assertImageReportPages(deck, 2, 'Shared ' + role);
+      assertPixelSizeLabels(deck, {x:30,y:60}, 'Shared ' + role + ' normalizes registered numeric strings', 2);
       assertNativeScaleBars(deck, 'Shared ' + role, '100 µm', 16 * 30, 2);
       assertImageAspect(deck, 1, 'Shared ' + role + ' 30×60 µm');
       for (const label of ['共有PPT合成プロジェクト', '共有乳酸', '共有切片A', '共有切片B']) {
@@ -457,6 +470,16 @@ async function checkManualPixelCalibration(page) {
   const invariant = snapshot => ({expected:snapshot.expected.map(({pitch, ...entry})=>entry),
     rois:snapshot.rois, metadata:snapshot.metadata});
   const before = invariant(await page.evaluate(sharedSourceSnapshot, true));
+  const exported = async (pitch, stage) => {
+    await page.locator('#btn-export-ppt').click();
+    await page.getByRole('dialog', {name:'PPT レポートの設定',exact:true}).waitFor({state:'visible'});
+    const downloadPromise = page.waitForEvent('download', {timeout:90000});
+    await page.locator('[data-report-create]').click();
+    const deck = await readDeck(await downloadPromise);
+    assertPixelSizeLabels(deck, {x:pitch,y:pitch}, stage);
+    assertNoSessionTokens(deck);
+    await page.waitForFunction(() => !document.getElementById('btn-export-ppt').disabled);
+  };
   const displayed = async (pitch, preview) => {
     await page.waitForFunction(({pitch,preview}) => {
       const panel = App.panels.get(App.project.sections[0].id);
@@ -501,8 +524,9 @@ async function checkManualPixelCalibration(page) {
       return (await ProjectStorage.getProject(App.project.id)).sections[0].meta.world_coords.msi_um_per_px;
     });
     assert.deepEqual(saved,{x:pitch,y:pitch},'Manual modal persists its calibration in real IndexedDB');
+    await exported(pitch, 'Manual ' + pitch + ' µm calibration');
     assert.deepEqual(invariant(await page.evaluate(sharedSourceSnapshot,false)),before,
-      'Manual calibration and Preview preserve original SHA-256, coordinates, intensities, ROI and statistics');
+      'Manual calibration, Preview and PPT preserve original SHA-256, coordinates, intensities, ROI and statistics');
   }
   await page.reload();
   await page.waitForFunction(id => typeof App!=='undefined' && App.project && App.project.id===id && App.panels.size>0,projectId);
@@ -515,9 +539,10 @@ async function checkManualPixelCalibration(page) {
   await page.locator('#btn-share-preview').click();
   await displayed(60,true);
   await page.locator('[data-preview-close]').click();
+  await exported(60, 'Reloaded manual 60 µm calibration');
   assert.deepEqual(invariant(await page.evaluate(sharedSourceSnapshot,true)),before,
-    'Reload keeps the original bytes, source geometry, ROI and source-row statistics');
-  console.log('Manual pixel calibration browser regression passed (30 → 60 µm, main/Preview DOM, IndexedDB save and reload).');
+    'Reload and PPT keep the original bytes, source geometry, ROI and source-row statistics');
+  console.log('Manual pixel calibration browser regression passed (30 → 60 µm, main/Preview/PPT, IndexedDB save and reload).');
 }
 
 // The real viewer, parsers, IndexedDB and download flow run with synthetic data
@@ -696,8 +721,8 @@ async function main() {
       assert.match(download.suggestedFilename(), /\.pptx$/);
       assert.doesNotMatch(download.suggestedFilename(), /[\\/:*?"<>|]/);
       assertImageReportPages(deck, 1, 'Master');
+      assertPixelSizeLabels(deck, calibrated ? {x:50,y:50} : null, 'Master ' + (calibrated ? '50 µm' : 'unknown pitch'));
       if (calibrated) assertNativeScaleBars(deck, 'Master 50 µm calibration');
-      else assert.doesNotMatch(deck.xml, /[µμ]m/, 'Unknown pixel pitch does not claim physical dimensions or a scale bar');
       for (const label of ['PPT検証','乳酸テスト','切片A','C3H6O3','0.1234567']) {
         assert.ok(deck.xml.includes(label), 'Master export preserves registered image labels: ' + label);
       }

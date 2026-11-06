@@ -99,6 +99,32 @@ async function unzip(report) {
         .map(file => zip.file(file).async('string')))).join('\n');
     return { bytes, zip, files, xml, all: xml.join('\n'), packageXml };
 }
+function bounds(xml) {
+    const offset = xml.match(/<a:off x="(-?\d+)" y="(-?\d+)"/);
+    const extent = xml.match(/<a:ext cx="(\d+)" cy="(\d+)"/);
+    assert.ok(offset && extent, 'Native object has an explicit position and size');
+    return {x: Number(offset[1]), y: Number(offset[2]), w: Number(extent[1]), h: Number(extent[2])};
+}
+function textShapes(xml, predicate) {
+    return [...xml.matchAll(/<p:sp>.*?<\/p:sp>/gs)].map(match => match[0])
+        .filter(shape => [...shape.matchAll(/<a:t>(.*?)<\/a:t>/gs)].some(match => predicate(match[1])));
+}
+function assertPixelLabelLayout(xml, detail) {
+    const labels = textShapes(xml, value => detail ? value.startsWith('Pixel size: ') : /µm\/px$|^Pixel size: /.test(value));
+    assert.ok(labels.length, 'Pixel sizes are editable native text objects');
+    const pictures = [...xml.matchAll(/<p:pic>.*?<\/p:pic>/gs)].map(match => bounds(match[0]));
+    for (const label of labels) {
+        const box = bounds(label);
+        assert.ok(box.x >= 0 && box.y >= 0 && box.x + box.w <= 12192010 && box.y + box.h <= 6858010);
+        for (const picture of pictures) assert.ok(box.y + box.h <= picture.y,
+            'Pixel-size labels stay above every image, including tall contained images');
+        if (detail) {
+            for (const range of textShapes(xml, value => value.startsWith('Range '))) {
+                assert.ok(box.y + box.h <= bounds(range).y, 'Pixel size and Range occupy separate text rows');
+            }
+        }
+    }
+}
 async function main() {
     const report = fixture(), before = JSON.stringify(report);
     const result = await unzip(report);
@@ -149,7 +175,21 @@ async function main() {
     const calibrated = fixture(2, 1);
     calibrated.molecules[0].sections[0].image = {...fixtureImage(), physicalWidthUm: 800, physicalHeightUm: 300};
     calibrated.molecules[0].sections[1].image = {...fixtureImage(), physicalWidthUm: 1200, physicalHeightUm: 900};
+    calibrated.molecules[0].sections[0].registeredPixelPitch = {x: 25, y: 40};
+    calibrated.molecules[0].sections[1].registeredPixelPitch = {x: 120, y: 120};
+    calibrated.molecules[0].sections.forEach(entry => {entry.pixelPitch = {x: 12.5, y: 20};});
+    const calibratedBefore = JSON.stringify(calibrated);
     const calibration = await unzip(calibrated), calibratedDetail = calibration.xml[1];
+    assert.equal(JSON.stringify(calibrated), calibratedBefore, 'Export preserves acquisition and display calibration');
+    for (const label of ['25 × 40 µm/px', '120 × 120 µm/px']) {
+        assert.equal(textShapes(calibration.xml[0], value => value === label).length, 1,
+            'Each summary section prints its acquisition pitch in editable text');
+        assert.equal(textShapes(calibratedDetail, value => value === 'Pixel size: ' + label).length, 1,
+            'Detailed images retain independent X/Y acquisition pitch');
+    }
+    assert.doesNotMatch(calibration.all, /12\.5 × 20 µm\/px/, 'Resampled display pitch is not labelled as acquisition pitch');
+    assertPixelLabelLayout(calibration.xml[0], false);
+    assertPixelLabelLayout(calibratedDetail, true);
     assert.match(calibratedDetail, /100 µm/); assert.match(calibratedDetail, /200 µm/);
     assert.doesNotMatch(calibration.xml[0], /100 µm|200 µm/, 'No shared physical scale is attached to a matrix of differently sized images');
     const scaleBars = [...calibratedDetail.matchAll(/<p:sp>.*?<\/p:sp>/gs)].map(match => match[0])
@@ -176,10 +216,36 @@ async function main() {
     const geometryResult = await unzip(scaleGeometry);
     assert.match(geometryResult.xml[1], /1 mm/); assert.match(geometryResult.xml[1], /2 mm/);
     assert.equal(geometryResult.xml[1].match(/cy="50292"/g).length, 2, 'Tall and wide images both retain their individual scale bars');
+    assertPixelLabelLayout(geometryResult.xml[1], true);
     const noCalibration = fixture(2, 1);
     noCalibration.molecules[0].sections[0].image = {...fixtureImage(), physicalWidthUm: NaN, physicalHeightUm: 100};
     assert.doesNotMatch((await unzip(noCalibration)).xml[1], /<a:t>\d+(?:\.\d+)? (?:µm|mm)<\/a:t>/,
         'Unknown physical calibration does not invent a scale bar');
+    const invalidPitches = [undefined, null, {x: 0, y: 25}, {x: 25, y: -1},
+        {x: NaN, y: 25}, {x: '25', y: 25}, {x: 25}];
+    const unknownPitches = fixture(invalidPitches.length, 1);
+    unknownPitches.molecules[0].sections.forEach((entry, i) => {
+        entry.registeredPixelPitch = invalidPitches[i];
+        entry.pixelPitch = {x: 99, y: 99};
+    });
+    const unknownPitchDeck = await unzip(unknownPitches);
+    assert.doesNotMatch(unknownPitchDeck.all, /µm\/px/, 'Invalid or absent acquisition pitch never uses display pitch or guessed units');
+    assert.equal(textShapes(unknownPitchDeck.all, value => value === 'Pixel size: —').length, invalidPitches.length * 2,
+        'Each unknown pitch is explicit in its summary header and detail image label');
+    const variablePitches = fixture(1, 9);
+    variablePitches.molecules.forEach((molecule, i) => {
+        molecule.sections[0].registeredPixelPitch = i < 8 ? {x: 25, y: 25} : {x: 25, y: 40};
+    });
+    const variablePitchDeck = await unzip(variablePitches);
+    assert.equal(textShapes(variablePitchDeck.xml[0], value => value === 'Pixel size: varies').length, 2,
+        'Repeated summary headers do not claim one pitch when different blocks contain different acquisitions');
+    assert.doesNotMatch(variablePitchDeck.xml[0], /µm\/px/, 'Variable summary pitch is resolved only on the detail slides');
+    assert.match(variablePitchDeck.xml[1], /Pixel size: 25 × 25 µm\/px/);
+    assert.match(variablePitchDeck.xml[9], /Pixel size: 25 × 40 µm\/px/);
+    variablePitches.molecules[8].sections[0].registeredPixelPitch = null;
+    const partlyUnknownPitchDeck = await unzip(variablePitches);
+    assert.match(partlyUnknownPitchDeck.xml[0], /Pixel size: varies/, 'Known and unknown acquisitions are not treated as a common known pitch');
+    assert.match(partlyUnknownPitchDeck.xml[9], /Pixel size: —/);
     const longNames = fixture(3, 1);
     longNames.sections.forEach((section, i) => {
         section.name = 'LONG_SECTION_' + i + '_' + '日本語と長い切片名'.repeat(15) + '_NAME_END_' + i;
@@ -260,10 +326,13 @@ async function main() {
     mixedKinds.molecules[1].kind = 'ratio';
     mixedKinds.molecules[1].sections[1].image = null;
     mixedKinds.molecules[1].sections[1].missingReason = 'Ratio inputs unavailable';
+    mixedKinds.molecules[1].sections[1].registeredPixelPitch = {x: 10, y: 20};
     const kindPages = assertMatrixCoverage(mixedKinds), kindDeck = await unzip(mixedKinds);
     assert.deepEqual(Array.from(kindPages, page => page.kind), ['msi', 'ratio'], 'Ratio diagnostics are separate from acquired molecules');
     assertMatrixLabels(mixedKinds, kindDeck.xml);
     assert.match(kindDeck.xml[1], /Ratio inputs unavailable/);
+    assert.match(kindDeck.xml[1], /10 × 20 µm\/px/, 'A registered ratio retains pitch even if its image is unavailable');
+    assert.match(kindDeck.xml[3], /Pixel size: 10 × 20 µm\/px/);
 
     const large = fixture(7, 25), largePages = assertMatrixCoverage(large);
     assert.equal(largePages.length, 6, 'Four-column and three-column matrix pages retain existing density limits');
@@ -274,6 +343,7 @@ async function main() {
     mixedMeasurements.molecules.forEach((molecule, index) => {
         const start = index < 16 ? 0 : index < 33 ? 2 : 4;
         molecule.sections = molecule.sections.slice(start, start + 2).map(entry => ({...entry, image: measuredImage, missingReason: ''}));
+        molecule.sections.forEach(entry => {entry.registeredPixelPitch = {x: start === 4 ? 120 : 25, y: start === 4 ? 120 : 25};});
     });
     const mixedDeck = await unzip(mixedMeasurements);
     assert.equal(mixedDeck.xml.length, 51, 'Six sections with 16/17/15 conditions produce three matrices and 48 details');
@@ -302,6 +372,7 @@ async function main() {
         molecules: [{ key: 'm1', name: 'Registered compound', subtitle: 'Q1 100 / Q3 50', metadata: {adduct: '[M-H]-'}, sections: [
             { sectionId: 's1', name: 'Registered kidney section',
                 metadata: {registered_function: 'MRM Function 7'},
+                registeredPixelPitch: {x: 20, y: 30}, pixelPitch: {x: 10, y: 15},
                 raster: { W: 2, H: 1, values: Float64Array.from([5, 10]) }, stats: { max: 100, mean: 25, n: 4 } }
         ] }] }, { createCanvas });
     const integrated = await unzip(prepared);
@@ -316,6 +387,9 @@ async function main() {
     const integratedTable = integrated.xml[1].match(/<a:tbl>.*?<\/a:tbl>/s)[0];
     assert.match(integratedTable, /<a:t>100<\/a:t>/, 'Source maximum survives removal of information pages');
     assert.match(integratedTable, /<a:t>25<\/a:t>/, 'Source mean survives removal of information pages');
+    assert.match(integrated.xml[0], /20 × 30 µm\/px/, 'Data preparation passes measured pitch to summary labels');
+    assert.match(integrated.xml[1], /Pixel size: 20 × 30 µm\/px/, 'Data preparation passes measured pitch to detail labels');
+    assert.doesNotMatch(integrated.all, /10 × 15 µm\/px/, 'The data-to-PPT path does not substitute display calibration');
     assert.equal(JSON.stringify(deck.COLOR_STOPS), JSON.stringify(Data.COLOR_STOPS.map(color => color.slice(1))), 'Legend and rendered images use the same exact stops');
     const fallback = fixture(1, 1);
     fallback.molecules[0].intensityScale = {upperBasis: 'unit-fallback', upper: 1};
@@ -346,11 +420,17 @@ async function main() {
     const styleSample=fixture(2,1);
     styleSample.displayStyle={mode:'individual',colormap:'test-green',smoothing:'linear',smoothingStrength:6,linearStrength:4,otsu:true,
         lut:Array.from({length:256},(_,i)=>[0,i,0])};
-    styleSample.molecules[0].sections.forEach((entry,i)=>{entry.displayWindow={min:i?2:-4,max:i?80:40};});
+    styleSample.molecules[0].sections.forEach((entry,i)=>{
+        entry.displayWindow={min:i?2:-4,max:i?80:40};
+        entry.registeredPixelPitch={x:25,y:40};
+        entry.image=fixtureImage(80,320);
+    });
     const styleDeck=await unzip(styleSample),styleXml=styleDeck.all;
     assert.match(styleXml,/Range -4 – 40/);assert.match(styleXml,/Range 2 – 80/);
     assert.match(styleXml,/100%/);assert.match(styleXml,/Display style: test-green/);
     assert.match(styleXml,/linear \(strength 4\/10\)/,'PPT records the applied Linear strength');
+    assertPixelLabelLayout(styleDeck.xml[0], false);
+    assertPixelLabelLayout(styleDeck.xml[1], true);
     styleSample.displayStyle.smoothing='median';
     assert.match((await unzip(styleSample)).all,/median \(strength 6\/10\)/,'PPT records the independent median strength');
     assert.doesNotMatch(styleXml,/Shared display p99\.8/,'display-style reports do not claim the reference percentile');
@@ -377,6 +457,7 @@ async function main() {
         });
         approvedSample.molecules.forEach(molecule => molecule.sections.forEach((section, index) => {
             section.image = {...section.image, physicalWidthUm: index ? 1200 : 800, physicalHeightUm: index ? 600 : 400};
+            section.registeredPixelPitch = index ? {x: 120, y: 120} : {x: 25, y: 40};
         }));
         fs.writeFileSync(approvedTarget, (await unzip(approvedSample)).bytes);
         console.log('Approved matrix/detail layout sample: ' + approvedTarget);
@@ -386,7 +467,10 @@ async function main() {
         const mixedTarget = path.resolve(root, '../report-mixed-registration-sample.pptx');
         fs.writeFileSync(mixedTarget, mixedDeck.bytes);
         console.log('Mixed registration groups sample: ' + mixedTarget);
+        const styleTarget = path.resolve(root, '../report-pixel-style-sample.pptx');
+        fs.writeFileSync(styleTarget, styleDeck.bytes);
+        console.log('Pixel-size and display-range sample: ' + styleTarget);
     }
-    console.log('Project report deck regression: PASS (MSI-only PPTX, editable statistics, omitted metadata, calibrated scale bars, image geometry)');
+    console.log('Project report deck regression: PASS (MSI-only PPTX, editable statistics and acquisition pixel sizes, omitted metadata, calibrated scale bars, image geometry)');
 }
 main().catch(error => { console.error(error.stack || error); process.exitCode = 1; });

@@ -32,10 +32,27 @@ const {archive,startServer,prepare,createRatio,sourceSnapshot}=require('./msi_ra
         displayStyle:()=>App.getRatioDisplayStyle(key)};
       const input=ProjectReportApp.createAdapter(hooks,{includeRatios:true,useDisplayStyle:true});
       const job=input.molecules.find(m=>m.kind==='ratio'),entries=await job.loadEntries();
-      const prepared=await ProjectReportData.prepare({...input,molecules:[job]},{nearestUpscale:false});
+      const prepared=await ProjectReportData.prepare({...input,molecules:[{...job,loadEntries:async()=>entries}]},{nearestUpscale:false});
       const deck=await ProjectReportDeck.create(prepared,{type:'blob'}),zip=await JSZip.loadAsync(deck);
-      const xml=(await Promise.all(Object.keys(zip.files).filter(name=>/^ppt\/slides\/slide\d+\.xml$/.test(name))
-        .map(name=>zip.file(name).async('string')))).join('\n');
+      const slideXml=await Promise.all(Object.keys(zip.files).filter(name=>/^ppt\/slides\/slide\d+\.xml$/.test(name))
+        .sort((a,b)=>Number(a.match(/slide(\d+)/)[1])-Number(b.match(/slide(\d+)/)[1]))
+        .map(name=>zip.file(name).async('string'))),xml=slideXml.join('\n');
+      const registeredPitches=sections.map(section=>section.meta.world_coords.msi_um_per_px);
+      let unknownInput;
+      try {
+        sections.forEach(section=>{section.meta.world_coords.msi_um_per_px=null;});
+        unknownInput=ProjectReportApp.createAdapter(hooks,{includeRatios:true,useDisplayStyle:true});
+      } finally {
+        sections.forEach((section,index)=>{section.meta.world_coords.msi_um_per_px=registeredPitches[index];});
+      }
+      // Resolve after restoring the real calibration. The captured absence must
+      // stay unknown, not acquire a value from live metadata or raster geometry.
+      const unknownJob=unknownInput.molecules.find(m=>m.kind==='ratio'),unknownEntries=await unknownJob.loadEntries();
+      const unknownPrepared=await ProjectReportData.prepare({...unknownInput,
+        molecules:[{...unknownJob,loadEntries:async()=>unknownEntries}]},{nearestUpscale:false});
+      const unknownZip=await JSZip.loadAsync(await ProjectReportDeck.create(unknownPrepared,{type:'blob'}));
+      const unknownXml=(await Promise.all(Object.keys(unknownZip.files).filter(name=>/^ppt\/slides\/slide\d+\.xml$/.test(name))
+        .map(name=>unknownZip.file(name).async('string')))).join('\n');
       const photo=RoiMediaApp.createAdapter(App.project,roi),frames=[];
       for(const section of sections) {
         const frame=await photo.loadMsi(App.project,roi,section.id,key);
@@ -47,10 +64,31 @@ const {archive,startServer,prepare,createRatio,sourceSnapshot}=require('./msi_ra
       const sameJob=ProjectReportApp.createAdapter(hooks,{includeRatios:true,useDisplayStyle:true}).molecules.find(m=>m.kind==='ratio');
       const sameEntries=await sameJob.loadEntries();
       const samePhoto=RoiMediaApp.createAdapter(App.project,roi),sameFrame=await samePhoto.loadMsi(App.project,roi,sections[0].id,key);
-      return {entries:entries.map(e=>({window:e.displayWindow,statistics:e.ratioStatistics,rois:e.ratioRois})),
-        sameWindows:sameEntries.map(e=>e.displayWindow),sameStatus:sameFrame.status,frames,xml,
+      return {entries:entries.map(e=>({window:e.displayWindow,statistics:e.ratioStatistics,rois:e.ratioRois,
+          registeredPixelPitch:e.registeredPixelPitch})),
+        preparedPitches:prepared.molecules[0].sections.map(e=>e.registeredPixelPitch),
+        pitchAliases:entries.map((e,index)=>e.registeredPixelPitch===registeredPitches[index]
+          || e.registeredPixelPitch===prepared.molecules[0].sections[index].registeredPixelPitch),
+        unknownPitches:unknownEntries.map(e=>e.registeredPixelPitch),
+        unknownPreparedPitches:unknownPrepared.molecules[0].sections.map(e=>e.registeredPixelPitch),unknownXml,
+        sameWindows:sameEntries.map(e=>e.displayWindow),sameStatus:sameFrame.status,frames,xml,slideXml,
         paletteZero:App.getRatioDisplayStyle(key).lut[0],background:App.getRatioDisplayStyle(key).background};
     },key);
+    assert.deepEqual(output.entries.map(e=>e.registeredPixelPitch),[{x:30,y:30},{x:30,y:30}],
+      'Ratio adapter carries the registered measurement pitch per section');
+    assert.deepEqual(output.preparedPitches,[{x:30,y:30},{x:30,y:30}],
+      'Ratio preparation preserves registered pitch independently of image geometry');
+    assert.deepEqual(output.pitchAliases,[false,false],'Ratio pitch snapshots do not alias source metadata or prepared output');
+    for(const [index,label] of ['30 × 30 µm/px','Pixel size: 30 × 30 µm/px'].entries()) {
+      const shapes=output.slideXml[index].match(/<p:sp>[\s\S]*?<\/p:sp>/g)||[];
+      assert.equal(shapes.filter(shape=>shape.includes('<a:t>'+label+'</a:t>')).length,2,
+        'Ratio '+(index?'detail':'matrix')+' exposes editable registered pitch for both sections');
+    }
+    assert.deepEqual(output.unknownPitches,[null,null],'Ratio adapter does not infer absent registered pitch');
+    assert.deepEqual(output.unknownPreparedPitches,[null,null],'Ratio preparation retains absent calibration');
+    assert.equal((output.unknownXml.match(/<a:t>Pixel size: —<\/a:t>/g)||[]).length,4,
+      'Unknown ratio pitch is explicit on both matrix and detail images');
+    assert.doesNotMatch(output.unknownXml,/\d(?:\.\d+)?\s*[µμ]m\/px/,'Ratio PPT does not invent measurement pitch');
     assert.deepEqual(output.entries.map(e=>e.window),[{min:0,max:6},{min:0,max:12}]);
     assert.deepEqual(output.sameWindows,[{min:0,max:7},{min:0,max:7}]);
     assert.match(output.sameStatus,/比 0–7/);

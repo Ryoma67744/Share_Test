@@ -6,7 +6,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, MsiSmoothing) {
     'use strict';
     // Keep these three report modules and their viewer URLs on one revision.
-    const REPORT_REVISION = 'ppt-20261106-1';
+    const REPORT_REVISION = 'ppt-20261106-2';
     function assertReportModules(data, deck) {
         if (!data || !deck || data.REPORT_REVISION !== REPORT_REVISION || deck.REPORT_REVISION !== REPORT_REVISION) {
             const error = new Error('レポート機能が更新されました。ページを再読み込みしてから作成し直してください。');
@@ -18,6 +18,13 @@
     const copy = value => value == null ? value : JSON.parse(JSON.stringify(value));
     const finite = value => typeof value === 'number' && Number.isFinite(value) ? value : null;
     const pitchValue = pitch => pitch && finite(pitch.x) > 0 && finite(pitch.y) > 0 ? { x: pitch.x, y: pitch.y } : null;
+    function registeredPitchValue(pitch) {
+        // The acquisition label uses the registered source pitch, independently
+        // of the effective display pitch used by resampling and scale bars.
+        const numeric = value => typeof value === 'string'
+            && /^[+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(value.trim()) ? Number(value) : value;
+        return pitchValue(pitch && {x: numeric(pitch.x), y: numeric(pitch.y)});
+    }
     const label = (key, meta) => String(meta.base || meta.name || key.replace(/^MSI_/i, ''));
     const metadataFields = ['name', 'base', 'precursor', 'product', 'ce', 'cv', 'polarity', 'mz', 'adduct',
         'formula', 'dwell', 'functionIndex', 'channelIndex', 'rtStart', 'rtEnd', 'instrument', 'acquiredAt',
@@ -324,6 +331,7 @@
             const { section, panel } = job.state;
             const result = { sectionId: section.id, name: sectionName(section),
                 transform: copy(job.transform), pixelPitch: copy(job.pixelPitch), metadata: copy(job.meta),
+                registeredPixelPitch: registeredPitchValue(job.pixelPitch),
                 stats: { mean: null, max: null, n: null },
                 archiveProvenance: root.ProjectArchive ? root.ProjectArchive.provenance(job.archiveProvenance) : null,
                 qualityNote: root.ProjectArchive ? root.ProjectArchive.qualityLabel(job.archiveProvenance) : '' };
@@ -462,6 +470,7 @@
                     for (const state of sectionStates) {
                         const section=state.section, entry={sectionId:section.id,name:sectionName(section),
                             stats:{mean:null,max:null,n:null},ratioStatistics:null,ratioRois:[],metadata:{formula},
+                            registeredPixelPitch:registeredPitchValue(state.calibration && state.calibration.msi_um_per_px),
                             transform:copy(state.ratioTransform)};
                         if (typeof app.resolveRatio !== 'function') entry.missingReason='比の数値データを読み込めません。';
                         else {
