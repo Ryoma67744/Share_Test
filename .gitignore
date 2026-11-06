@@ -1,4 +1,5 @@
 .claude/
+/debug.log
 
 # Generated distributions and downloaded Windows runtime.
 /runtime/

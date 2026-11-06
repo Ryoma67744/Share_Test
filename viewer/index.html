@@ -818,13 +818,13 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
 <body class="text-gray-800">
 <div class="h-screen flex flex-col overflow-hidden">
     <!-- Top bar -->
-    <header class="flex items-center justify-between px-3 py-1 bg-white border-b shrink-0 gap-2">
-        <div class="flex items-center gap-3 min-w-0 flex-1">
+    <header class="flex flex-wrap items-center justify-between px-3 py-1 bg-white border-b shrink-0 gap-2">
+        <div class="flex items-center gap-3 min-w-0 flex-1" style="flex-basis:480px;">
             <h1 id="app-title" class="text-base font-bold text-gray-900 whitespace-nowrap">DESI Data Share</h1>
-            <select id="project-picker" class="text-xs border border-gray-300 rounded px-2 py-1 bg-white max-w-[260px] truncate" title="Switch project"></select>
+            <select id="project-picker" class="text-xs border border-gray-300 rounded px-2 py-1 bg-white min-w-0 max-w-[260px] truncate" title="Switch project"></select>
             <input id="project-name-input" type="text" class="text-xs border border-gray-300 rounded px-2 py-1 bg-white min-w-0 flex-1 max-w-[300px]" placeholder="Project name" />
         </div>
-        <div class="flex items-center gap-2 shrink-0">
+        <div class="flex flex-wrap items-center justify-end gap-2 shrink-0" style="max-width:100%;margin-left:auto;">
             <div id="share-mode-banner" title="Read-only Share mode. ROI editing requires acquiring an exclusive lock.">
                 <span>🔒</span><span>Share view</span>
             </div>

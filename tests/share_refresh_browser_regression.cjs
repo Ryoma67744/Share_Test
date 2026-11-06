@@ -129,6 +129,13 @@ async function main(){
    App._scheduleAutoPublish=()=>{};return {pending:!!App.project.__publishPending,storedPending:!!p.__publishPending,state:App._syncState,revision:p.shareInfo.serverRevision,timer:ctx.timer,publishes:refreshFixture.publishCalls};});
   assert.deepEqual(clean,{pending:false,storedPending:false,state:'synced',revision:2,timer:0,publishes:0},'read-only hydration must not republish the downloaded project');
   if(process.env.SHARE_REFRESH_SCREENSHOT_DIR)await page.screenshot({path:path.join(process.env.SHARE_REFRESH_SCREENSHOT_DIR,'cloud-refresh-complete.png'),fullPage:true});
+  const header=await page.evaluate(()=>({width:innerWidth,controls:[...document.querySelector('body > div > header').querySelectorAll('button,select,input,#sync-status,#app-title')]
+   .map(el=>{const r=el.getBoundingClientRect();return {id:el.id||el.dataset.mode||el.textContent.trim(),x:r.x,y:r.y,right:r.right,bottom:r.bottom,width:r.width,height:r.height};}).filter(r=>r.width>0&&r.height>0)}));
+  for(const control of header.controls)assert.ok(control.x>=0&&control.right<=header.width,'header control stays in viewport: '+JSON.stringify(control));
+  for(let i=0;i<header.controls.length;i++)for(let j=i+1;j<header.controls.length;j++){
+   const a=header.controls[i],b=header.controls[j],width=Math.min(a.right,b.right)-Math.max(a.x,b.x),height=Math.min(a.bottom,b.bottom)-Math.max(a.y,b.y);
+   assert.ok(width<=1||height<=1,'header controls must not overlap: '+JSON.stringify([a,b]));
+  }
   // Keep the hydration marker set while dispatching a real user click: only
   // the explicit initial-layer calls may use derived saves, never all edits.
   const priorEpoch=await page.evaluate(()=>{App._hydratingServerProjectId=App.project.id;return App.project.publishEditEpoch||0;});
