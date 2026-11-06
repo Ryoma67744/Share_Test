@@ -315,6 +315,8 @@ end
 $$;
 
 -- Rename / re-shape (rare) an ROI with optimistic lock.
+-- A stale version is a permanent request conflict, not a retryable SQL
+-- serialization failure. PT409 maps to HTTP 409 in PostgREST.
 -- Signature changed (added p_name): drop the old one first so a re-run
 -- replaces it instead of creating a second overload. The mutable fields
 -- default to null + coalesce so a rename can pass only p_name (leaving
@@ -348,7 +350,7 @@ begin
      and version = p_expected_version
    returning * into v;
   if v.id is null then
-    raise exception 'stale_version' using errcode = '40001';
+    raise exception 'stale_version' using errcode = 'PT409';
   end if;
   return v;
 end

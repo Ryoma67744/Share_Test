@@ -16,20 +16,20 @@ function method(name) {
   return html.slice(at,html.indexOf('\n    }',at)+6).trim();
 }
 const store=new Map(),calls=[],notices=[];
-let remoteVersion=4;
+let remoteVersion=4,conflictCode='PT409';
 const App={shareMode:{token:'token'},panels:new Map(),_refreshShareAlignments:async()=>{}};
 const ctx=displayContext({JSON,Object,Array,Map,Set,Number,Math,console,App,
   _shareAlignBySection:store,_shareAlignServerMissing:false,_shareAlignWriteGen:0,
-  showToast:s=>notices.push(s),_isMissingRpc:()=>false,_isStaleVersionError:e=>e.code==='40001',
+  showToast:s=>notices.push(s),_isMissingRpc:()=>false,
   SupabaseClient:{async upsertShareAlignment(token,id,payload,version) {
     calls.push({id,payload:plain(payload),version});
-    if(version!==remoteVersion) {const e=new Error('stale_version');e.code='40001';throw e;}
+    if(version!==remoteVersion) {const e=new Error('optimistic conflict');e.code=conflictCode;throw e;}
     remoteVersion++;return {version:remoteVersion};
   }}});
 for(const name of ['SECTION_ALIGN_WC_KEYS','SECTION_ALIGN_META_KEYS'])
   vm.runInContext(new RegExp('const '+name+' = \\[[^\\]]*\\];').exec(html)[0],ctx);
 vm.runInContext(html.slice(html.indexOf('function alignmentFrameDescriptor('),html.indexOf('function createMsiSourceGeometry(')),ctx);
-for(const name of ['buildHeToMsiAffine','captureSectionAlignment','applySectionAlignment',
+for(const name of ['_isStaleVersionError','buildHeToMsiAffine','captureSectionAlignment','applySectionAlignment',
   'getShareAlignmentVersion','pushShareAlignment']) vm.runInContext(fn(name),ctx);
 vm.runInContext('this.resolve=({'+method('_resolveTHeToMsi')+'})._resolveTHeToMsi',ctx);
 
@@ -272,8 +272,11 @@ assert.equal((html.match(/alignmentImageReference:(?:ref|img|ent)\.alignmentImag
   const baseline=ctx.getShareAlignmentVersion(sec);
   const draft=ctx.captureSectionAlignment(sec);draft.perSourceAlign=false;
   store.set(sec.id,{payload:{remote:true},version:5});remoteVersion=5;
-  assert.equal(await ctx.pushShareAlignment(sec,{payload:draft,expectedVersion:baseline}),false,
-    'polling while editing cannot promote stale draft baseline');
+  for(const code of ['PT409','40001']){
+    conflictCode=code;
+    assert.equal(await ctx.pushShareAlignment(sec,{payload:draft,expectedVersion:baseline}),false,
+      code+': polling while editing cannot promote stale draft baseline');
+  }
   assert.equal(calls.at(-1).version,4);assert.equal(store.get(sec.id).version,5);
   assert.ok(notices.some(s=>/他の人が先に更新/.test(s)));
   assert.deepEqual(sec,snapshot,'failed save cannot change the active metadata or sources');

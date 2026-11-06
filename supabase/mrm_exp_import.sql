@@ -120,15 +120,17 @@ begin
         select * into v_compound from public.mrm_compounds where name = v_name;
         v_found := found;
         v_expected := v_row->'expected';
+        -- A stale preview needs new user input, not an automatic retry of
+        -- identical SQL. PT409 preserves the conflict as HTTP 409.
         if not v_found then
-            if v_expected <> 'null'::jsonb then raise exception 'Library changed; refresh preview: %', v_name using errcode = '40001'; end if;
+            if v_expected <> 'null'::jsonb then raise exception 'Library changed; refresh preview: %', v_name using errcode = 'PT409'; end if;
             if (v_row->>'shelf') is null or (v_row->>'shelf') not in ('main','archive') then
                 raise exception 'Explicit destination required: %', v_name using errcode = '22023';
             end if;
         else
             if jsonb_typeof(v_expected) <> 'object' or (v_expected->>'id') is distinct from v_compound.id::text
                 or (v_expected->>'updated_at')::timestamptz is distinct from v_compound.updated_at then
-                raise exception 'Library changed; refresh preview: %', v_name using errcode = '40001';
+                raise exception 'Library changed; refresh preview: %', v_name using errcode = 'PT409';
             end if;
             if v_compound.polarity is distinct from v_polarity then
                 raise exception 'Polarity conflict: %', v_name using errcode = '22023';
@@ -143,7 +145,7 @@ begin
             select coalesce(jsonb_agg(t order by t->>'id'), '[]'::jsonb)
                 into v_expected_transitions from jsonb_array_elements(v_expected->'transitions') t;
             if v_current <> v_expected_transitions then
-                raise exception 'Transitions changed; refresh preview: %', v_name using errcode = '40001';
+                raise exception 'Transitions changed; refresh preview: %', v_name using errcode = 'PT409';
             end if;
             if not exists(select 1 from public.mrm_transitions where compound_id = v_compound.id and precursor = v_precursor and product = v_product and ce = v_ce and cv = v_cv)
                 and v_row->'allow_new_condition' is distinct from 'true'::jsonb then
@@ -255,7 +257,7 @@ begin
         update public.mrm_exp_documents set name = trim(_name), source_sha256 = v_hash, payload = _payload,
             revision = revision + 1, updated_at = clock_timestamp()
             where id = _id and revision = _expected_revision returning * into v_doc;
-        if not found then raise exception 'Document changed or missing; reload before saving' using errcode = '40001'; end if;
+        if not found then raise exception 'Document changed or missing; reload before saving' using errcode = 'PT409'; end if;
     end if;
     return jsonb_build_object('id',v_doc.id,'name',v_doc.name,'revision',v_doc.revision,'source_sha256',v_doc.source_sha256,'updated_at',v_doc.updated_at);
 end $$;

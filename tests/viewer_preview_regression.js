@@ -2045,8 +2045,7 @@ async function testShareOverlaysAreSharedWithEveryone() {
 
   // --- 他の人が先に直していた (楽観ロックの衝突) ---
   //   黙って上書きすると、あとから開いた人の変更が理由なく消える。
-  const stale = new Error('stale_version');
-  stale.code = '40001';
+  const stale = new Error('optimistic conflict');
   const survivor = { id: 'uuid-2', name: '直したい', _server: true, _serverVersion: 1,
                      layers: [{ key: 'MSI_c' }, { key: 'MSI_d' }] };
   App.project.overlays.push(survivor);
@@ -2054,9 +2053,12 @@ async function testShareOverlaysAreSharedWithEveryone() {
   SupabaseClient.updateShareOverlay = () => Promise.reject(stale);
   const refreshed = [];
   App._refreshShareOverlays = () => { refreshed.push(true); return Promise.resolve(); };
-  assert.equal(await pushShareOverlay(survivor), false, '衝突したら保存できていないと返すこと');
+  for (const code of ['PT409', '40001']) {
+    stale.code = code;
+    assert.equal(await pushShareOverlay(survivor), false, code + ': 衝突したら保存できていないと返すこと');
+  }
   assert.ok(toasts.some(t => /他の人が先に更新/.test(t)), '衝突したことを知らせること');
-  assert.deepEqual(refreshed, [true], '最新を読み直すこと');
+  assert.deepEqual(refreshed, [true, true], '各衝突で最新を一度だけ読み直すこと');
   SupabaseClient.updateShareOverlay = realUpdate;
 
   // --- RPC がまだ無いデータベース: 端末保存へ落ちる ---
@@ -2230,13 +2232,16 @@ async function testShareAlignmentsAreSharedWithEveryone() {
   assert.equal(store.get('sec-uuid-1').version, 2);
 
   // 他の人が先に直していた → 上書きしない。
-  const stale = new Error('stale_version'); stale.code = '40001';
+  const stale = new Error('optimistic conflict');
   upsertThrows = stale;
   const refreshed = [];
   App._refreshShareAlignments = () => { refreshed.push(true); return Promise.resolve(); };
-  assert.equal(await api.pushShareAlignment(sec), false, '衝突したら保存できていないと返すこと');
+  for (const code of ['PT409', '40001']) {
+    stale.code = code;
+    assert.equal(await api.pushShareAlignment(sec), false, code + ': 衝突したら保存できていないと返すこと');
+  }
   assert.ok(toasts.some(t => /他の人が先に更新/.test(t)), '衝突したことを知らせること');
-  assert.equal(refreshed.length, 1, '最新を読み直すこと');
+  assert.equal(refreshed.length, 2, '各衝突で最新を一度だけ読み直すこと');
   assert.equal(store.get('sec-uuid-1').version, 2, '衝突したら控えの version を進めないこと');
   upsertThrows = null;
 

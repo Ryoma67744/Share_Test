@@ -3,6 +3,7 @@
  const copy=value=>JSON.parse(JSON.stringify(value));
  const revision=value=>Number.isSafeInteger(value)&&value>=0;
  const error=(code,message)=>Object.assign(new Error(message),{code});
+  const isConflict=e=>!!e&&(e.code==='PT409'||e.code==='40001');
  const uuid=()=>globalThis.crypto.randomUUID();
  function baseline(project,slug){
    const info=project.shareInfo||{};
@@ -17,7 +18,7 @@
    if(project.__importFailures>0)
      throw error('PUBLISH_SOURCE_MISSING','共有版の取得が一部失敗したローカル版からは上書きできません。原本とROIを完全に取得してから比較してください。');
    if(revision(project.shareInfo.serverRevision)&&project.shareInfo.serverRevision>confirmation.serverRevision)
-     throw error('40001','比較後に公開版が更新されています。もう一度共有版を確認してください。');
+     throw error('PT409','比較後に公開版が更新されています。もう一度共有版を確認してください。');
    return {create:false,revision:confirmation.serverRevision};
  }
  async function parallel(items,limit,fn){
@@ -82,12 +83,12 @@
        const receipt=localReceipt(previousReceipt,oldPending,oldPending.settings||settings,oldPending,hooks.url(job.slug));
        await hooks.receipt(receipt);await hooks.release(oldPending.jobId);job.sourceSlug=receipt.slug;job.previousSlug=receipt.slug;snapshot.shareInfo={...(snapshot.shareInfo||{}),slug:receipt.slug,serverRevision:receipt.serverRevision,blobPaths:receipt.blobPaths};
        if(overwrite&&receipt.serverRevision>overwrite.revision)
-         throw error('40001','比較後に公開版が更新されています。もう一度共有版を確認してください。');
+         throw error('PT409','比較後に公開版が更新されています。もう一度共有版を確認してください。');
        if(oldPending.publishedEditEpoch===job.publishedEditEpoch&&JSON.stringify(oldPending.settings)===JSON.stringify(settings)
          &&(!overwrite||(state.exists===true&&receipt.serverRevision===overwrite.revision&&state.server_revision===overwrite.revision)))return receipt;
      }else resumedCreate=!!oldPending.create&&state&&state.exists===false;
      if(overwrite&&(state.exists!==true||state.server_revision!==overwrite.revision))
-       throw error('40001','比較後に公開版が更新されています。もう一度共有版を確認してください。');
+       throw error('PT409','比較後に公開版が更新されています。もう一度共有版を確認してください。');
    }
    const base=overwrite||(resumedCreate?{create:true,revision:0}:baseline(snapshot,job.slug));job.create=base.create;job.baseServerRevision=base.revision;
    const session=await hooks.session(job);
@@ -170,7 +171,7 @@
      try{server=await hooks.commit(args);}catch(e){
        // The exact same immutable request is retried. SQL returns its receipt
        // if the first commit succeeded, and never runs a legacy writer.
-       if(e.code==='40001'||e.code==='22023'||e.code==='28000'||e.code==='PGRST202'||e.cancelled)throw e;
+       if(isConflict(e)||e.code==='22023'||e.code==='28000'||e.code==='PGRST202'||e.cancelled)throw e;
        server=await hooks.commit(args);
      }
      assertReceipt(server,job);
@@ -183,5 +184,5 @@
      for(const e of Object.values(s.msiSeries||paths.msiSeries||{})){molecules++;sources.add(e.sourceReference||e.sourceFileId||e.blobId||e.path||'unknown');}}
    return {sections:sections.length,sources:sources.size,molecules,images,rois:(project.rois||[]).reduce((n,r)=>n+(r.polysBySection?Object.keys(r.polysBySection).length:(r.section_id||r.sectionId?1:0)),0)};
  }
- return {run,baseline,summary,parallel,ownedRois};
+ return {run,baseline,summary,parallel,ownedRois,isConflict};
 });
