@@ -1171,7 +1171,7 @@ Compare images in a grid, create multicolour molecule overlays and produce PPT r
 1. **Open Preview** — Open Preview to view molecule or ratio images across sections. Before publishing, inspect the recipient's view.
 2. **Match comparison settings** — Select sections and molecules, then check Range, Same / Individual, colour and ROI visibility.
 3. **Overlay molecules** — Assign colours to multiple molecules in an overlay. Review brightness normalisation before comparing distributions. Multicolour ratio overlays are not supported.
-4. **Create a PPT report** — Open PPT report, review sections, molecules, ratios and image settings, then export. Check slide titles and scales afterwards.
+4. **Create a PPT report** — Open PPT report, review sections, molecules, ratios and image settings, then export. Molecule detail pages include only sections with that registered molecule and measurement condition. The overview keeps section columns aligned and omits unregistered combinations. Load failures for registered data remain visible. Check slide titles and scales afterwards.
 
 ![Preview image grid](docs/help/images/preview.png)
 

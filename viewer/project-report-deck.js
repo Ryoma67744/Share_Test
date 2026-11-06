@@ -114,8 +114,7 @@
             {fontSize: 11, bold: true, color: '000000', align: 'center'});
     }
     function entryFor(molecule, section) {
-        return (molecule.sections || []).find(entry => string(entry.sectionId) === section.id) ||
-            { sectionId: section.id, name: section.name, image: null, max: null, mean: null, missingReason: 'No registered MSI layer' };
+        return (molecule.sections || []).find(entry => string(entry.sectionId) === section.id);
     }
     // Approximate East Asian width conservatively for compact matrix labels.
     function wrap(value, capacity) {
@@ -142,10 +141,14 @@
                 {x: 0.4, y: 3.0, w: 12.4, h: 0.7}, {fontSize: 22});
             return;
         }
-        const sectionPages = chunks(sections, 4), moleculeBlocks = chunks(report.molecules, 8);
+        const sectionPages = chunks(sections, 4);
         const borderColors = ['FF0000', '00D000', '00BFFF', 'FFAA00'];
         let page = 0;
         for (const sectionPage of sectionPages) {
+            // Keep section columns aligned for comparison, but omit molecule
+            // rows with no registration anywhere on this section page.
+            const moleculeBlocks = chunks(report.molecules.filter(molecule =>
+                sectionPage.some(section => entryFor(molecule, section))), 8);
             const maxBlocks = sectionPage.length <= 2 ? 3 : sectionPage.length === 3 ? 2 : 1;
             for (const blocks of chunks(moleculeBlocks, maxBlocks)) {
                 await checkpoint();
@@ -188,9 +191,12 @@
                         text(slide, shortLabel(subtitle, Math.max(18, labelWidth * 18), 2),
                             {x: x + 0.015, y: y + rowHeight * 0.5, w: labelWidth - 0.05, h: rowHeight * 0.45},
                             {fontSize: labelFont - 1, color: 'D9D9D9'});
-                        sectionPage.forEach((section, column) => picture(slide, entryFor(molecule, section),
-                            {x: x + labelWidth + column * imageWidth + 0.02, y,
-                                w: imageWidth - 0.04, h: rowHeight - 0.025}, {fontSize: 7}));
+                        sectionPage.forEach((section, column) => {
+                            const entry = entryFor(molecule, section);
+                            if (entry) picture(slide, entry,
+                                {x: x + labelWidth + column * imageWidth + 0.02, y,
+                                    w: imageWidth - 0.04, h: rowHeight - 0.025}, {fontSize: 7});
+                        });
                     });
                 });
                 text(slide, 'MSI matrix ' + (++page), {x: 0.1, y: 7.32, w: 4, h: 0.13}, {fontSize: 7, color: '999999'});
@@ -199,7 +205,9 @@
     }
     async function addDetails(pptx, report, sections, checkpoint) {
         for (const molecule of report.molecules) {
-            const pages = chunks(sections, 2);
+            // Registration determines inclusion, not image availability: keep
+            // load failures visible and retain valid all-zero measurements.
+            const pages = chunks(sections.filter(section => entryFor(molecule, section)), 2);
             for (let index = 0; index < pages.length; index++) {
                 await checkpoint();
                 const sectionPage = pages[index];
@@ -317,7 +325,8 @@
         pptx.title = report.projectName + ' — DESI MSI report';
         pptx.company = 'Share_Test'; pptx.lang = 'ja-JP';
         pptx.theme = { headFontFace: FONT, bodyFontFace: FONT, lang: 'ja-JP' };
-        const sections = sectionsFor(report);
+        const sections = sectionsFor(report).filter(section =>
+            report.molecules.some(molecule => entryFor(molecule, section)));
         await addMatrices(pptx, report, sections, checkpoint);
         await addDetails(pptx, report, sections, checkpoint);
         await addRatioRois(pptx, report, checkpoint);

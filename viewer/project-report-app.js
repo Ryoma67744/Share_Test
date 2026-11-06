@@ -407,8 +407,6 @@
                     for (const section of sections) {
                         const job = group.jobs.find(item => item.state.section === section);
                         if (job) entries.push(await loadJob(job));
-                        else entries.push({ sectionId: section.id, name: sectionName(section),
-                            stats: { mean: null, max: null, n: null }, missingReason: 'この分子・測定条件は切片に登録されていません。' });
                     }
                     if (displayStyle) {
                         const maximum = Math.max(0,...entries.filter(e=>e.displayAuto).map(e=>e.displayAuto.max));
