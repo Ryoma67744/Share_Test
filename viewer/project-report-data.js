@@ -5,7 +5,7 @@
   if (root) root.ProjectReportData = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function(MsiSmoothing) {
   'use strict';
-  const REPORT_REVISION = 'ppt-20261106-1';
+  const REPORT_REVISION = 'ppt-20261106-2';
 
   // Report colour clipping is a display operation. Quantitative table values
   // are supplied by the application's original-measurement statistics, never
@@ -390,6 +390,7 @@
               status:text(row.status),reason:text(row.reason),
               statistics:ratioStatistics(row.statistics)}))}:{}),
           image, missingReason: state.error, pixelPitch: entry.pixelPitch || null, displayWindow:entry.displayWindow || null,
+          registeredPixelPitch: metadataCopy(entry.registeredPixelPitch || null),
           otsuApplied:!!entry.keepGrid,
           archiveProvenance: metadataCopy(entry.archiveProvenance || null), qualityNote: text(entry.qualityNote),
           metadata: metadataCopy(entry.metadata || {})});

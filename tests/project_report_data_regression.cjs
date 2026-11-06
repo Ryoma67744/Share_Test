@@ -31,9 +31,11 @@ const sortedPercentile = (values, p) => {
     projectName: '登録済みプロジェクト', generatedAt: '2026-10-28T00:00:00Z', metadata: {machine: 'DESI'},
     sections: [{id: 'a', name: '切片A'}, {id: 'b', name: '切片B'}, {id: 'missing', name: '欠損'}],
     molecules: [{key: 'm', name: 'Glucose', subtitle: '181 > 89', sections: [
-      {sectionId: 'a', name: '切片A', raster: a, stats: duplicateStats},
+      {sectionId: 'a', name: '切片A', raster: a, stats: duplicateStats,
+        pixelPitch: {x: 50, y: 80}, registeredPixelPitch: {x: 25, y: 40}},
       {sectionId: 'b', name: '切片B', raster: b},
-      {sectionId: 'missing', name: '欠損', missingReason: '元データなし', stats: {max: null, mean: null, n: 0}}
+      {sectionId: 'missing', name: '欠損', missingReason: '元データなし', stats: {max: null, mean: null, n: 0},
+        registeredPixelPitch: {x: 30, y: 60}}
     ]}]
   };
   const result = await Data.prepare(source, nativeOptions);
@@ -47,6 +49,12 @@ const sortedPercentile = (values, p) => {
   assert.equal(molecule.sections[1].max, null);
   assert.equal(molecule.sections[2].image, null);
   assert.equal(molecule.sections[2].missingReason, '元データなし');
+  assert.deepEqual(molecule.sections[0].registeredPixelPitch, {x: 25, y: 40}, 'measurement labels survive independently of resampled display pitch');
+  assert.deepEqual(molecule.sections[0].pixelPitch, {x: 50, y: 80});
+  assert.equal(molecule.sections[1].registeredPixelPitch, null, 'unknown registration stays unknown');
+  assert.deepEqual(molecule.sections[2].registeredPixelPitch, {x: 30, y: 60}, 'load failure retains known registration');
+  molecule.sections[0].registeredPixelPitch.x = 999;
+  assert.deepEqual(source.molecules[0].sections[0].registeredPixelPitch, {x: 25, y: 40}, 'prepared metadata does not alias its source');
   assert.equal(result.intensityScale.basis, 'finite-measured-display-raster');
   assert.equal(result.intensityScale.statisticsBasis, 'original-measurement-rows');
   assert.equal(molecule.intensityScale.upperBasis, 'percentile');

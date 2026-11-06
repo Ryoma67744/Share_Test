@@ -5,7 +5,7 @@
     root.ProjectReportDeck = api;
 })(typeof globalThis === 'object' ? globalThis : this, function (root) {
     'use strict';
-    const REPORT_REVISION = 'ppt-20261106-1';
+    const REPORT_REVISION = 'ppt-20261106-2';
     const WIDTH = 13.333333, HEIGHT = 7.5;
     const FONT = 'Yu Gothic';
     // Same reference boostmap ramp as ProjectReportData. These are scientific
@@ -117,6 +117,18 @@
     function entryFor(molecule, section) {
         return (molecule.sections || []).find(entry => string(entry.sectionId) === section.id);
     }
+    function registeredPixelSize(entry) {
+        // Acquisition pitch is independent of the resampled display raster.
+        // Never fall back to entry.pixelPitch or infer it from image dimensions.
+        const pitch = entry && entry.registeredPixelPitch;
+        return pitch && Number.isFinite(pitch.x) && pitch.x > 0 && Number.isFinite(pitch.y) && pitch.y > 0
+            ? number(pitch.x) + ' × ' + number(pitch.y) + ' µm/px' : null;
+    }
+    function matrixPixelSize(molecules, section) {
+        const values = new Set(molecules.map(molecule => registeredPixelSize(entryFor(molecule, section))));
+        if (values.size > 1) return 'Pixel size: varies';
+        return values.values().next().value || 'Pixel size: —';
+    }
     function planMatrices(molecules, sections) {
         // Group by registration, never image availability or intensity. Every
         // row in a group owns an entry for every column, including read failures
@@ -175,7 +187,9 @@
             const blockWidth = (WIDTH - 0.16) / blocks.length;
             const hasReference = sectionPage.some(section => !!section.referenceImage);
             const maxRows = Math.max(...blocks.map(block => block.length));
-            const rowHeight = (6.64 - (hasReference ? 0.04 : 0)) / (maxRows + (hasReference ? 1 : 0));
+            const top = 0.86;
+            const rowHeight = (7.3 - top - (hasReference ? 0.04 : 0)) / (maxRows + (hasReference ? 1 : 0));
+            const pageMolecules = blocks.flat();
             blocks.forEach((molecules, block) => {
                 const x = 0.08 + block * blockWidth;
                 const labelWidth = blockWidth * (sectionPage.length <= 2 ? 0.39 : 0.3);
@@ -189,8 +203,9 @@
                         fill: {color: '000000'}, line: {color: borderColors[sections.indexOf(section) % borderColors.length], width: 2}});
                     text(slide, shortLabel(section.name, Math.max(12, imageWidth * 17), 2),
                         {x: left + 0.025, y: 0.31, w: imageWidth - 0.05, h: 0.29}, {fontSize: 9, bold: true, align: 'center'});
+                    text(slide, matrixPixelSize(pageMolecules, section),
+                        {x: left + 0.025, y: 0.65, w: imageWidth - 0.05, h: 0.17}, {fontSize: 8, align: 'center'});
                 });
-                const top = 0.66;
                 if (hasReference) {
                     text(slide, 'Optical / TIC', {x: x + 0.015, y: top, w: labelWidth - 0.05, h: rowHeight},
                         {fontSize: labelFont, bold: true});
@@ -258,11 +273,15 @@
                 sectionPage.forEach((section, i) => {
                     const x = 0.12 + i * cellW, entry = entryFor(molecule, section);
                     text(slide, section.name,
-                        {x: x + 0.05, y: 2.2, w: cellW - 0.1, h: style?0.25:0.35},
+                        {x: x + 0.05, y: 2.2, w: cellW - 0.1, h: 0.25},
                         {fontSize: 17, color: '000000', align: 'center'});
+                    text(slide, 'Pixel size: ' + (registeredPixelSize(entry) || '—'),
+                        {x: x + 0.05, y: 2.47, w: cellW - 0.1, h: 0.16},
+                        {fontSize: 9, color: '333333', align: 'center'});
                     if(style && entry.displayWindow)text(slide,'Range '+number(entry.displayWindow.min)+' – '+number(entry.displayWindow.max),
-                        {x:x+0.05,y:2.47,w:cellW-0.1,h:0.15},{fontSize:8,color:'333333',align:'center'});
-                    const cell = {x: x + 0.08, y: 2.62, w: cellW - 0.16, h: 4.0};
+                        {x:x+0.05,y:2.65,w:cellW-0.1,h:0.15},{fontSize:8,color:'333333',align:'center'});
+                    const imageTop = style && entry.displayWindow ? 2.84 : 2.66;
+                    const cell = {x: x + 0.08, y: imageTop, w: cellW - 0.16, h: 6.62 - imageTop};
                     const bounds = picture(slide, entry, cell, {light: true});
                     imageScaleBar(pptx, slide, entry, bounds, cell);
                     if(ratio && entry.metadata && entry.metadata.formula)
