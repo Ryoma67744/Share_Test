@@ -102,8 +102,7 @@ const tests = [
         const input = report.createAdapter(f.hooks);
         assert.equal(input.molecules.length, 3);
         const entries = await input.molecules[0].loadEntries();
-        assert.equal(entries.length, 2);
-        assert.ok(entries[1].missingReason, 'unregistered conditions remain visible as unavailable');
+        assert.deepEqual(entries.map(entry => entry.sectionId), ['left'], 'unregistered conditions do not create report entries');
         assert.notEqual(report.moleculeIdentity('MSI_DA', { base: 'Dopamine' }),
             report.moleculeIdentity('MSI_DA', { base: 'Dopamine', precursor: 154.1 }));
         assert.equal(report.moleculeIdentity('MSI_DA', { base: 'Dopamine', ce: '15' }),
@@ -128,7 +127,7 @@ const tests = [
         const measurements = await Promise.all(input.molecules.map(molecule => molecule.loadEntries()));
         const entries = measurements.find(items => items.filter(entry => entry.raster).length === 1);
         assert.ok(entries[0].raster);
-        assert.ok(entries[1].missingReason);
+        assert.equal(entries.length, 1, 'an absent replicate does not create an unavailable placeholder');
     }],
     ['missing local metadata uses the same registered fallback as the app', async () => {
         const f = fixture(); delete f.sections[0].msiSeries.MSI_DA.compoundMeta;
@@ -545,7 +544,7 @@ const tests = [
         for (const molecule of input.molecules) {
             const entries = await molecule.loadEntries();
             assert.equal(entries.filter(entry => entry.raster).length, 1);
-            assert.equal(entries.filter(entry => entry.missingReason).length, 1);
+            assert.equal(entries.length, 1, 'hidden conditions remain separate without unregistered-section placeholders');
             allEntries.push(entries);
         }
         assert.equal(new Set(input.molecules.map(molecule => molecule.key)).size, 3);

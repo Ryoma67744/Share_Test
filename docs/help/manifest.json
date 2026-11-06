@@ -928,8 +928,8 @@
             "en": "Create a PPT report"
           },
           "body": {
-            "ja": "PPTレポートを開き、出力する切片・分子・比と画像条件を確認して書き出します。出力後に各スライドの見出しと尺度を確認します。",
-            "en": "Open PPT report, review sections, molecules, ratios and image settings, then export. Check slide titles and scales afterwards."
+            "ja": "PPTレポートを開き、出力する切片・分子・比と画像条件を確認して書き出します。分子・測定条件が未登録の切片は、分子別ページの対象から外れます。一覧では切片の列を保ち、未登録の組み合わせの表示を省きます。登録済みデータの読み込み失敗は表示に残ります。出力後に各スライドの見出しと尺度を確認します。",
+            "en": "Open PPT report, review sections, molecules, ratios and image settings, then export. Molecule detail pages include only sections with that registered molecule and measurement condition. The overview keeps section columns aligned and omits unregistered combinations. Load failures for registered data remain visible. Check slide titles and scales afterwards."
           }
         }
       ],
