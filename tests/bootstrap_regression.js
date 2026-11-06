@@ -9,6 +9,8 @@ const check=(value,message)=>{assert.ok(value,message);checks++;};
 const equal=(value,expected,message)=>{assert.deepEqual(value,expected,message);checks++;};
 function tags(html,tag){return [...html.matchAll(new RegExp('<'+tag+'\\b([^>]*?)>','gi'))].map(match=>({attrs:match[1],offset:match.index}));}
 function attr(tag,name){const match=tag.attrs.match(new RegExp('\\b'+name+'\\s*=\\s*(["\'])(.*?)\\1','i'));return match&&match[2];}
+// Cache revisions belong to the URL, not the file name on disk.
+function assetPath(url){return url.split(/[?#]/,1)[0];}
 
 for(const file of ['index.html','mrm.html','viewer/index.html']){
   const html=fs.readFileSync(path.join(root,file),'utf8');
@@ -23,7 +25,7 @@ for(const file of ['index.html','mrm.html','viewer/index.html']){
   for(const tag of scripts){
     const src=attr(tag,'src');if(!src)continue;
     check(!/^(?:\/|[a-z][a-z0-9+.-]*:)/i.test(src),file+' external/root-absolute script '+src);
-    const resolved=path.resolve(root,path.dirname(file),src);
+    const resolved=path.resolve(root,path.dirname(file),assetPath(src));
     check(resolved.startsWith(root+path.sep),file+' script escapes root '+src);
     check(fs.existsSync(resolved),file+' missing script '+src);
     const webUrl=new URL(src,'https://example.github.io/Share_Test/'+file);
@@ -33,7 +35,7 @@ for(const file of ['index.html','mrm.html','viewer/index.html']){
     if(attr(tag,'rel')!=='stylesheet')continue;
     const href=attr(tag,'href');check(!!href,file+' empty stylesheet');
     check(!/^(?:\/|[a-z][a-z0-9+.-]*:)/i.test(href),file+' non-relative stylesheet');
-    check(fs.existsSync(path.resolve(root,path.dirname(file),href)),file+' missing stylesheet');
+    check(fs.existsSync(path.resolve(root,path.dirname(file),assetPath(href))),file+' missing stylesheet');
   }
   check(!/window\.(?:SUPABASE_URL|SUPABASE_ANON_KEY)\s*=/.test(html),file+' must not override shared cloud globals');
   check(!/\/offline\/config\.js/.test(html),file+' must use canonical runtime config');
@@ -59,7 +61,7 @@ for(const base of ['http://127.0.0.1:8765/','https://example.github.io/Share_Tes
     const directory=['projectReportData','projectReportDeck'].includes(name)?'viewer/':'vendor/';
     const resolved=new URL(value,sandbox.location);
     check(resolved.href.startsWith(base+directory),'lazy asset escapes app base: '+name);
-    check(fs.existsSync(path.resolve(root,'viewer',value)),'missing lazy asset: '+name);
+    check(fs.existsSync(path.resolve(root,'viewer',assetPath(value))),'missing lazy asset: '+name);
   }
 }
 console.log('Canonical three-page bootstrap regression: PASS ('+checks+' checks)');

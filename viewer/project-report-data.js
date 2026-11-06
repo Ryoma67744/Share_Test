@@ -5,6 +5,7 @@
   if (root) root.ProjectReportData = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function(MsiSmoothing) {
   'use strict';
+  const REPORT_REVISION = 'ppt-20261106-1';
 
   // Report colour clipping is a display operation. Quantitative table values
   // are supplied by the application's original-measurement statistics, never
@@ -413,6 +414,6 @@
     return result;
   }
 
-  return Object.freeze({prepare, render, renderReference, geometry, percentile, statistics, colorAt,
+  return Object.freeze({REPORT_REVISION, prepare, render, renderReference, geometry, percentile, statistics, colorAt,
     validateRaster, COLOR_STOPS, MAX_SAMPLES, MAX_IMAGE_DIMENSION, TARGET_IMAGE_DIMENSION, PERCENTILE});
 });

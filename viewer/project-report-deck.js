@@ -5,6 +5,7 @@
     root.ProjectReportDeck = api;
 })(typeof globalThis === 'object' ? globalThis : this, function (root) {
     'use strict';
+    const REPORT_REVISION = 'ppt-20261106-1';
     const WIDTH = 13.333333, HEIGHT = 7.5;
     const FONT = 'Yu Gothic';
     // Same reference boostmap ramp as ProjectReportData. These are scientific
@@ -116,6 +117,31 @@
     function entryFor(molecule, section) {
         return (molecule.sections || []).find(entry => string(entry.sectionId) === section.id);
     }
+    function planMatrices(molecules, sections) {
+        // Group by registration, never image availability or intensity. Every
+        // row in a group owns an entry for every column, including read failures
+        // and valid all-zero measurements. Ratios retain their own diagnostics.
+        const groups = new Map();
+        for (const molecule of molecules) {
+            const registered = new Set((molecule.sections || []).map(entry => string(entry.sectionId)));
+            const included = sections.filter(section => registered.has(section.id));
+            if (!included.length) continue;
+            const kind = molecule.kind === 'ratio' ? 'ratio' : 'msi';
+            const key = JSON.stringify([kind, included.map(section => section.id)]);
+            if (!groups.has(key)) groups.set(key, {kind, sections: included, molecules: []});
+            groups.get(key).molecules.push(molecule);
+        }
+        const pages = [];
+        for (const group of groups.values()) {
+            for (const sectionPage of chunks(group.sections, 4)) {
+                const maxBlocks = sectionPage.length <= 2 ? 3 : sectionPage.length === 3 ? 2 : 1;
+                for (const blocks of chunks(chunks(group.molecules, 8), maxBlocks)) {
+                    pages.push({kind: group.kind, sections: sectionPage, blocks});
+                }
+            }
+        }
+        return pages;
+    }
     // Approximate East Asian width conservatively for compact matrix labels.
     function wrap(value, capacity) {
         const lines = []; let line = '', width = 0;
@@ -141,66 +167,58 @@
                 {x: 0.4, y: 3.0, w: 12.4, h: 0.7}, {fontSize: 22});
             return;
         }
-        const sectionPages = chunks(sections, 4);
         const borderColors = ['FF0000', '00D000', '00BFFF', 'FFAA00'];
         let page = 0;
-        for (const sectionPage of sectionPages) {
-            // Keep section columns aligned for comparison, but omit molecule
-            // rows with no registration anywhere on this section page.
-            const moleculeBlocks = chunks(report.molecules.filter(molecule =>
-                sectionPage.some(section => entryFor(molecule, section))), 8);
-            const maxBlocks = sectionPage.length <= 2 ? 3 : sectionPage.length === 3 ? 2 : 1;
-            for (const blocks of chunks(moleculeBlocks, maxBlocks)) {
-                await checkpoint();
-                const slide = pptx.addSlide(); slide.background = {color: '000000'};
-                const blockWidth = (WIDTH - 0.16) / blocks.length;
-                const hasReference = sectionPage.some(section => !!section.referenceImage);
-                const maxRows = Math.max(...blocks.map(block => block.length));
-                const rowHeight = (6.64 - (hasReference ? 0.04 : 0)) / (maxRows + (hasReference ? 1 : 0));
-                blocks.forEach((molecules, block) => {
-                    const x = 0.08 + block * blockWidth;
-                    const labelWidth = blockWidth * (sectionPage.length <= 2 ? 0.39 : 0.3);
-                    const imageWidth = (blockWidth - labelWidth - 0.08) / sectionPage.length;
-                    const labelFont = blocks.length === 3 ? 9 : blocks.length === 2 ? 10 : 12;
-                    text(slide, report.projectName, {x: x + labelWidth, y: 0.05,
-                        w: blockWidth - labelWidth - 0.08, h: 0.22}, {fontSize: 10, bold: true, align: 'center'});
+        for (const {sections: sectionPage, blocks} of planMatrices(report.molecules, sections)) {
+            await checkpoint();
+            const slide = pptx.addSlide(); slide.background = {color: '000000'};
+            const blockWidth = (WIDTH - 0.16) / blocks.length;
+            const hasReference = sectionPage.some(section => !!section.referenceImage);
+            const maxRows = Math.max(...blocks.map(block => block.length));
+            const rowHeight = (6.64 - (hasReference ? 0.04 : 0)) / (maxRows + (hasReference ? 1 : 0));
+            blocks.forEach((molecules, block) => {
+                const x = 0.08 + block * blockWidth;
+                const labelWidth = blockWidth * (sectionPage.length <= 2 ? 0.39 : 0.3);
+                const imageWidth = (blockWidth - labelWidth - 0.08) / sectionPage.length;
+                const labelFont = blocks.length === 3 ? 9 : blocks.length === 2 ? 10 : 12;
+                text(slide, report.projectName, {x: x + labelWidth, y: 0.05,
+                    w: blockWidth - labelWidth - 0.08, h: 0.22}, {fontSize: 10, bold: true, align: 'center'});
+                sectionPage.forEach((section, column) => {
+                    const left = x + labelWidth + column * imageWidth;
+                    slide.addShape(pptx.ShapeType.rect, {x: left, y: 0.3, w: imageWidth, h: 0.31,
+                        fill: {color: '000000'}, line: {color: borderColors[sections.indexOf(section) % borderColors.length], width: 2}});
+                    text(slide, shortLabel(section.name, Math.max(12, imageWidth * 17), 2),
+                        {x: left + 0.025, y: 0.31, w: imageWidth - 0.05, h: 0.29}, {fontSize: 9, bold: true, align: 'center'});
+                });
+                const top = 0.66;
+                if (hasReference) {
+                    text(slide, 'Optical / TIC', {x: x + 0.015, y: top, w: labelWidth - 0.05, h: rowHeight},
+                        {fontSize: labelFont, bold: true});
                     sectionPage.forEach((section, column) => {
-                        const left = x + labelWidth + column * imageWidth;
-                        slide.addShape(pptx.ShapeType.rect, {x: left, y: 0.3, w: imageWidth, h: 0.31,
-                            fill: {color: '000000'}, line: {color: borderColors[sections.indexOf(section) % borderColors.length], width: 2}});
-                        text(slide, shortLabel(section.name, Math.max(12, imageWidth * 17), 2),
-                            {x: left + 0.025, y: 0.31, w: imageWidth - 0.05, h: 0.29}, {fontSize: 9, bold: true, align: 'center'});
+                        if (!section.referenceImage) return;
+                        const box = {x: x + labelWidth + column * imageWidth + 0.02, y: top,
+                            w: imageWidth - 0.04, h: rowHeight - 0.03};
+                        picture(slide, {image: section.referenceImage, name: section.referenceLabel || 'Optical / TIC'}, box);
                     });
-                    const top = 0.66;
-                    if (hasReference) {
-                        text(slide, 'Optical / TIC', {x: x + 0.015, y: top, w: labelWidth - 0.05, h: rowHeight},
-                            {fontSize: labelFont, bold: true});
-                        sectionPage.forEach((section, column) => {
-                            if (!section.referenceImage) return;
-                            const box = {x: x + labelWidth + column * imageWidth + 0.02, y: top,
-                                w: imageWidth - 0.04, h: rowHeight - 0.03};
-                            picture(slide, {image: section.referenceImage, name: section.referenceLabel || 'Optical / TIC'}, box);
-                        });
-                    }
-                    molecules.forEach((molecule, row) => {
-                        const y = top + (row + (hasReference ? 1 : 0)) * rowHeight;
-                        const subtitle = string(molecule.subtitle).split(/\s+\|\s+/)[0];
-                        text(slide, shortLabel(molecule.name || molecule.key, Math.max(18, labelWidth * 17), 2),
-                            {x: x + 0.015, y: y + 0.02, w: labelWidth - 0.05, h: rowHeight * 0.48},
-                            {fontSize: labelFont, bold: true});
-                        text(slide, shortLabel(subtitle, Math.max(18, labelWidth * 18), 2),
-                            {x: x + 0.015, y: y + rowHeight * 0.5, w: labelWidth - 0.05, h: rowHeight * 0.45},
-                            {fontSize: labelFont - 1, color: 'D9D9D9'});
-                        sectionPage.forEach((section, column) => {
-                            const entry = entryFor(molecule, section);
-                            if (entry) picture(slide, entry,
-                                {x: x + labelWidth + column * imageWidth + 0.02, y,
-                                    w: imageWidth - 0.04, h: rowHeight - 0.025}, {fontSize: 7});
-                        });
+                }
+                molecules.forEach((molecule, row) => {
+                    const y = top + (row + (hasReference ? 1 : 0)) * rowHeight;
+                    const subtitle = string(molecule.subtitle).split(/\s+\|\s+/)[0];
+                    text(slide, shortLabel(molecule.name || molecule.key, Math.max(18, labelWidth * 17), 2),
+                        {x: x + 0.015, y: y + 0.02, w: labelWidth - 0.05, h: rowHeight * 0.48},
+                        {fontSize: labelFont, bold: true});
+                    text(slide, shortLabel(subtitle, Math.max(18, labelWidth * 18), 2),
+                        {x: x + 0.015, y: y + rowHeight * 0.5, w: labelWidth - 0.05, h: rowHeight * 0.45},
+                        {fontSize: labelFont - 1, color: 'D9D9D9'});
+                    sectionPage.forEach((section, column) => {
+                        const entry = entryFor(molecule, section);
+                        if (entry) picture(slide, entry,
+                            {x: x + labelWidth + column * imageWidth + 0.02, y,
+                                w: imageWidth - 0.04, h: rowHeight - 0.025}, {fontSize: 7});
                     });
                 });
-                text(slide, 'MSI matrix ' + (++page), {x: 0.1, y: 7.32, w: 4, h: 0.13}, {fontSize: 7, color: '999999'});
-            }
+            });
+            text(slide, 'MSI matrix ' + (++page), {x: 0.1, y: 7.32, w: 4, h: 0.13}, {fontSize: 7, color: '999999'});
         }
     }
     async function addDetails(pptx, report, sections, checkpoint) {
@@ -335,5 +353,5 @@
         assertCurrent();
         return output;
     }
-    return Object.freeze({ create, COLOR_STOPS: Object.freeze(COLOR_STOPS) });
+    return Object.freeze({ REPORT_REVISION, create, planMatrices, COLOR_STOPS: Object.freeze(COLOR_STOPS) });
 });
