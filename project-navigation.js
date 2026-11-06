@@ -28,14 +28,24 @@
             }
             return {key:keys[0], value:target[keys[0]]};
         }
-        function masterUrl(target) {
+        function refreshOption(key, options) {
+            if (options === undefined) return false;
+            if (!options || typeof options !== 'object' || Array.isArray(options)
+                || Object.keys(options).some(name => name !== 'refreshShare')
+                || ('refreshShare' in options && typeof options.refreshShare !== 'boolean')
+                || (options.refreshShare && key !== 'projectId')) throw new Error('Invalid project navigation options');
+            return options.refreshShare === true;
+        }
+        function masterUrl(target, options) {
             const {key,value} = targetValue(target), url = new URL('viewer/index.html', appBase());
             url.searchParams.set(key === 'projectId' ? 'project' : 'import', value);
+            if (refreshOption(key, options)) url.searchParams.set('refresh', 'share');
             return url.href;
         }
-        function masterLoginUrl(target) {
+        function masterLoginUrl(target, options) {
             const {key,value} = targetValue(target), url = new URL('index.html', appBase());
             url.searchParams.set(key === 'projectId' ? 'openProject' : 'importProject', value);
+            if (refreshOption(key, options)) url.searchParams.set('refresh', 'share');
             return url.href;
         }
         function masterLoginUrlFromViewer(href) {
@@ -45,7 +55,9 @@
                 if (url.origin !== base.origin || !['viewer/','viewer/index.html'].some(p => url.pathname === new URL(p, base).pathname)) return fallback;
                 const projects = url.searchParams.getAll('project'), imports = url.searchParams.getAll('import');
                 if (projects.length + imports.length !== 1) return fallback;
-                return masterLoginUrl(projects.length ? {projectId:projects[0]} : {importSlug:imports[0]});
+                const refresh = url.searchParams.getAll('refresh');
+                if (refresh.length > 1 || (refresh.length && (refresh[0] !== 'share' || !projects.length))) return fallback;
+                return masterLoginUrl(projects.length ? {projectId:projects[0]} : {importSlug:imports[0]}, {refreshShare:refresh.length === 1});
             } catch (_) { return fallback; }
         }
         function shareUrl(slug) {
@@ -71,10 +83,10 @@
             if (typeof win.showToast === 'function') win.showToast(message, 7000);
             else if (typeof win.alert === 'function') win.alert(message);
         }
-        function openMaster(target) {
+        function openMaster(target, options) {
             let child = null, opened = false;
             try {
-                const destination = masterUrl(target);
+                const destination = masterUrl(target, options);
                 const offline = win.DESI_OFFLINE === true;
                 const auth = offline ? null : masterAuth();
                 // Open only a new, empty, same-origin context. No application
@@ -90,7 +102,7 @@
                 if (auth) for (const [key,value] of Object.entries(auth)) child.sessionStorage.setItem(key, value);
                 child.opener = null;
                 if (child.opener !== null) throw new Error('Could not detach the new tab');
-                child.location.replace(offline || auth ? destination : masterLoginUrl(target));
+                child.location.replace(offline || auth ? destination : masterLoginUrl(target, options));
                 return true;
             } catch (_) {
                 if (opened) { try { child.close(); } catch (_) {} }
@@ -103,10 +115,13 @@
                 const base = appBase(), current = new URL(win.location.href);
                 if (current.origin !== base.origin || ![base.pathname,new URL('index.html',base).pathname].includes(current.pathname)) return false;
                 const entries = [...current.searchParams.entries()];
-                if (entries.length !== 1 || !['openProject','importProject'].includes(entries[0][0])) return false;
-                const [key,value] = entries[0];
+                const targets = entries.filter(([key]) => key === 'openProject' || key === 'importProject');
+                const refresh = current.searchParams.getAll('refresh');
+                if (targets.length !== 1 || entries.length !== 1 + refresh.length || refresh.length > 1
+                    || (refresh.length && (refresh[0] !== 'share' || targets[0][0] !== 'openProject'))) return false;
+                const [key,value] = targets[0];
                 const target = key === 'openProject' ? {projectId:value} : {importSlug:value};
-                const destination = masterUrl(target);
+                const destination = masterUrl(target, {refreshShare:refresh.length === 1});
                 if (win.DESI_OFFLINE !== true && !masterAuth()) return false;
                 win.location.replace(destination);
                 return true;

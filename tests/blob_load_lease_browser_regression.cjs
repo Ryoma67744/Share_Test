@@ -4,10 +4,11 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),http=require('n
 const {chromium}=require('playwright');
 const root=path.resolve(__dirname,'..'),html=fs.readFileSync(path.join(root,'viewer/index.html'),'utf8').replace(/\r\n/g,'\n');
 const moduleCode=fs.readFileSync(path.join(root,'project-store-safety.js'),'utf8');
+const refreshCode=fs.readFileSync(path.join(root,'viewer/share-refresh.js'),'utf8');
 const start=html.indexOf('const ProjectStorage = (() => {'),wrapper=html.slice(start,html.indexOf('\n})();',start)+6);
 function method(name){const at=html.indexOf('    async '+name+'(');assert.ok(at>=0,name);return html.slice(at,html.indexOf('\n    },',at)+6);}
 function helper(name){let at=html.indexOf('function '+name+'(');assert.ok(at>=0,name);if(html.slice(at-6,at)==='async ')at-=6;return html.slice(at,html.indexOf('\n}',at)+2);}
-const harness=`<!doctype html><meta charset="utf-8"><title>Cloud load lease fixture</title><script src="/safety.js"></script><script>
+const harness=`<!doctype html><meta charset="utf-8"><title>Cloud load lease fixture</title><script src="/safety.js"></script><script src="/share-refresh.js"></script><script>
 const uid=p=>p+'_'+crypto.randomUUID(),nowIso=()=>new Date().toISOString();
 ${wrapper}
 window.storage=ProjectStorage;
@@ -33,7 +34,7 @@ const originalPut=storage.putBlob;storage.putBlob=async(...args)=>{const result=
 window.loadShared=async()=>{window.shared=await app._loadSharedProject({slug:'fixture',token:'synthetic-read-token'});return [...Object.values(shared.sections[0].images),...Object.values(shared.sections[0].msiSeries)].map(x=>x.blobId);};
 </script>`;
 async function main(){
- const server=http.createServer((req,res)=>{const url=new URL(req.url,'http://fixture');if(url.pathname==='/safety.js'){res.setHeader('Content-Type','text/javascript');res.end(moduleCode);}else if(url.pathname.startsWith('/fixture/')){res.setHeader('Content-Type','text/plain');res.end('original '+url.pathname);}else if(url.pathname==='/away'){res.end('<!doctype html><title>Away</title>');}else{res.setHeader('Content-Type','text/html; charset=utf-8');res.end(harness);}});
+ const server=http.createServer((req,res)=>{const url=new URL(req.url,'http://fixture');if(url.pathname==='/safety.js'||url.pathname==='/share-refresh.js'){res.setHeader('Content-Type','text/javascript');res.end(url.pathname==='/safety.js'?moduleCode:refreshCode);}else if(url.pathname.startsWith('/fixture/')){res.setHeader('Content-Type','text/plain');res.end('original '+url.pathname);}else if(url.pathname==='/away'){res.end('<!doctype html><title>Away</title>');}else{res.setHeader('Content-Type','text/html; charset=utf-8');res.end(harness);}});
  await new Promise(r=>server.listen(0,'127.0.0.1',r));const origin='http://127.0.0.1:'+server.address().port;let browser;
  try{
   // Full Chromium's headless mode reports renderer crashes reliably on Windows;

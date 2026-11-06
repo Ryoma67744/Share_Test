@@ -91,6 +91,7 @@
       </div>
       <div id="storage-description" class="text-xs text-gray-500">ローカル (このブラウザ) と、サーバ (Supabase) の両方から一覧表示します</div>
     </div>
+    <p id="sharing-description" class="text-xs text-gray-600 mt-2">データはこのブラウザに保存され、同じ Google アカウントでも他のPCへ自動同期されません。別のPCで使うには公開し、受け取るPCで共有版を取り込んでください。一覧取得だけではローカルの内容は更新されません。</p>
     <div class="flex items-center gap-2 flex-wrap mt-3">
       <input id="proj-search" type="search" placeholder="プロジェクトを検索 (名前・装置・サンプル種・メモ・slug)"
              class="flex-1 min-w-[220px] text-sm border border-gray-300 rounded px-3 py-1.5" />
@@ -1672,9 +1673,12 @@ function rowHtml(r) {
     const gk = memo.googleKeep || '';
     const stypes = Array.isArray(memo.sampleTypes) ? memo.sampleTypes : [];
     const url = (r.local && r.local.shareInfo && r.local.shareInfo.url) || '';
+    const canCheckShare = window.DESI_OFFLINE !== true && !!(r.local && r.local.shareInfo && r.local.shareInfo.slug);
     const badge = r.kind === 'server-only'
         ? '<span class="badge server">Server only</span>'
-        : (r.kind === 'local+server' ? '<span class="badge both">Local + Server</span>' : '<span class="badge local">Local</span>');
+        : (r.kind === 'local+server' ? '<span class="badge both">Local + Server</span>'
+            : canCheckShare ? '<span class="badge local">このPC／共有URLあり</span>'
+            : '<span class="badge local">' + (window.DESI_OFFLINE === true ? 'このPCのみ' : 'このPCのみ／未公開') + '</span>');
     // ローカル記録に切片が 1 つも無い = 開いても「レイヤーがありません」にしか
     // ならない。作っただけのプロジェクトを「データが消えた」と誤解しないよう、
     // 一覧の時点で分かるようにする。
@@ -1689,10 +1693,11 @@ function rowHtml(r) {
               <div class="font-semibold truncate">${safe(name)}</div>
               ${badge}${emptyBadge}<span class="text-xs text-gray-500" title="Browser-local copy ID">${safe(localId)}</span>
             </div>
-            <div class="flex gap-2">
+            <div class="flex gap-2 flex-wrap">
               ${r.local
                   ? '<button type="button" class="btn primary" data-action="open-local" title="新しいタブで開きます">Open</button>'
                   : '<button type="button" class="btn primary" data-action="open-server" title="サーバから取り込み、新しいタブの master mode で開きます (master password 要)">Open (master)</button>'}
+              ${canCheckShare ? '<button type="button" class="btn" data-action="refresh-share" title="新しいタブで共有版の更新を確認します。ローカルの編集は保持します">共有の最新版を確認</button>' : ''}
               ${(!r.local && slug) ? '<a class="btn" data-action="open-share" href="' + safe(ProjectNavigation.shareUrl(slug)) + '" target="_blank" rel="noopener" title="閲覧専用 share view を新しいタブで開きます">Share view</a>' : ''}
               ${window.DESI_OFFLINE === true ? '' : (url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : ''))}
               ${r.local ? '<button type="button" class="btn danger" data-action="delete-local">Delete</button>' : ''}
@@ -1926,6 +1931,10 @@ async function renderList(options = {}) {
         click('open-local', () => {
             if (!localId) return;
             ProjectNavigation.openMaster({projectId:localId});
+        });
+        click('refresh-share', () => {
+            if (!localId || !slug || window.DESI_OFFLINE === true) return;
+            ProjectNavigation.openMaster({projectId:localId}, {refreshShare:true});
         });
         click('open-server', () => {
             if (!slug) return;
@@ -2230,6 +2239,7 @@ async function init() {
     if (window.DESI_OFFLINE === true) {
         document.getElementById('btn-refresh-server').hidden = true;
         document.getElementById('btn-change-master-pw').hidden = true;
+        document.getElementById('sharing-description').hidden = true;
         document.getElementById('storage-description').textContent = 'オフライン版: この PC の同じブラウザーに保存します。各プロジェクトの Export ZIP と MRM バックアップを定期的に保存してください。';
         const note = document.createElement('p');
         note.className = 'text-xs text-gray-500 mt-2';

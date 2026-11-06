@@ -760,7 +760,7 @@ Choose browser saving, file backup or server publication according to your needs
 
 > Shared viewers do not publish the author's source project. Use the available exports and personal settings.
 
-1. **Check Memo and save status** — Record conditions and observations in Memo. Check save and conflict status before closing the page.
+1. **Check Memo and save status** — Record conditions and observations in Memo and check storage status. このPCのみ・未公開 means browser-only, unpublished data; このPCに保存・公開待ち means saved on this PC and awaiting publication. Review any save error before closing the page.
 2. **Back up with Export ZIP** — Use Export ZIP to save sources, ROIs, microscopy images and ratio definitions. ZIP export is independent of publication.
 3. **Restore with Import** — Import the saved ZIP, review its contents and confirm restoration. A compatible app on another computer can restore it.
 4. **Review and publish** — Authors use Publish to share after Preview. Verify completion and Sync status, then share the URL and required password.
@@ -775,7 +775,11 @@ Saving, ZIP and publication do not replace source signals with display colours. 
 
 Local saving uses this browser; Export ZIP creates a file you save; Publish updates shared server content. These are separate destinations.
 
-Review Auto-publish on save and Sync status. Check the consequences before republishing, and monitor large uploads until completion.
+✓ 公開版 vN を保存済み identifies the publication revision saved as this PC's baseline. It does not guarantee that this copy matches the latest changes published from another PC. Use 共有の最新版を確認 to retrieve shared content.
+
+Auto-publish sends local edits from a published project to its share. It stops when the shared revision conflicts or the baseline is unknown. Local saving alone does not resume publication; explicitly compare and republish. Review the effect on the share and monitor large uploads until completion.
+
+Local data remains separate on each PC and browser, even with the same Google account. On another PC, import through the server list with Open (master), or open the shared URL for viewing. Transfer unpublished work with Export ZIP / Import.
 
 Shared display settings and personal ratio changes do not save back to the published source. Shared ROI, alignment and overlay saves follow their permissions and locks. Shared-view Memo edits are temporary and discarded on reload.
 

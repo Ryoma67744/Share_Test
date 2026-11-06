@@ -46,6 +46,17 @@ function fixture(options={}){
  assert.throws(()=>f.api.masterUrl({projectId:'\n'}));
  assert.throws(()=>f.api.shareUrl(''));assert.throws(()=>f.api.masterUrl({projectId:'p'.repeat(1025)}));
 }
+{
+ const f=fixture(),before=[...f.records];assert.equal(f.api.openMaster({projectId:'dirty-local'},{refreshShare:true}),true);
+ assert.equal(f.navigated[0],base+'viewer/index.html?project=dirty-local&refresh=share');
+ assert.deepEqual([...f.records],before);assert.equal(f.child().opener,null);
+ assert.deepEqual([...f.child().copied.keys()],['desi:masterUnlocked','desi:masterPw']);
+ assert.equal(f.api.masterUrl({projectId:'p'},{refreshShare:false}),base+'viewer/index.html?project=p');
+ assert.throws(()=>f.api.masterUrl({importSlug:'s'},{refreshShare:true}));
+ for(const options of [{refreshShare:'share'},{next:'https://other.invalid'},null,[]])assert.throws(()=>f.api.masterUrl({projectId:'p'},options));
+ const loggedOut=fixture({records:{}});assert.equal(loggedOut.api.openMaster({projectId:'p'},{refreshShare:true}),true);
+ assert.equal(loggedOut.navigated[0],base+'index.html?openProject=p&refresh=share');assert.equal(loggedOut.child().copied.size,0);
+}
 for(const records of [
  {}, {'desi:masterUnlocked':'not-json','desi:masterPw':JSON.stringify(password)},
  {'desi:masterUnlocked':JSON.stringify({expiresAt:now-1000}),'desi:masterPw':JSON.stringify(password)},
@@ -71,8 +82,9 @@ for(const failure of ['blocked','clearFailure','seedFailure','detachFailure','na
 {
  const f=fixture();
  assert.equal(f.api.masterLoginUrlFromViewer(base+'viewer/index.html?project=p'),base+'index.html?openProject=p');
+ assert.equal(f.api.masterLoginUrlFromViewer(base+'viewer/index.html?project=p&refresh=share'),base+'index.html?openProject=p&refresh=share');
  assert.equal(f.api.masterLoginUrlFromViewer(base+'viewer/?import=s'),base+'index.html?importProject=s');
- for(const href of ['https://other.invalid/viewer/?project=p',base+'wrong?project=p',base+'viewer/?project=p&import=s',base+'viewer/?project=p&project=q','javascript:alert(1)']){
+ for(const href of ['https://other.invalid/viewer/?project=p',base+'wrong?project=p',base+'viewer/?project=p&import=s',base+'viewer/?project=p&project=q',base+'viewer/?project=p&refresh=share&refresh=share',base+'viewer/?project=p&refresh=https://other.invalid',base+'viewer/?import=s&refresh=share','javascript:alert(1)']){
   assert.equal(f.api.masterLoginUrlFromViewer(href),base+'index.html');
  }
 }
@@ -80,9 +92,14 @@ for(const [query,key,value]of [['openProject=p','project','p'],['importProject=s
  const f=fixture({href:base+'index.html?'+query});assert.equal(f.api.resumeMasterDestination(),true);
  assert.equal(f.navigated[0],base+'viewer/index.html?'+key+'='+value);assert.equal(f.events.length,0,'login resumes in the child, not another popup');
 }
-for(const href of [base+'?openProject=p&next=https://other.invalid',base+'?openProject=p&importProject=s',base+'?openProject=',base+'viewer/?openProject=p']){
+for(const query of ['openProject=p&refresh=share','refresh=share&openProject=p']){
+ const f=fixture({href:base+'index.html?'+query});assert.equal(f.api.resumeMasterDestination(),true);
+ assert.equal(f.navigated[0],base+'viewer/index.html?project=p&refresh=share');assert.equal(f.events.length,0);
+}
+for(const href of [base+'?openProject=p&next=https://other.invalid',base+'?openProject=p&importProject=s',base+'?openProject=',base+'viewer/?openProject=p',base+'?openProject=p&refresh=share&next=https://other.invalid',base+'?openProject=p&refresh=share&refresh=share',base+'?openProject=p&refresh=',base+'?importProject=s&refresh=share',base+'?refresh=share']){
  const f=fixture({href});assert.equal(f.api.resumeMasterDestination(),false);assert.equal(f.navigated.length,0);
 }
 assert.equal(fixture({href:base+'?openProject=p',records:{}}).api.resumeMasterDestination(),false);
+assert.equal(fixture({href:base+'?openProject=p&refresh=share',records:{}}).api.resumeMasterDestination(),false);
 assert.equal(fixture({base:'https://other.invalid/'}).api.openMaster({projectId:'p'}),false);
 console.log('Project navigation regression: PASS (isolated auth, original expiry, safe destinations, popup/storage failures, login return)');

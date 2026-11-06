@@ -219,9 +219,10 @@ Shared viewer and administrator permissions differ. Help cannot enable editing o
 Create and organise projects, distinguish local and server copies, and check storage status.
 
 1. **Create a project** — Choose New project in Projects, enter a name and description, then open the Viewer.
-2. **Organise the list** — Create folders and move projects. Local / Server badges indicate browser data and published copies.
-3. **Open the required copy** — Use Open to edit local data. From the server list, open the shared URL or import a local copy for editing.
-4. **Back up before deleting** — Save an Export ZIP and read the deletion confirmation. Removing a local project and deleting server data are separate operations.
+2. **Organise the list** — Create folders and move projects. Local / Server badges distinguish storage locations. An unpublished project's save status reads このPCのみ・未公開 (This PC only, unpublished).
+3. **Open the required copy** — Use Open to edit local data. On another PC, first retrieve the server list and choose Open (master) to import the published content. For viewing, open the shared URL.
+4. **Check the shared version** — For a local project linked to a share, choose 共有の最新版を確認 (Check the latest shared version) and compare this PC's publication revision and section count with the server. Choose このプロジェクトに反映 (Apply to this project) or 別コピーで取得 (Get a separate copy). If local changes are unpublished or a publish result is unresolved, only the separate-copy option is available.
+5. **Back up before deleting** — Save an Export ZIP and read the deletion confirmation. Removing a local project and deleting server data are separate operations.
 
 ![Projects list with creation and MRM management controls](docs/help/images/projects.png)
 
@@ -234,6 +235,10 @@ Folders and names do not change measurements. Local copies on different computer
 When a storage conflict appears, review reload or recovery draft options before continuing. Automatic recovery drafts are optional.
 
 Export ZIP backups regularly to another location in case browser storage is cleared or a device fails.
+
+A successful application updates the same local project and retains its previous version as a separate Projects entry named サーバー版取り込み前 ... (Before server import). This backup is detached from the share and is created even when automatic recovery drafts are OFF.
+
+Application stops without replacing the existing project if a source or ROI cannot be retrieved, another tab changes the local record, or the server publication revision changes during retrieval. Signing in with the same Google account does not automatically synchronise local projects between PCs or browsers.
 
 ### Import sections and data
 
@@ -432,7 +437,7 @@ In supported sharing environments, overlays created by recipients are shared wit
 
 Choose browser saving, file backup or server publication according to your needs.
 
-1. **Check Memo and save status** — Record conditions and observations in Memo. Check save and conflict status before closing the page.
+1. **Check Memo and save status** — Record conditions and observations in Memo and check storage status. このPCのみ・未公開 means browser-only, unpublished data; このPCに保存・公開待ち means saved on this PC and awaiting publication. Review any save error before closing the page.
 2. **Back up with Export ZIP** — Use Export ZIP to save sources, ROIs, microscopy images and ratio definitions. ZIP export is independent of publication.
 3. **Restore with Import** — Import the saved ZIP, review its contents and confirm restoration. A compatible app on another computer can restore it.
 4. **Review and publish** — Authors use Publish to share after Preview. Verify completion and Sync status, then share the URL and required password.
@@ -447,7 +452,11 @@ Saving, ZIP and publication do not replace source signals with display colours. 
 
 Local saving uses this browser; Export ZIP creates a file you save; Publish updates shared server content. These are separate destinations.
 
-Review Auto-publish on save and Sync status. Check the consequences before republishing, and monitor large uploads until completion.
+✓ 公開版 vN を保存済み identifies the publication revision saved as this PC's baseline. It does not guarantee that this copy matches the latest changes published from another PC. Use 共有の最新版を確認 to retrieve shared content.
+
+Auto-publish sends local edits from a published project to its share. It stops when the shared revision conflicts or the baseline is unknown. Local saving alone does not resume publication; explicitly compare and republish. Review the effect on the share and monitor large uploads until completion.
+
+Local data remains separate on each PC and browser, even with the same Google account. On another PC, import through the server list with Open (master), or open the shared URL for viewing. Transfer unpublished work with Export ZIP / Import.
 
 Shared display settings and personal ratio changes do not save back to the published source. Shared ROI, alignment and overlay saves follow their permissions and locks. Shared-view Memo edits are temporary and discarded on reload.
 

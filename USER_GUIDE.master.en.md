@@ -657,10 +657,10 @@ Pressing `Publish`:
 2. Server issues a 1-hour **publish session token**
 3. All blobs (TIFF / xlsx / txt / parquet / .raw.zip) upload to Supabase Storage in parallel (concurrency 4) — the token is sent as a header and validated by RLS
    - Objects already present at the same path are HEAD-verified and not re-uploaded. **Even when the local blob is gone, a copy on Storage is enough to write the reference, so the published document never loses a layer.**
-   - If a layer's source is missing both locally and on Storage, the publish **asks before continuing** (an auto-publish aborts and explains itself on the sync indicator). `storage_paths` is replaced per section, so continuing silently would drop that layer for recipients.
+   - If a required original cannot be verified locally or on the server, publication **stops and identifies the missing source**. It does not update the share with incomplete sources.
 4. A progress modal shows live `X / N files (Y MB / Z MB)`
 5. Each file retries up to 3 times with exponential backoff
-6. `upsert_project_doc` is called with the master password to update the DB
+6. The confirmed publication revision is checked, and the document and completion receipt are saved together
 7. On success a Share URL modal opens with URL + viewer/admin passwords
 
 > Without the master password, a third party with only the anon key cannot publish or write to Storage. Authentication is enforced server-side via bcrypt in Supabase.
@@ -669,7 +669,9 @@ Pressing `Publish`:
 
 ### 11-1. Auto-publish on save
 
-Once a project has been published, every subsequent save (queueSave) automatically attempts to **re-publish in the background**. ROI / Memo / Align / rename changes flow to the server without you re-clicking `Publish to share`.
+After a project has been published with a known baseline revision, local saves attempt to **re-publish in the background**. This sends ROI, Memo, Align and name changes from this PC to the share. It does not automatically retrieve changes made on another PC.
+
+Automatic publication stops if the shared revision conflicts or the baseline is unknown. Local saving alone does not resume it; explicitly compare the versions and republish.
 
 - Master pw is cached in sessionStorage on the first publish — no re-prompt within the session.
 - Different tab / new session → next publish re-prompts (sync indicator turns `needs-master-pw`).
@@ -680,15 +682,28 @@ A small **sync badge** sits in the header. Its color and label show the current 
 
 | State | Label | Meaning |
 | --- | --- | --- |
-| `synced` (green) | Synced | All saved + matches server. |
-| `uploading` (blue) | Uploading… | Publish in flight (storage upload + RPC). Returns to `synced` on success. |
-| `local-saved` (gray) | Local saved | IDB updated but server not yet. Next save retries publish. |
-| `conflict` (red) | Conflict | Another device published in the meantime (`updated_at` mismatch). Click to resolve via manual Publish. |
-| `needs-master-pw` (purple) | Master pw needed | sessionStorage has no master pw — click to re-enter. |
-| `needs-share-pw` (purple) | Share password unset | An imported project does not inherit the viewer / admin passwords. Click to open `Publish to share` and set them once. |
-| `error` (red) | Error | Publish failed. Click for a detailed toast. |
+| `local-only` | このPCのみ・未公開 (This PC only, unpublished) | Saved in this browser; not published to a share. |
+| `synced` (green) | ✓ 公開版 vN を保存済み (Publication vN saved) | This PC's saved baseline revision. It does not guarantee agreement with the latest changes from another PC. |
+| `uploading` (blue) | ⬆ アップロード中 (Uploading) | Publication is in progress. The saved revision appears after completion. |
+| `local-saved` (gray) | 💾 このPCに保存・公開待ち (Saved here, awaiting publication) | Saved locally; changes have not yet reached the share. |
+| `conflict` (red) | ⚠ 公開版の比較が必要 (Compare publication versions) | The baseline is unknown or the share has changed. Click to compare. |
+| `needs-baseline` | 公開版が未確認 (Publication unverified) | This local copy has no confirmed publication revision. Check the shared version. |
+| `needs-master-pw` (purple) | 🔑 Master pw 期限切れ (Master password expired) | A valid master password is unavailable. Click to re-enter it. |
+| `needs-share-pw` (purple) | 🔑 共有パスワード未設定 (Share password unset) | Imports do not inherit viewer / admin passwords. Open `Publish to share` to set them. |
+| `no-server` | ⚠ サーバに接続できません (Cannot connect to server) | This PC's changes have not been published. Check connectivity before retrying. |
+| `error` (red) | ⚠ Sync 失敗 (Sync failed) | Publication failed. Review the reported reason. |
 
-- Closing the tab while sync isn't `synced` triggers the **beforeunload warning**.
+The publication badge does not continuously verify that the server has no newer changes. Use **共有の最新版を確認 (Check the latest shared version)** to retrieve content published from another PC.
+
+### 11-3. Apply a shared version to an existing project
+
+1. Open a local project linked to a share and choose **共有の最新版を確認**.
+2. Compare this PC's **publication revision and section count** with the server. Review added sections and sections absent from the share. Matching counts do not prove that all data is identical.
+3. **このプロジェクトに反映 (Apply to this project)** updates the same local project with the retrieved version. **別コピーで取得 (Get a separate copy)** imports it as another local project and preserves the current one.
+4. If local changes are unpublished or a publish result remains unresolved, only the separate-copy option is available. Wait for an active publication to finish before checking.
+5. A successful replacement always preserves the preceding version in Projects as **サーバー版取り込み前 ... (Before server import)**. This independent local backup is detached from the share and is created **even when automatic recovery drafts are OFF**.
+
+Application stops without replacing the existing project if an original or ROI cannot be retrieved, this PC or another tab changes the local content, or the server publication revision changes during retrieval. **中断 (Cancel)** also preserves the existing version. You do not need to delete it before the download finishes.
 
 ---
 
@@ -699,6 +714,14 @@ A small **sync badge** sits in the header. Its color and label show the current 
 - Only share the admin password with people you want to grant the admin view (full Method table)
 
 > The URL is also accessible later via `Share info` (post-publish) or `Copy URL` on the manager page.
+
+### Opening the project on another PC
+
+Local projects are independent on each PC and browser. Signing in with the same Google account does not automatically synchronise them.
+
+- To continue editing on a new PC, retrieve the server list and choose **Open (master)** to import published content. Use **Export ZIP / Import** to transfer unpublished work.
+- To view the project, open its shared URL and enter a password if requested.
+- If this PC already has a local copy, use **共有の最新版を確認** to compare and apply the shared version, or get a separate copy. Open in the local list does not itself retrieve the shared version.
 
 ---
 
@@ -952,9 +975,10 @@ Shared viewer and administrator permissions differ. Help cannot enable editing o
 Create and organise projects, distinguish local and server copies, and check storage status.
 
 1. **Create a project** — Choose New project in Projects, enter a name and description, then open the Viewer.
-2. **Organise the list** — Create folders and move projects. Local / Server badges indicate browser data and published copies.
-3. **Open the required copy** — Use Open to edit local data. From the server list, open the shared URL or import a local copy for editing.
-4. **Back up before deleting** — Save an Export ZIP and read the deletion confirmation. Removing a local project and deleting server data are separate operations.
+2. **Organise the list** — Create folders and move projects. Local / Server badges distinguish storage locations. An unpublished project's save status reads このPCのみ・未公開 (This PC only, unpublished).
+3. **Open the required copy** — Use Open to edit local data. On another PC, first retrieve the server list and choose Open (master) to import the published content. For viewing, open the shared URL.
+4. **Check the shared version** — For a local project linked to a share, choose 共有の最新版を確認 (Check the latest shared version) and compare this PC's publication revision and section count with the server. Choose このプロジェクトに反映 (Apply to this project) or 別コピーで取得 (Get a separate copy). If local changes are unpublished or a publish result is unresolved, only the separate-copy option is available.
+5. **Back up before deleting** — Save an Export ZIP and read the deletion confirmation. Removing a local project and deleting server data are separate operations.
 
 ![Projects list with creation and MRM management controls](docs/help/images/projects.png)
 
@@ -967,6 +991,10 @@ Folders and names do not change measurements. Local copies on different computer
 When a storage conflict appears, review reload or recovery draft options before continuing. Automatic recovery drafts are optional.
 
 Export ZIP backups regularly to another location in case browser storage is cleared or a device fails.
+
+A successful application updates the same local project and retains its previous version as a separate Projects entry named サーバー版取り込み前 ... (Before server import). This backup is detached from the share and is created even when automatic recovery drafts are OFF.
+
+Application stops without replacing the existing project if a source or ROI cannot be retrieved, another tab changes the local record, or the server publication revision changes during retrieval. Signing in with the same Google account does not automatically synchronise local projects between PCs or browsers.
 
 ### Import sections and data
 
@@ -1165,7 +1193,7 @@ In supported sharing environments, overlays created by recipients are shared wit
 
 Choose browser saving, file backup or server publication according to your needs.
 
-1. **Check Memo and save status** — Record conditions and observations in Memo. Check save and conflict status before closing the page.
+1. **Check Memo and save status** — Record conditions and observations in Memo and check storage status. このPCのみ・未公開 means browser-only, unpublished data; このPCに保存・公開待ち means saved on this PC and awaiting publication. Review any save error before closing the page.
 2. **Back up with Export ZIP** — Use Export ZIP to save sources, ROIs, microscopy images and ratio definitions. ZIP export is independent of publication.
 3. **Restore with Import** — Import the saved ZIP, review its contents and confirm restoration. A compatible app on another computer can restore it.
 4. **Review and publish** — Authors use Publish to share after Preview. Verify completion and Sync status, then share the URL and required password.
@@ -1180,7 +1208,11 @@ Saving, ZIP and publication do not replace source signals with display colours. 
 
 Local saving uses this browser; Export ZIP creates a file you save; Publish updates shared server content. These are separate destinations.
 
-Review Auto-publish on save and Sync status. Check the consequences before republishing, and monitor large uploads until completion.
+✓ 公開版 vN を保存済み identifies the publication revision saved as this PC's baseline. It does not guarantee that this copy matches the latest changes published from another PC. Use 共有の最新版を確認 to retrieve shared content.
+
+Auto-publish sends local edits from a published project to its share. It stops when the shared revision conflicts or the baseline is unknown. Local saving alone does not resume publication; explicitly compare and republish. Review the effect on the share and monitor large uploads until completion.
+
+Local data remains separate on each PC and browser, even with the same Google account. On another PC, import through the server list with Open (master), or open the shared URL for viewing. Transfer unpublished work with Export ZIP / Import.
 
 Shared display settings and personal ratio changes do not save back to the published source. Shared ROI, alignment and overlay saves follow their permissions and locks. Shared-view Memo edits are temporary and discarded on reload.
 

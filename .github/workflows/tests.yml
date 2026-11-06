@@ -93,6 +93,10 @@ jobs:
         run: node tests/help_browser_regression.cjs
       - name: Local persistence and recovery across browser tabs
         run: node tests/project_store_safety_browser_regression.cjs
+      - name: Atomic shared-version replacement and preserved local copies
+        run: node tests/project_server_replace_browser_regression.cjs
+      - name: Fetch latest shared sections into existing projects
+        run: node tests/share_refresh_browser_regression.cjs
       - name: New project tabs and isolated authentication
         run: node tests/project_navigation_browser_regression.cjs
       - name: Manager list refresh after returning from another tab

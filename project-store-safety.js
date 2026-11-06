@@ -301,6 +301,82 @@
                 return {applied: true, project: current, previousStorageRevision, storageRevision: current.storageRevision};
             });
         }
+        async function replaceProjectFromServer(id, downloadedProject, settings = {}) {
+            const assertCurrent=()=>{
+                if(settings.assertCurrent){
+                    const checked=settings.assertCurrent();
+                    if(checked&&typeof checked.then==='function')throw new Error('Replacement guard must be synchronous');
+                }
+            };
+            assertCurrent();
+            if (!id || !downloadedProject || downloadedProject.__summary || !Array.isArray(downloadedProject.sections)) {
+                throw new Error('サーバー版の完全なプロジェクトが必要です。');
+            }
+            // Freeze all caller-controlled inputs before waiting for an IDB transaction.
+            const record = clone(downloadedProject), expected = settings.expectedRevision;
+            const expectedServer = settings.expectedServerRevision;
+            const checkServer = Object.prototype.hasOwnProperty.call(settings, 'expectedServerRevision');
+            const handle = settings.lease || settings.blobLease;
+            const load = ownedLease(handle);
+            if (!Number.isSafeInteger(expected) || expected < 0) throw conflict('取り込み前の保存版を確認してください。', {projectId:id});
+            if (options.prepare) options.prepare(record);
+            const pending = project => !!(project.__publishPending || project.pendingPublish || project.shareInfo?.pendingPublish);
+            const incoming = record.shareInfo;
+            if (record.__importFailures || pending(record) || !incoming?.slug
+                || !Number.isSafeInteger(incoming.serverRevision) || incoming.serverRevision < 0
+                || (checkServer && (!Number.isSafeInteger(expectedServer) || expectedServer < 0 || incoming.serverRevision !== expectedServer))) {
+                throw new Error('サーバー版の取得が未完了か、公開版番号を確認できません。');
+            }
+            if (Array.isArray(record.rois)) record.rois = record.rois.filter(r => !(r && r._collab));
+            record.id = id;
+            load.closing = true;
+            let result;
+            try {
+                result = await run([...referenceStores,'project_index','blobs','preferences'], 'readwrite', async tx => {
+                    const projects = tx.objectStore('projects');
+                    const lease = await leaseRow(tx, handle);
+                    if (lease.purpose !== 'cloud-import') throw new Error('サーバー取り込み用の原本保持が必要です。');
+                    const current = await request(projects.get(id));
+                    const actual = current ? revision(current.storageRevision) : null;
+                    assertCurrent();
+                    if (!current || actual !== expected) throw conflict('取得中に別のタブで更新または削除されています。取り込み直してください。',
+                        {projectId:id,expectedRevision:expected,actualRevision:actual});
+                    if (pending(current)) throw conflict('未公開の変更または公開結果の確認中の処理があるため、サーバー版を反映できません。',
+                        {projectId:id,reason:'publish-pending'});
+                    const share = current.shareInfo;
+                    if (!share?.slug || share.slug !== incoming.slug
+                        || (Number.isSafeInteger(share.serverRevision) && incoming.serverRevision < share.serverRevision)) {
+                        throw conflict('共有先または公開版番号が変わっています。取り込み直してください。', {projectId:id,reason:'server-version-changed'});
+                    }
+                    for (const blobId of collectBlobIds(record)) {
+                        if (!await request(tx.objectStore('blobs').get(blobId))) throw new Error('取り込み原本がありません: ' + blobId);
+                    }
+                    assertCurrent();
+                    // This is an explicit, independently listed backup, regardless of
+                    // the optional automatic-recovery preference. Originals remain
+                    // referenced by it even after the replacement drops those layers.
+                    const backup = detach(clone(current)), stamp = now();
+                    do { backup.id = uid('proj'); } while (await request(projects.get(backup.id)));
+                    delete backup.pendingPublish;
+                    if (backup.meta) delete backup.meta.pendingPublish;
+                    backup.displayName = (backup.displayName || 'Project') + ' (サーバー版取り込み前 ' + stamp + ')';
+                    backup.storageRevision = 1; backup.createdAt = stamp; backup.updatedAt = stamp;
+                    assertCurrent();
+                    await request(projects.add(backup));
+                    await request(tx.objectStore('project_index').put(options.indexRowFor(backup)));
+                    record.storageRevision = actual + 1;
+                    record.createdAt = current.createdAt || record.createdAt || stamp;
+                    record.updatedAt = stamp;
+                    await saveRecord(tx, record);
+                    if (activeProjectId === id) await writeSession(tx, record, [], true);
+                    await removeLeaseRow(tx, lease, true);
+                    assertCurrent();
+                    return {project:record,backupProject:backup,previousStorageRevision:actual,storageRevision:record.storageRevision};
+                });
+            } catch (error) { load.closing = false; throw error; }
+            closeLease(load);
+            return result;
+        }
         async function recordPublishReceipt(id, receipt) {
             const nextRevision = receipt.serverRevision;
             const baseRevision = receipt.baseServerRevision;
@@ -498,7 +574,7 @@
         const putArchiveJob = job => run(['archive_jobs'], 'readwrite', tx => request(tx.objectStore('archive_jobs').put(clone(job))));
         const getArchiveJobs = () => run(['archive_jobs'], 'readonly', tx => request(tx.objectStore('archive_jobs').getAll()));
         const deleteArchiveJob = id => run(['archive_jobs'], 'readwrite', tx => request(tx.objectStore('archive_jobs').delete(id)));
-        return {getProject, releaseProject, putProject, patchProject, recordPublishReceipt, listRecoveries, restoreRecovery, discardRecovery,
+        return {getProject, releaseProject, putProject, patchProject, replaceProjectFromServer, recordPublishReceipt, listRecoveries, restoreRecovery, discardRecovery,
             getRecoveryEnabled,setRecoveryEnabled,
             deleteProject, putBlob, renameBlob, deleteBlob, pruneShareOrphans, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
             beginBlobLease,pinBlobLease,finishBlobLease,reclaimInactiveBlobLeases};
