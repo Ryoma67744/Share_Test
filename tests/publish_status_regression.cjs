@@ -23,12 +23,12 @@ function fixture(){
   document:{getElementById(id){if(!nodes.has(id))nodes.set(id,{style:{},dataset:{},classList:{add(){},remove(){}},setAttribute(){},removeAttribute(){}});return nodes.get(id);}},
   SupabaseClient:{configured:()=>true,unlockProjectMaster:async()=>({token:'synthetic-read'}),
    fetchProjectDoc:async()=>({publish_revision:1,sections:[],meta:{project_meta:{memo:{text:'original'}}}}),listRois:async()=>[]},
-  clearTimeout(){},_readCachedMasterPw:()=> 'synthetic',_saveCachedMasterPw(){},
+  ProjectStorage:{putProject:async()=>{}},clearTimeout(){},_readCachedMasterPw:()=> 'synthetic',_saveCachedMasterPw(){},
   showToast:message=>notices.push(message),alert:message=>notices.push(message),
   openPublishMetaModal:async()=>({slug:project.shareInfo.slug,isPublic:true}),openShareInfoModal:async()=>{},
   openModal:Object.assign(async()=> 'overwrite',{_card:{querySelector:()=>({addEventListener(){}})}})});
  vm.runInContext('const _publishContexts=new Map();'+['_publishContext','_publishStatus','_adoptPublishPatch','_comparePublishedProject','publishProjectToShare'].map(standalone).join('\n')
-  +';globalThis.App={'+['refreshShareInfoButton','_setSyncStatus','autoPublishProject'].map(method).join(',')+'};',context);
+  +';globalThis.App={'+['refreshShareInfoButton','_setSyncStatus','autoPublishProject','_doSave'].map(method).join(',')+'};',context);
  const app=context.App,render=app._setSyncStatus;
  Object.assign(app,{project,_flushSave:async()=>true,_scheduleAutoPublish(){scheduled.push(this.project.id);}});
  app._setSyncStatus=function(...args){render.apply(this,args);states.push({state:this._syncState,title:nodes.get('sync-status')?.title});};
@@ -112,6 +112,11 @@ async function main(){
  await refreshing.run('manual');assert.equal(refreshing.commits(),0);
  assert.equal(refreshing.context._publishContext(refreshing.project).inflight,false);
  assert.equal(refreshing.project.shareInfo.serverRevision,1);assert.match(refreshing.notices.at(-1),/確認・取得が終わってから/);checks+=4;
+ const unpublished=fixture();delete unpublished.project.shareInfo;delete unpublished.project.__publishPending;
+ unpublished.app._publishDirty=true;unpublished.app._saveRevision=1;unpublished.app._savedRevision=0;
+ assert.equal(await unpublished.app._doSave(),true);
+ assert.equal(unpublished.app._syncState,'local-only');
+ assert.equal(unpublished.nodes.get('sync-status').textContent,'このPCのみ・未公開');checks+=3;
  console.log(`Publish status regression: PASS (${checks} checks)`);
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

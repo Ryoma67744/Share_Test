@@ -27349,7 +27349,8 @@ const App = {
                 // Project picker summaries only change on create/delete/rename.
                 // Keep server status unchanged when the server is unavailable.
                 this._setSyncStatus(
-                    this._syncState === 'no-server' ? 'no-server'
+                    !project.shareInfo?.slug ? 'local-only'
+                    : this._syncState === 'no-server' ? 'no-server'
                     : this._publishDirty ? 'local-saved'
                     : (this._syncState === 'synced' ? 'synced' : 'local-saved'));
                 this._scheduleAutoPublish();
