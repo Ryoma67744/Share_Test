@@ -280,6 +280,46 @@ async function asynchronousChecks() {
   assert.equal(f.closed.length,1,'Decoded images are disposed if the project changes during decode');
 }
 
+async function commonizedPhotoChecks() {
+  const f=fixture(),Groups=require('../viewer/msi-spatial-groups.js');
+  f.context.MsiSpatialGroups=Groups;
+  const panel=f.app.panels.get(f.toxo.id),anchor=f.toxo.msiSeries.MSI_A,target=f.toxo.msiSeries.MSI_wrong;
+  const anchorGeometry=panel.msiValueRasters.get('MSI_A').sourceGeometry;
+  const targetGeometry=panel.msiValueRasters.get('MSI_wrong').sourceGeometry;
+  const attachment={id:'before-commonization',roiKey:f.roi.colorKey,sectionId:f.toxo.id,sourceRef:'toxo-source',
+    roiSnapshot:model.snapshot(f.roi,f.toxo),blobId:'photo-file',filename:'photo.png',mime:'image/png',width:16,height:12};
+  const snapshotBefore=JSON.stringify(attachment);
+  f.blobs.set('photo-file',png());
+  Groups.ensureGroup(f.toxo,anchor,anchorGeometry);Groups.ensureGroup(f.toxo,target,targetGeometry);
+  f.roi.geometryBySection.toxo4=Groups.roiMeta(f.toxo,anchor,anchorGeometry);
+  assert.equal(model.snapshotMatches(attachment,f.roi,f.toxo),false,'Persisted snapshots retain their original exact contract');
+  const commonMeta=plain(f.roi.geometryBySection.toxo4),adapter=f.api.createAdapter(f.project,f.roi);
+  adapter.selectPhoto(f.project,f.roi,f.toxo.id,attachment);
+  const targetState=()=>adapter.compounds(f.project,f.roi,f.toxo.id).items.find(item=>item.key==='MSI_wrong');
+  assert.equal(targetState().disabled,false,'Unchanged photo/ROI geometry survives explicit same-section commonization');
+  const photo=await adapter.loadPhoto(attachment);
+  assert.doesNotMatch(photo.status,/写真登録後にROI形状・座標が変更/);photo.dispose();
+  assert.ok((await adapter.loadMsi(f.project,f.roi,f.toxo.id,'MSI_wrong')).canvas,
+    'Original anchor photo may be compared to the verified other group source');
+  f.roi.polysBySection.toxo4[0][0]+=.125;
+  assert.equal(targetState().disabled,true,'A real shape edit cannot use the migration exception');
+  const changed=await adapter.loadPhoto(attachment);
+  assert.match(changed.status,/写真登録後にROI形状・座標が変更/);changed.dispose();
+  await assert.rejects(adapter.loadMsi(f.project,f.roi,f.toxo.id,'MSI_wrong'),/写真登録時とはMSI測定ソース/);
+  f.roi.polysBySection.toxo4=plain(attachment.roiSnapshot.vertices);
+  for(const patch of [meta=>{meta.sourceRef='different-anchor';},meta=>{meta.displayGeometry.x.origin+=1;},
+    meta=>{meta.displayGeometry.y.step*=2;},meta=>{meta.frameKey='different-frame';}]) {
+    f.roi.geometryBySection.toxo4=plain(commonMeta);patch(f.roi.geometryBySection.toxo4);
+    assert.equal(targetState().disabled,true,'Source or coordinate frame edits remain rejected');
+  }
+  f.roi.geometryBySection.toxo4=plain(commonMeta);
+  adapter.selectPhoto(f.project,f.roi,f.toxo.id,{...attachment,sectionId:'other-section'});
+  assert.equal(targetState().disabled,true,'Identical coordinates do not cross the photo section');
+  adapter.selectPhoto(f.project,f.roi,f.toxo.id,{...attachment,roiKey:'another-roi'});
+  assert.equal(targetState().disabled,true,'Another ROI cannot borrow the old photo snapshot');
+  assert.equal(JSON.stringify(attachment),snapshotBefore,'Compatibility never rewrites the historical photo snapshot');
+}
+
 async function legacyPhotoSourceChecks() {
   const f = fixture();
   f.roi.geometryBySection = {};
@@ -500,7 +540,7 @@ async function ratioAdapterChecks() {
 }
 
 (async () => {
-  await preflight(); await adapterChecks(); await registeredCalibrationChecks(); await smoothingSnapshotChecks(); await asynchronousChecks(); await legacyPhotoSourceChecks();
+  await preflight(); await adapterChecks(); await registeredCalibrationChecks(); await smoothingSnapshotChecks(); await asynchronousChecks(); await legacyPhotoSourceChecks(); await commonizedPhotoChecks();
   await persistenceAndUnloadChecks(); await ratioAdapterChecks(); listHooks();
   console.log('ROI media app regression: preflight, section/source association, display isolation, async guards, persisted rollback, unload protection and ROI list entry points passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

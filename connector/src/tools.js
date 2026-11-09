@@ -7,7 +7,7 @@ import {
   listMrmLibrary, getExpTemplate, searchProjectsByCompound,
 } from './supabase.js';
 import {
-  buildMsiGrid, createMsiSourceGeometry, msiSourceReference, roiContainsSourcePoint, extractRoiValues, stats, pointInPolygon,
+  buildMsiGrid, createMsiSourceGeometry, msiSourceReference, roiContainsSourcePoint, extractRoiValues, stats, pointInPolygon, resolveRoiGeometryForSource,
 } from './msi.js';
 import { newRowCache, loadRowsForDef } from './rows.js';
 import { buildExp } from './exp.js';
@@ -106,6 +106,7 @@ async function loadProject(slug) {
       name: s.display_name || ('Section ' + (s.ordinal != null ? s.ordinal : '')),
       ordinal: s.ordinal != null ? s.ordinal : 0,
       msiSeries,
+      meta: s.meta || {},
       rois,
     });
   }
@@ -202,7 +203,7 @@ export async function getRoiStats(slug, opts = {}) {
         if(r.geometry&&r.geometry.version==='msi-unresolved-v1')throw new Error('ROI geometry is unresolved');
         if(!r.geometry&&new Set(Object.values(s.msiSeries).map(msiSourceReference)).size>1)
           throw new Error('Legacy ROI source is ambiguous; original polygon was preserved');
-        vals=extractRoiValues(rows,r.poly,grid,r.geometry,def);
+        vals=extractRoiValues(rows,r.poly,grid,r.geometry,def,s);
       } catch(e) {results.push({section:s.name,roi:r.name,compound_key:k,error:String(e.message||e)});continue;}
       results.push({
         section: s.name,
@@ -289,10 +290,11 @@ export async function getMatrix(slug, opts = {}) {
     roiName = r.name;
     if(r.geometry&&r.geometry.version==='msi-unresolved-v1')throw new Error('ROI geometry is unresolved');
     const geometry=createMsiSourceGeometry(rows,def);
+    const resolvedRoi=resolveRoiGeometryForSource(r.geometry,geometry,s,def);
     if(!r.geometry&&new Set(Object.values(s.msiSeries).map(msiSourceReference)).size>1)
       throw new Error('Legacy ROI source is ambiguous; original polygon was preserved');
     rows=rows.filter(row=>{
-      const inside=roiContainsSourcePoint(r.poly,r.geometry,geometry,row.x,row.y);
+      const inside=roiContainsSourcePoint(r.poly,resolvedRoi,geometry,row.x,row.y);
       if(inside===null)throw new Error('ROI source geometry cannot be resolved');
       return inside;
     });

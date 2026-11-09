@@ -6,10 +6,15 @@ services:
   - type: web
     name: desi-share-connector
     runtime: node
-    rootDir: connector
+    # The connector imports the shared coordinate model from viewer/.
+    rootDir: .
     plan: free
-    buildCommand: npm install
-    startCommand: npm run serve
+    buildCommand: npm --prefix connector ci
+    startCommand: npm --prefix connector run serve
+    buildFilter:
+      paths:
+        - connector/**
+        - viewer/msi-spatial-groups.js
     envVars:
       - key: CONNECTOR_API_KEY
         generateValue: true          # Render generates a secret; copy it to the GPT

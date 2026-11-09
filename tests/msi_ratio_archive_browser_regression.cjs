@@ -52,6 +52,11 @@ async function main(){
       assert.equal(await packed.zip.file(e.sourcePath).async('string'),data.sources['synthetic/'+e.filename]);
     }
     await importBytes(page,bytes);
+    assert.equal(await page.evaluate(()=>App.project.sections.every(section=>{
+      const id=MsiRatioModel.canonicalSectionId(section);
+      return section.meta.spatialGroups && id===section.id && App.getRatioDefinitions().every(def=>
+        def.bindings[id] && def.display.ranges.whole[id]);
+    })),true,'grouped imported sections use fresh IDs for ratio bindings and individual ranges');
     assert.deepEqual(await values(page),before,'ZIP regenerates the same ratios and ROI values from exact sources');
     assert.deepEqual(await windows(),[4,6],'Ratio manual windows survive ZIP restoration');
     assert.equal(await page.evaluate(()=>MsiRatioModel.validateProjectReferences(App.project).valid),true);

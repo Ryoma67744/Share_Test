@@ -21,7 +21,7 @@ for(const name of common){
 }
 for(const name of ['msiSourceCell','msiSourceRow','msiRoiGeometryMeta','extractRoiRawFromSection'])
   vm.runInContext(lift(html,name),viewer);
-vm.runInContext(lift(connector,'extractRoiValues'),cv);
+vm.runInContext(lift(connector,'resolveRoiGeometryForSource')+'\n'+lift(connector,'extractRoiValues'),cv);
 const def={kind:'txt',sourceFileId:'original'};
 const poly=[[-0.5,-0.5],[5,-0.5],[5,2],[-0.5,2]];
 const make=tuples=>tuples.map((r,i)=>viewer.msiSourceRow(...r,i));
@@ -41,6 +41,7 @@ async function main(){
     const cg=cv.createMsiSourceGeometry(test.rows,def);
     assert.deepEqual(plain(g),plain(cg),test.name+' viewer/connector parity');
     assert.equal(g.legacy.confirmed,test.confirmed,test.name);
+    assert.equal(g.currentConfirmed,test.reason!=='legacy-coordinate-unconfirmed',test.name+' current coordinate confidence');
     if(test.reason)assert.equal(g.legacy.reason,test.reason);
     const section={id:'sec',msiSeries:{MSI_A:def}};
     viewer._ensureRoiRawGrid=async()=>({rows:test.rows,sourceGeometry:g});
@@ -68,10 +69,19 @@ async function main(){
   assert.equal(viewer.createMsiSourceGeometry(positions,def,col).legacy.reason,'legacy-render-quant-axis-mismatch',
     'ROI source matrix passes selected value/cell information into its geometry check');
   assert.equal(viewer.createMsiSourceGeometry(positions,def).legacy.reason,'legacy-value-axis-unconfirmed');
+  assert.equal(viewer.createMsiSourceGeometry(positions,def).currentConfirmed,true,
+    'current coordinate frames do not depend on the selected molecule');
   assert.equal(viewer.createMsiSourceGeometry(rows,{...def,kind:'parquet'}).legacy.confirmed,true,
     'Legacy Parquet geometry used all coordinate rows independently of the selected intensity');
   const raw=make([[10,0,10],[20,0,20]]);raw[0].legacyX=0;raw[1].legacyX=1;
   assert.equal(viewer.createMsiSourceGeometry(raw,{...def,kind:'raw'}).legacy.confirmed,true);
+  for(const creator of [viewer.createMsiSourceGeometry,cv.createMsiSourceGeometry]) {
+    const archived=creator(raw,{...def,archiveGeometryUnconfirmed:true});
+    assert.equal(archived.currentConfirmed,false);
+    assert.equal(archived.legacy.confirmed,false);
+    assert.equal(archived.legacy.reason,'archive-source-variant-unconfirmed');
+    assert.equal(creator([],def).currentConfirmed,false);
+  }
   console.log('Legacy ROI geometry safety regression: PASS');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

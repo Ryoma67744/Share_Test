@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import { msiSourceRow, msiTextTable, msiTextValueColumn } from './source-cells.js';
+import MsiSpatialGroups from '../../viewer/msi-spatial-groups.js';
 
 // =============================================================================
 // MSI parsing / ROI extraction — ported VERBATIM from the web app
@@ -165,6 +166,9 @@ export function createMsiSourceGeometry(rows, ent, legacyColumns) {
             legacyReason='legacy-coordinate-unconfirmed';break;
         }
     }
+    // Current frames use all acquisition coordinates, independently of whether
+    // an old intensity-filtered renderer retained every axis.
+    const currentConfirmed=rows.length>0&&!legacyReason&&!(ent&&ent.archiveGeometryUnconfirmed);
     if(!legacyReason && !(ent&&ent.kind==='parquet')) {
         let columns=legacyColumns ? (Array.isArray(legacyColumns)?legacyColumns:[legacyColumns]) : null;
         if(!columns) {
@@ -191,7 +195,8 @@ export function createMsiSourceGeometry(rows, ent, legacyColumns) {
             }
         }
     }
-    return {sourceRef:msiSourceReference(ent),displayGeometry:grid.displayGeometry,
+    if (ent && ent.archiveGeometryUnconfirmed) legacyReason = 'archive-source-variant-unconfirmed';
+    return {sourceRef:msiSourceReference(ent),currentConfirmed,displayGeometry:grid.displayGeometry,
         legacy:{W:legacy.W,H:legacy.H,confirmed:!legacyReason,reason:legacyReason,
             x:pairs('x'),y:pairs('y')}};
 }
@@ -219,8 +224,13 @@ export function msiValidRoiGeometry(meta) {
         &&Number.isInteger(g.W)&&g.W>0&&Number.isInteger(g.H)&&g.H>0);
 }
 
-export function roiContainsSourcePoint(poly,meta,geometry,x,y) {
+export function roiContainsSourcePoint(poly,meta,geometry,x,y,section,entry) {
     if(!Number.isFinite(x)||!Number.isFinite(y)||!geometry)return false;
+    if(meta&&meta.version==='msi-group-v1') {
+        if(!MsiSpatialGroups.roiCompatible(meta,geometry,section,entry))return null;
+        const g=meta.displayGeometry;
+        return pointInPolygon((x-g.x.origin)/g.x.step,(y-g.y.origin)/g.y.step,poly);
+    }
     if(msiValidRoiGeometry(meta)) {
         if(meta.sourceRef!==geometry.sourceRef)return null;
         const g=meta.displayGeometry;
@@ -231,6 +241,15 @@ export function roiContainsSourcePoint(poly,meta,geometry,x,y) {
     const g=geometry.legacy;
     if(!g||g.confirmed===false)return null;
     return pointInPolygon(msiAxisInterpolate(g.x,x,false),msiAxisInterpolate(g.y,y,false),poly);
+}
+
+// Validate a group once per extraction, never once per measurement row. This
+// source-scoped adapter is transient; stored ROI provenance is never rewritten.
+export function resolveRoiGeometryForSource(meta,geometry,section,entry) {
+    if(!meta||meta.version!=='msi-group-v1')return meta;
+    if(!MsiSpatialGroups.roiCompatible(meta,geometry,section,entry))
+        throw new Error('ROI source geometry cannot be resolved');
+    return {...meta,version:'msi-source-v1',sourceRef:geometry.sourceRef};
 }
 
 // xlsx ArrayBuffer/Buffer → [{x,y,v}] using the def stored in the project doc's
@@ -293,15 +312,16 @@ export function parseMsiRows(buf, def) {
 // (appendRoisToAnalyteLines): map each raw row to its grid pixel cell via
 // buildMsiGrid, then pointInPolygon on pixel coords. Returns the raw intensity
 // values (NOT the 0-255 display luminance the analysis chart uses).
-export function extractRoiValues(rows, polyMsi, precomputedGrid, roiGeometry, ent) {
+export function extractRoiValues(rows, polyMsi, precomputedGrid, roiGeometry, ent, section) {
   const out=[];out.rowIds=[];out.nUniqueCoordinates=0;
   if(!polyMsi||!polyMsi.length)return out;
   const geometry=precomputedGrid&&precomputedGrid.sourceRef?precomputedGrid:createMsiSourceGeometry(rows,ent);
+  const resolvedRoi=resolveRoiGeometryForSource(roiGeometry,geometry,section,ent);
   if(!roiGeometry&&geometry.legacy&&geometry.legacy.confirmed===false)
     throw new Error('Legacy ROI geometry is unconfirmed: '+geometry.legacy.reason+'; original polygon was preserved');
   const coords=new Set();
   for(const [i,r] of rows.entries()) {
-    const inside=roiContainsSourcePoint(polyMsi,roiGeometry,geometry,r.x,r.y);
+    const inside=roiContainsSourcePoint(polyMsi,resolvedRoi,geometry,r.x,r.y);
     if(inside===null)throw new Error('ROI source geometry cannot be resolved');
     if(!inside)continue;
     const cell=r.sourceCells&&r.sourceCells.v;

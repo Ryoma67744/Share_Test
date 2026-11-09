@@ -88,8 +88,8 @@ for(const field of ['sheet','func','annotation','col_x','data_start_row'])
   assert.notEqual(api._roiGridKey(section,'MSI_A',{...def,sourceReference:geometry.sourceRef,[field]:'changed'}),api._roiGridKey(section,'MSI_A',{...def,sourceReference:geometry.sourceRef}));
 // Connector shares the same source-position membership and original row order.
 const connector=fs.readFileSync(path.join(root,'connector/src/msi.js'),'utf8');
-const cnames=['pointInPolygon','buildLegacyMsiGrid','buildMsiGrid','msiSourceReference','createMsiSourceGeometry','msiAxisInterpolate','msiValidRoiGeometry','roiContainsSourcePoint','extractRoiValues','stats'];
-const cc=vm.createContext({Float64Array,Map,Set});
+const cnames=['pointInPolygon','buildLegacyMsiGrid','buildMsiGrid','msiSourceReference','createMsiSourceGeometry','msiAxisInterpolate','msiValidRoiGeometry','roiContainsSourcePoint','resolveRoiGeometryForSource','extractRoiValues','stats'];
+const cc=vm.createContext({Float64Array,Map,Set,MsiSpatialGroups:require('../viewer/msi-spatial-groups.js')});
 vm.runInContext(cnames.map(n=>lift(connector,n)).join('\n')+'\nthis.api={'+cnames.join(',')+'};',cc);
 const cvals=cc.api.extractRoiValues(rows,poly,cc.api.createMsiSourceGeometry(rows,def),newMeta,def);
 assert.deepEqual([...cvals],[10,30,100]);assert.equal(cc.api.stats(cvals).mean,expected);

@@ -8,6 +8,7 @@
 <script src="share-refresh.js"></script>
 <script src="msi-display-settings.js"></script>
 <script src="msi-display-geometry.js"></script>
+<script src="msi-spatial-groups.js"></script>
 <script src="../offline/offline.js"></script>
 <script src="msi-smoothing.js"></script>
 <script src="msi-roi-range.js"></script>
@@ -878,6 +879,12 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
                             </div>
                         </label>
                     </div>
+                </div>
+                <div style="display:flex;align-items:center;flex-wrap:wrap;gap:4px;margin-bottom:6px;flex-shrink:0;">
+                    <select id="roi-create-scope" class="text-xs border rounded" style="min-width:0;max-width:100%;flex:1;padding:3px;" aria-label="新規ROIの適用範囲" title="共通は同じ切片で座標が一致するMSIに適用します">
+                        <option value="group">同じ座標のMSIで共通</option><option value="source">この測定のみ</option>
+                    </select>
+                    <button type="button" class="text-xs border rounded px-1" style="white-space:nowrap;padding:3px;" onclick="App.shareRoisInSection().catch(e=>showToast(e.message,6000))" title="この切片の既存ROIを、確認できた同じ座標のMSIで共通使用します">既存ROIを共通化</button>
                 </div>
                 <div id="roi-list" class="space-y-1 overflow-y-auto flex-1 min-h-0 text-xs">
                     <p class="text-gray-500">No ROI yet.</p>
@@ -2158,7 +2165,7 @@ const heDisplayAxisCache = new WeakMap();
 function heMsiDisplayWarp(source, T, section, key, pixelScale) {
     const geometry = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section, key) : null;
     const legacy = geometry && geometry.legacy, grid = geometry && geometry.displayGeometry;
-    if (!legacy || legacy.confirmed === false || !grid || !(legacy.W > 0 && legacy.H > 0 && grid.W > 0 && grid.H > 0)) return null;
+    if (!legacy || (legacy.confirmed === false && geometry.currentConfirmed !== true) || !grid || !(legacy.W > 0 && legacy.H > 0 && grid.W > 0 && grid.H > 0)) return null;
     if (!msiDisplayGeometryChanged(section, key)) return null;
     const inv = invertAffine(T);
     if (!inv) return null;
@@ -3933,25 +3940,33 @@ function alignmentFrameDescriptor(section, key, panel) {
     const geometry=(raster&&raster.sourceGeometry)||e.sourceGeometry||null;
     const legacy=geometry&&geometry.legacy;
     const validAxis=a=>Array.isArray(a)&&a.length>0&&a.every(v=>Array.isArray(v)&&v.length===2&&v.every(Number.isFinite));
-    const confirmed=!!(sourceId&&legacy&&legacy.confirmed!==false&&validAxis(legacy.x)&&validAxis(legacy.y)
+    const validCoordinates=!!(sourceId&&legacy&&validAxis(legacy.x)&&validAxis(legacy.y)
         &&Number.isInteger(legacy.W)&&legacy.W>0&&Number.isInteger(legacy.H)&&legacy.H>0);
+    const legacyConfirmed=validCoordinates&&legacy.confirmed!==false;
+    const currentCoordinatesConfirmed=validCoordinates&&geometry.currentConfirmed===true;
+    const spatialGroup=(legacyConfirmed||currentCoordinatesConfirmed)&&typeof MsiSpatialGroups!=='undefined'
+        ? MsiSpatialGroups.resolveMembership(section,e,geometry) : null;
+    const confirmed=legacyConfirmed||!!(currentCoordinatesConfirmed&&spatialGroup);
     // Saved landmarks are pixel-edge positions in the legacy raster basis.
     // A different display supersampling factor does not change that basis.
     const coordinateKey=confirmed?JSON.stringify(['legacy-msi-pixel-edges-v1',legacy.W,legacy.H,legacy.x,legacy.y]):null;
-    const frameKey=JSON.stringify(['msi-alignment-frame-v1',measurementKey,readerKey,
-        coordinateKey||['unresolved',key||'']]);
-    return {version:'msi-alignment-frame-v1',key:frameKey,measurementKey,readerKey,
-        sourceFileId:e.sourceFileId||null,coordinateKey,confirmed,
+    const frameParts=['msi-alignment-frame-v1',measurementKey,readerKey,coordinateKey||['unresolved',key||'']];
+    // The current source map may be valid even when a historical display
+    // dropped a whole missing-signal axis. Never rebind old frame records to it.
+    if(confirmed&&!legacyConfirmed)frameParts.push('source-coordinate-map-v1');
+    const frameKey=JSON.stringify(frameParts);
+    return {version:'msi-alignment-frame-v1',key:frameKey,measurementKey,readerKey,spatialGroup,
+        sourceFileId:e.sourceFileId||null,coordinateKey,confirmed,legacyConfirmed,currentCoordinatesConfirmed,
         reason:confirmed?null:((legacy&&legacy.reason)||'alignment-coordinate-unconfirmed'),
         geometry:geometry?JSON.parse(JSON.stringify(geometry)):null};
 }
 function alignmentLegacySourceIsUnambiguous(section, frame, panel) {
-    if(!frame||!frame.confirmed)return false;
+    if(!frame||!frame.confirmed||frame.legacyConfirmed===false)return false;
     const entries=Object.entries((section&&section.msiSeries)||{}).filter(([k,e])=>/^MSI_/i.test(k)&&e);
     const related=entries.map(([k])=>alignmentFrameDescriptor(section,k,panel)).filter(f=>
         frame.sourceFileId?f.sourceFileId===frame.sourceFileId:f.measurementKey===frame.measurementKey);
     return related.length>0&&related.every(f=>f.measurementKey===frame.measurementKey&&f.readerKey===frame.readerKey
-        &&(!f.geometry||(f.confirmed&&f.coordinateKey===frame.coordinateKey)));
+        &&(!f.geometry||(f.confirmed&&f.legacyConfirmed!==false&&f.coordinateKey===frame.coordinateKey)));
 }
 function alignmentLegacySeedIsCompatible(section, frame, savedRecord, panel) {
     if(!alignmentLegacySourceIsUnambiguous(section,frame,panel))return false;
@@ -3994,7 +4009,7 @@ function alignmentEditOrder(record) {
 }
 function alignmentNextEditOrder(layer) {
     let last=Number.isSafeInteger(layer.editCounter)&&layer.editCounter>0?layer.editCounter:0;
-    for(const group of [layer.byFrame,layer.sharedByCoordinate,layer.bySource])
+    for(const group of [layer.byFrame,layer.sharedByCoordinate,layer.bySource,layer.byGroup])
         for(const record of Object.values(group||{}))last=Math.max(last,alignmentEditOrder(record));
     if(last>=Number.MAX_SAFE_INTEGER)throw new Error('位置合わせの保存順序を更新できません');
     layer.editCounter=last+1;
@@ -4039,13 +4054,24 @@ function alignmentRecordProblem(record, frame, imageIdentity, shared) {
     if(record.imageIdentity!==imageIdentity)return 'image-changed';
     if(record.alignment_raster_basis!=='legacy-msi-pixel-edges-v1')return 'unsupported-basis';
     if(!alignmentValidAffine(record.T_he_to_msi))return 'invalid-transform';
-    if(shared) {
+    if(frame.legacyConfirmed===false&&record.coordinateProvenance!=='source-coordinate-map-v1')return 'coordinate-unconfirmed';
+    if(record.scope==='group') {
+        const group=frame.spatialGroup;
+        if(record.groupFrameVersion!==1||!group||group.groupId!==record.groupId||group.frameKey!==record.groupFrameKey
+            ||record.frame.coordinateKey!==frame.coordinateKey)return 'coordinate-mismatch';
+    } else if(shared) {
         if(!alignmentSharedIncludes(record,frame))return 'source-mismatch';
     } else {
         if(record.frame.coordinateKey!==frame.coordinateKey)return 'coordinate-mismatch';
         if(record.frame.key!==frame.key)return 'source-mismatch';
     }
     return null;
+}
+function alignmentGroupRecord(layer, frame) {
+    const group=frame&&frame.spatialGroup;
+    if(!group)return null;
+    const record=(layer.byGroup||{})[group.groupId];
+    return record&&record.groupFrameKey===group.frameKey?record:null;
 }
 // One read-only resolver for the main image, individual Align drafts and PNG
 // export. Never materialize per-frame records, save, or decode source rows here.
@@ -4055,7 +4081,7 @@ function resolveHeMsiAlignment(section, heKey, msiKey, panel, knownFrame) {
     const layer=alignment[layerKey]||{},frame=knownFrame||alignmentFrameDescriptor(section,msiKey,panel);
     const identity=alignmentImageIdentity(((section&&section.images)||{})[layerKey]);
     const managed=Object.values(alignment).some(r=>r&&(
-        Object.keys(r.byFrame||{}).length||Object.keys(r.sharedByCoordinate||{}).length));
+        Object.keys(r.byFrame||{}).length||Object.keys(r.sharedByCoordinate||{}).length||Object.keys(r.byGroup||{}).length));
     const result=(T,record,origin,reason)=>({T,record,origin,reason,frame,
         status:T?'ready':reason==='loading'?'loading':'unavailable'});
     if(isRatioDisplayKey(msiKey)) {
@@ -4075,6 +4101,7 @@ function resolveHeMsiAlignment(section, heKey, msiKey, panel, knownFrame) {
         return result(a.T,a.record,'ratio',null);
     }
     if(!managed) {
+        if(frame.currentCoordinatesConfirmed&&frame.legacyConfirmed===false)return result(null,null,'legacy','coordinate-unconfirmed');
         const fid=frame.sourceFileId,bySource=wc.T_he_to_msi_by_source||{};
         let T=wc.T_he_to_msi||null;
         if(fid&&bySource[fid]&&(meta.perSourceAlign||!T||
@@ -4085,9 +4112,11 @@ function resolveHeMsiAlignment(section, heKey, msiKey, panel, knownFrame) {
     const exact=(layer.byFrame||{})[frame.key];
     const knownMismatch=alignmentKnownFrameMismatch(layer,frame);
     const common=alignmentCommonRecord(layer,frame);
+    const grouped=alignmentGroupRecord(layer,frame);
     const candidates=[];
     if(exact)candidates.push({record:exact,origin:'frame',shared:false,priority:0});
     if(common)candidates.push({record:common,origin:'shared',shared:true,priority:2});
+    if(grouped&&!(exact&&exact.scope==='source'))candidates.push({record:grouped,origin:'group',shared:false,priority:1});
     // Unversioned, valid individual records keep their existing precedence.
     // A newly saved common record can supersede them with an explicit order.
     const old=(layer.bySource||{})[frame.sourceFileId]||(!layer.byFrame&&!layer.sharedByCoordinate?layer:null);
@@ -4095,6 +4124,8 @@ function resolveHeMsiAlignment(section, heKey, msiKey, panel, knownFrame) {
         const T=old.T_he_to_msi||buildHeToMsiAffine(old);
         candidates.push({record:old,origin:'legacy',shared:false,priority:1,legacyT:T});
     }
+    // Individual overrides survive ordinary group edits; explicit group apply
+    // removes them. The old all-source action still follows its saved order.
     candidates.sort((a,b)=>alignmentEditOrder(b.record)-alignmentEditOrder(a.record)||a.priority-b.priority);
     if(candidates.length) {
         const selected=candidates[0],record=selected.record;
@@ -4146,6 +4177,9 @@ function createMsiSourceGeometry(rows, ent, legacyColumns) {
             legacyReason='legacy-coordinate-unconfirmed';break;
         }
     }
+    // Current frames use all acquisition coordinates, independently of whether
+    // an old intensity-filtered renderer retained every axis.
+    const currentConfirmed=rows.length>0&&!legacyReason&&!(ent&&ent.archiveGeometryUnconfirmed);
     if(!legacyReason && !(ent&&ent.kind==='parquet')) {
         let columns=legacyColumns ? (Array.isArray(legacyColumns)?legacyColumns:[legacyColumns]) : null;
         if(!columns) {
@@ -4173,7 +4207,7 @@ function createMsiSourceGeometry(rows, ent, legacyColumns) {
         }
     }
     if (ent && ent.archiveGeometryUnconfirmed) legacyReason = 'archive-source-variant-unconfirmed';
-    return {sourceRef:msiSourceReference(ent),displayGeometry:grid.displayGeometry,
+    return {sourceRef:msiSourceReference(ent),currentConfirmed,displayGeometry:grid.displayGeometry,
         legacy:{W:legacy.W,H:legacy.H,confirmed:!legacyReason,reason:legacyReason,
             x:pairs('x'),y:pairs('y')}};
 }
@@ -4195,17 +4229,20 @@ function msiRoiGeometryMeta(roi,section) {
         || (section.meta&&section.meta.roiGeometryByColorKey&&roi&&section.meta.roiGeometryByColorKey[roi.colorKey]) || null;
 }
 function msiValidRoiGeometry(meta) {
-    if(!meta||meta.version!=='msi-source-v1'||typeof meta.sourceRef!=='string'||!meta.sourceRef)return false;
+    if(!meta||!['msi-source-v1','msi-group-v1'].includes(meta.version)||typeof meta.sourceRef!=='string'||!meta.sourceRef)return false;
+    if(meta.version==='msi-group-v1'&&(!meta.groupId||!meta.frameKey||meta.frameVersion!==1||!meta.sectionId||meta.scope!=='group'))return false;
     const g=meta.displayGeometry;
     return !!(g&&g.version==='msi-proportional-v1'&&g.x&&g.y
         &&Number.isFinite(g.x.origin)&&Number.isFinite(g.y.origin)
         &&Number.isFinite(g.x.step)&&g.x.step>0&&Number.isFinite(g.y.step)&&g.y.step>0
         &&Number.isInteger(g.W)&&g.W>0&&Number.isInteger(g.H)&&g.H>0);
 }
-function roiContainsSourcePoint(poly,meta,geometry,x,y) {
+function roiContainsSourcePoint(poly,meta,geometry,x,y,section,entry) {
     if(!Number.isFinite(x)||!Number.isFinite(y)||!geometry)return false;
     if(msiValidRoiGeometry(meta)) {
-        if(meta.sourceRef!==geometry.sourceRef)return null;
+        if(meta.version==='msi-group-v1') {
+            if(typeof MsiSpatialGroups==='undefined'||!MsiSpatialGroups.roiCompatible(meta,geometry,section,entry))return null;
+        } else if(meta.sourceRef!==geometry.sourceRef)return null;
         const g=meta.displayGeometry;
         if(!g||!g.x||!g.y)return null;
         return pointInPolygon((x-g.x.origin)/g.x.step,(y-g.y.origin)/g.y.step,poly);
@@ -4223,15 +4260,15 @@ function msiLayerSourceGeometry(section,key) {
     return raster&&raster.sourceGeometry || null;
 }
 function msiLegacyRasterSize(section,key) {
-    const g=msiLayerSourceGeometry(section,key);return g&&g.legacy.confirmed!==false?{w:g.legacy.W,h:g.legacy.H}:null;
+    const g=msiLayerSourceGeometry(section,key);return g&&(g.legacy.confirmed!==false||g.currentConfirmed===true)?{w:g.legacy.W,h:g.legacy.H}:null;
 }
 function msiLegacyRasterPointToDisplay(section,key,point) {
-    const g=msiLayerSourceGeometry(section,key);if(!g||g.legacy.confirmed===false)return null;
+    const g=msiLayerSourceGeometry(section,key);if(!g||(g.legacy.confirmed===false&&g.currentConfirmed!==true))return null;
     return [ (msiAxisInterpolate(g.legacy.x,point[0],true)-g.displayGeometry.x.origin)/g.displayGeometry.x.step,
         (msiAxisInterpolate(g.legacy.y,point[1],true)-g.displayGeometry.y.origin)/g.displayGeometry.y.step ];
 }
 function msiDisplayRasterPointToLegacy(section,key,point) {
-    const g=msiLayerSourceGeometry(section,key);if(!g||g.legacy.confirmed===false)return null;
+    const g=msiLayerSourceGeometry(section,key);if(!g||(g.legacy.confirmed===false&&g.currentConfirmed!==true))return null;
     return [msiAxisInterpolate(g.legacy.x,g.displayGeometry.x.origin+point[0]*g.displayGeometry.x.step,false),
         msiAxisInterpolate(g.legacy.y,g.displayGeometry.y.origin+point[1]*g.displayGeometry.y.step,false)];
 }
@@ -4243,7 +4280,11 @@ function roiPolygonForDisplay(roi,section,key,poly) {
     const g=msiLayerSourceGeometry(section,key);if(!g)return null;
     const meta=msiRoiGeometryMeta(roi,section);
     if(!meta&&new Set(Object.values(section.msiSeries||{}).map(msiSourceReference)).size>1)return null;
-    if(meta&&meta.sourceRef!==g.sourceRef)return null;
+    if(meta&&meta.version==='msi-group-v1') {
+        const sourceKey=typeof App!=='undefined'&&App.ratioSourceKey&&/^MSI_RATIO_/.test(key)?App.ratioSourceKey(section,key):key;
+        if(/^MSI_RATIO_/.test(key)&&(typeof App==='undefined'||!App.ratioRoiCompatible||!App.ratioRoiCompatible(section,key,meta)))return null;
+        if(typeof MsiSpatialGroups==='undefined'||!MsiSpatialGroups.roiCompatible(meta,g,section,(section.msiSeries||{})[sourceKey]))return null;
+    } else if(meta&&meta.sourceRef!==g.sourceRef)return null;
     if(meta&&!msiValidRoiGeometry(meta))return null;
     if(!meta&&g.legacy.confirmed===false)return null;
     const source=meta&&meta.displayGeometry;
@@ -8273,6 +8314,11 @@ class SectionPanel {
             && Number.isFinite(result.width) && Number.isFinite(result.height)) {
             if(result.sourceGeometry)result.sourceGeometry.sourceRef=msiSourceReference(ent);
             this.msiValueRasters.set(key, { W: result.width, H: result.height, values: result.values, sourceGeometry:result.sourceGeometry });
+            // Registration metadata is independent of the raster LRU. A verified
+            // later measurement joins the same frame without copying HE or ROI.
+            if(result.sourceGeometry&&typeof MsiSpatialGroups!=='undefined'&&!App.shareMode) {
+                MsiSpatialGroups.ensureGroup(this.section,ent,result.sourceGeometry);
+            }
         } else {
             this.msiValueRasters.delete(key);
         }
@@ -8910,7 +8956,7 @@ class SectionPanel {
         const hasMsiRef = this.registeredMsiKeys().length > 0
             || Object.keys(this.imageSources).some(k => /^MSI_/i.test(k));
         const alignmentManaged=Object.values((this.section.meta&&this.section.meta.alignment)||{})
-            .some(r=>r&&(Object.keys(r.byFrame||{}).length||Object.keys(r.sharedByCoordinate||{}).length));
+            .some(r=>r&&(Object.keys(r.byFrame||{}).length||Object.keys(r.sharedByCoordinate||{}).length||Object.keys(r.byGroup||{}).length));
         const alignmentUnavailable=[];
 
         // In Compound mode the focus compound is the only MSI layer drawn,
@@ -8995,7 +9041,9 @@ class SectionPanel {
             // rotate-90 path below.
             const isHeLike = /HE_STAIN|IF_STAIN/i.test(key) && !isTicBackdrop;
             const T = isHeLike ? this._resolveTHeToMsi(key) : null;
-            if(isHeLike&&hasMsiRef&&(alignmentManaged||isRatioDisplayKey(this._pickRefMsiKey()))&&!T) {
+            const legacyCoordinatesUnavailable=isHeLike&&hasMsiRef&&!T&&!alignmentManaged
+                &&resolveHeMsiAlignment(this.section,key,this._pickRefMsiKey(),this).reason==='coordinate-unconfirmed';
+            if(isHeLike&&hasMsiRef&&(alignmentManaged||legacyCoordinatesUnavailable||isRatioDisplayKey(this._pickRefMsiKey()))&&!T) {
                 const name=(this.section.images&&this.section.images[key]&&this.section.images[key].filename)||key;
                 alignmentUnavailable.push(name+'（'+alignmentUnavailableReason(this.section,key,this._pickRefMsiKey(),this)+'）');
                 // A frame-managed image with no verified transform must never
@@ -9391,10 +9439,14 @@ class SectionPanel {
     _drawingMatchesMsiSource(notify) {
         const drawing = App.drawing || {};
         const expected = drawing.sourceGeometry;
+        const sourceKey=App.ratioSourceKey&&/^MSI_RATIO_/.test(this._pickRefMsiKey())?App.ratioSourceKey(this.section,this._pickRefMsiKey()):this._pickRefMsiKey();
         const current = typeof msiLayerSourceGeometry === 'function'
             ? msiLayerSourceGeometry(this.section, this._pickRefMsiKey()) : null;
-        const matches = !!(expected && current && expected.sourceRef === current.sourceRef
-            && JSON.stringify(expected.displayGeometry) === JSON.stringify(current.displayGeometry));
+        const matches = expected&&expected.version==='msi-group-v1'
+            ? typeof MsiSpatialGroups!=='undefined'&&MsiSpatialGroups.roiCompatible(expected,current,this.section,(this.section.msiSeries||{})[sourceKey])
+                &&(!/^MSI_RATIO_/.test(this._pickRefMsiKey())||App.ratioRoiCompatible&&App.ratioRoiCompatible(this.section,this._pickRefMsiKey(),expected))
+            : !!(expected && current && expected.sourceRef === current.sourceRef
+                && JSON.stringify(expected.displayGeometry) === JSON.stringify(current.displayGeometry));
         if (!matches && notify && typeof showToast === 'function') {
             showToast('ROI描画を開始した測定ソースに戻ってください。途中の頂点は保持されています。描画の完了・中止もできます。', 6000);
         }
@@ -11086,7 +11138,8 @@ function decodeRoiPolygon(payload) {
 function remapRoiGeometry(geometryBySection, sectionIds) {
     const out = {};
     for (const [id, geometry] of Object.entries(geometryBySection || {})) {
-        if (sectionIds[id]) out[sectionIds[id]] = geometry;
+        if (sectionIds[id]) out[sectionIds[id]] = geometry&&geometry.version==='msi-group-v1'
+            ? Object.assign({},geometry,{sectionId:sectionIds[id]}) : geometry;
     }
     return out;
 }
@@ -11266,6 +11319,13 @@ function populateRoiList() {
         badge.textContent = sectionsCount + '/' + totalSections;
         badge.title = 'Drawn on ' + sectionsCount + ' of ' + totalSections + ' sections';
         left.appendChild(badge);
+        const activeGeometry=(roi.geometryBySection||{})[App.activeSectionId];
+        if(activeGeometry) {
+            const scopeBadge=document.createElement('span');scopeBadge.className='text-[10px] ml-1';
+            scopeBadge.textContent=activeGeometry.version==='msi-group-v1'?'MSI共通':'個別';
+            scopeBadge.title=activeGeometry.version==='msi-group-v1'?'同じ切片の確認済み共通座標グループで使用':'描画元の測定データで使用';
+            left.appendChild(scopeBadge);
+        }
 
         el.appendChild(left);
 
@@ -11295,6 +11355,12 @@ function populateRoiList() {
                 App.startDrawing(roi.id);
             });
             actions.appendChild(addBtn);
+            if(typeof MsiSpatialGroups!=='undefined'&&activeGeometry&&activeGeometry.version!=='msi-group-v1') {
+                const common=document.createElement('button');common.className='text-[10px] text-blue-600';
+                common.textContent='共通化';common.title='この切片の同じ座標のMSIで使用';
+                common.addEventListener('click',e=>{e.stopPropagation();App.shareRoisInSection([roi.id]).catch(err=>showToast(err.message,6000));});
+                actions.appendChild(common);
+            }
 
             const delBtn = document.createElement('button');
             delBtn.className = 'text-xs text-gray-400 hover:text-red-600';
@@ -11478,14 +11544,23 @@ async function extractRoiRawFromSection(panel, layerKey, polyMsi, roi) {
     const meta=msiRoiGeometryMeta(roi,section);
     const refs=new Set(Object.values(section.msiSeries||{}).map(msiSourceReference));
     if(!meta&&refs.size>1)return {values:[],unavailable:true,reason:'legacy-roi-source-ambiguous'};
-    if(meta&&meta.sourceRef!==grid.sourceGeometry.sourceRef)return {values:[],unavailable:true,reason:'roi-source-mismatch'};
+    const sourceKey=typeof App!=='undefined'&&App.ratioSourceKey&&/^MSI_RATIO_/.test(layerKey)?App.ratioSourceKey(section,layerKey):layerKey;
+    const sourceEntry=(section.msiSeries||{})[sourceKey];
+    if(meta&&meta.version==='msi-group-v1') {
+        if(/^MSI_RATIO_/.test(layerKey)&&(typeof App==='undefined'||!App.ratioRoiCompatible||!App.ratioRoiCompatible(section,layerKey,meta)))return {values:[],unavailable:true,reason:'roi-group-mismatch'};
+        if(typeof MsiSpatialGroups==='undefined'||!MsiSpatialGroups.roiCompatible(meta,grid.sourceGeometry,section,sourceEntry))return {values:[],unavailable:true,reason:'roi-group-mismatch'};
+    } else if(meta&&meta.sourceRef!==grid.sourceGeometry.sourceRef)return {values:[],unavailable:true,reason:'roi-source-mismatch'};
     if(!meta&&grid.sourceGeometry.legacy&&grid.sourceGeometry.legacy.confirmed===false)
         return {values:[],unavailable:true,reason:grid.sourceGeometry.legacy.reason};
     const out=[],rowIds=[],coords=new Set();let unlocatedRows=0;
+    // Membership was verified once above. Keep the per-row containment loop
+    // independent of the size of the coordinate/group registry.
+    const membershipMeta=meta&&meta.version==='msi-group-v1'
+        ? Object.assign({},meta,{version:'msi-source-v1',sourceRef:grid.sourceGeometry.sourceRef}) : meta;
     // No display setting (including Otsu) is consulted in this loop.
     for(const row of grid.rows) {
         if(!Number.isFinite(row.x)||!Number.isFinite(row.y)){unlocatedRows++;continue;}
-        const inside=roiContainsSourcePoint(polyMsi,meta,grid.sourceGeometry,row.x,row.y);
+        const inside=roiContainsSourcePoint(polyMsi,membershipMeta,grid.sourceGeometry,row.x,row.y);
         if(inside===null)return {values:[],unavailable:true,reason:'roi-geometry-unavailable'};
         if(!inside)continue;
         const cell=row.sourceCells&&row.sourceCells.v;
@@ -11575,6 +11650,7 @@ async function renderAnalysisChart(gen) {
             'legacy-value-axis-unconfirmed': '旧描画時の測定行を確認できず、旧ROIの座標対応は未確定です',
             'legacy-render-quant-axis-mismatch': '旧描画と旧定量で座標軸が異なるため、旧ROIを安全に対応付けできません。元のROIは保持しています',
             'roi-source-mismatch': 'ROIと測定ソースの対応を確認できません',
+            'roi-group-mismatch': 'ROIの共通座標グループに含まれない測定です',
             'roi-geometry-unavailable': 'ROIの座標系を確認できません',
             'unsupported-source-precision': '入力の型・精度を保った計算に未対応の値があります'
         };
@@ -15417,6 +15493,7 @@ const Wizards = {
         // All registration edits stay in this private metadata copy until Save.
         const sec = Object.assign({}, realSec, { meta: clone(realSec.meta || {}), images: Object.assign({}, realSec.images || {}) });
         const baseProject = App.project;
+        const baseShareToken = App.shareMode && App.shareMode.token;
         const baseShareVersion = typeof getShareAlignmentVersion === 'function' ? getShareAlignmentVersion(realSec) : null;
         const baseAlignment = captureSectionAlignment(realSec);
         const session = MsiAlignmentSession.create({ sectionId: sec.id, initialAlignment: baseAlignment });
@@ -15425,7 +15502,8 @@ const Wizards = {
         let workspace = null, activeFrame = null, activeDraft = null;
         const cleanups = [];
         const lastMsiByMode = new Map();
-        const stillOpen = () => !closed && App.project === baseProject && !panel._destroyed;
+        const stillOpen = () => !closed && App.project === baseProject && !panel._destroyed
+            && (App.shareMode && App.shareMode.token) === baseShareToken;
         sec.images = sec.images || {};
         const heKeys = Object.keys(sec.images).filter(k => /HE_STAIN|IF_STAIN/i.test(k))
             .concat(Object.keys(sec.images).filter(k => !/HE_STAIN|IF_STAIN/i.test(k)
@@ -15520,6 +15598,41 @@ const Wizards = {
         // section's last-saved choice, then MSI_TIC (typically the cleanest
         // landmark target), then whichever MSI series happens to be first.
         const allMsiKeys = Object.keys(sec.msiSeries || {}).filter(k => /^MSI_/i.test(k));
+        const groupMode = id => '__group__|' + id;
+        const isGroupMode = mode => typeof mode==='string'&&mode.startsWith('__group__|');
+        let coordinateGroupCache=null;
+        const enrollLoadedGroups = () => {
+            coordinateGroupCache=null;
+            if(shareAlign||typeof MsiSpatialGroups==='undefined')return;
+            for(const key of allMsiKeys) {
+                const frame=alignmentFrameDescriptor(sec,key,panel);
+                if(frame.confirmed||frame.geometry?.currentConfirmed===true)MsiSpatialGroups.ensureGroup(sec,sec.msiSeries[key],frame.geometry);
+            }
+        };
+        const coordinateGroups = () => {
+            if(coordinateGroupCache)return coordinateGroupCache;
+            const groups=new Map();
+            for(const key of allMsiKeys) {
+                const frame=alignmentFrameDescriptor(sec,key,panel),group=frame.spatialGroup;
+                if(!group)continue;
+                if(!groups.has(group.groupId))groups.set(group.groupId,{...group,keys:[],targets:new Set()});
+                groups.get(group.groupId).keys.push(key);
+                groups.get(group.groupId).targets.add(alignmentTargetKey(frame));
+            }
+            // Retain previously verified, currently unloaded members in the
+            // picker/count. Selection still loads and revalidates their grid.
+            if(typeof MsiSpatialGroups!=='undefined')for(const group of groups.values()) {
+                const saved=sec.meta.spatialGroups.groups.find(item=>item.id===group.groupId&&item.frameKey===group.frameKey);
+                for(const key of allMsiKeys)if(!group.keys.includes(key)
+                    &&saved.members.some(member=>member.key===MsiSpatialGroups.memberKey(sec.msiSeries[key]))) {
+                    const frame=alignmentFrameDescriptor(sec,key,panel);
+                    if(frame.geometry)continue; // Known changed coordinates cannot borrow membership.
+                    group.keys.push(key);group.targets.add(alignmentTargetKey(frame));
+                }
+            }
+            return coordinateGroupCache=groups;
+        };
+        enrollLoadedGroups();
         const realTicKey = allMsiKeys.find(k => /^MSI_TIC$/i.test(k));
         // Synthetic TIC is offered when the user has 2+ MSI series and no real
         // MSI_TIC is registered. The synthetic image is just the per-pixel sum
@@ -15572,10 +15685,17 @@ const Wizards = {
         // Respect the saved individual-editing preference when reopening.
         const perSourceAlign = !!(sec.meta && sec.meta.perSourceAlign);
         state.sourceMode = (() => {
-            if (!hasSources) return null;
-            if (!hasMultipleSources) return sourceFids[0];
+            if(!perSourceAlign&&isGroupMode(persistedSourceMode))return persistedSourceMode;
             if (persistedSourceMode === '__all__' && !perSourceAlign) return '__all__';
             if (persistedSourceMode && sourceFids.includes(persistedSourceMode)) return persistedSourceMode;
+            if(persistedSourceMode==='__individual__')return persistedSourceMode;
+            if(!persistedSourceMode&&!perSourceAlign) {
+                const key=allMsiKeys.includes(state.msiKey)?state.msiKey:allMsiKeys[0];
+                const group=key&&alignmentFrameDescriptor(sec,key,panel).spatialGroup;
+                if(group)return groupMode(group.groupId);
+            }
+            if (!hasSources) return '__individual__';
+            if (!hasMultipleSources) return sourceFids[0];
             if (initialFidFromMsi && sourceFids.includes(initialFidFromMsi)) return initialFidFromMsi;
             return sourceFids[0];
         })();
@@ -15599,6 +15719,14 @@ const Wizards = {
         // every MSI key so the dropdown stays full when the user wants a
         // shared T.
         const compoundsForMode = (mode) => {
+            if(isGroupMode(mode)) {
+                const group=coordinateGroups().get(mode.slice(10));
+                if(group)return group.keys;
+                const saved=sec.meta.spatialGroups?.groups?.find(item=>item.id===mode.slice(10));
+                return saved&&typeof MsiSpatialGroups!=='undefined'
+                    ? allMsiKeys.filter(key=>saved.members?.some(member=>member.key===MsiSpatialGroups.memberKey(sec.msiSeries[key]))) : [];
+            }
+            if(mode==='__individual__')return allMsiKeys.slice();
             if (mode === '__all__' || !mode) return allMsiKeys.slice();
             return allMsiKeys.filter(k => {
                 const ent = sec.msiSeries[k];
@@ -15697,16 +15825,22 @@ const Wizards = {
                 || (bs && Number.isFinite(bs.scale_pct)));
             return hasT ? '△' : '−';
         };
-        const sourceOpts = hasSources
-            ? sourceFids.map((fid, idx) => {
+        const buildSourceOpts = () => sourceFids.map((fid, idx) => {
                 const lbl = sourceLabels.get(fid) || fid;
                 const sel = state.sourceMode === fid ? ' selected' : '';
                 return `<option value="${safe(fid)}"${sel}>${sourceAlignStatus(fid)} Source ${idx + 1}: ${safe(lbl)}</option>`;
               }).join('')
+              + (!hasSources?`<option value="__individual__"${state.sourceMode==='__individual__'?' selected':''}>この測定のみ</option>`:'')
+              + [...coordinateGroups().values()].map((group,index)=> {
+                  const key=group.keys[0],reference=sourceLabels.get(fidOf(key))||formatDisplayName(key);
+                  return `<option value="${safe(groupMode(group.groupId))}"${state.sourceMode===groupMode(group.groupId)?' selected':''}>同じ座標の測定に共通 (${group.targets.size} 件) / ${safe(reference)} [${index+1}]</option>`;
+              }).join('')
+              + (isGroupMode(state.sourceMode)&&!coordinateGroups().has(state.sourceMode.slice(10))
+                  ? `<option value="${safe(state.sourceMode)}" selected>同じ座標の測定に共通（確認待ち）</option>`:'')
               + (hasMultipleSources
                   ? `<option value="__all__"${state.sourceMode==='__all__'?' selected':''}>全ソース共通</option>`
-                  : '')
-            : '';
+                  : '');
+        const sourceOpts=buildSourceOpts();
         const html = `
             <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;flex-wrap:wrap;">
               <h2 style="margin:0;">HE/IF ⇔ MSI Alignment</h2>
@@ -15714,10 +15848,10 @@ const Wizards = {
                 <label style="font-size:11px;color:#475569;">
                   Layer: <select data-align-layer style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;">${layerOpts}</select>
                 </label>
-                ${hasSources ? `<label style="font-size:11px;color:#475569;">
-                  Source: <select data-align-source style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;">${sourceOpts}</select>
+                ${(hasSources||coordinateGroups().size) ? `<label style="font-size:11px;color:#475569;">
+                  Source: <select data-align-source style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;max-width:360px;">${sourceOpts}</select>
                 </label>` : ''}
-                ${hasMultipleSources ? `<label style="font-size:11px;color:#475569;display:inline-flex;align-items:center;gap:4px;" title="ON にすると各測定回(Source)の重ね合わせを個別に保持し、共通Tへ集約しません（連続測定の微小なずれを測定ごとに補正）">
+                ${(hasSources||coordinateGroups().size) ? `<label style="font-size:11px;color:#475569;display:inline-flex;align-items:center;gap:4px;" title="ON にすると表示中の測定だけを調整します。共通設定は保持されます。">
                   <input type="checkbox" data-align-persource${(sec.meta && sec.meta.perSourceAlign) ? ' checked' : ''}> 測定回ごとに個別
                 </label>` : ''}
                 <label style="font-size:11px;color:#475569;">
@@ -15727,6 +15861,7 @@ const Wizards = {
             </div>
             <p style="font-size:11px;color:#475569;margin-top:0;">
               スライダーまたは対応点クリックで HE/IF を MSI に重ねます。この画面内で比較・合成表示を確認できます。<br>
+              <span style="color:#475569;">「同じ座標の測定に共通」は、このsectionで座標が確認できた測定に適用します。同じ座標で後から追加した測定も引き継ぎます。個別の補正は「同じ座標へ再適用」で解除できます。</span><br>
               <span style="color:#64748b;">※ 位置合わせは「Source」で選んだ範囲に保存されます。<b>全ソース共通</b>は登録済みの全ソース(POS/NEG など)に、同じ回転・倍率・移動を画像の画素座標で適用します。測定座標の原点・間隔の違いによる非表示は行いません。未読込の画像にも読み込み後に適用します。特定の Source を選ぶとそのソースだけを調整できます。後から明示的に編集・適用した設定を優先します。Source 一覧の記号 ✓=対応点で整列済 / ⊙=自動整合済 / △=スライダーのみ / −=未整列。<br>「全ソースへ反映」は、現在の位置合わせを共通設定として再適用して保存します。</span>
             </p>
 
@@ -15803,6 +15938,7 @@ const Wizards = {
             <div style="display:flex;gap:6px;margin-top:10px;justify-content:space-between;flex-wrap:wrap;">
               <button type="button" class="btn" data-reset>Reset to identity</button>
               <div style="display:flex;gap:6px;">
+                <button type="button" class="btn" data-apply-group title="座標が確認できた同じグループに現在の位置合わせを保存し、対象の個別補正を解除します。">同じ座標へ再適用</button>
                 ${hasMultipleSources ? `<button type="button" class="btn" data-apply-all title="現在の位置合わせを登録済みの全ソースへ保存します。測定座標の完全一致は不要です。未読込の画像にも読み込み後に適用します。">全ソースへ反映</button>` : ''}
                 <button type="button" class="btn" data-modal-cancel>Cancel</button>
                 <button type="button" class="btn primary" data-save>Save</button>
@@ -15847,6 +15983,36 @@ const Wizards = {
         const autoBox  = $('[data-auto-result]');
         const resetBtn = $('[data-reset]');
         const saveBtn  = $('[data-save]');
+        const applyGroupBtn = $('[data-apply-group]');
+        const groupsToReapply = new Set();
+        if(applyGroupBtn)applyGroupBtn.addEventListener('click',()=>{
+            const group=activeFrame&&activeFrame.spatialGroup;
+            if(!imagesReady||saving||!group)return;
+            captureCurrent();
+            if(!state.seedVerified&&!session.isDirty(activeDraft.key)) {
+                showToast('位置合わせを調整してから同じ座標へ反映してください。',5000);return;
+            }
+            const targets=coordinateGroups().get(group.groupId);
+            if(!targets)return;
+            const layer=sec.meta.alignment[state.layerKey]||{};
+            const overrides=targets.keys.map(key=>alignmentFrameDescriptor(sec,key,panel))
+                .filter(frame=>(layer.byFrame||{})[frame.key]?.scope==='source');
+            for(const record of Object.values(layer.byFrame||{}))if(record?.scope==='source'
+                &&record.frame?.spatialGroup?.groupId===group.groupId
+                &&record.frame.spatialGroup.frameKey===group.frameKey)overrides.push(record.frame);
+            const overrideCount=new Set(overrides.map(alignmentTargetKey)).size;
+            if(overrideCount&&!confirm(`同じ座標の ${targets.targets.size} 件へ反映し、${overrideCount} 件の個別補正を解除します。続けますか？`))return;
+            const current=clone(state),view=workspace&&workspace.getViewState();
+            activeDraft=session.activate({layerKey:state.layerKey,imageIdentity:alignmentImageIdentity(sec.images[state.layerKey]),
+                scope:'group',frame:activeFrame,groupId:group.groupId,groupFrameKey:group.frameKey},
+                seedForFrame(state.layerKey,activeFrame,groupMode(group.groupId)));
+            Object.assign(state,current,{sourceMode:groupMode(group.groupId)});
+            session.capture(state,view);session.forceCommit();
+            groupsToReapply.add(group.groupId);
+            sec.meta.perSourceAlign=false;if(perSourceEl)perSourceEl.checked=false;
+            if(sourceSel)sourceSel.value=state.sourceMode;
+            saveBtn.click();
+        });
         const applyAllBtn = $('[data-apply-all]');
         if (applyAllBtn) applyAllBtn.addEventListener('click', () => {
             if (!imagesReady || saving || !activeFrame || !activeFrame.confirmed) return;
@@ -15953,7 +16119,9 @@ const Wizards = {
         if (perSourceEl) perSourceEl.addEventListener('change', () => {
             sec.meta = sec.meta || {};
             sec.meta.perSourceAlign = perSourceEl.checked;
-            updatePreview();
+            const fid=fidOf(state.msiKey),group=activeFrame&&activeFrame.spatialGroup;
+            const mode=perSourceEl.checked?(fid||'__individual__'):(group?groupMode(group.groupId):state.sourceMode);
+            changeSelection(state.layerKey,state.msiKey,mode,{createGroup:!perSourceEl.checked});
             // This flag is a draft setting too; Cancel must never persist it.
         });
 
@@ -15966,7 +16134,7 @@ const Wizards = {
             if (!activeDraft) return;
             const revision=activeDraft.editRevision;
             session.capture(state, workspace && workspace.getViewState());
-            if(activeDraft.context.scope==='shared'&&activeFrame&&activeFrame.confirmed&&activeDraft.editRevision!==revision) {
+            if((activeDraft.context.scope==='shared'||activeDraft.context.scope==='group')&&activeFrame&&activeFrame.confirmed&&activeDraft.editRevision!==revision) {
                 activeDraft.context.frame=clone(activeFrame);
                 activeDraft.frameKey=MsiAlignmentSession.frameKey(activeFrame);
             }
@@ -15974,6 +16142,8 @@ const Wizards = {
         const seedForFrame = (heKey, frame, mode) => {
             const rec = sec.meta.alignment[heKey] || {};
             const identity = alignmentImageIdentity(sec.images[heKey]);
+            const grouped=isGroupMode(mode)&&alignmentGroupRecord(rec,frame);
+            if(grouped&&!alignmentRecordProblem(grouped,frame,identity,false))return Object.assign(clone(grouped),{seedVerified:true});
             const shared = mode === '__all__' && alignmentCommonRecord(rec,frame);
             if(shared&&!alignmentRecordProblem(shared,frame,identity,true))return Object.assign(clone(shared),{seedVerified:true});
             if(mode!=='__all__') {
@@ -15984,7 +16154,7 @@ const Wizards = {
             const bySrc = unambiguous && rec.bySource && rec.bySource[frame.sourceFileId];
             // Once a frame is explicitly recorded, a legacy fallback must not
             // accidentally attach its points to another sheet or coordinate grid.
-            if (!Object.keys(rec.byFrame||{}).length&&!Object.keys(rec.sharedByCoordinate||{}).length) {
+            if (!Object.keys(rec.byFrame||{}).length&&!Object.keys(rec.sharedByCoordinate||{}).length&&!Object.keys(rec.byGroup||{}).length) {
                 // Pre-frame common settings also expressed an all-source
                 // intent. Restore their own parameters, not a source override,
                 // without requiring equal acquisition coordinates.
@@ -16014,6 +16184,12 @@ const Wizards = {
             if (autoBtn) autoBtn.disabled = busy;
             saveBtn.disabled = busy || saving;
             for(const el of [scaleEl,scaleNum,rotateEl,rotateNum,offxEl,offxNum,offyEl,offyNum,flipLrEl,flipUdEl,clearLmBtn,resetBtn,applyAllBtn])if(el)el.disabled=busy||saving;
+            if(applyGroupBtn) {
+                const group=activeFrame&&activeFrame.spatialGroup;
+                const targets=group&&coordinateGroups().get(group.groupId);
+                applyGroupBtn.disabled=busy||saving||!targets;
+                applyGroupBtn.textContent=targets?`同じ座標へ再適用 (${targets.targets.size} 件)`:'同じ座標へ再適用';
+            }
             if (message) pickStatus.textContent = message;
         };
         const ensureSelection = async (key, generation) => {
@@ -16034,6 +16210,7 @@ const Wizards = {
             if (autoBox) { autoBox.style.display = 'none'; autoBox.innerHTML = ''; }
             try {
                 await ensureSelection(nextKey,generation);
+                enrollLoadedGroups();
                 const anchor=sec.meta.alignmentMsiKey;
                 if (anchor && sec.msiSeries[anchor] && anchor !== nextKey && generation === selectionGeneration) {
                     if (panel.ensureMsiLayerLoaded) await panel.ensureMsiLayerLoaded(anchor);
@@ -16041,6 +16218,8 @@ const Wizards = {
                 if (!stillOpen() || generation !== selectionGeneration) return;
                 const referenceKey = frameKeyForSelection(nextKey);
                 const frame = alignmentFrameDescriptor(sec, referenceKey, panel);
+                if(!activeDraft&&!persistedSourceMode&&!perSourceAlign&&frame.spatialGroup)
+                    nextMode=groupMode(frame.spatialGroup.groupId);
                 // Synthetic TIC is a display aid only. Every contributor must
                 // have the same confirmed coordinate basis before pooling points.
                 if (isTicKey(nextKey)) {
@@ -16050,25 +16229,34 @@ const Wizards = {
                     }
                 }
                 const context = { layerKey:nextLayer, imageIdentity:alignmentImageIdentity(sec.images[nextLayer]),
-                    scope:nextMode === '__all__' ? 'shared' : 'source', frame,
+                    scope:nextMode === '__all__' ? 'shared' : isGroupMode(nextMode) ? 'group' : 'source', frame,
+                    groupId:isGroupMode(nextMode)&&frame.spatialGroup?frame.spatialGroup.groupId:null,
+                    groupFrameKey:isGroupMode(nextMode)&&frame.spatialGroup?frame.spatialGroup.frameKey:null,
                     sharedId:nextMode === '__all__' ? '__all__' : null };
+                if(isGroupMode(nextMode)&&(!frame.spatialGroup||nextMode!==groupMode(frame.spatialGroup.groupId)))
+                    throw new Error('この測定は選択した共通座標グループに属していません。');
                 const seed = Object.assign({flip_lr:false,flip_ud:false,scale_pct:100,rotate_deg:0,offx:0,offy:0,
                     landmarks:{he:[],msi:[]},autoAligned:null},seedForFrame(nextLayer,frame,nextMode), {
                     layerKey:nextLayer, msiKey:nextKey, sourceMode:nextMode, pickMode:'none',
                     msi_um_x:msiUm.x, msi_um_y:msiUm.y });
                 const existingCommon=alignmentCommonRecord(sec.meta.alignment[nextLayer]||{},frame);
+                const createGroup=options&&options.createGroup&&isGroupMode(nextMode)
+                    &&previousDraft&&previousDraft.context.scope==='source'&&nextLayer===previousState.layerKey
+                    &&frame.confirmed&&previousFrame&&previousFrame.confirmed
+                    &&!alignmentGroupRecord(sec.meta.alignment[nextLayer]||{},frame)
+                    &&(previousState.seedVerified||session.isDirty(previousDraft.key));
                 const createCommon=options&&options.createCommon&&nextMode==='__all__'
                     &&previousDraft&&previousDraft.context.scope==='source'&&nextLayer===previousState.layerKey
                     &&frame.confirmed&&previousFrame&&previousFrame.confirmed
                     &&(!existingCommon||alignmentRecordProblem(existingCommon,frame,context.imageIdentity,true))
                     &&(previousState.seedVerified||session.isDirty(previousDraft.key))
                     &&alignmentValidAffine(buildHeToMsiAffine(previousState));
-                if(createCommon)Object.assign(seed,MsiAlignmentSession.alignmentState(previousState),{seedVerified:true});
+                if(createCommon||createGroup)Object.assign(seed,MsiAlignmentSession.alignmentState(previousState),{seedVerified:true});
                 const existingDraft=session.peek(context);
                 const keepSharedDraft=existingDraft&&session.isDirty(existingDraft.key);
                 const previous = activeDraft;
                 activeDraft = session.activate(context, seed);
-                if(createCommon&&!keepSharedDraft) {
+                if((createCommon||createGroup)&&!keepSharedDraft) {
                     Object.assign(activeDraft.state,seed);
                     activeDraft.context.frame=clone(previousFrame);
                     activeDraft.frameKey=MsiAlignmentSession.frameKey(previousFrame);
@@ -16079,16 +16267,19 @@ const Wizards = {
                 // untouched default alignment as a new edit on Save.
                 for(const key of Object.keys(state))delete state[key];
                 Object.assign(state, clone(activeDraft.state), { layerKey:nextLayer, msiKey:nextKey, sourceMode:nextMode });
-                if(createCommon)session.forceCommit({once:true});
-                if(options&&options.createCommon) {
+                if(createCommon||createGroup)session.forceCommit({once:true});
+                if(options&&(options.createCommon||options.createGroup)) {
                     sec.meta.perSourceAlign=false;
                     if(perSourceEl)perSourceEl.checked=false;
+                } else if(options&&options.individual) {
+                    sec.meta.perSourceAlign=true;
+                    if(perSourceEl)perSourceEl.checked=true;
                 }
                 if (!state.landmarks) state.landmarks = {he:[],msi:[]};
                 if (previous && previous.key !== activeDraft.key && workspace) workspace.setViewState(activeDraft.view || {});
                 lastMsiByMode.set(nextMode || '__legacy__', nextKey);
                 layerSel.value = nextLayer;
-                if (sourceSel) sourceSel.value = nextMode || '';
+                if (sourceSel) {sourceSel.innerHTML=buildSourceOpts();sourceSel.value = nextMode || '';}
                 msiSel.innerHTML = buildMsiOpts(nextMode); msiSel.value = nextKey || '';
                 syncUiFromState();
                 pickHeBtn.style.background=state.pickMode==='he'?'#dbeafe':'';
@@ -16116,7 +16307,8 @@ const Wizards = {
             const filtered = compoundsForMode(mode);
             const remembered = lastMsiByMode.get(mode || '__legacy__');
             const next = filtered.includes(remembered) ? remembered : filtered.includes(state.msiKey) ? state.msiKey : filtered[0];
-            if (next) changeSelection(state.layerKey, next, mode,{createCommon:mode==='__all__'});
+            if (next) changeSelection(state.layerKey, next, mode,{createCommon:mode==='__all__',createGroup:isGroupMode(mode),
+                individual:mode!=='__all__'&&!isGroupMode(mode)});
         });
 
         // ---- MSI colour mapping (Plasma) + synthetic TIC --------------------
@@ -16815,7 +17007,7 @@ const Wizards = {
             target.meta.world_coords = target.meta.world_coords || {};
             const wc = target.meta.world_coords;
             const serialized = session.serialize();
-            const registeredFrames = serialized.entries.some(entry=>entry.context.scope==='shared')
+            const registeredFrames = serialized.entries.some(entry=>entry.context.scope==='shared'||entry.context.scope==='group')
                 ? allMsiKeys.map(key=>alignmentFrameDescriptor(sec,key,panel)) : [];
             for (const entry of serialized.entries) {
                 const heKey = entry.context.layerKey;
@@ -16828,10 +17020,39 @@ const Wizards = {
                 record.imageIdentity = entry.context.imageIdentity;
                 const aRef = target.meta.alignment[heKey] = target.meta.alignment[heKey] || {};
                 record.scope = entry.context.scope;
+                if(entry.context.scope==='group'||frame.currentCoordinatesConfirmed)
+                    record.coordinateProvenance='source-coordinate-map-v1';
                 record.editOrder = alignmentNextEditOrder(aRef);
                 aRef.byFrame = aRef.byFrame || {};
                 let frames = [frame];
-                if (entry.context.scope === 'shared') {
+                if(entry.context.scope==='group') {
+                    const group=frame.spatialGroup;
+                    if(!group||group.groupId!==entry.context.groupId||group.frameKey!==entry.context.groupFrameKey)
+                        throw new Error('共通座標グループを確認できません。対象の測定を読み直してください。');
+                    record.groupId=group.groupId;record.groupFrameKey=group.frameKey;record.groupFrameVersion=1;
+                    aRef.byGroup=aRef.byGroup||{};
+                    aRef.byGroup[group.groupId]=Object.assign(clone(record),{frame:clone(frame)});
+                    if(groupsToReapply.has(group.groupId)) {
+                        // An already verified member may currently be evicted
+                        // from the raster cache. Clear its saved override too.
+                        const inGroup=saved=>saved?.frame?.spatialGroup?.groupId===group.groupId
+                            &&saved.frame.spatialGroup.frameKey===group.frameKey;
+                        for(const [key,saved] of Object.entries(aRef.byFrame))if(inGroup(saved))delete aRef.byFrame[key];
+                        for(const [fid,saved] of Object.entries(aRef.bySource||{}))if(inGroup(saved)) {
+                            delete aRef.bySource[fid];
+                            if(wc.T_he_to_msi_by_source)delete wc.T_he_to_msi_by_source[fid];
+                        }
+                        for(const f of registeredFrames.filter(f=>f.spatialGroup?.groupId===group.groupId
+                            &&f.spatialGroup.frameKey===group.frameKey)) {
+                            delete aRef.byFrame[f.key];
+                            if(alignmentLegacySourceIsUnambiguous(sec,f)&&f.sourceFileId) {
+                                if(aRef.bySource)delete aRef.bySource[f.sourceFileId];
+                                if(wc.T_he_to_msi_by_source)delete wc.T_he_to_msi_by_source[f.sourceFileId];
+                            }
+                        }
+                    }
+                    frames=[]; // Membership, including later additions, resolves the common record.
+                } else if (entry.context.scope === 'shared') {
                     record.targetKeys = [...new Set(registeredFrames.map(alignmentTargetKey))];
                     aRef.sharedByCoordinate = aRef.sharedByCoordinate || {};
                     aRef.sharedByCoordinate[frame.coordinateKey] = Object.assign(clone(record),{frame:clone(frame)});
@@ -16881,6 +17102,11 @@ const Wizards = {
             try {
                 const payload = buildSavePayload();
                 if (shareAlign) {
+                    if(Object.values(payload.alignment||{}).some(layer=>Object.keys(layer.byGroup||{}).length)) {
+                        if(typeof ensureSpatialServerSupport!=='function')throw new Error('共通座標の保存機能を確認できません。画面を更新してください。');
+                        await ensureSpatialServerSupport();
+                    }
+                    if (!stillOpen()) return;
                     const ok = await pushShareAlignment(realSec,{payload,expectedVersion:baseShareVersion});
                     if (!ok) return;
                     if (!stillOpen()) return;
@@ -16895,6 +17121,7 @@ const Wizards = {
                     if (!stillOpen()) return;
                     const savedSection = Object.assign({},realSec,{meta:clone(realSec.meta || {})});
                     applySectionAlignment(savedSection,payload);
+                    if(sec.meta.spatialGroups)savedSection.meta.spatialGroups=clone(sec.meta.spatialGroups);
                     const savedProject = Object.assign({},baseProject,{
                         sections:(baseProject.sections || []).map(s=>s.id === realSec.id ? savedSection : s)
                     });
@@ -16903,6 +17130,7 @@ const Wizards = {
                     if (baseProject.storageRevision === savedProject.storageRevision - 1) baseProject.storageRevision = savedProject.storageRevision;
                     if (!stillOpen()) return;
                     applySectionAlignment(realSec,payload);
+                    if(sec.meta.spatialGroups)realSec.meta.spatialGroups=clone(sec.meta.spatialGroups);
                     // Normal synchronization starts only after local Save succeeded.
                     App.queueSave(0);
                 }
@@ -18144,17 +18372,21 @@ function buildOneCsvTable(group, roiPairs, project, otsuMode) {
         const sourceGeometry = createMsiSourceGeometry(ref.positions, ref.repr || {}, ref.cols);
         const resolvedPairs = [];
         for (const pair of roiPairs) {
-            const reason = pair.unresolved || (!pair.geometry&&sourceGeometry.legacy.confirmed===false ? sourceGeometry.legacy.reason : null) || (pair.geometry &&
-                (!msiValidRoiGeometry(pair.geometry) || pair.geometry.sourceRef !== sourceGeometry.sourceRef)
-                ? 'roi-source-geometry-unavailable' : null);
+            const reason = pair.unresolved || (roiPairs.statusFor
+                ? group.map(member=>roiPairs.statusFor(pair,member)).find(Boolean)
+                : pair.geometry?.version==='msi-group-v1' ? 'roi-group-context-unavailable'
+                : (!pair.geometry&&sourceGeometry.legacy.confirmed===false ? sourceGeometry.legacy.reason : null)
+                    || (pair.geometry && (!msiValidRoiGeometry(pair.geometry)
+                        || pair.geometry.sourceRef !== sourceGeometry.sourceRef) ? 'roi-source-geometry-unavailable' : null)) || null;
             metadata.roiAssignments.push({ name: pair.name, status: reason ? 'unresolved' : 'resolved', reason });
-            if (!reason) resolvedPairs.push(pair);
+            if (!reason) resolvedPairs.push(pair.geometry && pair.geometry.version==='msi-group-v1'
+                ? {...pair,geometry:{...pair.geometry,version:'msi-source-v1',sourceRef:sourceGeometry.sourceRef}} : pair);
         }
         for (let r = 0; r < N; r++) {
             const p = ref.positions[r];
             if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) continue;
             for (const pair of resolvedPairs) {
-                if (roiContainsSourcePoint(pair.poly, pair.geometry, sourceGeometry, p.x, p.y)) { roiArr[r] = pair.name; break; }
+                if (roiContainsSourcePoint(pair.poly, pair.geometry, sourceGeometry, p.x, p.y,roiPairs.section,ref.repr)) { roiArr[r] = pair.name; break; }
             }
         }
     }
@@ -18213,9 +18445,28 @@ async function buildSampleCsvGroups(sec, project, otsuMode, snapshotStorage) {
     const roiPairs = rois.map(r => ({ name: String(r.name || r.colorKey || ''), poly: r.polysBySection[sec.id],
         geometry: msiRoiGeometryMeta(r, sec),
         unresolved: !msiRoiGeometryMeta(r, sec) && ambiguousLegacySource ? 'legacy-roi-source-ambiguous' : null }));
+    roiPairs.section=sec;
+    roiPairs.statusFor=(pair,member)=>{
+        if(pair.unresolved)return pair.unresolved;
+        const matrix=member.matrix;
+        const geometry=member.roiGeometry||(member.roiGeometry=createMsiSourceGeometry(matrix.positions,matrix.repr||{},matrix.cols));
+        if(!pair.geometry)return geometry.legacy.confirmed===false?geometry.legacy.reason:null;
+        if(!msiValidRoiGeometry(pair.geometry))return 'roi-source-geometry-unavailable';
+        for(const {ent} of member.entries) {
+            const sourceGeometry={...geometry,sourceRef:msiSourceReference(ent)};
+            const valid=pair.geometry.version==='msi-group-v1'
+                ? typeof MsiSpatialGroups!=='undefined'&&MsiSpatialGroups.roiCompatible(pair.geometry,sourceGeometry,sec,ent)
+                : pair.geometry.sourceRef===sourceGeometry.sourceRef;
+            if(!valid)return 'roi-source-geometry-unavailable';
+        }
+        return null;
+    };
     const groups = [];
     for (const member of parsed) {
-        const compatible = groups.find(group => msiCsvRowOrder(group[0].matrix, member.matrix));
+        // A single ROI label column must describe every source in the table.
+        // Equal coordinate rows cannot merge an individual ROI's scope away.
+        member.roiScope=JSON.stringify(roiPairs.map(pair=>roiPairs.statusFor(pair,member)));
+        const compatible = groups.find(group => group[0].roiScope===member.roiScope&&msiCsvRowOrder(group[0].matrix, member.matrix));
         if (compatible) compatible.push(member); else groups.push([member]);
     }
     return groups.map(group => buildOneCsvTable(group, roiPairs, project, 'none'));
@@ -18608,14 +18859,21 @@ async function tryAppendUserRoiColumns(srcBlob, section, msiEnt, project) {
             if (!Number.isFinite(x) || !Number.isFinite(y)) { positions.push(null); continue; }
             positions.push({ x, y });
         }
-        const sourceGeometry = createMsiSourceGeometry(positions.filter(Boolean), msiEnt);
+        const sourceGeometry = roiPairs.some(pair=>pair.geometry?.version==='msi-group-v1')
+            ? createMsiSourceGeometry(parseXlsxToRows(buf,msiEnt),msiEnt)
+            : createMsiSourceGeometry(positions.filter(Boolean), msiEnt);
+        const sourcePairs=roiPairs.flatMap(pair=>{
+            if(pair.geometry?.version!=='msi-group-v1')return [pair];
+            return typeof MsiSpatialGroups!=='undefined'&&MsiSpatialGroups.roiCompatible(pair.geometry,sourceGeometry,section,msiEnt)
+                ? [{...pair,geometry:{...pair.geometry,version:'msi-source-v1',sourceRef:sourceGeometry.sourceRef}}] : [];
+        });
         for (let k = 0; k < positions.length; k++) {
             const pos = positions[k];
             const r = dataStart0 + k;
             if (!pos) continue;
             let matched = '';
-            for (const pair of roiPairs) {
-                if (roiContainsSourcePoint(pair.poly, pair.geometry, sourceGeometry, pos.x, pos.y)) { matched = pair.name; break; }
+            for (const pair of sourcePairs) {
+                if (roiContainsSourcePoint(pair.poly, pair.geometry, sourceGeometry, pos.x, pos.y,section,msiEnt)) { matched = pair.name; break; }
             }
             if (matched) sheet[XLSX.utils.encode_cell({ r, c: roiCol })] = { t: 's', v: matched };
         }
@@ -18656,6 +18914,9 @@ async function tryAppendUserRoiColumnsToTxt(srcBlob, section, msiEnt, project) {
         }));
 
         roiPairs.sourceDef = msiEnt;
+        roiPairs.section = section;
+        if(roiPairs.some(pair=>pair.geometry?.version==='msi-group-v1'))
+            roiPairs.sourceGeometry=createMsiSourceGeometry(parseTxtToRows(buf,msiEnt),msiEnt);
         // Try Analyte parsing unconditionally — many Analyte-derived dumps
         // omit the literal "Analyte (converted from imzML)" marker on line
         // 0, but parseAnalyteHeader's structural detector (two consecutive
@@ -18743,7 +19004,12 @@ function appendRoisToAnalyteLines(linesAll, parsed, roiPairs) {
         if (!Number.isFinite(x) || !Number.isFinite(y)) { positions.push(null); continue; }
         positions.push({ x, y });
     }
-    const sourceGeometry = createMsiSourceGeometry(positions.filter(Boolean), roiPairs.sourceDef || {});
+    const sourceGeometry = roiPairs.sourceGeometry || createMsiSourceGeometry(positions.filter(Boolean), roiPairs.sourceDef || {});
+    const sourcePairs=roiPairs.flatMap(pair=>{
+        if(pair.geometry?.version!=='msi-group-v1')return [pair];
+        return typeof MsiSpatialGroups!=='undefined'&&MsiSpatialGroups.roiCompatible(pair.geometry,sourceGeometry,roiPairs.section,roiPairs.sourceDef)
+            ? [{...pair,geometry:{...pair.geometry,version:'msi-source-v1',sourceRef:sourceGeometry.sourceRef}}] : [];
+    });
     // Pass 2: convert to pixel indices and run pointInPolygon. Empty cell
     // when the pixel falls outside every polygon (downstream filters by
     // non-empty values).
@@ -18752,8 +19018,8 @@ function appendRoisToAnalyteLines(linesAll, parsed, roiPairs) {
         const i = dataStartLine + k;
         if (!pos) continue;
         let matched = '';
-        for (const pair of roiPairs) {
-            if (roiContainsSourcePoint(pair.poly, pair.geometry, sourceGeometry, pos.x, pos.y)) { matched = pair.name; break; }
+        for (const pair of sourcePairs) {
+            if (roiContainsSourcePoint(pair.poly, pair.geometry, sourceGeometry, pos.x, pos.y,roiPairs.section,roiPairs.sourceDef)) { matched = pair.name; break; }
         }
         out[i] = appendCell(out[i], matched);
     }
@@ -18813,14 +19079,19 @@ function appendRoisToGenericLines(linesAll, roiPairs) {
         if (!Number.isFinite(x) || !Number.isFinite(y)) { positions.push(null); continue; }
         positions.push({ x, y });
     }
-    const sourceGeometry = createMsiSourceGeometry(positions.filter(Boolean), roiPairs.sourceDef || {});
+    const sourceGeometry = roiPairs.sourceGeometry || createMsiSourceGeometry(positions.filter(Boolean), roiPairs.sourceDef || {});
+    const sourcePairs=roiPairs.flatMap(pair=>{
+        if(pair.geometry?.version!=='msi-group-v1')return [pair];
+        return typeof MsiSpatialGroups!=='undefined'&&MsiSpatialGroups.roiCompatible(pair.geometry,sourceGeometry,roiPairs.section,roiPairs.sourceDef)
+            ? [{...pair,geometry:{...pair.geometry,version:'msi-source-v1',sourceRef:sourceGeometry.sourceRef}}] : [];
+    });
     for (let k = 0; k < positions.length; k++) {
         const pos = positions[k];
         const i = headerIdx + 1 + k;
         if (!pos) continue;
         let matched = '';
-        for (const pair of roiPairs) {
-            if (roiContainsSourcePoint(pair.poly, pair.geometry, sourceGeometry, pos.x, pos.y)) { matched = pair.name; break; }
+        for (const pair of sourcePairs) {
+            if (roiContainsSourcePoint(pair.poly, pair.geometry, sourceGeometry, pos.x, pos.y,roiPairs.section,roiPairs.sourceDef)) { matched = pair.name; break; }
         }
         out[i] = appendCell(out[i], escape(matched));
     }
@@ -19050,6 +19321,11 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     // overwrite was waiting. Validate the compared local state once more.
     if(typeof opts.assertBeforeStart==='function')opts.assertBeforeStart();
     if (!SupabaseClient.configured()) throw new Error('supabase_not_configured');
+    // Merely discovering coordinate candidates must not block publishing an
+    // otherwise legacy project to an older server. Actual shared contracts do.
+    if((project.sections||[]).some(s=>Object.values(s.meta&&s.meta.alignment||{}).some(a=>a&&Object.keys(a.byGroup||{}).length))
+        ||(project.rois||[]).some(r=>Object.values(r.geometryBySection||{}).some(g=>g&&g.version==='msi-group-v1')))
+        await ensureSpatialServerSupport();
     if (!ProjectStorage.recordPublishReceipt || !ProjectStorage.pinBlobs) throw new Error('保存機能を更新してから再読み込みしてください。');
     let progress=null,cancelled=false; const abort=new AbortController();
     const context=_publishContext(project,meta.slug);
@@ -21775,10 +22051,13 @@ async function importZipFile(file, options = {}) {
                 id: uid('sec'),
                 ordinal: sEnt.ordinal || (newProject.sections.length + 1),
                 displayName: sEnt.displayName || ('Section ' + (newProject.sections.length + 1)),
-                meta: sEnt.meta || {},
+                meta: Object.assign({},sEnt.meta||{}),
                 images: {}, msiSeries: {}, msiFiles: {},
             };
             sectionsBySrcId[sEnt.id] = newSec.id;
+            // Resolve all imported aliases against the final local identity.
+            // Group ROI sections are independent from their exported source.
+            if(newSec.meta.spatialGroups)newSec.meta.client_id=newSec.id;
             mapRatioSection(sEnt, newSec);
             // HE/IF full originals (aligned PNGs are derived artifacts; the app
             // re-derives the overlay from the full image + meta.world_coords).
@@ -21889,12 +22168,13 @@ async function importZipFile(file, options = {}) {
                 id: uid('sec'),
                 ordinal: atlas.ordinal || (newProject.sections.length + 1),
                 displayName: atlas.displayName || ('Section ' + (newProject.sections.length + 1)),
-                meta: atlas.meta || {},
+                meta: Object.assign({},atlas.meta||{}),
                 images: {},
                 msiSeries: {},
                 msiFiles: {},
             };
             sectionsBySrcId[atlas.id] = newSec.id;
+            if(newSec.meta.spatialGroups)newSec.meta.client_id=newSec.id;
             mapRatioSection(atlas, newSec);
             const dir = ap.replace(/atlas\.json$/, '');
 
@@ -22576,6 +22856,21 @@ function _isMissingRpc(e) {
     return (e && e.code === 'PGRST202') || /Could not find the function/i.test(msg);
 }
 
+// A grouped coordinate contract must never be silently saved by an older
+// server as a source-only ROI. Retry after a failed capability request.
+async function ensureSpatialServerSupport() {
+    if(typeof window!=='undefined'&&window.DESI_OFFLINE===true)return true;
+    let result;
+    try { result=await SupabaseClient.spatialGroupCapabilities(); }
+    catch(error) {
+        if(typeof _isMissingRpc==='function'&&_isMissingRpc(error))throw new Error('共通HE・ROIの共有保存にはサーバの更新が必要です（supabase/spatial_groups_v1.sql）。ローカルの内容は保持されています。');
+        throw error;
+    }
+    if(!result||result.version!==1||result.roiGeometry!=='msi-group-v1'||result.alignmentScope!=='group'||result.protectDowngrade!==true)
+        throw new Error('共通座標の保存に対応したサーバへ更新してください（supabase/spatial_groups_v1.sql）。');
+    return true;
+}
+
 const SupabaseClient = (() => {
     let client = null;
     let lastError = null;
@@ -22709,7 +23004,9 @@ const SupabaseClient = (() => {
         heartbeatRoiLock(token) { return rpc('heartbeat_roi_lock', { _token: token }); },
         releaseRoiLock(token) { return rpc('release_roi_lock', { _token: token }); },
         // Master publish ---------------------------------------
-        publishProjectDocV2(args) { return rpc('publish_project_doc_v2', args); },
+        publishProjectDocV2(args) { return rpc('publish_project_doc_v2', Object.assign({},args,{_meta:Object.assign({},args._meta,{spatialWriteProtocol:1})})); },
+        spatialGroupCapabilities() { return rpc('spatial_group_capabilities_v1', {}); },
+        convertRoisToSpatialGroup(token, updates) { return rpc('convert_rois_to_spatial_group_v1', {p_token:token,p_updates:updates}); },
         getPublishStateV2(masterPw,slug,requestId) { return rpc('get_publish_state_v2',{_master_pw:masterPw,_slug:slug,_request_id:requestId||null}); },
         requestPublishSessionV2(masterPw,job) { return rpc('request_publish_session_v2',{_master_pw:masterPw,_slug:job.slug,
             _request_id:job.jobId,_expected_revision:job.baseServerRevision,_create_only:job.create}); },
@@ -23708,6 +24005,7 @@ const App = {
             signature:JSON.stringify([msiDisplayContextKey(this), _roiGridKey(section, key, ent),
                 panel && panel._msiLoadIdentity ? panel._msiLoadIdentity(key) : null,
                 ent.kind, ent.snap, ent.range, ent.bakeMode,
+                section.meta&&section.meta.spatialGroups,
                 rois.map(roi => [roi.id, roi.polysBySection[section.id], msiRoiGeometryMeta(roi, section)])])};
     },
     getRoiDisplayRange(section, key) {
@@ -23771,9 +24069,18 @@ const App = {
             const sameLoad = entry.loadIdentity != null && panel._msiLoadIdentity
                 && entry.loadIdentity === panel._msiLoadIdentity(key);
             if (!current() || (latestRaster && !sameLoad && entry.rasterStamp !== identStamp(latestRaster))) return {status:'stale'};
-            const sourceStats = MsiRoiRange.summarizeRows(grid && grid.rows,
-                polygons.map(({roi}) => row => roiContainsSourcePoint(roi.polysBySection[section.id],
-                    msiRoiGeometryMeta(roi, section), grid && grid.sourceGeometry, row.x, row.y)));
+            const sourceKey=typeof this.ratioSourceKey==='function'?this.ratioSourceKey(section,key)||key:key;
+            const sourceEntry=section.msiSeries && section.msiSeries[sourceKey];
+            const predicates=polygons.map(({roi})=>{
+                let meta=msiRoiGeometryMeta(roi,section);
+                if(meta&&meta.version==='msi-group-v1') {
+                    if(typeof MsiSpatialGroups==='undefined'||!MsiSpatialGroups.roiCompatible(meta,grid&&grid.sourceGeometry,section,sourceEntry))return ()=>null;
+                    meta={...meta,version:'msi-source-v1',sourceRef:grid.sourceGeometry.sourceRef};
+                }
+                return row=>roiContainsSourcePoint(roi.polysBySection[section.id],meta,
+                    grid&&grid.sourceGeometry,row.x,row.y,section,sourceEntry);
+            });
+            const sourceStats = MsiRoiRange.summarizeRows(grid && grid.rows,predicates);
             return {status:'ready', raster:rasterStats, source:sourceStats};
         }).catch(error => {
             console.warn('ROI display range unavailable', key, error);
@@ -26596,18 +26903,126 @@ const App = {
     },
 
     // ---- ROI drawing ----
+    async shareRoisInSection(ids) {
+        if(typeof MsiSpatialGroups==='undefined'||!this.project)return;
+        if(this.drawing&&this.drawing.mode)throw new Error('描画中のROIを確定または中止してから共通化してください。');
+        const project=this.project,shareAtStart=this.shareMode,sectionId=this.activeSectionId,panel=this.panels.get(sectionId);
+        if(!panel)throw new Error('共通化する切片を選択してください。');
+        const section=panel.section,rois=(project.rois||[]).filter(r=>!r._collab&&(!ids||ids.includes(r.id))
+            &&Array.isArray((r.polysBySection||{})[sectionId])&&(r.polysBySection[sectionId]||[]).length
+            &&(!r.geometryBySection||!r.geometryBySection[sectionId]||r.geometryBySection[sectionId].version!=='msi-group-v1'));
+        if(!rois.length){showToast('共通化する個別ROIがありません');return;}
+        const before=JSON.stringify(rois.map(r=>[r.polysBySection[sectionId],(r.geometryBySection||{})[sectionId]]));
+        const revisions=JSON.stringify(Object.entries(section.msiSeries||{}).map(([k,e])=>[k,MsiSpatialGroups.memberKey(e)]));
+        const groupRevision=JSON.stringify(section.meta&&section.meta.spatialGroups);
+        const staged=Object.assign({},section,{meta:JSON.parse(JSON.stringify(section.meta||{}))});
+        const converted=[];
+        for(const roi of rois) {
+            const old=msiRoiGeometryMeta(roi,section),refs=new Set(Object.values(section.msiSeries||{}).map(msiSourceReference));
+            if(!old&&refs.size!==1)throw new Error('「'+(roi.name||roi.colorKey)+'」の描画元が不明です。元のROIを保持しています。');
+            if(old&&old.version!=='msi-source-v1')throw new Error('このROIの座標形式を確認できません。元のROIを保持しています。');
+            const key=Object.keys(section.msiSeries||{}).find(k=>msiSourceReference(section.msiSeries[k])===(old?old.sourceRef:[...refs][0]));
+            if(!key)throw new Error('ROIの描画元データが見つかりません。');
+            const ent=section.msiSeries[key],grid=await _ensureRoiRawGrid(section,key);
+            if(!grid||!MsiSpatialGroups.geometryKey(grid.sourceGeometry))throw new Error('ROIの元座標を確認できません。元データを読み直してください。');
+            if(this.shareMode&&!MsiSpatialGroups.resolveMembership(section,ent,grid.sourceGeometry))throw new Error('管理側で同じ座標のMSIを登録し、再公開してから共通化してください。');
+            const geometry=MsiSpatialGroups.roiMeta(staged,ent,grid.sourceGeometry);
+            if(old)geometry.displayGeometry=JSON.parse(JSON.stringify(old.displayGeometry));
+            if(!MsiSpatialGroups.roiCompatible(geometry,grid.sourceGeometry,staged,ent))throw new Error('保存済みROIと現在の座標が一致しません。元のROIを保持しています。');
+            let vertices=roi.polysBySection[sectionId].map(p=>p.slice());
+            if(!old) {
+                // Use the exact existing piecewise legacy mapper, including all
+                // edge knots; a vertex-only affine would change membership.
+                const temporary={section,msiValueRasters:new Map([[key,{sourceGeometry:grid.sourceGeometry}]])};
+                const previous=this.panels.get(sectionId);this.panels.set(sectionId,temporary);
+                try {vertices=roiPolygonForDisplay(roi,section,key,vertices);}finally{this.panels.set(sectionId,previous);}
+                if(!vertices)throw new Error('旧ROIの座標対応を確認できません。');
+            }
+            const prepared=Object.assign({},geometry,{version:'msi-source-v1',sourceRef:grid.sourceGeometry.sourceRef});
+            for(const row of grid.rows) {
+                if(!Number.isFinite(row.x)||!Number.isFinite(row.y))continue;
+                const a=roiContainsSourcePoint(roi.polysBySection[sectionId],old,grid.sourceGeometry,row.x,row.y);
+                const b=roiContainsSourcePoint(vertices,prepared,grid.sourceGeometry,row.x,row.y);
+                if(a===null||a!==b)throw new Error('共通化でROI内の測定行が変わるため保存を中止しました。元のROIを保持しています。');
+            }
+            converted.push({roi,vertices,geometry});
+        }
+        const current=()=>this.project===project&&this.shareMode===shareAtStart&&this.panels.get(sectionId)===panel
+            &&rois.every(r=>(project.rois||[]).includes(r))
+            &&groupRevision===JSON.stringify(section.meta&&section.meta.spatialGroups)
+            &&before===JSON.stringify(rois.map(r=>[r.polysBySection[sectionId],(r.geometryBySection||{})[sectionId]]))
+            &&revisions===JSON.stringify(Object.entries(section.msiSeries||{}).map(([k,e])=>[k,MsiSpatialGroups.memberKey(e)]));
+        if(!current())throw new Error('確認中にROIまたは元データが変更されました。再実行してください。');
+        let savedRows=null;
+        if(this.shareMode) {
+            await ensureSpatialServerSupport();
+            if(!await this._tryAcquireRoiLock())return;
+            try {
+                if(!current())throw new Error('ROIが変更されました。再実行してください。');
+                const updates=converted.map(({roi,vertices,geometry})=>{
+                    const saved=(roi.serverIdsBySection||{})[sectionId];
+                    if(!saved||!saved.id)throw new Error('先に未保存のROIを保存してください。');
+                    return {id:saved.id,expectedVersion:saved.version,poly_msi:{version:'msi-roi-polygon-v1',vertices,geometry}};
+                });
+                const priorPending=converted.map(({roi})=>roi._unsynced);
+                this._roiWriteGeneration=(this._roiWriteGeneration||0)+1;
+                converted.forEach(({roi})=>{roi._unsynced=true;});
+                try {savedRows=await SupabaseClient.convertRoisToSpatialGroup(shareAtStart.token,updates);}
+                finally {
+                    this._roiWriteGeneration=(this._roiWriteGeneration||0)+1;
+                    converted.forEach(({roi},i)=>{if(priorPending[i])roi._unsynced=priorPending[i];else delete roi._unsynced;});
+                }
+            } finally {
+                if(this.shareMode===shareAtStart)this._releaseRoiLock();
+                else SupabaseClient.releaseRoiLock(shareAtStart.token).catch(()=>{});
+            }
+        }
+        if(this.project!==project) return;
+        section.meta=section.meta||{};section.meta.spatialGroups=staged.meta.spatialGroups;
+        for(const {roi,vertices,geometry} of converted) {
+            roi.polysBySection[sectionId]=vertices;roi.geometryBySection=roi.geometryBySection||{};
+            roi.geometryBySection[sectionId]=geometry;
+            if(savedRows) {
+                const old=(roi.serverIdsBySection||{})[sectionId];
+                const saved=savedRows.find(r=>r.id===old.id);if(saved)roi.serverIdsBySection[sectionId]=saved;
+            }
+        }
+        populateRoiList();this.redrawAllRois();this.renderAnalysis();
+        if(!this.shareMode){this.queueSave(0);if(await this._flushSave()===false)throw new Error('共通化は未保存です。内容は画面に保持しています。保存を再試行してください。');}
+        showToast(converted.length+'件のROIを同じ座標のMSIで共通使用します');
+    },
+
     async startDrawing(targetRoiId) {
         if (!this.project) return;
         if (!this.activeSectionId) { showToast('まず切片パネルをクリックしてアクティブにしてください'); return; }
         const projectAtStart=this.project,sectionAtStart=this.activeSectionId;
         const panelAtStart=this.panels.get(sectionAtStart);
         const keyAtStart=panelAtStart&&panelAtStart._pickRefMsiKey();
+        const sourceKeyAtStart=this.ratioSourceKey&&/^MSI_RATIO_/.test(keyAtStart)?this.ratioSourceKey(panelAtStart.section,keyAtStart):keyAtStart;
         const sourceAtStart=panelAtStart&&msiLayerSourceGeometry(panelAtStart.section,keyAtStart);
-        const snapshot=sourceAtStart&&{sourceRef:sourceAtStart.sourceRef,
+        let snapshot=sourceAtStart&&{sourceRef:sourceAtStart.sourceRef,
             displayGeometry:JSON.parse(JSON.stringify(sourceAtStart.displayGeometry))};
         if(!snapshot||!msiValidRoiGeometry(Object.assign({version:'msi-source-v1'},snapshot))) {
             showToast('ROI を描く前に対象 MSI の元データを読み込んでください。画像だけから座標は推定できません',5000);
             return;
+        }
+        const target=(this.project.rois||[]).find(r=>r.id===targetRoiId);
+        const savedGeometry=target&&(target.geometryBySection||{})[sectionAtStart];
+        if(target&&target._collab){showToast('このROIは共有先で編集してください');return;}
+        const scopeEl=document.getElementById('roi-create-scope');
+        if(typeof MsiSpatialGroups!=='undefined'&&(savedGeometry&&savedGeometry.version==='msi-group-v1'||!savedGeometry&&(!scopeEl||scopeEl.value!=='source'))) {
+            const ent=(panelAtStart.section.msiSeries||{})[sourceKeyAtStart];
+            const published=this.shareMode&&MsiSpatialGroups.resolveMembership(panelAtStart.section,ent,sourceAtStart);
+            if(this.shareMode&&!published){showToast('共通ROIを使用するには、管理側で座標を確認して再公開してください。「この測定のみ」はそのまま使用できます。',6000);return;}
+            const groupMeta=savedGeometry||MsiSpatialGroups.roiMeta(panelAtStart.section,ent,sourceAtStart);
+            if(!groupMeta||!MsiSpatialGroups.roiCompatible(groupMeta,sourceAtStart,panelAtStart.section,ent)
+                ||(/^MSI_RATIO_/.test(keyAtStart)&&(!this.ratioRoiCompatible||!this.ratioRoiCompatible(panelAtStart.section,keyAtStart,groupMeta)))) {
+                showToast('このMSIの共通座標を確認できません。「この測定のみ」を選ぶか、対象のMSIに戻してください。',6000);return;
+            }
+            if(this.shareMode)try{await ensureSpatialServerSupport();}catch(e){showToast(e.message,6000);return;}
+            snapshot=JSON.parse(JSON.stringify(groupMeta));
+        } else if(savedGeometry&&savedGeometry.sourceRef!==sourceAtStart.sourceRef) {
+            showToast('このROIは別の測定で作成されています。「共通化」を実行するか、描画元のMSIへ戻してください。',6000);return;
         }
         // In Share-Only mode, ROI editing is gated behind a server-side
         // exclusive lock so only one viewer can write at a time. Acquire
@@ -26618,8 +27033,13 @@ const App = {
             if (!ok) return;
         }
         const current=panelAtStart&&msiLayerSourceGeometry(panelAtStart.section,panelAtStart._pickRefMsiKey());
+        const currentKey=panelAtStart&&panelAtStart._pickRefMsiKey();
+        const currentSourceKey=this.ratioSourceKey&&/^MSI_RATIO_/.test(currentKey)?this.ratioSourceKey(panelAtStart.section,currentKey):currentKey;
         if(this.project!==projectAtStart||this.activeSectionId!==sectionAtStart||!current
-            ||current.sourceRef!==snapshot.sourceRef||JSON.stringify(current.displayGeometry)!==JSON.stringify(snapshot.displayGeometry)) {
+            ||(snapshot.version==='msi-group-v1'
+                ? !MsiSpatialGroups.roiCompatible(snapshot,current,panelAtStart.section,(panelAtStart.section.msiSeries||{})[currentSourceKey])
+                    ||(/^MSI_RATIO_/.test(currentKey)&&(!this.ratioRoiCompatible||!this.ratioRoiCompatible(panelAtStart.section,currentKey,snapshot)))
+                : current.sourceRef!==snapshot.sourceRef||JSON.stringify(current.displayGeometry)!==JSON.stringify(snapshot.displayGeometry))) {
             if(this.shareMode)this._releaseRoiLock();
             showToast('ROI の対象が切り替わりました。対象 MSI を選び直して描画を開始してください',5000);return;
         }
@@ -26815,7 +27235,9 @@ const App = {
     async _refreshShareRois() {
         if (!this.shareMode || !this.shareMode.token || !this.project) return;
         if (_shareTokenExpired) return;
-        const rows = await fetchAllShareRois(this.shareMode.token, this.project.sections);
+        const project=this.project,share=this.shareMode,generation=this._roiWriteGeneration||0;
+        const rows = await fetchAllShareRois(share.token, project.sections);
+        if(this.project!==project||this.shareMode!==share||generation!==(this._roiWriteGeneration||0))return;
         const remote = groupRoiRowsByColor(rows, this.project.anatomyPalette);
         // Reconcile: keep the local ROI id stable across polls so
         // activeRoiId / roiHidden / list-row dataset.roiId all still
@@ -26834,9 +27256,11 @@ const App = {
         // Preserve locally-drawn ROIs whose server write failed (_unsynced) and
         // that the server doesn't know about yet, so the poll doesn't silently
         // discard the user's un-persisted work.
-        const remoteColors = new Set(remote.map(r => r.colorKey));
         for (const loc of (this.project.rois || [])) {
-            if (loc && loc._unsynced && !remoteColors.has(loc.colorKey)) remote.push(loc);
+            if (loc && loc._unsynced) {
+                const at=remote.findIndex(r=>r.colorKey===loc.colorKey);
+                if(at>=0)remote[at]=loc;else remote.push(loc);
+            }
         }
         // Drop the active selection if the ROI was deleted on the server.
         if (this.activeRoiId && !remote.find(r => r.id === this.activeRoiId)) {
@@ -26992,6 +27416,7 @@ const App = {
     },
 
     async finalizeDrawing() {
+        const projectAtSave=this.project,shareAtSave=this.shareMode;
         const verts = (this.drawing.vertices || []).slice();
         const sectionId = this.drawing.sectionId;
         const targetRoiId = this.drawing.targetRoiId;
@@ -26999,14 +27424,29 @@ const App = {
         if(!sourceGeometry||!msiValidRoiGeometry(Object.assign({version:'msi-source-v1'},sourceGeometry))) {
             showToast('ROI の元座標を確認できません。頂点は保持しています。元の MSI に戻して確認してください',5000);return;
         }
+        if(sourceGeometry.version==='msi-group-v1') {
+            const panel=this.panels.get(sectionId),key=panel&&panel._pickRefMsiKey();
+            const sourceKey=this.ratioSourceKey&&/^MSI_RATIO_/.test(key)?this.ratioSourceKey(panel.section,key):key;
+            if(!panel||!MsiSpatialGroups.roiCompatible(sourceGeometry,msiLayerSourceGeometry(panel.section,key),panel.section,(panel.section.msiSeries||{})[sourceKey])
+                ||(/^MSI_RATIO_/.test(key)&&(!this.ratioRoiCompatible||!this.ratioRoiCompatible(panel.section,key,sourceGeometry)))) {
+                showToast('ROIの共通座標または対象が変更されています。元の対象へ戻してください。頂点は保持しています。',6000);return;
+            }
+        }
         if (verts.length < 3) {
             showToast('ROI の確定には3点以上必要です（現在 ' + verts.length + ' 点）。頂点を追加するか「中止」を押してください', 4500);
             return;
         }
+        // Retain the shared edit lock while the write is in flight. cancelDrawing
+        // releases the drawing's own lock level, not this save's level.
+        const holdSaveLock=!!(shareAtSave&&sourceGeometry.version==='msi-group-v1');
+        if(holdSaveLock&&!await this._tryAcquireRoiLock())return;
+        if(this.project!==projectAtSave||this.shareMode!==shareAtSave) {
+            if(holdSaveLock)this._releaseRoiLock();return;
+        }
         let roi;
         if (targetRoiId) {
             roi = (this.project.rois || []).find(r => r.id === targetRoiId);
-            if (!roi) { this.cancelDrawing(); return; }
+            if (!roi) { this.cancelDrawing(); if(holdSaveLock)this._releaseRoiLock(); return; }
             roi.polysBySection = roi.polysBySection || {};
             roi.polysBySection[sectionId] = verts;
         } else {
@@ -27024,12 +27464,15 @@ const App = {
             if (!this.shareMode && !this.project.__share) storeRoiPaletteColor(this.project, roi);
         }
         roi.geometryBySection=roi.geometryBySection||{};
-        roi.geometryBySection[sectionId]=sourceGeometry ? {
+        roi.geometryBySection[sectionId]=sourceGeometry&&sourceGeometry.version==='msi-group-v1' ? JSON.parse(JSON.stringify(sourceGeometry)) : sourceGeometry ? {
             version:'msi-source-v1',sourceRef:sourceGeometry.sourceRef,
             displayGeometry:JSON.parse(JSON.stringify(sourceGeometry.displayGeometry)),
             createdQuantVersion:'msi-source-rows-v1'
         } : {version:'msi-unresolved-v1',reason:'source-geometry-unavailable'};
         this.activeRoiId = roi.id;
+        // Protect both new ROIs and edits of an existing server colorKey from
+        // polling before the request settles (not only after a failed write).
+        if(shareAtSave){roi._unsynced=true;this._roiWriteGeneration=(this._roiWriteGeneration||0)+1;}
         // ★ ROI を描き終えた直後は「その ROI の強度」を見たいはず。Analysis パネルの
         //   既定は背景を非表示（Otsu） なので、ここで切り替えないと右側は ROI と無関係の
         //   ヒストグラムのままで、利用者からは「棒グラフが出ない」ように見える
@@ -27047,7 +27490,7 @@ const App = {
         // In Share mode the local IndexedDB is just an ephemeral cache;
         // persistence happens server-side through the create_roi / update_roi
         // RPCs. Master mode keeps using queueSave to write IDB.
-        if (this.shareMode) {
+        if (shareAtSave) {
             try {
                 roi.serverIdsBySection = roi.serverIdsBySection || {};
                 const existing = roi.serverIdsBySection[sectionId];
@@ -27057,13 +27500,13 @@ const App = {
                     // update in place so polling / reload don't see two
                     // rows for the same (colorKey, section_id) pair.
                     rec = await SupabaseClient.updateRoi(
-                        this.shareMode.token,
+                        shareAtSave.token,
                         existing.id,
                         existing.version || 1,
                         { p_color_key: roi.colorKey, p_poly_msi: encodeRoiPolygon(roi, sectionId) }
                     );
                 } else {
-                    rec = await SupabaseClient.createRoi(this.shareMode.token, {
+                    rec = await SupabaseClient.createRoi(shareAtSave.token, {
                         p_section_id: sectionId,
                         p_color_key: roi.colorKey,
                         p_name: roi.name,
@@ -27088,6 +27531,12 @@ const App = {
                 showToast(_isStaleVersionError(e)
                     ? 'このROIは他の人が先に更新しました。描いた内容は未保存として保持しています。最新の共有内容を確認してからやり直してください。'
                     : 'ROI のサーバ保存に失敗しました。未保存として保持中です。ロックを取り直してもう一度お試しください。', 4500);
+            } finally {
+                this._roiWriteGeneration=(this._roiWriteGeneration||0)+1;
+                if(holdSaveLock) {
+                    if(this.shareMode===shareAtSave)this._releaseRoiLock();
+                    else SupabaseClient.releaseRoiLock(shareAtSave.token).catch(()=>{});
+                }
             }
         } else {
             this.queueSave(0);

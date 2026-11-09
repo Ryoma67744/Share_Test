@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const RoiMediaModel = require('../viewer/roi-media-model.js');
+const MsiSpatialGroups = require('../viewer/msi-spatial-groups.js');
 const html = fs.readFileSync(path.join(__dirname, '../viewer/index.html'), 'utf8').replace(/\r\n/g, '\n');
 const clone = value => JSON.parse(JSON.stringify(value));
 const noNetwork = () => { throw new Error('ZIP transport must not contact or publish to the cloud'); };
@@ -181,6 +182,48 @@ async function main() {
     }
   }
 
+  // A common ROI and its microscope-photo snapshot carry a section-bound
+  // coordinate contract. Independent imports must remap both consistently.
+  const commonRows=[{x:0,y:0,v:10},{x:1,y:0,v:20},{x:0,y:1,v:30},{x:1,y:1,v:40}];
+  const commonOriginal=new Blob(['x\ty\tvalue\n0\t0\t10\n1\t0\t20\n0\t1\t30\n1\t1\t40\n'],{type:'text/plain'});
+  const commonVertices=[[-0.5,-0.5],[1.5,-0.5],[1.5,0.5],[-0.5,0.5]];
+  const {createMsiSourceGeometry}=await import('../connector/src/msi.js');
+  for(const sourceOffline of [false,true]) {
+    const source=context(sourceOffline,true),project=source.App.project,section=project.sections[0],roi=project.rois[0];
+    source.blobs.set('txt',{blob:commonOriginal,mime:commonOriginal.type});
+    const a=section.msiSeries.MSI_A;
+    section.msiSeries.MSI_B={...a,sourceFileId:'source-two',sourceReference:'source-two'};
+    const commonGeometry=createMsiSourceGeometry(commonRows,a);
+    const shared=MsiSpatialGroups.roiMeta(section,a,commonGeometry);
+    MsiSpatialGroups.ensureGroup(section,section.msiSeries.MSI_B,
+      createMsiSourceGeometry(commonRows,section.msiSeries.MSI_B));
+    roi.polysBySection[section.id]=clone(commonVertices);
+    roi.geometryBySection[section.id]=clone(shared);
+    project.meta.roiMedia.items[0].roiSnapshot={vertices:clone(commonVertices),geometry:clone(shared)};
+    const before=clone(project);
+    await source.exportProjectAsZip();
+    assert.deepEqual(source.alerts,[]);
+    assert.deepEqual(clone(project),before,'common export retains original frame and photo snapshot');
+    for(const targetOffline of [false,true]) {
+      const target=context(targetOffline);
+      await target.importZipFile(source.exported);
+      const restored=target.saved,s=restored.sections[0],r=restored.rois[0],photo=restored.meta.roiMedia.items[0];
+      const restoredGeometry=r.geometryBySection[s.id];
+      assert.equal(restoredGeometry.sectionId,s.id);
+      assert.equal(photo.roiSnapshot.geometry.sectionId,s.id,'nested snapshot uses the imported section identity');
+      assert.equal(photo.roiSnapshot.geometry.groupId,shared.groupId,'group identity is preserved within its new section');
+      assert.deepEqual(photo.roiSnapshot.vertices,commonVertices);
+      assert.ok(RoiMediaModel.snapshotMatches(photo,r,s),'restored photo still matches its unchanged common ROI');
+      for(const entry of Object.values(s.msiSeries)) {
+        const current=createMsiSourceGeometry(commonRows,entry);
+        assert.ok(MsiSpatialGroups.roiCompatible(restoredGeometry,current,s,entry),'main ROI matches either restored MSI source');
+        assert.ok(MsiSpatialGroups.roiCompatible(photo.roiSnapshot.geometry,current,s,entry),'photo remains usable on either common MSI source');
+        await equalOriginal(target,entry.blobId,commonOriginal);
+      }
+      await equalOriginal(target,photo.blobId,originals.photo);
+    }
+  }
+
   // Simulate simultaneous recoveries against the same transactional store.
   // Both archives ask for the same old ID; distinct names and independently
   // restored image blobs expose replacement instead of a successful import.
@@ -239,7 +282,7 @@ async function main() {
     assert.equal(target.saved.shareInfo, undefined);
     assert.equal(target.saved.__publishPending, undefined);
   }
-  console.log('ZIP compatibility regression: PASS (4 mode pairs, original bytes, overlay ownership, atomic concurrent recovery, rollback, legacy archives)');
+  console.log('ZIP compatibility regression: PASS (4 mode pairs, common ROI/photo frame remapping, original bytes, overlay ownership, atomic concurrent recovery, rollback, legacy archives)');
 }
 if (require.main === module) main().catch(error => { console.error(error); process.exitCode = 1; });
 module.exports = {context, MemoryZip, fixture};

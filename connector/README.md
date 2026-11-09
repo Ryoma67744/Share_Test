@@ -11,6 +11,8 @@
 - Node.js 18 以上（`fetch` が標準で使えるため）。
 
 ## セットアップ
+リポジトリ全体を取得してから実行してください。共通座標ROIの判定には本体と同じ `../viewer/msi-spatial-groups.js` を使用するため、`connector/` だけを別の場所へ切り離さず、隣の `viewer/` を含む配置を維持します。
+
 ```bash
 cd connector
 npm install
@@ -92,10 +94,13 @@ ChatGPT はあなたのPC内のプログラムを直接呼べないため、同�
 
 ### 1. デプロイ（例: Render）
 1. このリポジトリを GitHub に置く。
-2. [render.com](https://render.com) → **New > Blueprint** → このリポジトリを選ぶ（`connector/render.yaml` を検出）。
+2. [render.com](https://render.com) → **New > Blueprint** → このリポジトリを選び、Blueprint のパスに `connector/render.yaml` を指定する。
 3. Render が HTTPS の URL（例 `https://desi-share-connector.onrender.com`）と `CONNECTOR_API_KEY`（自動生成）を用意します。**このAPIキーを控える**。
    - 既定は `PUBLIC_ONLY=true`（**公開プロジェクトのみ**）。非公開も読むなら（かつこの入口を信頼できるなら）Render 側で `PUBLIC_ONLY=false` にし、`OWNER_ADMIN_PASSWORD` / `PROJECT_PW__<slug>` を**シークレット環境変数**として追加（**master pw は絶対に入れない**）。
    - 無料プランは無操作でスリープします（初回アクセスが少し遅い）。
+
+共通座標モデルを読み込むため、サービスの **Root Directory はリポジトリ直下（`.`）**、**Build Command は `npm --prefix connector ci`**、**Start Command は `npm --prefix connector run serve`** にします。既存サービスで Root Directory が `connector` の場合も、再デプロイ前にこの3項目を更新してください。[Render は Root Directory 外のファイルをビルド時・実行時に公開しない](https://render.com/docs/monorepo-support)ため、旧設定のままでは起動できません。Blueprint のビルド対象には `connector/**` と `viewer/msi-spatial-groups.js` を含めています。
+
 - Render を使わずローカルで試すなら: `CONNECTOR_API_KEY=<任意の長い文字列> npm run serve` → `cloudflared tunnel` / `ngrok` で公開URLを作る（稼働中のみ有効）。
 
 ### 2. 動作確認（デプロイ後）

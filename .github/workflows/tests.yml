@@ -85,6 +85,8 @@ jobs:
         run: node tests/msi_display_settings_browser_regression.cjs
       - name: ROI-only automatic display ranges and restoration
         run: node tests/msi_roi_range_browser_regression.cjs
+      - name: Shared section HE alignment and ROI workflows
+        run: node tests/msi_spatial_browser_regression.cjs
       - name: Ratio creation, display isolation, ROI statistics and CSV
         run: node tests/msi_ratio_browser_regression.cjs
       - name: Ratio ZIP roundtrip and shared personal settings
