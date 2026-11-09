@@ -11,7 +11,8 @@ const JSZip = require('../vendor/jszip.min.js');
 const root = path.resolve(__dirname, '..');
 const publicDocs = ['docs/EXP_EDITOR.md', 'docs/LOCAL_STORAGE_UPGRADE.md', 'docs/ARCHIVE_COMPATIBILITY.md', 'docs/ARCHIVE_COMPATIBILITY.en.md'];
 const help = JSON.parse(fs.readFileSync(path.join(root,'docs/help/manifest.json'),'utf8'));
-publicDocs.push('docs/help/manifest.json','docs/help/capture-manifest.json',...help.screenshots.map(shot=>shot.path));
+publicDocs.push('docs/help/manifest.json','docs/help/capture-manifest.json','docs/help/images/brain-colorbar.png',
+  ...help.screenshots.flatMap(shot=>[shot.path,...(shot.provenance?[shot.provenance]:[])]));
 const mrmResources = ['mrm/exp-core.mjs', 'mrm/exp-editor.mjs', 'mrm/exp-editor.css', 'mrm/exp-library-import.mjs', 'docs/EXP_EDITOR.md'];
 const commit = '1234567890abcdef1234567890abcdef12345678';
 function put(dir, rel, data) {

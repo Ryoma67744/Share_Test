@@ -12,8 +12,8 @@
         "en": "Getting started"
       },
       "summary": {
-        "ja": "プロジェクトを開き、切片・分子・ROI の関係を確認します。画面写真は説明用の合成データを使っています。",
-        "en": "Open a project and identify its sections, molecules and ROIs. Screenshots use synthetic demonstration data."
+        "ja": "プロジェクトを開き、切片・分子・ROI の関係を確認します。脳の実測データを使った比較図・実操作画面と、合成データを使った操作画面を区別して掲載しています。",
+        "en": "Open a project and identify its sections, molecules and ROIs. This guide distinguishes comparisons and actual application screenshots using measured brain data from operation screenshots using synthetic data."
       },
       "steps": [
         {
@@ -32,8 +32,8 @@
             "en": "Choose a section and molecule"
           },
           "body": {
-            "ja": "左側で切片、上部の Method / Compound で測定法と分子を選びます。Main view が選んだ切片を表示します。",
-            "en": "Select a section on the left and a Method / Compound at the top. Main view shows the selected section."
+            "ja": "左側で切片、Method / Compound で測定法と分子を選びます。Main view が選んだ切片を表示します。この実画面では左下の Method に Malate-1 と Glutamate を表示しています。",
+            "en": "Select a section on the left and use Method / Compound to choose the acquisition method and molecule. Main view shows the selected section. In this measured-data screenshot, Method at the lower left lists Malate-1 and Glutamate."
           }
         },
         {
@@ -88,7 +88,7 @@
         }
       ],
       "screenshots": [
-        "viewer"
+        "brain-viewer"
       ],
       "notes": {
         "offline": {
@@ -318,8 +318,8 @@
             "en": "Choose a View mode"
           },
           "body": {
-            "ja": "Free は切片ごとに分子を選びます。Compound は選んだ分子を切片間で揃えて比較します。",
-            "en": "Free lets each section show a different compound. Compound aligns the selected compound across sections."
+            "ja": "Free は切片ごとに分子を選びます。Compound は選んだ分子を切片間で揃えて比較します。下の例では同じ切片の Malate-1 と Glutamate を切り替えます。",
+            "en": "Free lets each section show a different compound. Compound aligns the selected compound across sections. The example below switches between Malate-1 and Glutamate in the same section."
           }
         },
         {
@@ -410,8 +410,10 @@
         }
       ],
       "screenshots": [
-        "viewer",
         "kmd"
+      ],
+      "examples": [
+        "brain-molecules"
       ]
     },
     {
@@ -441,8 +443,8 @@
             "en": "Set the Range"
           },
           "body": {
-            "ja": "表示する強度範囲を調整します。Same は比較対象の尺度を揃え、Individual は各画像に合わせます。白飛びしたら上限を見直します。",
-            "en": "Adjust the displayed intensity range. Same uses a common scale; Individual adapts to each image. Review the upper bound if bright areas saturate."
+            "ja": "表示する強度範囲を調整します。Same は比較対象の尺度を揃え、Individual は各画像に合わせます。下の Malate-1 の例では下限 0、上限 448206.855 を入力します。明るい領域が最大色になる場合は上限を見直します。",
+            "en": "Adjust the displayed intensity range. Same uses a common scale; Individual adapts to each image. For the Malate-1 example below, enter a lower bound of 0 and an upper bound of 448206.855. Review the upper bound when bright regions reach the maximum colour."
           }
         },
         {
@@ -512,8 +514,10 @@
           "en": "Hide background (Otsu), TIC histogram, threshold, apply to all sections and outlier clipping"
         }
       ],
-      "screenshots": [
-        "display"
+      "screenshots": [],
+      "examples": [
+        "brain-range",
+        "brain-smoothing"
       ]
     },
     {
@@ -543,8 +547,8 @@
             "en": "Select molecules X and Y"
           },
           "body": {
-            "ja": "分子側（X）と分母側（Y）を切片ごとに選び、名前を付けます。検索で候補を絞り、同名ならファイル・列・測定条件で区別します。別ファイルでは座標の単位と原点が同じことを確認します。",
-            "en": "Choose X and Y for each section and name the ratio. Search to narrow candidates; distinguish identical names by file, column and acquisition conditions. For different files, confirm matching coordinate units and origin."
+            "ja": "分子側（X）と分母側（Y）を切片ごとに選び、名前を付けます。この例は X = Malate-1、Y = Glutamate です。検索で候補を絞り、同名ならファイル・列・測定条件で区別します。別ファイルでは座標の単位と原点が同じことを確認します。",
+            "en": "Choose X and Y for each section and name the ratio. This example uses X = Malate-1 and Y = Glutamate. Search to narrow candidates; distinguish identical names by file, column and acquisition conditions. For different files, confirm matching coordinate units and origin."
           }
         },
         {
@@ -615,8 +619,7 @@
         }
       ],
       "screenshots": [
-        "ratio",
-        "ratio-image"
+        "brain-ratio-settings"
       ],
       "notes": {
         "viewer": {
@@ -627,7 +630,10 @@
           "ja": "共有管理者であっても、比の定義変更は個人用として扱います。",
           "en": "Even for shared administrators, ratio definition changes are personal overrides."
         }
-      }
+      },
+      "examples": [
+        "brain-ratio"
+      ]
     },
     {
       "id": "align",
@@ -789,8 +795,9 @@
           "en": "Write lock, ROI-only display, source-row statistics and ratio ROI"
         }
       ],
-      "screenshots": [
-        "roi"
+      "screenshots": [],
+      "examples": [
+        "brain-roi"
       ]
     },
     {
@@ -1437,6 +1444,608 @@
       "caption": {
         "ja": "ANALYSIS の KMD図：単位選択、系列一覧、重ねる、選択解除",
         "en": "ANALYSIS KMD plot: units, series list, overlay and reset"
+      }
+    },
+    {
+      "id": "brain-malate",
+      "path": "docs/help/images/brain-malate.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 876,
+      "height": 664,
+      "alt": {
+        "ja": "同じ脳切片の Malate-1 実測信号。HotMetal、None、Range 0 ～ 448,206.855。",
+        "en": "Measured Malate-1 signals in the brain section: HotMetal, None, Range 0–448,206.855."
+      },
+      "caption": {
+        "ja": "Malate-1：登録原本からの再描画",
+        "en": "Malate-1: re-rendered from the registered source"
+      }
+    },
+    {
+      "id": "brain-glutamate",
+      "path": "docs/help/images/brain-glutamate.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 876,
+      "height": 664,
+      "alt": {
+        "ja": "同じ脳切片の Glutamate 実測信号。HotMetal、None、Range 0 ～ 1,116,827.345。",
+        "en": "Measured Glutamate signals in the same brain section: HotMetal, None, Range 0–1,116,827.345."
+      },
+      "caption": {
+        "ja": "Glutamate：登録原本からの再描画",
+        "en": "Glutamate: re-rendered from the registered source"
+      }
+    },
+    {
+      "id": "brain-range-max",
+      "path": "docs/help/images/brain-range-max.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 876,
+      "height": 664,
+      "alt": {
+        "ja": "Malate-1 の Range 上限を原信号の最大値 1,026,290 にした図。",
+        "en": "Malate-1 with the Range upper limit set to the maximum original signal, 1,026,290."
+      },
+      "caption": {
+        "ja": "Range 0 ～ 1,026,290：原本からの再描画",
+        "en": "Range 0–1,026,290: re-rendered from the source"
+      }
+    },
+    {
+      "id": "brain-detail-none",
+      "path": "docs/help/images/brain-detail-none.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 990,
+      "height": 825,
+      "alt": {
+        "ja": "Malate-1 の 90 × 75 画素を、平滑化なしで拡大した比較図。",
+        "en": "The 90 × 75-pixel Malate-1 comparison area enlarged without smoothing."
+      },
+      "caption": {
+        "ja": "None：同じ範囲の拡大再描画",
+        "en": "None: enlarged re-rendering of the same area"
+      }
+    },
+    {
+      "id": "brain-detail-linear",
+      "path": "docs/help/images/brain-detail-linear.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 990,
+      "height": 825,
+      "alt": {
+        "ja": "同じ Malate-1 の範囲を Linear 10 / 10 で表示した比較図。",
+        "en": "The same Malate-1 area displayed with Linear 10 / 10."
+      },
+      "caption": {
+        "ja": "Linear 10 / 10：表示専用の補間",
+        "en": "Linear 10 / 10: display-only interpolation"
+      }
+    },
+    {
+      "id": "brain-detail-median",
+      "path": "docs/help/images/brain-detail-median.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 990,
+      "height": 825,
+      "alt": {
+        "ja": "同じ Malate-1 の範囲を Median 3 / 10、近傍 7 × 7 画素で表示した比較図。",
+        "en": "The same Malate-1 area displayed with Median 3 / 10, a 7 × 7 neighbourhood."
+      },
+      "caption": {
+        "ja": "Median 3 / 10：表示専用のフィルター",
+        "en": "Median 3 / 10: display-only filtering"
+      }
+    },
+    {
+      "id": "brain-detail-locator",
+      "path": "docs/help/images/brain-detail-locator.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 876,
+      "height": 664,
+      "alt": {
+        "ja": "脳切片の全体像に Smoothing 比較で拡大する範囲を示した図。",
+        "en": "Whole brain section with the area enlarged for the Smoothing comparison marked."
+      },
+      "caption": {
+        "ja": "拡大した場所：原本からの再描画に範囲を追記",
+        "en": "Enlarged area: marked on a source-data re-rendering"
+      }
+    },
+    {
+      "id": "brain-ratio-zero",
+      "path": "docs/help/images/brain-ratio-zero.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 876,
+      "height": 664,
+      "alt": {
+        "ja": "Malate-1 / Glutamate 信号比。分母下限 0、Range 0 ～ 1.5。この比較図では無効点を灰色で表示。",
+        "en": "Malate-1 / Glutamate signal ratio, denominator threshold 0, Range 0–1.5. Invalid positions are gray in this comparison image."
+      },
+      "caption": {
+        "ja": "分母下限 0：原本からの信号比を再描画",
+        "en": "Threshold 0: re-rendered signal ratios from source values"
+      }
+    },
+    {
+      "id": "brain-ratio-threshold",
+      "path": "docs/help/images/brain-ratio-threshold.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 876,
+      "height": 664,
+      "alt": {
+        "ja": "Malate-1 / Glutamate 信号比。説明用の分母下限 10,000、Range 0 ～ 1.5。この比較図では無効点を灰色で表示。",
+        "en": "Malate-1 / Glutamate signal ratio with illustrative denominator threshold 10,000 and Range 0–1.5. Invalid positions are gray in this comparison image."
+      },
+      "caption": {
+        "ja": "分母下限 10,000：原本からの信号比を再描画",
+        "en": "Threshold 10,000: re-rendered signal ratios from source values"
+      }
+    },
+    {
+      "id": "brain-roi",
+      "path": "docs/help/images/brain-roi.png",
+      "kind": "measured-render",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 876,
+      "height": 664,
+      "alt": {
+        "ja": "Malate-1 の実測信号に仮 ROI A・B の枠と名称を重ねた図。各 30 × 25 画素、各 750 測定点。",
+        "en": "Measured Malate-1 signals with temporary ROI A and B outlines and labels. Each covers 30 × 25 pixels and 750 measurements."
+      },
+      "caption": {
+        "ja": "仮 ROI A・B：原本からの再描画に説明用の枠を追加",
+        "en": "Temporary ROI A and B: illustrative outlines on a source-data re-rendering"
+      }
+    },
+    {
+      "id": "brain-viewer",
+      "path": "docs/help/images/brain-viewer.png",
+      "kind": "measured-screenshot",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 1600,
+      "height": 1000,
+      "alt": {
+        "ja": "脳の実測原本を実際の Viewer で開いた画面。左下の Method に Malate-1 と Glutamate、中央上部に Range と Smoothing。",
+        "en": "Actual Viewer with measured brain data: Method at the lower left lists Malate-1 and Glutamate; Range and Smoothing are above the main image."
+      },
+      "caption": {
+        "ja": "実操作画面：独立したローカル環境に原本を読み込み、2 分子を表示。共有データは変更していません。",
+        "en": "Actual application screenshot: source data loaded in an isolated local workspace with two molecules. Shared data was not changed."
+      }
+    },
+    {
+      "id": "brain-ratio-settings",
+      "path": "docs/help/images/brain-ratio-settings.png",
+      "kind": "measured-screenshot",
+      "provenance": "docs/help/brain-example-provenance.json",
+      "width": 1600,
+      "height": 1000,
+      "alt": {
+        "ja": "実測原本を開いた実際の比設定画面。X = Malate-1、Y = Glutamate と分母下限を指定する操作。",
+        "en": "Actual ratio settings with measured source data: controls for X = Malate-1, Y = Glutamate and the denominator threshold."
+      },
+      "caption": {
+        "ja": "実操作画面：同じ測定ファイルの信号比を設定",
+        "en": "Actual application screenshot: configure a signal ratio from the same acquisition file"
+      }
+    }
+  ],
+  "examples": [
+    {
+      "id": "brain-molecules",
+      "title": {
+        "ja": "分子を切り替えて、信号の分布を見比べる",
+        "en": "Switch molecules to compare signal distributions"
+      },
+      "intro": {
+        "ja": "Method の分子一覧で Malate-1、Glutamate を選びます。同じ切片でも、分子によって明るく見える場所が変わります。",
+        "en": "Select Malate-1 and Glutamate in the Method molecule list. Different molecules can show different distributions within the same section."
+      },
+      "panels": [
+        {
+          "image": "brain-malate",
+          "title": {
+            "ja": "Malate-1",
+            "en": "Malate-1"
+          },
+          "subtitle": {
+            "ja": "MRM 133.101 → 115",
+            "en": "MRM 133.101 → 115"
+          },
+          "scale": {
+            "min": 0,
+            "max": 448206.855,
+            "unit": {
+              "ja": "信号強度",
+              "en": "Signal intensity"
+            }
+          }
+        },
+        {
+          "image": "brain-glutamate",
+          "title": {
+            "ja": "Glutamate",
+            "en": "Glutamate"
+          },
+          "subtitle": {
+            "ja": "MRM 146 → 102",
+            "en": "MRM 146 → 102"
+          },
+          "scale": {
+            "min": 0,
+            "max": 1116827.345,
+            "unit": {
+              "ja": "信号強度",
+              "en": "Signal intensity"
+            }
+          }
+        }
+      ],
+      "notes": [
+        {
+          "ja": "HotMetal ／ Smoothing: None ／ 各分子の Range は 0 ～ 原信号の 99.5 パーセンタイル値。背景除外は使っていません。",
+          "en": "HotMetal / Smoothing: None / Each molecule uses a Range from 0 to the 99.5th percentile of its original signals. Background exclusion is off."
+        },
+        {
+          "ja": "色は信号強度を表します。この例は分子ごとに表示上限が異なるため、画像間の同じ色が同じ信号強度や濃度を意味するわけではありません。",
+          "en": "Colour represents signal intensity. Each image has a different upper limit, so matching colours across these images do not imply matching signal intensities or concentrations."
+        }
+      ],
+      "source": {
+        "ja": "261030_Hirabayashi_13C_Brain ／ Ctrl(+/+)_13C_A。登録原本の同じ切片を再描画しています。登録画素サイズは 30 × 30 µm。",
+        "en": "261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm."
+      }
+    },
+    {
+      "id": "brain-range",
+      "title": {
+        "ja": "Range の上限を下げて、弱い信号を見やすくする",
+        "en": "Lower the Range upper limit to reveal weaker signals"
+      },
+      "intro": {
+        "ja": "同じ Malate-1 の画像で Range だけを変えます。上限 448206.855 を入力した例では、信号を色へ割り当てる範囲が変わります。",
+        "en": "Only the Range changes between these Malate-1 images. Entering an upper limit of 448206.855 changes how the signals map to colours."
+      },
+      "panels": [
+        {
+          "image": "brain-range-max",
+          "title": {
+            "ja": "全測定値が収まる上限",
+            "en": "Upper limit covering all measurements"
+          },
+          "subtitle": {
+            "ja": "上限 = 原信号の最大値",
+            "en": "Upper limit = maximum original signal"
+          },
+          "scale": {
+            "min": 0,
+            "max": 1026290,
+            "unit": {
+              "ja": "信号強度",
+              "en": "Signal intensity"
+            }
+          }
+        },
+        {
+          "image": "brain-malate",
+          "title": {
+            "ja": "弱い信号を見やすくした例",
+            "en": "Example revealing weaker signals"
+          },
+          "subtitle": {
+            "ja": "上限 = 原信号の 99.5 パーセンタイル値",
+            "en": "Upper limit = 99.5th percentile of original signals"
+          },
+          "scale": {
+            "min": 0,
+            "max": 448206.855,
+            "unit": {
+              "ja": "信号強度",
+              "en": "Signal intensity"
+            }
+          }
+        }
+      ],
+      "notes": [
+        {
+          "ja": "元データ・ROI の集計値は変わりません。低い上限の図では、上限を超える 182 点が最大色になります。明るく見えたことだけで信号が増えたとは判断しません。",
+          "en": "Source data and ROI statistics are unchanged. In the lower-limit image, 182 measurements above the limit use the maximum colour. A brighter appearance does not mean the measured signals increased."
+        },
+        {
+          "ja": "99.5 パーセンタイルは、この説明例のために原本から求めた値です。自動設定ボタンの紹介ではありません。配色・倍率・Smoothing: None は同一です。",
+          "en": "The 99.5th percentile was calculated from the source for this example; this is not an automatic-setting button. Colour map, magnification and Smoothing: None are identical."
+        }
+      ],
+      "source": {
+        "ja": "261030_Hirabayashi_13C_Brain ／ Ctrl(+/+)_13C_A。登録原本の同じ切片を再描画しています。登録画素サイズは 30 × 30 µm。",
+        "en": "261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm."
+      }
+    },
+    {
+      "id": "brain-smoothing",
+      "title": {
+        "ja": "同じ場所を拡大し、滑らかさと細部を確認する",
+        "en": "Compare smoothness and detail in the same enlarged area"
+      },
+      "intro": {
+        "ja": "Smoothing で種類を選び、強さスライダーを調整します。以下は同じ拡大範囲・同じ Range での比較です。",
+        "en": "Choose a Smoothing method and adjust its strength slider. These comparisons use the same enlarged area and the same Range."
+      },
+      "panels": [
+        {
+          "image": "brain-detail-none",
+          "title": {
+            "ja": "None",
+            "en": "None"
+          },
+          "subtitle": {
+            "ja": "補間・メディアン処理なし",
+            "en": "No interpolation or median filtering"
+          },
+          "scale": {
+            "min": 0,
+            "max": 448206.855,
+            "unit": {
+              "ja": "信号強度",
+              "en": "Signal intensity"
+            }
+          }
+        }
+      ],
+      "choices": {
+        "label": {
+          "ja": "比較する表示",
+          "en": "Display to compare"
+        },
+        "options": [
+          {
+            "id": "linear",
+            "label": {
+              "ja": "Linear 10 / 10",
+              "en": "Linear 10 / 10"
+            },
+            "panel": {
+              "image": "brain-detail-linear",
+              "title": {
+                "ja": "Linear 10 / 10",
+                "en": "Linear 10 / 10"
+              },
+              "subtitle": {
+                "ja": "従来の Linear と同じ最大の補間量",
+                "en": "Maximum interpolation, matching the original Linear"
+              },
+              "scale": {
+                "min": 0,
+                "max": 448206.855,
+                "unit": {
+                  "ja": "信号強度",
+                  "en": "Signal intensity"
+                }
+              }
+            },
+            "body": {
+              "ja": "Linear は画素間の色を補間します。1 は補間なしに近く、10 が従来の Linear と同じ強さです。",
+              "en": "Linear interpolates colours between pixels. Level 1 is close to no interpolation; level 10 matches the original Linear strength."
+            }
+          },
+          {
+            "id": "median",
+            "label": {
+              "ja": "Median 3 / 10",
+              "en": "Median 3 / 10"
+            },
+            "panel": {
+              "image": "brain-detail-median",
+              "title": {
+                "ja": "Median 3 / 10",
+                "en": "Median 3 / 10"
+              },
+              "subtitle": {
+                "ja": "近傍 7 × 7 画素の中央値を用いた表示",
+                "en": "Display using the median of a 7 × 7 neighbourhood"
+              },
+              "scale": {
+                "min": 0,
+                "max": 448206.855,
+                "unit": {
+                  "ja": "信号強度",
+                  "en": "Signal intensity"
+                }
+              }
+            },
+            "body": {
+              "ja": "Median は周囲の表示値の中央値を使います。この例は 3 / 10（7 × 7 画素）。細かい点や細い構造も変わるので、None と見比べて強さを選びます。",
+              "en": "Median uses the median of neighbouring display values. This example is level 3 / 10, a 7 × 7 window. Small spots and thin structures can change, so compare with None when choosing the strength."
+            }
+          }
+        ]
+      },
+      "contextImage": "brain-detail-locator",
+      "notes": [
+        {
+          "ja": "元データ・ROI の集計値は変わりません。強くすると細い構造が見えにくくなることがあります。",
+          "en": "Source data and ROI statistics do not change. Stronger smoothing may make thin structures harder to see."
+        },
+        {
+          "ja": "HotMetal、Range 0 ～ 448,206.855。拡大図は同じ 90 × 75 画素の範囲です。",
+          "en": "HotMetal, Range 0–448,206.855. Each enlarged image covers the same 90 × 75 source-pixel area."
+        }
+      ],
+      "source": {
+        "ja": "261030_Hirabayashi_13C_Brain ／ Ctrl(+/+)_13C_A。登録原本の同じ切片を再描画しています。登録画素サイズは 30 × 30 µm。",
+        "en": "261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm."
+      }
+    },
+    {
+      "id": "brain-ratio",
+      "title": {
+        "ja": "分母が弱い場所を含めるかで、比の画像が変わる",
+        "en": "Including weak denominator signals changes the ratio image"
+      },
+      "intro": {
+        "ja": "「比」で X に Malate-1、Y に Glutamate を指定します。この例では同じ RAW ファイル・function 1 の同じ測定位置で、原信号 X ÷ Y を計算しています。",
+        "en": "In Ratio, select Malate-1 for X and Glutamate for Y. This example divides original signals X by Y at matching measurement positions in the same RAW file and function 1."
+      },
+      "panels": [
+        {
+          "image": "brain-ratio-zero",
+          "title": {
+            "ja": "分母の下限: 0",
+            "en": "Denominator threshold: 0"
+          },
+          "subtitle": {
+            "ja": "Glutamate > 0 の点を採用",
+            "en": "Include positions with Glutamate > 0"
+          },
+          "scale": {
+            "min": 0,
+            "max": 1.5,
+            "unit": {
+              "ja": "信号比",
+              "en": "Signal ratio"
+            }
+          },
+          "footnote": {
+            "ja": "有効 35,267 / 36,354 点（97.0%）",
+            "en": "Valid: 35,267 / 36,354 positions (97.0%)"
+          }
+        },
+        {
+          "image": "brain-ratio-threshold",
+          "title": {
+            "ja": "分母の下限: 10,000",
+            "en": "Denominator threshold: 10,000"
+          },
+          "subtitle": {
+            "ja": "Glutamate > 10,000 の点を採用",
+            "en": "Include positions with Glutamate > 10,000"
+          },
+          "scale": {
+            "min": 0,
+            "max": 1.5,
+            "unit": {
+              "ja": "信号比",
+              "en": "Signal ratio"
+            }
+          },
+          "footnote": {
+            "ja": "有効 23,512 / 36,354 点（64.7%）",
+            "en": "Valid: 23,512 / 36,354 positions (64.7%)"
+          }
+        }
+      ],
+      "notes": [
+        {
+          "ja": "この比較図では無効点を灰色で表示しています。説明用に再描画した図であり、実際の Viewer の背景色は表示設定によって異なります。両図とも HotMetal、Range 0 ～ 1.5、None、Otsu なしです。",
+          "en": "In these comparison images, invalid positions are shown in gray. These are explanatory re-renderings; the actual Viewer background depends on its display settings. Both use HotMetal, Range 0–1.5, None and no Otsu."
+        },
+        {
+          "ja": "10,000 は操作説明用の任意の値で、検出限界や推奨基準ではありません。分母が 0 または下限以下の点は、比を 0 にせず表示・比の集計から除外します。下限 0 では 1,087 点、下限 10,000 では 12,842 点が除外されています。",
+          "en": "10,000 is an arbitrary setting for the demonstration, not a detection limit or recommended threshold. A denominator of zero or at or below the threshold is excluded from the ratio display and statistics, not replaced with zero. The thresholds 0 and 10,000 exclude 1,087 and 12,842 positions, respectively."
+        },
+        {
+          "ja": "表示上限の 1.5 を超える比は最大色です。下限 0 では 8,715 点、下限 10,000 では 99 点が該当します。表示 Range の変更は計算済みの比を変えません。",
+          "en": "Ratios above the display limit of 1.5 use the maximum colour: 8,715 positions at threshold 0 and 99 at threshold 10,000. Changing the display Range does not change calculated ratios."
+        },
+        {
+          "ja": "これは測定信号の比です。濃度比や生物学的な差を、この画像だけから断定しません。分母下限は比の有効点と統計を変えますが、原本や元の分子別 ROI 集計は変えません。",
+          "en": "This is a measured-signal ratio. The image alone does not establish a concentration ratio or biological difference. The denominator threshold changes valid positions and ratio statistics, but not the source or original single-molecule ROI statistics."
+        }
+      ],
+      "source": {
+        "ja": "261030_Hirabayashi_13C_Brain ／ Ctrl(+/+)_13C_A。登録原本の同じ切片を再描画しています。登録画素サイズは 30 × 30 µm。",
+        "en": "261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm."
+      }
+    },
+    {
+      "id": "brain-roi",
+      "title": {
+        "ja": "ROI の数値を元の測定値から確認する",
+        "en": "Read ROI statistics from original measurements"
+      },
+      "intro": {
+        "ja": "位置が分かるように、同じ大きさの仮 ROI A・B を重ねました。この説明用の ROI は、原本・プロジェクト・共有データには保存していません。",
+        "en": "Two temporary ROIs of equal size, A and B, mark the example locations. These illustrative ROIs were not saved to the source, project or shared data."
+      },
+      "panels": [
+        {
+          "image": "brain-roi",
+          "title": {
+            "ja": "Malate-1 と仮 ROI",
+            "en": "Malate-1 with temporary ROIs"
+          },
+          "subtitle": {
+            "ja": "None ／ 各 ROI: 30 × 25 画素",
+            "en": "None / Each ROI: 30 × 25 pixels"
+          },
+          "scale": {
+            "min": 0,
+            "max": 448206.855,
+            "unit": {
+              "ja": "信号強度",
+              "en": "Signal intensity"
+            }
+          },
+          "footnote": {
+            "ja": "ROI A・B は説明用の名称です。解剖学的な部位を意味しません。",
+            "en": "ROI A and B are illustrative labels, not anatomical region names."
+          }
+        }
+      ],
+      "table": {
+        "caption": {
+          "ja": "原本 Malate-1 の集計",
+          "en": "Original Malate-1 signal statistics"
+        },
+        "columns": [
+          {
+            "ja": "仮 ROI",
+            "en": "Temporary ROI"
+          },
+          {
+            "ja": "測定点数",
+            "en": "Measurement count"
+          },
+          {
+            "ja": "平均信号",
+            "en": "Mean signal"
+          }
+        ],
+        "rows": [
+          [
+            "ROI A",
+            "750",
+            "307,293.13"
+          ],
+          [
+            "ROI B",
+            "750",
+            "177,911.67"
+          ]
+        ]
+      },
+      "notes": [
+        {
+          "ja": "Range・Linear・Median を変更しても、この集計対象と元信号は同じです。画像の色ではなく、ROI 内の元の測定値を集計しています。",
+          "en": "Range, Linear and Median leave these selected measurements and source signals unchanged. Statistics use original measurements inside the ROI, not image colours."
+        },
+        {
+          "ja": "「比」の ROI 集計では、分母条件を満たす有効点だけが対象です。単分子の ROI 集計と区別し、ROI総信号比・個別比の平均などの指標名も確認します。",
+          "en": "Ratio ROI statistics use only valid positions meeting the denominator condition. Distinguish them from single-molecule ROI statistics and check metric names such as total-signal ratio and mean of individual ratios."
+        }
+      ],
+      "source": {
+        "ja": "261030_Hirabayashi_13C_Brain ／ Ctrl(+/+)_13C_A。登録原本の同じ切片を再描画しています。登録画素サイズは 30 × 30 µm。",
+        "en": "261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm."
       }
     }
   ]

@@ -555,18 +555,20 @@ For bug reports or requests, contact the publisher or open a GitHub Issue.
 
 [Open guided Help](help.html?role=viewer&lang=en&mode=online)
 
-Screenshots were captured from the actual application with synthetic data. Button labels follow the application interface language.
+The MSI examples use one measured mouse-brain dataset, shown as rendered figures and actual application screenshots. Other interface screenshots use synthetic demonstration data. See the source and display settings beside each figure.
 
 ### Getting started
 
-Open a project and identify its sections, molecules and ROIs. Screenshots use synthetic demonstration data.
+Open a project and identify its sections, molecules and ROIs. This guide distinguishes comparisons and actual application screenshots using measured brain data from operation screenshots using synthetic data.
 
 1. **Open your workspace** — Authors open a local project from Projects. For a shared URL, enter the viewing password when requested.
-2. **Choose a section and molecule** — Select a section on the left and a Method / Compound at the top. Main view shows the selected section.
+2. **Choose a section and molecule** — Select a section on the left and use Method / Compound to choose the acquisition method and molecule. Main view shows the selected section. In this measured-data screenshot, Method at the lower left lists Malate-1 and Glutamate.
 3. **Inspect the image** — Zoom and pan to inspect the distribution. Toggle HE / IF / MSI layers and adjust opacity to compare them.
 4. **Continue with a task** — Choose a chapter or search for a feature. The results and saving tabs explain numerical effects and persistence.
 
-![Viewer showing MSI, HE, section list, compound selection and ROI](docs/help/images/viewer.png)
+![Actual Viewer with measured brain data: Method at the lower left lists Malate-1 and Glutamate; Range and Smoothing are above the main image.](docs/help/images/brain-viewer.png)
+
+Actual application screenshot: source data loaded in an isolated local workspace with two molecules. Shared data was not changed.
 
 **Effect on results**
 
@@ -582,15 +584,45 @@ Shared viewer and administrator permissions differ. Help cannot enable editing o
 
 Use Free / Compound modes, section visibility and layers to compare images consistently.
 
-1. **Choose a View mode** — Free lets each section show a different compound. Compound aligns the selected compound across sections.
+1. **Choose a View mode** — Free lets each section show a different compound. Compound aligns the selected compound across sections. The example below switches between Malate-1 and Glutamate in the same section.
 2. **Choose visible sections** — Use section visibility to keep the relevant sections. Hidden sections are not deleted and can be shown again.
 3. **Combine layers** — Toggle HE / IF / MSI and use layer settings for opacity, Grayscale and Apply opacity. A TIC background may be used when HE is absent.
 4. **Check orientation and scale** — Inspect zoom, pan, Rotation and the scale bar. Authors can change a section's Flip H / V.
 5. **Explore series in the KMD plot** — Choose KMD in ANALYSIS and select CH₂, H₂ or O. Click a point to display its molecule; drag a rectangle to filter the Method table. Use Overlay for a series, and clear the filter with ⟲ or KMD selection in the Method table.
 
-![Viewer showing MSI, HE, section list, compound selection and ROI](docs/help/images/viewer.png)
+#### Switch molecules to compare signal distributions
+
+Select Malate-1 and Glutamate in the Method molecule list. Different molecules can show different distributions within the same section.
+
+**Malate-1**
+
+MRM 133.101 → 115
+
+![Measured Malate-1 signals in the brain section: HotMetal, None, Range 0–448,206.855.](docs/help/images/brain-malate.png)
+
+Malate-1: re-rendered from the registered source
+
+**Display range: 0 - 448,206.855 Signal intensity**
+
+**Glutamate**
+
+MRM 146 → 102
+
+![Measured Glutamate signals in the same brain section: HotMetal, None, Range 0–1,116,827.345.](docs/help/images/brain-glutamate.png)
+
+Glutamate: re-rendered from the registered source
+
+**Display range: 0 - 1,116,827.345 Signal intensity**
+
+> HotMetal / Smoothing: None / Each molecule uses a Range from 0 to the 99.5th percentile of its original signals. Background exclusion is off.
+
+> Colour represents signal intensity. Each image has a different upper limit, so matching colours across these images do not imply matching signal intensities or concentrations.
+
+**Source and settings**: 261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm.
 
 ![Actual non-target table and KMD panel showing 12 synthetic molecules in two CH₂ series](docs/help/images/kmd.png)
+
+ANALYSIS KMD plot: units, series list, overlay and reset
 
 **Effect on results**
 
@@ -611,11 +643,95 @@ KMD selection, Method filtering and series overlays are temporary. They do not a
 Make distributions easier to inspect with display-only adjustments. Median and Linear each have levels 1–10.
 
 1. **Choose style and colour** — Choose MSI style and colour map. Physical aspect display uses the specified MSI pixel size. Hide background (Otsu) and outlier clipping can also adjust the display.
-2. **Set the Range** — Adjust the displayed intensity range. Same uses a common scale; Individual adapts to each image. Review the upper bound if bright areas saturate.
+2. **Set the Range** — Adjust the displayed intensity range. Same uses a common scale; Individual adapts to each image. For the Malate-1 example below, enter a lower bound of 0 and an upper bound of 448206.855. Review the upper bound when bright regions reach the maximum colour.
 3. **Choose smoothing and strength** — None disables smoothing. Median is a display filter using neighbourhood medians. Linear ranges from nearly un-interpolated at 1 to the original Linear appearance at 10.
 4. **Inspect the ROI display** — ROI-only display focuses on visible ROIs. Its automatic Range uses the displayed ROI area, so brightness may differ from the full image.
 
-![Display controls with Median and its ten-level strength slider](docs/help/images/display.png)
+#### Lower the Range upper limit to reveal weaker signals
+
+Only the Range changes between these Malate-1 images. Entering an upper limit of 448206.855 changes how the signals map to colours.
+
+**Upper limit covering all measurements**
+
+Upper limit = maximum original signal
+
+![Malate-1 with the Range upper limit set to the maximum original signal, 1,026,290.](docs/help/images/brain-range-max.png)
+
+Range 0–1,026,290: re-rendered from the source
+
+**Display range: 0 - 1,026,290 Signal intensity**
+
+**Example revealing weaker signals**
+
+Upper limit = 99.5th percentile of original signals
+
+![Measured Malate-1 signals in the brain section: HotMetal, None, Range 0–448,206.855.](docs/help/images/brain-malate.png)
+
+Malate-1: re-rendered from the registered source
+
+**Display range: 0 - 448,206.855 Signal intensity**
+
+> Source data and ROI statistics are unchanged. In the lower-limit image, 182 measurements above the limit use the maximum colour. A brighter appearance does not mean the measured signals increased.
+
+> The 99.5th percentile was calculated from the source for this example; this is not an automatic-setting button. Colour map, magnification and Smoothing: None are identical.
+
+**Source and settings**: 261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm.
+
+#### Compare smoothness and detail in the same enlarged area
+
+Choose a Smoothing method and adjust its strength slider. These comparisons use the same enlarged area and the same Range.
+
+**None**
+
+No interpolation or median filtering
+
+![The 90 × 75-pixel Malate-1 comparison area enlarged without smoothing.](docs/help/images/brain-detail-none.png)
+
+None: enlarged re-rendering of the same area
+
+**Display range: 0 - 448,206.855 Signal intensity**
+
+##### Display to compare
+
+**Linear 10 / 10**
+
+Linear interpolates colours between pixels. Level 1 is close to no interpolation; level 10 matches the original Linear strength.
+
+**Linear 10 / 10**
+
+Maximum interpolation, matching the original Linear
+
+![The same Malate-1 area displayed with Linear 10 / 10.](docs/help/images/brain-detail-linear.png)
+
+Linear 10 / 10: display-only interpolation
+
+**Display range: 0 - 448,206.855 Signal intensity**
+
+**Median 3 / 10**
+
+Median uses the median of neighbouring display values. This example is level 3 / 10, a 7 × 7 window. Small spots and thin structures can change, so compare with None when choosing the strength.
+
+**Median 3 / 10**
+
+Display using the median of a 7 × 7 neighbourhood
+
+![The same Malate-1 area displayed with Median 3 / 10, a 7 × 7 neighbourhood.](docs/help/images/brain-detail-median.png)
+
+Median 3 / 10: display-only filtering
+
+**Display range: 0 - 448,206.855 Signal intensity**
+
+> Source data and ROI statistics do not change. Stronger smoothing may make thin structures harder to see.
+
+> HotMetal, Range 0–448,206.855. Each enlarged image covers the same 90 × 75 source-pixel area.
+
+**Locate the enlarged area**
+
+![Whole brain section with the area enlarged for the Smoothing comparison marked.](docs/help/images/brain-detail-locator.png)
+
+Enlarged area: marked on a source-data re-rendering
+
+**Source and settings**: 261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm.
 
 **Effect on results**
 
@@ -640,13 +756,51 @@ Create a ratio image from two molecules in the same section, for example oxidise
 > Ratios edited in this shared view are personal. Published source data remains unchanged.
 
 1. **Open Ratio** — Open Ratio in a project containing numerical sources. Existing definitions can be selected from the list.
-2. **Select molecules X and Y** — Choose X and Y for each section and name the ratio. Search to narrow candidates; distinguish identical names by file, column and acquisition conditions. For different files, confirm matching coordinate units and origin.
+2. **Select molecules X and Y** — Choose X and Y for each section and name the ratio. This example uses X = Malate-1 and Y = Glutamate. Search to narrow candidates; distinguish identical names by file, column and acquisition conditions. For different files, confirm matching coordinate units and origin.
 3. **Review the denominator threshold** — The default denominator threshold is 0. Y at or below the threshold, missing values and negative signals do not produce valid ratios. Invalid positions are excluded, not replaced with zero.
 4. **Display and compare the ratio** — Use Save and display to inspect the ratio image and ROI statistics. ROI summary CSV saves metrics; measurement-point CSV saves per-position values, validity and exclusion reasons.
 
-![Ratio dialog with molecule X, molecule Y and denominator threshold](docs/help/images/ratio.png)
+#### Including weak denominator signals changes the ratio image
 
-![Actual MSI view displaying the saved ratio](docs/help/images/ratio-image.png)
+In Ratio, select Malate-1 for X and Glutamate for Y. This example divides original signals X by Y at matching measurement positions in the same RAW file and function 1.
+
+**Denominator threshold: 0**
+
+Include positions with Glutamate > 0
+
+![Malate-1 / Glutamate signal ratio, denominator threshold 0, Range 0–1.5. Invalid positions are gray in this comparison image.](docs/help/images/brain-ratio-zero.png)
+
+Threshold 0: re-rendered signal ratios from source values
+
+**Display range: 0 - 1.5 Signal ratio**
+
+Valid: 35,267 / 36,354 positions (97.0%)
+
+**Denominator threshold: 10,000**
+
+Include positions with Glutamate > 10,000
+
+![Malate-1 / Glutamate signal ratio with illustrative denominator threshold 10,000 and Range 0–1.5. Invalid positions are gray in this comparison image.](docs/help/images/brain-ratio-threshold.png)
+
+Threshold 10,000: re-rendered signal ratios from source values
+
+**Display range: 0 - 1.5 Signal ratio**
+
+Valid: 23,512 / 36,354 positions (64.7%)
+
+> In these comparison images, invalid positions are shown in gray. These are explanatory re-renderings; the actual Viewer background depends on its display settings. Both use HotMetal, Range 0–1.5, None and no Otsu.
+
+> 10,000 is an arbitrary setting for the demonstration, not a detection limit or recommended threshold. A denominator of zero or at or below the threshold is excluded from the ratio display and statistics, not replaced with zero. The thresholds 0 and 10,000 exclude 1,087 and 12,842 positions, respectively.
+
+> Ratios above the display limit of 1.5 use the maximum colour: 8,715 positions at threshold 0 and 99 at threshold 10,000. Changing the display Range does not change calculated ratios.
+
+> This is a measured-signal ratio. The image alone does not establish a concentration ratio or biological difference. The denominator threshold changes valid positions and ratio statistics, but not the source or original single-molecule ROI statistics.
+
+**Source and settings**: 261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm.
+
+![Actual ratio settings with measured source data: controls for X = Malate-1, Y = Glutamate and the denominator threshold.](docs/help/images/brain-ratio-settings.png)
+
+Actual application screenshot: configure a signal ratio from the same acquisition file
 
 **Effect on results**
 
@@ -677,6 +831,8 @@ Use Align to register matching tissue positions and inspect their overlay.
 
 ![HE and MSI Align dialog](docs/help/images/align.png)
 
+Review images, scale and landmarks
+
 **Effect on results**
 
 Alignment defines coordinate correspondence; it does not rewrite MSI signals. ROI geometry retains its coordinate reference.
@@ -694,7 +850,34 @@ Draw regions of interest and quantify their source signals. Keep ratio statistic
 3. **Review visibility and scope** — Use ROI visibility and ROI-only display to inspect the intended area. Confirm the target ROI before deleting.
 4. **Review and export results** — Review source-signal results. For a ratio, also inspect the metric, valid count, exclusion reasons and denominator threshold.
 
-![ROI outline and ROI-only display](docs/help/images/roi.png)
+#### Read ROI statistics from original measurements
+
+Two temporary ROIs of equal size, A and B, mark the example locations. These illustrative ROIs were not saved to the source, project or shared data.
+
+**Malate-1 with temporary ROIs**
+
+None / Each ROI: 30 × 25 pixels
+
+![Measured Malate-1 signals with temporary ROI A and B outlines and labels. Each covers 30 × 25 pixels and 750 measurements.](docs/help/images/brain-roi.png)
+
+Temporary ROI A and B: illustrative outlines on a source-data re-rendering
+
+**Display range: 0 - 448,206.855 Signal intensity**
+
+ROI A and B are illustrative labels, not anatomical region names.
+
+**Original Malate-1 signal statistics**
+
+| Temporary ROI | Measurement count | Mean signal |
+| --- | --- | --- |
+| ROI A | 750 | 307,293.13 |
+| ROI B | 750 | 177,911.67 |
+
+> Range, Linear and Median leave these selected measurements and source signals unchanged. Statistics use original measurements inside the ROI, not image colours.
+
+> Ratio ROI statistics use only valid positions meeting the denominator condition. Distinguish them from single-molecule ROI statistics and check metric names such as total-signal ratio and mean of individual ratios.
+
+**Source and settings**: 261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm.
 
 **Effect on results**
 
@@ -721,6 +904,8 @@ Attach microscopy images to an ROI and inspect them alongside MSI.
 
 ![ROI microscopy image manager](docs/help/images/microscope.png)
 
+Microscopy images associated with an ROI
+
 **Effect on results**
 
 Microscopy images document the ROI. Attaching them does not change MSI source signals or ROI statistics.
@@ -740,7 +925,11 @@ Compare images in a grid, create multicolour molecule overlays and produce PPT r
 
 ![Preview image grid](docs/help/images/preview.png)
 
+Compare sections and molecules in a grid
+
 ![PPT report export settings](docs/help/images/report.png)
+
+Review report export conditions
 
 **Effect on results**
 
@@ -766,6 +955,8 @@ Choose browser saving, file backup or server publication according to your needs
 4. **Review and publish** — Authors use Publish to share after Preview. Verify completion and Sync status, then share the URL and required password.
 
 ![Viewer saving, ZIP and Memo controls](docs/help/images/save.png)
+
+Backup and note controls
 
 **Effect on results**
 
@@ -793,6 +984,8 @@ Diagnose display issues, missing sources, storage problems, sharing and offline 
 4. **Retry with the recorded conditions** — In the Method table, ↑ / ↓ moves between molecules. During ROI drawing, Enter finishes and Esc cancels. For support, record build version, action, input format and error text.
 
 ![Projects list with creation and MRM management controls](docs/help/images/projects.png)
+
+Project manager
 
 **Effect on results**
 

@@ -1,0 +1,553 @@
+{
+  "format": 1,
+  "synthetic": false,
+  "source": {
+    "sha256": "5e4c177c74c2cde79f6c97eb1e80e4657ad61e1af67e3b1e3116cdd405caac97",
+    "metadataSha256": "4c1bb1a7bbab6d1b726ec3ce614473893e90e4a9d9d2cdb6a4d7a2dcdacecc21",
+    "slug": "261030_hirabayashi_13c_brain",
+    "sectionId": "3040f31a-45d2-45b1-aafc-cf2f4c4bc401",
+    "section": "Ctrl(+/+)_13C_A"
+  },
+  "sourceVersion": "v2026-11-09.1",
+  "generatorSha256": "9de1c36942977a2a4cd3e7a6e6fa07a6db86dbc6c8aceb38f74c638ffbe7e3f0",
+  "geometry": {
+    "W": 219,
+    "H": 166,
+    "displayGeometry": {
+      "version": "msi-proportional-v1",
+      "W": 219,
+      "H": 166,
+      "x": {
+        "origin": -26.042699813842773,
+        "step": 0.02999999545036106
+      },
+      "y": {
+        "origin": -12.63599967956543,
+        "step": 0.029999998844031133
+      }
+    },
+    "orientation": [
+      [
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        1
+      ]
+    ],
+    "pixelPitchUm": {
+      "x": 30,
+      "y": 30
+    },
+    "detailRect": {
+      "x": 45,
+      "y": 40,
+      "width": 90,
+      "height": 75
+    }
+  },
+  "inputs": {
+    "numerator": {
+      "key": "MSI_Malate-1",
+      "precursor": 133.101,
+      "product": 115,
+      "function": 1,
+      "channel": 6
+    },
+    "denominator": {
+      "key": "MSI_Glutamate",
+      "precursor": 146,
+      "product": 102,
+      "function": 1,
+      "channel": 8
+    }
+  },
+  "rawStatistics": {
+    "numerator": {
+      "n": 36354,
+      "nFinite": 36354,
+      "nZero": 12,
+      "sum": 2971498869.0114746,
+      "mean": 81737.87943586605,
+      "min": 0,
+      "max": 1026290,
+      "p99_5": 448206.85500000016
+    },
+    "denominator": {
+      "n": 36354,
+      "nFinite": 36354,
+      "nZero": 1087,
+      "sum": 6852615539.643066,
+      "mean": 188496.87901312282,
+      "min": 0,
+      "max": 3019824,
+      "p99_5": 1116827.345
+    }
+  },
+  "settings": {
+    "colormap": "hotmetal",
+    "lutAPI": "MsiDisplaySettings.hotMetalLut(256)",
+    "lutSha256": "7e32e4ecf38832878420dbe812ea7075c507053e9c613ac4743e7c7e4541f101",
+    "rangeBasis": "Finite original measurements. Range only changes colour mapping; above-range values saturate without altering measurements.",
+    "median": "Level 3: radius 3, up to 7x7 valid raster neighbours; median of 8-bit display intensity indices, not original signals.",
+    "linear": "Level 10: full bilinear RGB interpolation in the report renderer; native browser Canvas can differ slightly.",
+    "detail": "Same source rectangle in all detail images. Median calculated over the full source raster before display crop.",
+    "ratio": "Original scan-row X/Y division; finite X >= 0 and finite Y > threshold. Invalid ratios excluded, never replaced by zero.",
+    "ratioInvalidColor": [
+      66,
+      76,
+      90
+    ],
+    "noTissueMask": true,
+    "sourceRowsUnmodified": true
+  },
+  "rois": [
+    {
+      "id": "illustration-A",
+      "label": "ROI A",
+      "color": "#00edff",
+      "gridRect": {
+        "x": 28,
+        "y": 82,
+        "width": 30,
+        "height": 25
+      },
+      "sourceBounds": {
+        "minX": -25.217699938957843,
+        "maxX": -24.317700075447014,
+        "minY": -10.190999773776893,
+        "maxY": -9.440999802676114
+      },
+      "numeratorStatistics": {
+        "n": 750,
+        "nFinite": 750,
+        "nZero": 0,
+        "sum": 230469846.953125,
+        "mean": 307293.12927083333,
+        "min": 13988.59375,
+        "max": 658828,
+        "p99_5": 553657.2225
+      },
+      "temporary": true,
+      "anatomicalInterpretation": false,
+      "ratioStatistics": [
+        {
+          "denominatorMin": 0,
+          "summary": {
+            "status": "ready",
+            "nCandidate": 750,
+            "nValid": 750,
+            "validFraction": 1,
+            "nUniqueCoordinates": 750,
+            "unlocatedRows": 0,
+            "reasonCounts": {},
+            "denominatorMin": 0,
+            "calculationVersion": "msi-ratio-v1",
+            "sumX": 230469846.953125,
+            "sumY": 560334324.0625,
+            "totalRatio": 0.4113077444233423,
+            "mean": 0.41709746038932227,
+            "median": 0.4090041636643952,
+            "min": 0.1769417365967651,
+            "max": 0.8878094924001524
+          }
+        },
+        {
+          "denominatorMin": 10000,
+          "summary": {
+            "status": "ready",
+            "nCandidate": 750,
+            "nValid": 750,
+            "validFraction": 1,
+            "nUniqueCoordinates": 750,
+            "unlocatedRows": 0,
+            "reasonCounts": {},
+            "denominatorMin": 10000,
+            "calculationVersion": "msi-ratio-v1",
+            "sumX": 230469846.953125,
+            "sumY": 560334324.0625,
+            "totalRatio": 0.4113077444233423,
+            "mean": 0.41709746038932227,
+            "median": 0.4090041636643952,
+            "min": 0.1769417365967651,
+            "max": 0.8878094924001524
+          }
+        }
+      ]
+    },
+    {
+      "id": "illustration-B",
+      "label": "ROI B",
+      "color": "#66ff76",
+      "gridRect": {
+        "x": 117,
+        "y": 80,
+        "width": 30,
+        "height": 25
+      },
+      "sourceBounds": {
+        "minX": -22.54770034387571,
+        "maxX": -21.64770048036488,
+        "minY": -10.250999771464954,
+        "maxY": -9.500999800364177
+      },
+      "numeratorStatistics": {
+        "n": 750,
+        "nFinite": 750,
+        "nZero": 0,
+        "sum": 133433753.359375,
+        "mean": 177911.67114583333,
+        "min": 20627.765625,
+        "max": 337572,
+        "p99_5": 311514.08625
+      },
+      "temporary": true,
+      "anatomicalInterpretation": false,
+      "ratioStatistics": [
+        {
+          "denominatorMin": 0,
+          "summary": {
+            "status": "ready",
+            "nCandidate": 750,
+            "nValid": 750,
+            "validFraction": 1,
+            "nUniqueCoordinates": 750,
+            "unlocatedRows": 0,
+            "reasonCounts": {},
+            "denominatorMin": 0,
+            "calculationVersion": "msi-ratio-v1",
+            "sumX": 133433753.359375,
+            "sumY": 217962640.90625,
+            "totalRatio": 0.6121863490210117,
+            "mean": 0.6231801036851103,
+            "median": 0.5936663026110514,
+            "min": 0.2002468753063636,
+            "max": 1.277361395008454
+          }
+        },
+        {
+          "denominatorMin": 10000,
+          "summary": {
+            "status": "ready",
+            "nCandidate": 750,
+            "nValid": 750,
+            "validFraction": 1,
+            "nUniqueCoordinates": 750,
+            "unlocatedRows": 0,
+            "reasonCounts": {},
+            "denominatorMin": 10000,
+            "calculationVersion": "msi-ratio-v1",
+            "sumX": 133433753.359375,
+            "sumY": 217962640.90625,
+            "totalRatio": 0.6121863490210117,
+            "mean": 0.6231801036851103,
+            "median": 0.5936663026110514,
+            "min": 0.2002468753063636,
+            "max": 1.277361395008454
+          }
+        }
+      ]
+    }
+  ],
+  "ratioStatistics": [
+    {
+      "denominatorMin": 0,
+      "summary": {
+        "status": "ready",
+        "nCandidate": 36354,
+        "nValid": 35267,
+        "validFraction": 0.9700995763877428,
+        "nUniqueCoordinates": 35267,
+        "unlocatedRows": 0,
+        "reasonCounts": {
+          "denominator-zero": 1087
+        },
+        "denominatorMin": 0,
+        "calculationVersion": "msi-ratio-v1",
+        "sumX": 2965710243.5288086,
+        "sumY": 6852615539.643066,
+        "totalRatio": 0.43278514989960815,
+        "mean": 1.9902341064807572,
+        "median": 0.5137402595175978,
+        "min": 0,
+        "max": 149.35262753736725
+      },
+      "clippedAbove1_5": 8715,
+      "thresholdPurpose": "Exclude zero denominator"
+    },
+    {
+      "denominatorMin": 10000,
+      "summary": {
+        "status": "ready",
+        "nCandidate": 36354,
+        "nValid": 23512,
+        "validFraction": 0.6467513891181162,
+        "nUniqueCoordinates": 23512,
+        "unlocatedRows": 0,
+        "reasonCounts": {
+          "denominator-at-or-below-min": 11755,
+          "denominator-zero": 1087
+        },
+        "denominatorMin": 10000,
+        "calculationVersion": "msi-ratio-v1",
+        "sumX": 2898045925.984619,
+        "sumY": 6822292271.2109375,
+        "totalRatio": 0.42479064378609865,
+        "mean": 0.4287175913002087,
+        "median": 0.3902169924174069,
+        "min": 0,
+        "max": 10.150962121225993
+      },
+      "clippedAbove1_5": 99,
+      "thresholdPurpose": "Illustrative setting only; not a validated detection limit"
+    }
+  ],
+  "assets": [
+    {
+      "id": "brain-malate",
+      "path": "docs/help/images/brain-malate.png",
+      "sha256": "367b6fabf31f4ca5f30575166137c6668e815b8f56849d3a556d4b7785ba86a6",
+      "kind": "measured-render",
+      "width": 876,
+      "height": 664,
+      "displayRange": [
+        0,
+        448206.85500000016
+      ],
+      "smoothing": "none"
+    },
+    {
+      "id": "brain-glutamate",
+      "path": "docs/help/images/brain-glutamate.png",
+      "sha256": "4a78e5d8951b9bcbb92b201d7858a1ac47f6665ea10ee604d0a27f74e680c8d5",
+      "kind": "measured-render",
+      "width": 876,
+      "height": 664,
+      "displayRange": [
+        0,
+        1116827.345
+      ],
+      "smoothing": "none"
+    },
+    {
+      "id": "brain-range-max",
+      "path": "docs/help/images/brain-range-max.png",
+      "sha256": "0928b44458b289fa1015342f39a19ed9a470201c3ed2c3691c8b3ea208915115",
+      "kind": "measured-render",
+      "width": 876,
+      "height": 664,
+      "displayRange": [
+        0,
+        1026290
+      ],
+      "smoothing": "none"
+    },
+    {
+      "id": "brain-detail-none",
+      "path": "docs/help/images/brain-detail-none.png",
+      "sha256": "38a213445a5c1804660f80dbca3ce22c36ab809750702fe5f9c04eea83069e0e",
+      "kind": "measured-render",
+      "width": 990,
+      "height": 825,
+      "displayRange": [
+        0,
+        448206.85500000016
+      ],
+      "smoothing": "none",
+      "detailRect": {
+        "x": 45,
+        "y": 40,
+        "width": 90,
+        "height": 75
+      }
+    },
+    {
+      "id": "brain-detail-linear",
+      "path": "docs/help/images/brain-detail-linear.png",
+      "sha256": "7ef46b85480d9cb24f6d945c99753f267bf35061912a048970ffaa4bd46f2163",
+      "kind": "measured-render",
+      "width": 990,
+      "height": 825,
+      "displayRange": [
+        0,
+        448206.85500000016
+      ],
+      "smoothing": "linear",
+      "strength": 10,
+      "detailRect": {
+        "x": 45,
+        "y": 40,
+        "width": 90,
+        "height": 75
+      }
+    },
+    {
+      "id": "brain-detail-median",
+      "path": "docs/help/images/brain-detail-median.png",
+      "sha256": "b84cc3eb2b83f93d7f47b6b722b928bd0a2bc8302afa98cd886ed76bea3307d6",
+      "kind": "measured-render",
+      "width": 990,
+      "height": 825,
+      "displayRange": [
+        0,
+        448206.85500000016
+      ],
+      "smoothing": "median",
+      "strength": 3,
+      "detailRect": {
+        "x": 45,
+        "y": 40,
+        "width": 90,
+        "height": 75
+      }
+    },
+    {
+      "id": "brain-detail-locator",
+      "path": "docs/help/images/brain-detail-locator.png",
+      "sha256": "fdb9194e15eec8014e90507e3ec915998c05212e6a18603891e0fa5df81d4818",
+      "kind": "measured-render",
+      "width": 876,
+      "height": 664,
+      "annotation": "White dashed rectangle marks the common detail rectangle",
+      "detailRect": {
+        "x": 45,
+        "y": 40,
+        "width": 90,
+        "height": 75
+      }
+    },
+    {
+      "id": "brain-ratio-zero",
+      "path": "docs/help/images/brain-ratio-zero.png",
+      "sha256": "5256a177be40e15bafa50f2c0c1de7c980329f66a8db801183e23baeba8ff184",
+      "kind": "measured-render",
+      "width": 876,
+      "height": 664,
+      "displayRange": [
+        0,
+        1.5
+      ],
+      "smoothing": "none",
+      "denominatorMin": 0
+    },
+    {
+      "id": "brain-ratio-threshold",
+      "path": "docs/help/images/brain-ratio-threshold.png",
+      "sha256": "032f53ba7789aad737fc70f8e623171d3ad610433e3f6e53c7d6205b962ea26e",
+      "kind": "measured-render",
+      "width": 876,
+      "height": 664,
+      "displayRange": [
+        0,
+        1.5
+      ],
+      "smoothing": "none",
+      "denominatorMin": 10000
+    },
+    {
+      "id": "brain-roi",
+      "path": "docs/help/images/brain-roi.png",
+      "sha256": "442200760a0a72b7c75c53dd64b417972f697468387b71e6efd5c3ded153c08c",
+      "kind": "measured-render",
+      "width": 876,
+      "height": 664,
+      "annotation": "Temporary ROI outlines and ROI A/B labels; no saved project ROI",
+      "displayRange": [
+        0,
+        448206.85500000016
+      ],
+      "smoothing": "none"
+    },
+    {
+      "id": "brain-colorbar",
+      "path": "docs/help/images/brain-colorbar.png",
+      "sha256": "9bd5674e26db43013a1ada9d583d8a8d8ae98f6d761404f9ef18d653dcb20f93",
+      "kind": "legend",
+      "width": 256,
+      "height": 12,
+      "colormap": "hotmetal"
+    },
+    {
+      "id": "brain-viewer",
+      "path": "docs/help/images/brain-viewer.png",
+      "sha256": "b20664c4c3e460c4c27132c9d03061f3439c56f49f86bad23579a21cce80c898",
+      "kind": "measured-screenshot",
+      "width": 1600,
+      "height": 1000,
+      "scenario": "Actual current Viewer with original Malate-1/Glutamate, HotMetal, None, Malate-1 Range 0..448206.86 (rounded p99.5)",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "role": "local author",
+      "mode": "offline"
+    },
+    {
+      "id": "brain-ratio-settings",
+      "path": "docs/help/images/brain-ratio-settings.png",
+      "sha256": "8db80e5b894c1f44be6f00d9d9f331f3d2194decc49c7cb1ca79d9b587dcc65a",
+      "kind": "measured-screenshot",
+      "width": 1600,
+      "height": 1000,
+      "scenario": "Actual saved Malate-1 / Glutamate dialog, denominator > 10000, calculated from original RAW measurements",
+      "viewport": {
+        "width": 1600,
+        "height": 1000
+      },
+      "deviceScaleFactor": 1,
+      "role": "local author",
+      "mode": "offline"
+    }
+  ],
+  "sourceFilesSha256": {
+    "version.js": "83e54f7348d3690a5dc9902313ec142937e0f6c7ca30262f161022a69fe35c83",
+    "viewer/index.html": "bd42808af362acb8c888df72be76ccc30682721bd06c4646eae6643f058253c6",
+    "viewer/project-report-data.js": "ecbe403afb48c701fe273b467dd1370200cc90cd4c9120e66419a2842488468a",
+    "viewer/msi-smoothing.js": "af0964a616c68ae26e8b6ef247204da732a1e8c92ff1b2bb89ba7c1883b5f49e",
+    "viewer/msi-display-settings.js": "3ae2889e6c4d6c1c6100ea412cdf1ef96d9740ec5fd8bf407b0cf2d6bfad2ea3",
+    "viewer/msi-ratio-core.js": "fb6faf21fad5d2f0a4bb5b196e5dfb6474a7d46991ced10253af8be90c06ea79",
+    "viewer/msi-ratio-app.js": "a210bae3a8e321631e35d8b37ae7e499906aa1e7e31bfe094194f36989c07518",
+    "connector/src/raw.js": "009241b525478ee12cf99d95d84ebcfcabc84274259e269833f7561af7076b8b",
+    "connector/src/msi.js": "43c486a5b3246589edabfe4c3f2e20cdade41963668a7404f96d68e5f2b953b3",
+    "connector/src/source-cells.js": "ef228ea0de9be18e6c83e0457405e940c302854d8fb030b1f73fca4e2c98deae",
+    "tools/help-capture.cjs": "6cfc65257d8aa5e7798040d2c472504306385985ae345344b0f73dc469a68cde"
+  },
+  "capture": {
+    "browser": "151.0.7922.34",
+    "viewport": {
+      "width": 1600,
+      "height": 1000
+    },
+    "sourceFixtureSha256": "30b15fa0a0248769afd8fdec56e521d5cdace098cdd77c6f652f5a3e77616355",
+    "localOnly": true,
+    "blockedRequestCount": 0,
+    "numericalRasterVerified": {
+      "W": 219,
+      "H": 166,
+      "n": 36354,
+      "max": 1026290
+    },
+    "ratioVerified": {
+      "threshold": 10000,
+      "nValid": 23512,
+      "nCandidate": 36354
+    },
+    "pageErrors": []
+  },
+  "validation": {
+    "sourceUnchanged": true,
+    "metadataUnchanged": true,
+    "sourceRowsUnchanged": true,
+    "sourceRasterAndMaskUnchanged": true,
+    "expectedCountsVerified": true
+  }
+}
