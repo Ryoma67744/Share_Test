@@ -54,7 +54,9 @@ function commonFiles(root, lock) {
   const guides = fs.readdirSync(root).filter(file => /^USER_GUIDE(?:\.[a-z]+)*\.(?:md|pdf)$/.test(file));
   const optional = ['OFFLINE_GUIDE.md', 'VALIDATION.txt', 'REGRESSION_RESULTS.txt'].filter(file => fs.existsSync(path.join(root, file)));
   const help = JSON.parse(readFile(root, 'docs/help/manifest.json'));
-  const helpFiles = ['docs/help/manifest.json', 'docs/help/capture-manifest.json', ...help.screenshots.map(shot => shot.path)];
+  const helpFiles = ['docs/help/manifest.json', 'docs/help/capture-manifest.json',
+    ...(help.examples?.length ? ['docs/help/images/brain-colorbar.png'] : []),
+    ...help.screenshots.flatMap(shot => [shot.path, ...(shot.provenance ? [shot.provenance] : [])])];
   for (const file of helpFiles) {
     if (!/^docs\/help\/(?:[\w.-]+\.json|images\/[\w.-]+\.png)$/.test(file)) throw new Error('Invalid Help asset: ' + file);
     readFile(root, file);
