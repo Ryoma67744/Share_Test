@@ -71,6 +71,8 @@ async function main() {
     Object.assign(panel, {
       section, project, roiCtx, dom: roiDom(4, 4),
       msiValueRasters: new Map([['MSI_A', { sourceGeometry }]]),
+      imageSources: { MSI_A: { complete: true, naturalWidth: 4, naturalHeight: 4 } },
+      imageSettings: { MSI_A: { opacity: 1, vmin: 0, vmax: 255 } },
       _pickRefMsiKey: () => 'MSI_A', _msiRoiCanvasMatrix: () => null,
       setDrawingPointerActive() {}, renderComposite() {},
     });
@@ -82,6 +84,18 @@ async function main() {
   app._scheduleAutoPublish = () => {};
   document.getElementById('roi-list').innerHTML = '<p>No ROI yet.</p>';
   document.getElementById('roi-toggle').checked = true;
+
+  const firstPanel = app.panels.get('first');
+  const loadedImage = firstPanel.imageSources.MSI_A;
+  delete firstPanel.imageSources.MSI_A;
+  let requestedLayer = null;
+  firstPanel.ensureMsiLayerLoaded = async key => { requestedLayer = key; return false; };
+  await app.startDrawing(null);
+  assert.equal(app.drawing.mode, false, 'drawing waits for the selected image to load');
+  assert.equal(requestedLayer, 'MSI_A', 'drawing requests its image explicitly');
+  assert.equal(project.rois.length, 0, 'an unloaded image cannot create a polygon');
+  firstPanel.imageSources.MSI_A = loadedImage;
+  delete firstPanel.ensureMsiLayerLoaded;
 
   await app.startDrawing(null);
   app.drawing.vertices = [[0, 0], [3, 0], [0, 3]];

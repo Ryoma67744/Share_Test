@@ -264,7 +264,7 @@ async function testSelectionAndProjectLoadRaceGuard() {
   const secondLoad = preview._selectCompound('MSI_B');
   const refreshCount = refreshed.length;
   App.project = { id: 'second', sections: project.sections.map(sec => ({ ...sec })) };
-  waits.get('s1:MSI_B').resolve(true);
+  assert.equal(waits.has('s1:MSI_B'), false, 'a new focus does not start a read for an already hidden section');
   waits.get('s2:MSI_B').resolve(true);
   await secondLoad;
   assert.equal(refreshed.length, refreshCount, 'a previous project completion cannot rebuild the current grid');

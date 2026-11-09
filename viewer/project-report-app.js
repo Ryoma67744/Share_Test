@@ -677,8 +677,19 @@
                     referenceImage: async (section, panel, transforms) => {
                         if (!panel || !panel.imageSources) return null;
                         const loaded = image => image && image.complete && image.naturalWidth > 0 && image.naturalHeight > 0;
-                        const opticalKey = Object.keys(section.images || {}).find(key => /^HE_STAIN/i.test(key)
-                            && key !== 'HE_STAIN_TIC' && loaded(panel.imageSources[key]));
+                        const registered = Object.keys(section.images || {}).filter(key => /^HE_STAIN/i.test(key)
+                            && key !== 'HE_STAIN_TIC');
+                        for (const key of registered) {
+                            if (!loaded(panel.imageSources[key]) && panel.ensureImageLayerLoaded)
+                                await panel.ensureImageLayerLoaded(key, {priority:0});
+                            context.assertCurrent();
+                            if (loaded(panel.imageSources[key])) break;
+                        }
+                        const opticalKey = registered.find(key => loaded(panel.imageSources[key]));
+                        if (!opticalKey && panel.ensureTicBackdrop) {
+                            await panel.ensureTicBackdrop({explicit:true});
+                            context.assertCurrent();
+                        }
                         const source = opticalKey ? panel.imageSources[opticalKey] : panel.imageSources.HE_STAIN_TIC;
                         if (!loaded(source)) return null;
                         try {
