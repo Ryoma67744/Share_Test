@@ -152,15 +152,39 @@
         function ratioRows(result){return {[Symbol.iterator]:function*(){for(let i=0;i<result.values.length;i++){const p=result.positions[i];yield {x:p.x,y:p.y,rowId:result.rowIds&&result.rowIds[i],v:result.values[i]};}}};}
         function roiStatistics(section,result) {
             const ambiguousLegacy=new Set(Object.values(section.msiSeries||{}).map(ent=>h.sourceReference(ent))).size>1;
+            const pair=inputs(section,result.key);
             return (app.project.rois||[]).filter(r=>r.polysBySection&&r.polysBySection[section.id]).map(roi=>{
                 const poly=roi.polysBySection[section.id],meta=h.roiMeta(roi,section);
                 if(!meta&&ambiguousLegacy)return {roiId:roi.id,name:roi.name||roi.id,status:'unavailable',reason:'legacy-roi-source-ambiguous',statistics:null};
-                const geometry=meta&&meta.sourceRef===result.denominator.sourceGeometry.sourceRef?result.denominator.sourceGeometry:result.sourceGeometry;
-                if(meta&&meta.sourceRef!==geometry.sourceRef)return {roiId:roi.id,name:roi.name||roi.id,status:'unavailable',reason:'roi-source-mismatch',statistics:null};
+                const denominator=meta&&meta.sourceRef===result.denominator.sourceGeometry.sourceRef;
+                let geometry=denominator?result.denominator.sourceGeometry:result.sourceGeometry;
+                let sourceEntry=denominator?pair.y.entry:pair.x.entry,preparedMeta=meta;
+                if(meta&&meta.version==='msi-group-v1') {
+                    const groups=root.MsiSpatialGroups;
+                    if(!groups||!groups.roiCompatible(meta,result.numerator.sourceGeometry,section,pair.x.entry)
+                        ||!groups.roiCompatible(meta,result.denominator.sourceGeometry,section,pair.y.entry))
+                        return {roiId:roi.id,name:roi.name||roi.id,status:'unavailable',reason:'roi-group-mismatch',statistics:null};
+                    geometry=result.sourceGeometry;sourceEntry=pair.x.entry;
+                    // Compatibility is checked once, not once per measurement.
+                    preparedMeta={...meta,version:'msi-source-v1',sourceRef:geometry.sourceRef};
+                } else if(meta&&meta.sourceRef!==geometry.sourceRef)return {roiId:roi.id,name:roi.name||roi.id,status:'unavailable',reason:'roi-source-mismatch',statistics:null};
                 let unavailable=false;
-                const stats=Core.summarize(result,(x,y)=>{const inside=h.roiContains(poly,meta,geometry,x,y);if(inside===null)unavailable=true;return inside===true;});
+                const stats=Core.summarize(result,(x,y)=>{const inside=h.roiContains(poly,preparedMeta,geometry,x,y,section,sourceEntry);if(inside===null)unavailable=true;return inside===true;});
                 return {roiId:roi.id,name:roi.name||roi.id,status:unavailable?'unavailable':'ready',reason:unavailable?'roi-geometry-unavailable':null,statistics:unavailable?null:stats};
             });
+        }
+        // Synchronous overlay/drawing guard. Keep the verified input frames
+        // with the display entry even after the large numeric LRU is evicted.
+        // Painting never starts another parse.
+        function roiCompatible(section,key,meta) {
+            syncContext();
+            if(!meta||meta.version!=='msi-group-v1'||!root.MsiSpatialGroups)return false;
+            try {
+                const pair=inputs(section,key),record=entries.get(section.id+'|'+key);
+                if(!record||!record.sourceGeometries||record.stamp!==signature(section,key))return false;
+                return root.MsiSpatialGroups.roiCompatible(meta,record.sourceGeometries.x,section,pair.x.entry)
+                    &&root.MsiSpatialGroups.roiCompatible(meta,record.sourceGeometries.y,section,pair.y.entry);
+            } catch (_) { return false; }
         }
         async function resolve(section,key,options={}) {
             syncContext();const p=inputs(section,key),stamp=signature(section,key),owner=app.project,id=section.id+'|'+key;
@@ -185,6 +209,7 @@
                     const raster=await rasterize(numeric,gx.sourceGeometry,assertCurrent);assertCurrent();
                     const max=numeric.summary.max,upper=Number.isFinite(max)&&max>0?max:1;
                     const ent=entry(section,key);Object.assign(ent,{rawRange:[0,upper],rawDispMax:upper,rawTrueMax:max,rasterW:raster.W,rasterH:raster.H,sourceGeometry:raster.sourceGeometry});
+                    entries.get(id).sourceGeometries={x:clone(X.sourceGeometry),y:clone(Y.sourceGeometry)};
                     const finite=Float64Array.from(raster.values).filter(Number.isFinite).sort();
                     const robustMax=finite.length?finite[Math.floor((finite.length-1)*.999)]:upper;
                     const out={...numeric,kind:'ratio',key,name:h.safeName(p.def.name),formula:h.inputLabel(section,p.x.key)+' / '+h.inputLabel(section,p.y.key),denominatorMin:p.def.denominatorMin,raster,statistics:numeric.summary,inputSignature:stamp,sourceKey:p.x.key,frameSourceKey:p.x.key,sourceGeometry:raster.sourceGeometry,displayAuto:{rawRange:[0,upper],max},robustMax:robustMax>0?robustMax:upper,assertCurrent};
@@ -368,6 +393,7 @@
             dialog.addEventListener('close',()=>dialog.remove(),{once:true});
         }
         Object.assign(app,{getRatioDefinitions:definitions,ratioSignature:signature,ratioEntry:entry,
+            ratioRoiCompatible:roiCompatible,
             ratioSourceKey(section,key){try{return inputs(section,key).x.key;}catch(_){return null;}},
             ratioKeys(section){return definitions().filter(d=>binding(section,d)).map(keyOf);},resolveRatio:resolve,openRatioDialog:openDialog,
             ratioKeepGrid:keepGrid,loadRatioLayer:load,activateRatio:activate,

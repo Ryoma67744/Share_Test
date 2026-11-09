@@ -247,6 +247,8 @@
       const mapped = idMap instanceof Map ? idMap.get(item.sectionId) : get(idMap, item.sectionId);
       if (mapped === undefined || mapped === null) fail('unmapped-section', 'No destination for ROI image section: ' + item.sectionId);
       item.sectionId = text(mapped, 'sectionId', true, 512);
+      const geometry = item.roiSnapshot && item.roiSnapshot.geometry;
+      if (geometry && geometry.version === 'msi-group-v1') geometry.sectionId = item.sectionId;
     }
     ensurePrimaries(registry.items);
     return registry;

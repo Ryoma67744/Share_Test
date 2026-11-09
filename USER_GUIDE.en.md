@@ -142,6 +142,10 @@ These toggles affect only your local view — they are not sent to the server.
 
 ### 4-2. Drawing a new ROI (write lock required)
 
+The ROI scope selector defaults to **同じ座標のMSIで共通** (share with matching-coordinate MSI). Within the same section, a new ROI applies to every verified member of that coordinate group, while each source retains its own intensity values and statistics. Choose **この測定のみ** (this measurement only) for an individual ROI. Different coordinate origins or layouts are excluded even when pixel pitch matches. Shared viewing requires coordinate groups published by the owner and the server migration described in [supabase/README.md](supabase/README.md).
+
+Existing ROIs keep their original scope. Use the row's **共通化** button or **既存ROIを共通化** in the header to explicitly convert compatible ROIs. Conversion checks original source-row membership before saving; an unresolved ROI is left unchanged.
+
 In share mode, **acquiring the write lock is required** to add or modify ROIs (one writer at a time).
 
 1. Click the section panel you want to draw on (it gets a blue outline)
@@ -193,7 +197,7 @@ Recipients can re-align HE/IF onto MSI with **`Align`** too. **The master's alig
 4. Use **重ね合わせ (Overlay)** to inspect the composite and opacity. Open **詳細設定・対応点一覧 (Details and points)** for Manual adjustments and point removal.
 5. **Save** commits all changed targets from this workspace. Shared saves check the version captured at editing start and refuse conflicting overwrites. A failed save retains the draft. **Cancel / Esc / Close** discard unsaved changes and release the editing lock.
 
-New work starts with individual measurement settings. Choose a common registration explicitly after confirming the coordinate basis. Equal image dimensions alone do not justify reusing old landmarks. Unconfirmed legacy records remain stored; point addition and Save are blocked when the displayed frame cannot be confirmed.
+New work defaults to a published coordinate group whose original origin, layout and extent have been verified within the same section. Existing individual and all-source selections are retained. **同じ座標の測定に共通 (N 件)** in Source shows the group targets. Choose an individual Source to correct just that measurement; ordinary group edits retain its correction. **同じ座標へ再適用** clears the affected individual corrections and restores the common setting. Equal image dimensions alone do not justify reusing old landmarks. Unconfirmed legacy records remain stored; point addition and Save are blocked until the frame can be confirmed. Saving group settings requires the corresponding server update.
 
 Display zoom and pan do not change point coordinates. Original MSI intensities, coordinates, missingness, row order, existing MSI-coordinate ROI statistics and numerical exports are unchanged. **Physical pitch (μm/px) is read-only in Align**; calibration changes belong to the separate MSI pixel size dialog.
 

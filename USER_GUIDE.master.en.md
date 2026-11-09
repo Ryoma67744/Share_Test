@@ -202,14 +202,17 @@ The Align workspace shows a **Source** dropdown when the section has a registere
 
 | Value | Behaviour |
 | --- | --- |
-| **All sources** | Use a common registration for measurements whose coordinate bases are confirmed to match |
+| **同じ座標の測定に共通 (N 件)** — matching-coordinate group | Share registration within this section when the original coordinate origin, layout and extent are confirmed to match. The filename and group number identify the targets |
 | Individual Source | Edit points and transforms for that measurement coordinate frame |
+| **全ソース共通** — all sources | The existing broad operation: apply the same logical-pixel rotation, scale and translation even across different acquisition coordinate layouts |
 
-New work defaults to individual measurement settings; a valid saved common selection is retained. A matching coordinate basis does not establish that measurements are the same physical scan, so applying a common registration is an explicit choice.
+New work, and work with no saved scope, defaults to a verified matching-coordinate group. Existing individual and all-source selections are retained. Later measurements added to the same section inherit its group registration after their source coordinates have been verified. Matching pixel pitch or image dimensions alone does not establish group membership.
 
-Switching measurements or HE/IF images preserves a separate draft for each target. Returning restores the unsaved points and adjustments. Different sheets, acquisition functions or coordinate-column definitions within one file remain distinct. Equal image dimensions alone do not justify reusing points.
+Switching measurements or HE/IF images preserves the draft for each target. Returning restores the unsaved points and adjustments. Molecules and measurements in the same coordinate group retain the group's common points and transform. Different sheets, acquisition functions and coordinate-column definitions keep their original source identities and join a common group only when the actual coordinates match.
 
-- **全ソースへ反映 (Apply to all sources)** explicitly copies the current registration to all sources with a confirmed matching coordinate basis and saves it. If shared and individual drafts both affect one target, the last edited state takes precedence.
+- Choose an individual Source or enable **測定回ごとに個別** to correct only that measurement. Ordinary group edits preserve individual corrections. **同じ座標へ再適用 (N 件)** saves the current registration to that group and clears its individual corrections; the affected count is shown for confirmation when corrections exist.
+- **全ソースへ反映 (Apply to all sources)** retains its existing broader behaviour: it copies the current logical-pixel transform to every registered source, including different acquisition origins/spacing and sources loaded after saving. This operation alone does not establish ROI coordinate compatibility.
+- Shared viewers use published coordinate groups. Saving group registration requires the corresponding server update; an unsupported server stops the save and shows an explanation.
 - Old points with an unconfirmed coordinate frame or HE/IF association remain stored and are not automatically reused on another image. Point addition and Save are disabled, with an explanation, when the displayed coordinate frame cannot be confirmed.
 
 ### 5-2. MSI pixel size
@@ -367,6 +370,10 @@ Toolbar / gear MSI Range is a temporary display setting for each project in this
 ---
 
 ## 7. Drawing ROIs
+
+The scope selector defaults to **同じ座標のMSIで共通** (share with matching-coordinate MSI). A new ROI applies to verified members of the same coordinate group within this section; intensities and statistics remain source-specific. Choose **この測定のみ** (this measurement only) to keep it individual. Matching pixel pitch alone does not establish matching coordinates.
+
+Existing ROIs retain their scope. The row's **共通化** button and the header's **既存ROIを共通化** explicitly convert compatible ROIs after verifying that original source-row membership stays unchanged. Shared group editing requires the [spatial-groups server migration](supabase/README.md).
 
 1. Click a section panel to make it active
 2. Click `+ 新規` in ROI LIST (drawing mode ON)

@@ -199,6 +199,8 @@ async function harness(options = {}) {
     const context = displayContext({ console, document, window, Image: class extends Element { constructor() { super('img', document); } },
         Math, Number, String, Boolean, Object, Array, Date, JSON, Map, Set, WeakMap, Promise, Float32Array, Float64Array, Uint8Array, Uint8ClampedArray, structuredClone,
         App, panel, MsiDisplayGeometry: require('../viewer/msi-display-geometry.js'), _shareAlignBySection: shareRecords, isShareAlignMode: () => !!options.shared,
+        MsiSpatialGroups: options.spatial ? require('../viewer/msi-spatial-groups.js') : undefined,
+        ensureSpatialServerSupport: options.ensureSpatialServerSupport || (async () => {}),
         alert: x => alerts.push(String(x)), confirm: () => true, showToast: x => alerts.push(String(x)),
         requestAnimationFrame: callback => { const id = nextTimer++; frames.set(id, callback); return id; }, cancelAnimationFrame: id => frames.delete(id),
         setTimeout: callback => { const id = nextTimer++; timers.set(id, callback); return id; }, clearTimeout: id => timers.delete(id),
@@ -699,7 +701,8 @@ test('physical Align thumbnails and clicks preserve native HE/MSI landmarks thro
     }
 });
 
-(async () => {
+module.exports = { harness, fixture, plain };
+if (require.main === module) (async () => {
     let passed = 0;
     for (const { name, fn } of tests) { await fn(); passed++; console.log('PASS Align: ' + name); }
     console.log(`MSI alignment modal regression tests: PASS (${passed} actual interaction paths)`);

@@ -120,11 +120,11 @@
 
     function contextKey(context, sectionId) {
         const ctx = context || {};
-        const scope = ctx.scope === 'shared' ? 'shared' : 'source';
+        const scope = ctx.scope === 'shared' ? 'shared' : ctx.scope === 'group' ? 'group' : 'source';
         return 'msi-align-draft-v1:' + stableKey({section: sectionId,
             layer: ctx.layerKey, image: ctx.imageIdentity != null ? ctx.imageIdentity : ctx.layerKey,
-            scope, group: scope === 'shared' ? (ctx.sharedId || '__all__') : null,
-            frame: scope === 'shared' ? sharedFrameKey(ctx.frame) : frameKey(ctx.frame)});
+            scope, group: scope === 'shared' ? (ctx.sharedId || '__all__') : scope === 'group' ? ctx.groupId : null,
+            frame: scope === 'shared' ? sharedFrameKey(ctx.frame) : scope === 'group' ? ctx.groupFrameKey : frameKey(ctx.frame)});
     }
 
     // This helper never converts point coordinates. The caller must prove a

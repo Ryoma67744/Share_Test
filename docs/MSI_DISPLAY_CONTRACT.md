@@ -52,7 +52,7 @@ Historical auto-saved all-zero rotations without an explicit flip, mirror or sha
 
 The correction establishes consistency with the internal raster; it does not establish agreement with source software or an anatomical image that has not been supplied. Non-square pixel scale bars use the screen direction mapped back into MSI physical coordinates, not an average of X/Y pitch.
 
-New ROIs retain numeric raster-space polygon vertices with a frozen source-anchored frame:
+Individual ROIs retain numeric raster-space polygon vertices with a frozen source-anchored frame:
 
 ```json
 {
@@ -76,7 +76,15 @@ The numbers above are illustrative. Vertices are not relabelled as raw X/Y. The 
 
 Use the same point-in-polygon predicate in the viewer, connector and CSV membership path. The existing ray-crossing test uses `(yi > y) !== (yj > y)` and a strict `x < intersection`; it has a half-open boundary convention. Boundary fixtures define expected membership rather than assuming every boundary point is included. Legacy polygon numbers remain unchanged.
 
-Shared `poly_msi` JSON stores the vertices and geometry in an envelope. Legacy polygon arrays remain readable. Updated viewer and connector code must be deployed together to consume new envelopes; no SQL schema migration is required for the JSON payload.
+Same-section common ROIs use `geometry.version: "msi-group-v1"` with `scope: "group"`, `groupId`, `frameKey`, `frameVersion: 1`, and the stable section client identity in `sectionId`. They retain the drawing source's `sourceRef` and frozen `displayGeometry`; source identity is never replaced by the group ID. There is one polygon per ROI and section. An individual ROI is a separate ROI record, not a hidden per-source override of that polygon.
+
+`section.meta.spatialGroups` is a versioned registry of exact coordinate frames and enrolled measurements. A frame includes complete confirmed acquisition-to-legacy-pixel axes and proportional display geometry. Equal pitch or dimensions alone, an origin-normalized resemblance, or a sample-condition group is insufficient. Enrollment follows successful coordinate verification; read-only resolution never enrolls a source. A later matching measurement may join the existing frame without rewriting its common ROIs. Source revision and current coordinate-reader settings remain part of membership identity; molecule/intensity-column changes within a measurement do not change that identity. Groups are section-local. ZIP imports remap the section identity while retaining opaque group IDs.
+
+The viewer, Connector, numerical CSV, ROI-only display, ratio and ROI photograph comparison must resolve the same group membership. Ratio ROI statistics require both measured inputs to belong to the saved group. A combined CSV with one ROI label column may join sources only if every source has the same applicable ROI scope; otherwise export separate tables. Validate group compatibility once per calculation, then use a transient source-bound predicate for row iteration. Never persist that calculation-only representation or copy group ROI vertices to every source.
+
+Existing individual ROIs remain source-bound until the explicit common-use action. Preserve their vertices and compare original source-row membership before committing a conversion. Legacy geometry with an ambiguous source or unconfirmed/nonlinear mapping cannot be guessed into the group. Unresolved shapes remain stored. Opening or displaying a project alone must not migrate an ROI.
+
+Shared `poly_msi` JSON stores the vertices and geometry in the existing envelope. Legacy polygon arrays remain readable. The JSONB column does not require a type change, but shared common geometry requires the `supabase/spatial_groups_v1.sql` capability and downgrade-protection protocol. Deploy the viewer and Connector readers with that server update before enabling shared writes. An old writer must not replace a common ROI or publish a document that silently removes its coordinate contract. Unknown geometry is unavailable for quantification, never interpreted as a legacy polygon.
 
 ### Alignment editing workspace
 

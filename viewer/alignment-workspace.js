@@ -147,10 +147,10 @@
         for (const fieldset of Array.from(card.querySelectorAll('fieldset'))) {
             if (fieldset !== landmarkFieldset) relocate(fieldset, detailsBody);
         }
-        const save = q('[data-save]'), cancel = q('[data-modal-cancel]'), applyAll = q('[data-apply-all]');
+        const save = q('[data-save]'), cancel = q('[data-modal-cancel]'), applyAll = q('[data-apply-all]'), applyGroup = q('[data-apply-group]');
         const status = create('span', 'msi-align-footer-status', '表示の拡大・移動で対応点の座標は変わりません。');
         footer.appendChild(status);
-        for (const node of [applyAll, cancel, save]) relocate(node, footer);
+        for (const node of [applyGroup, applyAll, cancel, save]) relocate(node, footer);
 
         const viewControls = create('div', 'msi-align-view-controls');
         const splitButton = button('左右比較'), overlayButton = button('重ね合わせ');

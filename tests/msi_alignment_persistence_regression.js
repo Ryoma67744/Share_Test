@@ -132,6 +132,14 @@ assert.equal(draws.length,1,'verified alignment resumes normal HE rendering');
 assert.equal(drawPanel.dom.alignmentStatus.hidden,true,'status clears when geometry becomes valid');
 drawPanel.section={...sec,meta:{}};ctx.render.call(drawPanel);
 assert.equal(draws.length,2,'ordinary unmanaged legacy HE keeps existing default rendering');
+const currentOnlyLegacy=plain(sec);
+currentOnlyLegacy.meta.alignment={};
+currentOnlyLegacy.msiSeries.MSI_A.sourceGeometry.currentConfirmed=true;
+currentOnlyLegacy.msiSeries.MSI_A.sourceGeometry.legacy.confirmed=false;
+currentOnlyLegacy.msiSeries.MSI_A.sourceGeometry.legacy.reason='legacy-render-quant-axis-mismatch';
+drawPanel.section=currentOnlyLegacy;ctx.render.call(drawPanel);
+assert.equal(draws.length,2,'rejected legacy coordinates must not fall through to an apparently aligned raw HE');
+assert.match(drawPanel.dom.alignmentStatus.textContent,/旧座標系を確認できません/);
 
 // A common record from the previous release can repair missing per-frame
 // records on read alone, including the real composite's hide/show decision.

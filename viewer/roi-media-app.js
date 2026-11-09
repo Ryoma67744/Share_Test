@@ -145,10 +145,32 @@
         if (!ent) return 'この切片には対象のMSIがありません。';
         const meta = msiRoiGeometryMeta(roi,section);
         if (meta && !msiValidRoiGeometry(meta)) return 'ROIの座標情報を確認できません。';
-        if (meta && meta.sourceRef !== msiSourceReference(ent)) return 'ROIを作成した測定ソースと異なります。';
+        if (meta && meta.version === 'msi-group-v1') {
+            const geometry = msiLayerSourceGeometry(section,sourceKeyFor(section,key)) || ent.sourceGeometry;
+            if (!root.MsiSpatialGroups || !root.MsiSpatialGroups.roiCompatible(meta,geometry,section,ent))
+                return 'このMSIがROIの共通座標に対応することを確認できません。主画面でMSIを読み込んでください。';
+        } else if (meta && meta.sourceRef !== msiSourceReference(ent)) return 'ROIを作成した測定ソースと異なります。';
         if (!meta && new Set(Object.values(section.msiSeries || {}).map(msiSourceReference)).size > 1)
             return '旧ROIの測定ソースを一意に確認できません。';
         return '';
+    }
+
+    // Explicit commonization keeps the original polygon and anchor map. Old
+    // photographs can use that new scope without rewriting their historical
+    // snapshot. Any actual shape/source/map/section change still fails closed.
+    function commonizedPhotoGeometry(item, roi, section) {
+        try {
+            const saved=item && item.roiSnapshot && item.roiSnapshot.geometry;
+            const current=msiRoiGeometryMeta(roi,section);
+            if(!saved||saved.version!=='msi-source-v1'||!current||current.version!=='msi-group-v1'
+                ||!msiValidRoiGeometry(saved)||!msiValidRoiGeometry(current)
+                ||!item.sourceRef||saved.sourceRef!==item.sourceRef||current.sourceRef!==item.sourceRef)return null;
+            const a=saved.displayGeometry,b=current.displayGeometry;
+            if(a.version!==b.version||a.W!==b.W||a.H!==b.H||a.x.origin!==b.x.origin||a.x.step!==b.x.step
+                ||a.y.origin!==b.y.origin||a.y.step!==b.y.step)return null;
+            const candidate={...item,roiSnapshot:{...item.roiSnapshot,geometry:current}};
+            return RoiMediaModel.snapshotMatches(candidate,roi,section)?current:null;
+        } catch (_) { return null; }
     }
 
     function createAdapter(project, roi) {
@@ -197,8 +219,17 @@
             const reason = compatibility(r,section,key);
             if (reason || !selectedPhoto) return reason;
             if (!selectedPhoto.sourceRef) return '写真登録時のMSI測定ソースを確認できません。写真を再登録すると現在の対応先を記録できます。';
-            if (selectedPhoto.sourceRef !== msiSourceReference(section.msiSeries[sourceKeyFor(section,key)]))
-                return '写真登録時とはMSI測定ソースが異なります。対応を確認してから写真を再登録してください。';
+            const sourceKey=sourceKeyFor(section,key),ent=section.msiSeries[sourceKey];
+            if (selectedPhoto.sourceRef !== msiSourceReference(ent)) {
+                const saved=RoiMediaModel.snapshotMatches(selectedPhoto,r,section)
+                    ? selectedPhoto.roiSnapshot && selectedPhoto.roiSnapshot.geometry
+                    : commonizedPhotoGeometry(selectedPhoto,r,section);
+                const currentMeta=msiRoiGeometryMeta(r,section),geometry=msiLayerSourceGeometry(section,sourceKey)||ent.sourceGeometry;
+                if (!saved || saved.sourceRef!==selectedPhoto.sourceRef || !currentMeta
+                    || saved.groupId!==currentMeta.groupId || saved.frameKey!==currentMeta.frameKey
+                    || !root.MsiSpatialGroups || !root.MsiSpatialGroups.roiCompatible(saved,geometry,section,ent))
+                    return '写真登録時とはMSI測定ソースが異なります。対応を確認してから写真を再登録してください。';
+            }
             return '';
         };
         const photo = async item => {
@@ -219,7 +250,7 @@
             const decoded = await decodePhoto(blob);
             if (!valid()) { decoded.dispose(); throw new Error('画像の表示対象が変更されました。'); }
             const section = (project.sections || []).find(s => RoiMediaModel.sectionKey(project,s) === item.sectionId);
-            if (section && !RoiMediaModel.snapshotMatches(item,roi,section))
+            if (section && !RoiMediaModel.snapshotMatches(item,roi,section) && !commonizedPhotoGeometry(item,roi,section))
                 decoded.status += ' ／ 写真登録後にROI形状・座標が変更されています';
             if (section) {
                 const sources = new Set(Object.values(section.msiSeries || {}).map(msiSourceReference));
@@ -288,6 +319,11 @@
                         throw new Error(resolved.reason || '有効な比がありません。分母下限と元の値を確認してください。');
                     if(resolved.assertCurrent)resolved.assertCurrent();
                     if((resolved.frameSourceKey || resolved.sourceKey)!==sourceKey)throw new Error('比の座標フレームが変更されました。');
+                    const roiMeta=msiRoiGeometryMeta(r,section);
+                    if(roiMeta&&roiMeta.version==='msi-group-v1') {
+                        const stats=(resolved.roiStats||[]).find(item=>item.roiId===r.id);
+                        if(!stats||stats.status!=='ready')throw new Error('比のX/YがROIの共通座標に対応することを確認できません。');
+                    }
                 } else if (!await panel.ensureMsiLayerLoaded(key)) throw new Error('MSIの元データを読み込めませんでした。');
                 assertValid();
                 const changedPhotoReason = photoCompatibility(r,section,key);
@@ -395,6 +431,7 @@
         const signature = JSON.stringify([active.roi.name,active.roi.rgba,active.roi.polysBySection,active.roi.geometryBySection,
             active.project.meta && active.project.meta.roiMedia,(active.project.sections || []).map(section => [section.id,
                 section.meta && section.meta.roiGeometryByColorKey,
+                section.meta && section.meta.spatialGroups,
                 [...new Set(Object.values(section.msiSeries || {}).map(msiSourceReference))]])]);
         if (!force && signature === active.signature) return;
         active.signature = signature;

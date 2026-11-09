@@ -1,5 +1,9 @@
 # Supabase setup (Phase 1)
 
+> **同一sectionのHE・ROI共通化:** [`spatial_groups_v1.sql`](./spatial_groups_v1.sql) を `publish_safety_v2.sql` の後に適用してください。既存データは書き換えず、共通座標グループと `msi-group-v1` ROIの保存、旧クライアントによる情報消失の検出を追加します。新アプリは `spatial_group_capabilities_v1` で対応を確認します。未適用サーバーへの共通設定の保存・公開は停止し、ローカルの編集内容を保持します。SQLを本番へ適用する作業はアプリのコード更新とは別です。
+
+> 新形式のグループ座標定義は不変です。同座標MSIの追加では所属一覧だけを更新します。既存グループや共通ROIを旧形式に戻す更新は拒否されます。個別ROIが必要な場合は別のROIとして作成してください。共通ROIの名称変更・削除、グループ設定を保持した再公開は引き続き使用できます。公開要求の `_meta.spatialWriteProtocol=1` は要求時だけ使い、プロジェクトへ保存しません。旧タブは更新してから編集してください。旧SQLの再適用やアプリだけの巻き戻しでは新形式を編集できません。
+
 > **公開v2移行:** 新しい公開処理には [`publish_safety_v2.sql`](./publish_safety_v2.sql) をベースSQLの最後に適用する必要があります。本番適用は別途承認が必要です。[適用順序・旧タブ・切り戻し](../docs/PUBLISH_SAFETY_V2.md) を先に確認してください。以下の旧バージョン説明にある `share_locks.sql` 単独再実行・Storage上書き/削除の説明は、v2移行後の運用には適用しません。
 
 > **既存 .exp の編集機能**: ファイル編集とローカル保存にはDB更新は不要です。MRM登録・原本付きメソッドの保存には、`mrm_library.sql` → `mrm_reconcile.sql` → `mrm_exp_import.sql` の順で適用してください。詳細は [EXP_EDITOR.md](../docs/EXP_EDITOR.md) を参照してください。
