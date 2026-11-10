@@ -324,7 +324,15 @@
             for (const {entry, label} of items) {
                 assertCurrent();
                 if (!entry.blobId) { missing.push(label); continue; }
-                if (!records.has(entry.blobId)) records.set(entry.blobId, await storage.getBlob(entry.blobId));
+                if (!records.has(entry.blobId)) {
+                    // A shared view may not have needed these bytes yet. Resolve
+                    // the frozen entry without changing its identity or omitting it.
+                    const record = options.ensureEntry
+                        ? await options.ensureEntry(entry, {signal:options.signal, assertCurrent})
+                        : await storage.getBlob(entry.blobId);
+                    assertCurrent();
+                    records.set(entry.blobId, record);
+                }
                 const rec = records.get(entry.blobId);
                 if (!rec || !rec.blob) missing.push(label);
             }

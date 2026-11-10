@@ -100,6 +100,23 @@
                 row.blobIds=[...pinned];await request(tx.objectStore('blob_pins').put(row));
             });
         }
+        async function getBlobWithLease(id, handle) {
+            ownedLease(handle);
+            // Reading before a separate pin transaction leaves a deletion gap.
+            // Commit the borrowed reference before returning the original.
+            return run(['blobs','blob_pins'],'readwrite',async tx=>{
+                const row=await leaseRow(tx,handle);
+                if(!id)return null;
+                const record=await request(tx.objectStore('blobs').get(id));
+                if(!record || !record.blob)return null;
+                if(!row.blobIds.includes(id)) {
+                    row.blobIds=[...row.blobIds,id];
+                    await request(tx.objectStore('blob_pins').put(row));
+                }
+                // Borrowing never transfers ownership or rewrites Blob bytes.
+                return record;
+            });
+        }
         async function removeLeaseRow(tx, row, discard) {
             await request(tx.objectStore('blob_pins').delete(row.id));
             if(discard) {
@@ -577,7 +594,7 @@
         return {getProject, releaseProject, putProject, patchProject, replaceProjectFromServer, recordPublishReceipt, listRecoveries, restoreRecovery, discardRecovery,
             getRecoveryEnabled,setRecoveryEnabled,
             deleteProject, putBlob, renameBlob, deleteBlob, pruneShareOrphans, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
-            beginBlobLease,pinBlobLease,finishBlobLease,reclaimInactiveBlobLeases};
+            beginBlobLease,pinBlobLease,getBlobWithLease,finishBlobLease,reclaimInactiveBlobLeases};
     }
     // Accessible, persistent recovery entry point shared by both pages.
     function mountRecoveryUi(storage, options = {}) {

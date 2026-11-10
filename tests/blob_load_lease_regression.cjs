@@ -11,6 +11,7 @@ function lockManager(){
  }};
 }
 async function main(){
+ await atomicLeaseReads();
  const mem=memoryIdb(),locks=lockManager();let n=0;
  const make=()=>Store.create({transaction:mem.transaction,locks,uid:p=>p+(++n),indexRowFor:p=>({id:p.id})});
  const a=make(),b=make(),blob=id=>({id,blob:new Blob([id])});
@@ -55,6 +56,48 @@ async function main(){
  assert.equal(await withoutLocks.reclaimInactiveBlobLeases(),0);assert.equal(mem.stores.blobs.has('unknown-live'),true);
  assert.equal(await b.reclaimInactiveBlobLeases(),0,'a lock-capable tab cannot reclaim a lease with unknown liveness');
  await withoutLocks.finishBlobLease(unknown);
- console.log('Blob load lease regression: PASS (atomic pins, owner checks, commit/abort, live/crashed leases, no-TTL fallback)');
+ console.log('Blob load lease regression: PASS (atomic reads/pins, owner checks, commit/abort, live/crashed leases, no-TTL fallback)');
+}
+async function atomicLeaseReads(){
+ const mem=memoryIdb(),locks=lockManager(),transactions=[];let n=0;
+ const transaction=(names,mode)=>{transactions.push({names:[...names],mode});return mem.transaction(names,mode);};
+ const make=()=>Store.create({transaction,locks,uid:p=>p+(++n),indexRowFor:p=>({id:p.id})});
+ const a=make(),b=make();
+ const original={id:'borrowed',filename:'original.csv',blob:new Blob(['unchanged original']),sourceRevision:'r1'};
+ mem.stores.blobs.set(original.id,original);
+ const lease=await a.beginBlobLease({kind:'share-view'});
+ transactions.length=0;mem.operations.length=0;
+ const [record,deleted]=await Promise.all([a.getBlobWithLease(original.id,lease),b.deleteBlob(original.id)]);
+ assert.equal(deleted,false,'a competing delete observes the committed pin, with no read/pin gap');
+ assert.equal(await record.blob.text(),'unchanged original');assert.equal(record.filename,original.filename);
+ assert.deepEqual(transactions[0],{names:['blobs','blob_pins'],mode:'readwrite'});
+ assert.deepEqual(mem.stores.blob_pins.get(lease.id).blobIds,[original.id]);
+ assert.deepEqual(mem.stores.blob_pins.get(lease.id).ownedBlobIds,[],'borrowed bytes do not become load-owned');
+ assert.ok(!mem.operations.some(op=>op.store==='blobs'&&['put','add'].includes(op.op)),'existing original is never rewritten');
+ assert.equal(mem.stores.blobs.get(original.id).sourceRevision,'r1');
+ const rowBefore=structuredClone(mem.stores.blob_pins.get(lease.id));mem.operations.length=0;
+ await a.getBlobWithLease(original.id,lease);
+ assert.ok(!mem.operations.some(op=>['put','add','delete'].includes(op.op)),'already pinned reads perform no record writes');
+ assert.deepEqual(mem.stores.blob_pins.get(lease.id),rowBefore);
+ assert.equal(await a.getBlobWithLease('absent',lease),null);
+ assert.deepEqual(mem.stores.blob_pins.get(lease.id),rowBefore,'missing originals are not pinned');
+ await assert.rejects(()=>b.getBlobWithLease(original.id,lease),{code:'BLOB_LEASE_OWNER'});
+ await assert.rejects(()=>a.getBlobWithLease(original.id,{...lease}),{code:'BLOB_LEASE_OWNER'});
+ const failing=await a.beginBlobLease({kind:'cloud-import'});mem.failNextCommit=true;
+ await assert.rejects(()=>a.getBlobWithLease(original.id,failing),{name:'QuotaExceededError'});
+ assert.deepEqual(mem.stores.blob_pins.get(failing.id).blobIds,[],'a failed pin commit cannot return an unprotected original');
+ assert.equal(await mem.stores.blobs.get(original.id).blob.text(),'unchanged original');
+ await a.finishBlobLease(failing);await a.finishBlobLease(lease);
+ await assert.rejects(()=>a.getBlobWithLease(original.id,lease),{code:'BLOB_LEASE_OWNER'});
+ assert.ok(mem.stores.blobs.has(original.id),'ending a borrower never deletes an unowned original');
+ // Releasing the original creator while another read pins its bytes must also
+ // preserve the bytes, rather than only protecting against direct deletion.
+ const owner=await a.beginBlobLease({kind:'share-view'}),borrower=await b.beginBlobLease({kind:'share-view'});
+ await a.putBlob({id:'shared-created',blob:new Blob(['shared'])},{lease:owner});
+ const [borrowed]=await Promise.all([b.getBlobWithLease('shared-created',borrower),a.finishBlobLease(owner)]);
+ assert.equal(await borrowed.blob.text(),'shared');assert.ok(mem.stores.blobs.has('shared-created'));
+ assert.deepEqual(mem.stores.blob_pins.get(borrower.id).ownedBlobIds,[]);
+ await b.finishBlobLease(borrower);
+ assert.ok(mem.stores.blobs.has('shared-created'),'existing conservative borrowed-original retention is unchanged');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
