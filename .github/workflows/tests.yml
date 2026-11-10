@@ -77,6 +77,8 @@ jobs:
         run: node tests/exp_editor_browser_regression.mjs
       - name: Project PowerPoint report browser workflow
         run: node tests/project_report_browser_regression.cjs
+      - name: PowerPoint output groups and automatic comparison ranges
+        run: node tests/project_report_groups_browser_regression.cjs
       - name: Sparse project report browser regression
         run: node tests/project_report_sparse_browser_regression.cjs
       - name: Physical scale bars and calibration updates

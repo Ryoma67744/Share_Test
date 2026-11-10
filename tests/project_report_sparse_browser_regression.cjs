@@ -5,6 +5,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs/promises');
 const {chromium}=require('playwright');
 const JSZip=require('../vendor/jszip.min.js');
 const {fixture,archive,startServer,prepare}=require('./msi_ratio_browser_regression.cjs');
+const {compareAllReportSections}=require('./report-groups-browser-helpers.cjs');
 // Three independent acquisition sets, each shared by two sections. Keeping
 // the source columns distinct lets the assertions check every registration
 // and its original statistics rather than only the final page count.
@@ -86,6 +87,7 @@ async function mixedAcquisitionReport(browser,server){
    return mixedSnapshot();
   });
   await page.locator('#btn-export-ppt').click();await page.locator('[data-report-create]').waitFor();
+  await compareAllReportSections(page);
   const downloading=page.waitForEvent('download',{timeout:120000});await page.locator('[data-report-create]').click();
   const slides=await readDownloadedDeck(await downloading),prepared=await page.evaluate(()=>mixedPrepared);
   const summaries=slides.filter(xml=>xml.includes('MSI matrix ')),details=slides.filter(xml=>xml.includes('Max Intensity'));
@@ -148,6 +150,7 @@ async function main(){
    return sparseSnapshot();
   });
   await page.locator('#btn-export-ppt').click();await page.locator('[data-report-create]').waitFor();
+  await compareAllReportSections(page);
   const downloading=page.waitForEvent('download',{timeout:60000});await page.locator('[data-report-create]').click();
   const slides=await readDownloadedDeck(await downloading);
   const text=slides.map(xml=>[...xml.matchAll(/<a:t>(.*?)<\/a:t>/g)].map(m=>m[1]).join(' ')),all=text.join('\n');

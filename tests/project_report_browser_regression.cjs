@@ -7,6 +7,7 @@ const { createServer } = require('node:http');
 const { chromium } = require('playwright');
 const JSZip = require('../vendor/jszip.min.js');
 const { renderOfflineConfig } = require('../offline/config.cjs');
+const { compareAllReportSections } = require('./report-groups-browser-helpers.cjs');
 const root = path.resolve(__dirname, '..');
 
 const sharedSlug = 'synthetic-shared-ppt-report';
@@ -156,7 +157,7 @@ async function installReportObservation(page) {
     const originalDeck = window.ProjectReportDeck;
     window.ProjectReportDeck = {...originalDeck, async create(report, options) {
       window.__reportTestModel = {displayStyle:report.displayStyle, molecules:report.molecules.map(molecule => ({
-        upper:molecule.upper, intensityScale:molecule.intensityScale,
+        upper:molecule.upper, intensityScale:molecule.intensityScale, outputScales:molecule.outputScales,
         sections:molecule.sections.map(section => ({sectionId:section.sectionId, displayWindow:section.displayWindow,
           width:section.image && section.image.width, height:section.image && section.image.height,
           physicalWidthUm:section.image && section.image.physicalWidthUm,
@@ -332,6 +333,7 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
     async function openOptions(includeCeCv, useDisplayStyle = false) {
       await page.locator('#btn-export-ppt').click();
       await page.getByRole('dialog', {name:'PPT レポートの設定', exact:true}).waitFor({state:'visible'});
+      await compareAllReportSections(page);
       const checkbox = page.locator('#project-report-include-ce-cv');
       const style = page.locator('#project-report-use-display-style');
       assert.equal(await style.isChecked(), false, 'Display-style mode starts OFF for every shared export');
@@ -401,20 +403,23 @@ async function checkSharedReport(browser, origin, role, traffic, logins) {
       for (const [index, molecule] of report.molecules.entries()) {
         assert.equal(molecule.sections.length, 2, 'Both output sections contribute to every molecule');
         const maximum = 512 * (index + 1);
+        const scales=Object.values(molecule.outputScales);
+        assert.equal(scales.length,1,'The requested comparison group has one automatic scale');
+        assert.equal(molecule.intensityScale.basis,'group-automatic');
         if (useDisplayStyle) {
-          assert.equal(report.displayStyle.mode, 'same', 'The captured Same mode is used');
+          assert.equal(report.displayStyle.mode, 'same', 'Viewer mode is captured; the explicit comparison group controls its automatic range');
           assert.equal(report.displayStyle.rangePolicy, 'maximum');
           assert.equal(report.displayStyle.colormap, 'hotmetal');
           assert.equal(report.displayStyle.smoothing, 'median');
           assert.equal(report.displayStyle.smoothingStrength,6,'PPT retains strength captured before asynchronous settings changes');
           assert.equal(report.displayStyle.linearStrength,4,'PPT retains the independent Linear strength');
           assert.match(deck.xml,/median \(strength 6\/10\)/);
-          assert.equal(molecule.intensityScale.basis, 'display-style');
+          assert.equal(scales[0].max,maximum,'Display-style comparison uses its captured automatic maximum');
           assert.deepEqual(molecule.sections.map(section => section.displayWindow),
             [{min:0,max:maximum},{min:0,max:maximum}], 'Same includes the stronger second section without mixing molecules');
         } else {
-          assert.equal(molecule.intensityScale.percentile, 99.8, 'OFF retains the legacy report percentile');
-          assert.equal(molecule.intensityScale.upperBasis, 'percentile');
+          assert.equal(scales[0].upperBasis, 'percentile', 'OFF retains p99.8 within its comparison group');
+          assert.equal(scales[0].max,scales[0].percentileValue);
           assert.ok(molecule.upper > 0 && molecule.upper < maximum, 'Legacy p99.8 does not silently become maximum');
         }
         for (const section of molecule.sections) {

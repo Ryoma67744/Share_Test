@@ -278,14 +278,29 @@ cannot replace a newer selection or project. Refresh main images, thumbnails,
 Range controls and Preview images together. This display operation does not change
 ROI quantification, analysis scope, whole-section Mean/Max or numerical exports.
 
-PPT keeps its existing p99.8/21-colour style by default. The optional display-style
-export snapshots palette, interpolation, range policy, manual Range, Otsu mask,
-orientation, pitch and source identity at the start. It still exports every project
-section and molecule: Same is recalculated per molecule across all output sections,
-not copied from the currently visible subset. Both report styles follow the
-selected aspect mode. Quantitative tables always use original rows. Ordinary
-shared viewers never receive a CV/CE option; authenticated shared Admin and master
-retain the existing explicitly selected, default-off option.
+PPT export starts with every section included as an independent output. Its options
+dialog can create, rename and delete comparison groups, assign selected sections
+in bulk, exclude sections, or return every section to independent output. A
+comparison group uses one automatic Range per strictly matched molecule across
+that group's included sections. An independent section uses its own automatic
+Range. A shared display name alone never joins different MRM conditions.
+
+The default p99.8/21-colour report style calculates its percentile within each
+output group. The optional display-style export snapshots palette, interpolation,
+automatic range policy, Otsu mask, orientation, pitch and source identity. Manual
+Viewer or ratio Range overrides do not determine either output mode's windows.
+The current display filter also does not choose the report's included sections.
+Group names, independent/comparison mode and raw intensity or ratio ranges are
+shown in the PowerPoint. Both report styles follow the selected aspect mode;
+quantitative and ROI tables always retain original measurements.
+
+Confirmed output assignments are remembered only for the same loaded project in
+the same tab. Cancelling discards dialog edits; adding or removing sections
+reconciles assignments by section ID, with new sections independent. These choices
+do not alter project metadata, source data, ROI settings or saved display ranges.
+Direct report adapters without an explicit output plan retain their legacy range
+contract. Ordinary shared viewers never receive a CV/CE option; authenticated
+shared Admin and master retain the explicitly selected, default-off option.
 
 ### Display-only Median and ten-level Linear
 

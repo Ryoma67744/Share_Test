@@ -5,7 +5,7 @@
     root.ProjectReportDeck = api;
 })(typeof globalThis === 'object' ? globalThis : this, function (root) {
     'use strict';
-    const REPORT_REVISION = 'ppt-20261106-2';
+    const REPORT_REVISION = 'ppt-20261110-1';
     const WIDTH = 13.333333, HEIGHT = 7.5;
     const FONT = 'Yu Gothic';
     // Same reference boostmap ramp as ProjectReportData. These are scientific
@@ -90,6 +90,57 @@
             for (const section of molecule.sections || []) add(section.sectionId, section.name);
         }
         return sections;
+    }
+    function validWindow(value) {
+        return value && Number.isFinite(value.min) && Number.isFinite(value.max) && value.max > value.min;
+    }
+    function outputGroupLabel(report) {
+        const group = report.outputGroup;
+        if (!group) return '';
+        if (group.kind === 'independent') return (group.name === '独立' ? '' : group.name + ' | ')
+            + '独立・この切片の自動Range';
+        return group.name + ' | 共通自動Range';
+    }
+    // The explicit plan is the authoritative export boundary. Do not restore
+    // an excluded section from a molecule entry, a reference, or a Ratio ROI.
+    // Range calculation belongs to data preparation, before any page chunks.
+    function outputReports(report) {
+        if (report.outputPlan == null) return [report];
+        const plan = report.outputPlan;
+        if (plan.version !== 1 || !Array.isArray(plan.groups)) throw new Error('Invalid report output plan');
+        const registered = new Map(report.sections.map(section => [string(section.id), section]));
+        const ids = new Set(), assigned = new Set();
+        const groups = plan.groups.map(group => {
+            if (!group || !group.id || ids.has(string(group.id)) || !['compare', 'independent'].includes(group.kind)
+                || !Array.isArray(group.sectionIds) || !group.sectionIds.length
+                || group.kind === 'independent' && group.sectionIds.length !== 1) throw new Error('Invalid report output group');
+            ids.add(string(group.id));
+            const sectionIds = group.sectionIds.map(string);
+            for (const id of sectionIds) {
+                if (!registered.has(id) || assigned.has(id)) throw new Error('Invalid report section assignment');
+                assigned.add(id);
+            }
+            return {id:string(group.id), name:string(group.name) || string(group.id), kind:group.kind, sectionIds};
+        });
+        const ordered = [...groups.filter(group => group.kind === 'compare'), ...groups.filter(group => group.kind === 'independent')];
+        return ordered.map(group => {
+            const included = new Set(group.sectionIds);
+            const sections = group.sectionIds.map(id => ({...registered.get(id), id}));
+            const molecules = report.molecules.map(molecule => {
+                const entries = (molecule.sections || []).filter(entry => included.has(string(entry.sectionId)));
+                if (!entries.length) return null;
+                if (entries.some(entry => entry.outputGroupId != null && string(entry.outputGroupId) !== group.id))
+                    throw new Error('Report entry belongs to another output group');
+                const supplied = molecule.outputScales && molecule.outputScales[group.id];
+                const scale = validWindow(supplied) ? supplied : entries.map(entry => entry.displayWindow).find(validWindow);
+                if (!scale && entries.some(entry => entry.image)) throw new Error('Automatic report Range is unavailable');
+                if (entries.some(entry => validWindow(entry.displayWindow)
+                    && scale && (entry.displayWindow.min !== scale.min || entry.displayWindow.max !== scale.max)))
+                    throw new Error('Report group Range is inconsistent');
+                return {...molecule, sections:entries, outputScale:scale || {min:0,max:1,available:false,upperBasis:'unit-fallback'}};
+            }).filter(Boolean);
+            return {...report, sections, molecules, outputGroup:group};
+        }).filter(scope => scope.molecules.length);
     }
     function imageScaleBar(pptx, slide, entry, bounds, cell) {
         const image = entry && entry.image;
@@ -187,7 +238,10 @@
             const blockWidth = (WIDTH - 0.16) / blocks.length;
             const hasReference = sectionPage.some(section => !!section.referenceImage);
             const maxRows = Math.max(...blocks.map(block => block.length));
-            const top = 0.86;
+            const headerOffset = report.outputGroup ? 0.26 : 0;
+            if (report.outputGroup) text(slide, outputGroupLabel(report),
+                {x:0.1,y:0.04,w:13.1,h:0.2},{fontSize:10,bold:true});
+            const top = 0.86 + headerOffset;
             const rowHeight = (7.3 - top - (hasReference ? 0.04 : 0)) / (maxRows + (hasReference ? 1 : 0));
             const pageMolecules = blocks.flat();
             blocks.forEach((molecules, block) => {
@@ -195,16 +249,16 @@
                 const labelWidth = blockWidth * (sectionPage.length <= 2 ? 0.39 : 0.3);
                 const imageWidth = (blockWidth - labelWidth - 0.08) / sectionPage.length;
                 const labelFont = blocks.length === 3 ? 9 : blocks.length === 2 ? 10 : 12;
-                text(slide, report.projectName, {x: x + labelWidth, y: 0.05,
+                text(slide, report.projectName, {x: x + labelWidth, y: 0.05 + headerOffset,
                     w: blockWidth - labelWidth - 0.08, h: 0.22}, {fontSize: 10, bold: true, align: 'center'});
                 sectionPage.forEach((section, column) => {
                     const left = x + labelWidth + column * imageWidth;
-                    slide.addShape(pptx.ShapeType.rect, {x: left, y: 0.3, w: imageWidth, h: 0.31,
+                    slide.addShape(pptx.ShapeType.rect, {x: left, y: 0.3 + headerOffset, w: imageWidth, h: 0.31,
                         fill: {color: '000000'}, line: {color: borderColors[sections.indexOf(section) % borderColors.length], width: 2}});
                     text(slide, shortLabel(section.name, Math.max(12, imageWidth * 17), 2),
-                        {x: left + 0.025, y: 0.31, w: imageWidth - 0.05, h: 0.29}, {fontSize: 9, bold: true, align: 'center'});
+                        {x: left + 0.025, y: 0.31 + headerOffset, w: imageWidth - 0.05, h: 0.29}, {fontSize: 9, bold: true, align: 'center'});
                     text(slide, matrixPixelSize(pageMolecules, section),
-                        {x: left + 0.025, y: 0.65, w: imageWidth - 0.05, h: 0.17}, {fontSize: 8, align: 'center'});
+                        {x: left + 0.025, y: 0.65 + headerOffset, w: imageWidth - 0.05, h: 0.17}, {fontSize: 8, align: 'center'});
                 });
                 if (hasReference) {
                     text(slide, 'Optical / TIC', {x: x + 0.015, y: top, w: labelWidth - 0.05, h: rowHeight},
@@ -227,9 +281,13 @@
                         {fontSize: labelFont - 1, color: 'D9D9D9'});
                     sectionPage.forEach((section, column) => {
                         const entry = entryFor(molecule, section);
+                        const range = report.outputGroup && entry && (entry.displayWindow || molecule.outputScale);
                         if (entry) picture(slide, entry,
                             {x: x + labelWidth + column * imageWidth + 0.02, y,
-                                w: imageWidth - 0.04, h: rowHeight - 0.025}, {fontSize: 7});
+                                w: imageWidth - 0.04, h: rowHeight - 0.025 - (range ? 0.16 : 0)}, {fontSize: 7});
+                        if (range) text(slide, 'Range ' + number(range.min) + ' – ' + number(range.max),
+                            {x:x+labelWidth+column*imageWidth+0.02,y:y+rowHeight-0.15,w:imageWidth-0.04,h:0.12},
+                            {fontSize:7,color:'D9D9D9',align:'center'});
                     });
                 });
             });
@@ -245,9 +303,12 @@
                 await checkpoint();
                 const sectionPage = pages[index];
                 const slide = pptx.addSlide(); slide.background = {color: 'FFFFFF'};
+                const headerOffset = report.outputGroup ? 0.24 : 0;
+                if (report.outputGroup) text(slide, outputGroupLabel(report),
+                    {x:0.12,y:0.04,w:13.0,h:0.18},{fontSize:10,bold:true,color:'333333'});
                 text(slide, `${molecule.name || molecule.key}${pages.length > 1 ? ' (' + (index + 1) + '/' + pages.length + ')' : ''}`,
-                    {x: 0.12, y: 0.06, w: 13.0, h: 0.37}, {fontSize: 24, bold: true, color: '000000'});
-                text(slide, molecule.subtitle, {x: 0.12, y: 0.46, w: 12.95, h: 0.22}, {fontSize: 11, color: '333333'});
+                    {x: 0.12, y: 0.06 + headerOffset, w: 13.0, h: 0.37}, {fontSize: 24, bold: true, color: '000000'});
+                text(slide, molecule.subtitle, {x: 0.12, y: 0.46 + headerOffset, w: 12.95, h: 0.22}, {fontSize: 11, color: '333333'});
                 const ratio=molecule.kind==='ratio';
                 const tableWidth = 11.83, headerWidth = ratio?2.2:1.55;
                 const dataWidth = (tableWidth - headerWidth) / sectionPage.length;
@@ -261,7 +322,7 @@
                 const cells = table.map((row, rowIndex) => row.map((value, column) => ({text: value,
                     options: {bold: column === 0 || rowIndex === 0, fontSize: ratio?10:rowIndex === 0 ? 11 : 13,
                         fill: rowIndex === 0 ? 'D1DAE9' : rowIndex === 1 ? 'E9EDF4' : 'D1DAE9'}})));
-                slide.addTable(cells, {x: 0.12, y: 0.76, w: tableWidth,
+                slide.addTable(cells, {x: 0.12, y: 0.76 + headerOffset, w: tableWidth,
                     colW: [headerWidth, ...sectionPage.map(() => dataWidth)], rowH: ratio?[0.48,0.24,0.24,0.24,0.24]:[0.63, 0.36, 0.36],
                     h: ratio?1.44:1.35, autoPage: false, border: {type: 'solid', color: 'FFFFFF', pt: 1},
                     margin: [2, 5, 2, 5], fontFace: FONT, fontSize: 13, color: '000000',
@@ -269,18 +330,19 @@
                 const cellW = 11.83 / sectionPage.length;
                 const style=molecule.displayStyle || report.displayStyle;
                 const ranges=sectionPage.map(section=>entryFor(molecule,section).displayWindow).filter(Boolean);
-                const individual=style && new Set(ranges.map(w=>JSON.stringify(w))).size>1;
+                const individual=!report.outputGroup && style && new Set(ranges.map(w=>JSON.stringify(w))).size>1;
                 sectionPage.forEach((section, i) => {
                     const x = 0.12 + i * cellW, entry = entryFor(molecule, section);
                     text(slide, section.name,
-                        {x: x + 0.05, y: 2.2, w: cellW - 0.1, h: 0.25},
+                        {x: x + 0.05, y: 2.2 + headerOffset, w: cellW - 0.1, h: 0.25},
                         {fontSize: 17, color: '000000', align: 'center'});
                     text(slide, 'Pixel size: ' + (registeredPixelSize(entry) || '—'),
-                        {x: x + 0.05, y: 2.47, w: cellW - 0.1, h: 0.16},
+                        {x: x + 0.05, y: 2.47 + headerOffset, w: cellW - 0.1, h: 0.16},
                         {fontSize: 9, color: '333333', align: 'center'});
-                    if(style && entry.displayWindow)text(slide,'Range '+number(entry.displayWindow.min)+' – '+number(entry.displayWindow.max),
-                        {x:x+0.05,y:2.65,w:cellW-0.1,h:0.15},{fontSize:8,color:'333333',align:'center'});
-                    const imageTop = style && entry.displayWindow ? 2.84 : 2.66;
+                    const window = report.outputGroup ? entry.displayWindow || molecule.outputScale : style && entry.displayWindow;
+                    if(window)text(slide,'Range '+number(window.min)+' – '+number(window.max),
+                        {x:x+0.05,y:2.65+headerOffset,w:cellW-0.1,h:0.15},{fontSize:8,color:'333333',align:'center'});
+                    const imageTop = (window ? 2.84 : 2.66) + headerOffset;
                     const cell = {x: x + 0.08, y: imageTop, w: cellW - 0.16, h: 6.62 - imageTop};
                     const bounds = picture(slide, entry, cell, {light: true});
                     imageScaleBar(pptx, slide, entry, bounds, cell);
@@ -288,16 +350,20 @@
                         text(slide,shortLabel(entry.metadata.formula,Math.floor(cellW*17),2),
                             {x:x+0.08,y:6.65,w:cellW-0.16,h:0.27},{fontSize:9,color:'333333',align:'center'});
                 });
-                text(slide, individual?'Colour level':ratio?'Ratio':'Intensity', {x: 12.02, y: 2.38, w: 1.15, h: 0.25}, {fontSize: 10, color: '000000', align: 'center'});
-                const range=style && ranges[0];
-                colorBar(pptx, slide, 12.12, 2.83, 0.24, individual?1:range?range.max:molecule.upper, {height: 3.7,
+                text(slide, individual?'Colour level':ratio?'Ratio':'Intensity', {x: 12.02, y: 2.38+headerOffset, w: 1.15, h: 0.25}, {fontSize: 10, color: '000000', align: 'center'});
+                const range=report.outputGroup ? molecule.outputScale : style && ranges[0];
+                colorBar(pptx, slide, 12.12, 2.83+headerOffset, 0.24, individual?1:range?range.max:molecule.upper, {height: 3.7-headerOffset,
                     lower:individual?0:range?range.min:0,percent:individual,
                     stops:style && style.lut.map(c=>c.map(v=>Math.round(v).toString(16).padStart(2,'0')).join(''))});
-                const basis = molecule.intensityScale && molecule.intensityScale.upperBasis;
-                const scaleNote = style ? 'Display style: '+style.colormap+' / '+(style.mode==='individual'?'Individual':'Same (all sections)')
+                const basis = report.outputGroup ? molecule.outputScale.upperBasis : molecule.intensityScale && molecule.intensityScale.upperBasis;
+                const automaticNote = range && range.available === false ? 'No valid display samples; fallback Range 0 – 1'
+                    : basis === 'percentile' ? 'Automatic display p99.8'
+                    : basis === 'positive-maximum-fallback' ? 'Automatic positive maximum (fallback)'
+                    : basis === 'unit-fallback' ? 'Upper bound 1 (no positive range)' : 'Automatic display Range';
+                const scaleNote = style ? 'Display style: '+style.colormap+' / '+(report.outputGroup?automaticNote:style.mode==='individual'?'Individual':'Same (all sections)')
                     +' / '+style.smoothing+(style.smoothing==='linear'?' (strength '+(style.linearStrength || 10)+'/10)'
                         :style.smoothing==='median'?' (strength '+(style.smoothingStrength || 1)+'/10)':'')
-                    +(style.otsu?' / Otsu (available masks)':'') : basis === 'percentile' ? 'Shared display p99.8' :
+                    +(style.otsu?' / Otsu (available masks)':'') : report.outputGroup ? automaticNote : basis === 'percentile' ? 'Shared display p99.8' :
                     basis === 'positive-maximum-fallback' ? 'Shared positive maximum (fallback)' :
                     basis === 'unit-fallback' ? 'Upper bound 1 (no positive range)' : 'Common scale for this molecule';
                 const qualityNotes = [...new Set(sectionPage.map(section => entryFor(molecule, section).qualityNote).filter(Boolean))];
@@ -321,6 +387,8 @@
             for(const page of chunks(rows,12)) {
                 await checkpoint();
                 const slide=base(pptx,report,(molecule.name || 'Ratio')+' — ROI',true);
+                if(report.outputGroup)text(slide,outputGroupLabel(report),
+                    {x:0.35,y:0.04,w:12.6,h:0.17},{fontSize:10,bold:true,color:'333333'});
                 text(slide,molecule.subtitle,{x:0.35,y:0.85,w:12.6,h:0.35},{fontSize:11,color:'333333'});
                 slide.addTable([['Section','ROI','Total signal ratio','Mean point ratio','Median point ratio','Valid / paired','Status'],...page],
                     {x:0.35,y:1.35,w:12.6,h:4.9,colW:[1.9,1.9,1.65,1.65,1.65,1.3,2.55],
@@ -362,11 +430,15 @@
         pptx.title = report.projectName + ' — DESI MSI report';
         pptx.company = 'Share_Test'; pptx.lang = 'ja-JP';
         pptx.theme = { headFontFace: FONT, bodyFontFace: FONT, lang: 'ja-JP' };
-        const sections = sectionsFor(report).filter(section =>
-            report.molecules.some(molecule => entryFor(molecule, section)));
-        await addMatrices(pptx, report, sections, checkpoint);
-        await addDetails(pptx, report, sections, checkpoint);
-        await addRatioRois(pptx, report, checkpoint);
+        const scopes = outputReports(report);
+        for (const scope of scopes) {
+            const sections = (scope.outputGroup ? scope.sections : sectionsFor(scope)).filter(section =>
+                scope.molecules.some(molecule => entryFor(molecule, section)));
+            await addMatrices(pptx, scope, sections, checkpoint);
+            await addDetails(pptx, scope, sections, checkpoint);
+            await addRatioRois(pptx, scope, checkpoint);
+        }
+        if (!scopes.length) await addMatrices(pptx,{...report,molecules:[]},[],checkpoint);
         await checkpoint('write');
         const output = await pptx.write({ outputType: type, compression: true });
         assertCurrent();
