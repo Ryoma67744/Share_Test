@@ -8118,7 +8118,9 @@ class SectionPanel {
     _observeThumb(key, box) {
         const paint = () => {
             if (!this._thumbDirty.has(key)) return;
+            if(App.isPanelDisplayWanted && !App.isPanelDisplayWanted(this))return;
             this._thumbDirty.delete(key);
+            if(this.isMsiLayerReady(key)) {this.renderMsiThumbnail(key);return;}
             this.ensureLayerLoaded(key, { retry:false, automatic:true, priority:20 }).then((ok) => {
                 if (this._destroyed) return;
                 if (!ok) { this._thumbDirty.add(key); return; }
@@ -8168,15 +8170,30 @@ class SectionPanel {
         if (this._msiDrawWaiters) this._msiDrawWaiters.clear();
         if (this._msiImageIdentity) this._msiImageIdentity.clear();
         if (this._heGeometryWarpCache) this._heGeometryWarpCache.clear();
+        if (this._heGrayscaleCache) this._heGrayscaleCache.clear();
         if (this._msiLutCache) this._msiLutCache.clear();
         this.msiValueRasters.clear();
         this.imageSources = {};
         this.imageDataUrls = {};
     }
 
-    markAllThumbsDirty() {
-        for (const key of this.msiThumbRefs.keys()) {
-            if (this.isMsiLayerReady(key)) { try { this.renderMsiThumbnail(key); } catch (e) {} }
+    _isThumbDisplayWanted(key) {
+        if(App.isPanelDisplayWanted && !App.isPanelDisplayWanted(this))return false;
+        const image=this.msiThumbRefs.get(key),host=this.dom.thumbs;
+        // Canvas-only tests and older embedding adapters have no DOM viewport.
+        if(!image?.getBoundingClientRect || !host?.getBoundingClientRect)return true;
+        const rect=image.getBoundingClientRect(),bounds=host.getBoundingClientRect();
+        return rect.width>0 && rect.height>0 && bounds.width>0 && bounds.height>0
+            && rect.right>bounds.left && rect.left<bounds.right && rect.bottom>bounds.top && rect.top<bounds.bottom;
+    }
+
+    markAllThumbsDirty(onlyKey) {
+        for (const key of (onlyKey ? [onlyKey] : this.msiThumbRefs.keys())) {
+            if(!this.msiThumbRefs.has(key))continue;
+            if (this.isMsiLayerReady(key) && this._isThumbDisplayWanted(key)) {
+                this._thumbDirty.delete(key);
+                try { this.renderMsiThumbnail(key); } catch (e) {}
+            }
             else {
                 // 未読込 / LRU で退避済み。印を付けるだけでは足りない —
                 // _thumbDirty を消化するのは _observeThumb が仕込む paint だけで、
@@ -8347,6 +8364,7 @@ class SectionPanel {
                 if(current() && error?.name!=='AbortError' && error?.code!=='SOURCE_CANCELLED') {
                     errors.set(key,{identity,error});
                     delete this.imageSources[key];delete this.imageDataUrls[key];
+                    this._heGrayscaleCache?.delete(key);this._heGeometryWarpCache?.delete(key);
                     console.warn('HE/IF image load failed',key,error);
                     if(typeof showToast==='function') showToast('画像を読み込めませんでした。レイヤーを選び直すと再試行できます。',6000);
                 }
@@ -8532,6 +8550,7 @@ class SectionPanel {
                     reject(new Error('画像をデコードできませんでした (' + key + ')')); return;
                 }
                 // A pending or failed Image never enters the drawable cache.
+                this._msiLutCache?.delete(key);this._heGrayscaleCache?.delete(key);this._heGeometryWarpCache?.delete(key);
                 this.imageSources[key] = img; resolve(true);
             };
             img.onload = () => finish(true); img.onerror = () => finish(false);
@@ -9064,6 +9083,136 @@ class SectionPanel {
         return true;
     }
 
+    // One bounded pool for display derivatives across all panels. These maps
+    // retain the ordinary Map contract so every existing layer delete/clear
+    // also releases its byte accounting. Original images/values are not owned
+    // by this pool and are never resized, detached or mutated on eviction.
+    _newDisplayCache(maxEntries) {
+        const pool = SectionPanel._displayCacheBudget || (SectionPanel._displayCacheBudget = {
+            maxBytes:64 * 1024 * 1024, bytes:0, entries:new Map(),
+        });
+        return new class extends Map {
+            constructor() { super(); this.tokens = new Map(); this.displayBudgetManaged = true; }
+            get(key) {
+                const token=this.tokens.get(key);
+                if(token){pool.entries.delete(token);pool.entries.set(token,token);}
+                return super.get(key);
+            }
+            set(key,value) {
+                this.delete(key);
+                const bytes=Math.max(0,Number(value._bytes)||0);
+                if(bytes>pool.maxBytes)return this;
+                const token={cache:this,key,bytes};
+                super.set(key,value);this.tokens.set(key,token);pool.entries.set(token,token);pool.bytes+=bytes;
+                while(this.size>maxEntries)this.delete(this.keys().next().value);
+                while(pool.bytes>pool.maxBytes&&pool.entries.size){
+                    const oldest=pool.entries.keys().next().value;oldest.cache.delete(oldest.key);
+                }
+                return this;
+            }
+            delete(key) {
+                const token=this.tokens.get(key);
+                if(token){this.tokens.delete(key);pool.entries.delete(token);pool.bytes-=token.bytes;}
+                return super.delete(key);
+            }
+            clear() { for(const key of this.keys())this.delete(key); }
+        }();
+    }
+
+    // Range and Median operate in the original raster, before colour/alpha or
+    // any spatial transform. Main and thumbnail share this exact calculation;
+    // their historically different alpha/palette policies are applied below.
+    _msiDisplayRaster(key,img,rawRange,window,keepGrid) {
+        const vr=this.msiValueRasters&&this.msiValueRasters.get(key);
+        const strength=App.msiSmoothing==='median'?(App.msiSmoothingStrength||1):0;
+        const width=img.naturalWidth,height=img.naturalHeight;
+        const sig=identStamp(img)+'|'+width+'x'+height+'|'+identStamp(vr)
+            +'|'+identStamp(vr&&vr.values)+'|'+identStamp(vr&&vr.measuredMask)
+            +'|'+(rawRange?(rawRange[0]+','+rawRange[1]):'-')
+            +'|'+(window?(window.min+','+window.max):'-')
+            +'|'+identStamp(keepGrid&&keepGrid.keep)+'|'+(keepGrid?(keepGrid.W+'x'+keepGrid.H):'-')
+            +'|smooth:'+strength;
+        if(!this._msiLutCache?.displayBudgetManaged)this._msiLutCache=this._newDisplayCache(MSI_LUT_CACHE_MAX);
+        const cached=this._msiLutCache.get(key);
+        if(cached&&cached.baseSig===sig)return cached;
+        const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;
+        const ctx=get2dContext(canvas,{willReadFrequently:true});ctx.drawImage(img,0,0);
+        const data=ctx.getImageData(0,0,width,height).data,N=width*height;
+        const alpha=new Uint8Array(N),background=new Uint8Array(N),indices=new Uint8Array(N);
+        const smoothMask=strength>0?new Uint8Array(N):null;
+        const useValues=!!(vr&&vr.W===width&&vr.H===height);
+        const useKeep=keepGrid&&keepGrid.W===width&&keepGrid.H===height;
+        const fallback=msiRawFallbackMax(rawRange);
+        let opaque=true;
+        for(let pixel=0;pixel<N;pixel++){
+            const offset=pixel*4,a=data[offset+3];alpha[pixel]=a;if(a!==255)opaque=false;
+            if(a===0||(useKeep&&keepGrid.keep[pixel]===0)){background[pixel]=1;continue;}
+            const value=useValues?vr.values[pixel]:NaN;
+            if(smoothMask)smoothMask[pixel]=!useValues||(Number.isFinite(value)
+                &&(!vr.measuredMask||vr.measuredMask[pixel]))?1:0;
+            const evaluated=Number.isFinite(value)?msiValueEval(value,window,fallback)
+                :msiWindowEval(0.299*data[offset]+0.587*data[offset+1]+0.114*data[offset+2],rawRange,window);
+            indices[pixel]=Math.round(evaluated.n*255);
+        }
+        if(smoothMask){
+            const filtered=MsiSmoothing.medianIndices(indices,width,height,strength,smoothMask);
+            for(let pixel=0;pixel<N;pixel++)if(smoothMask[pixel])indices[pixel]=filtered[pixel];
+        }
+        const record={baseSig:sig,sig,width,height,alpha,background,indices,opaque,variants:new Map(),_bytes:N*3};
+        this._msiLutCache.set(key,record);
+        return record;
+    }
+
+    _msiColorCanvas(key,img,rawRange,window,keepGrid,lut,bg,paletteKey,preserveAlpha=false) {
+        const record=this._msiDisplayRaster(key,img,rawRange,window,keepGrid);
+        const alphaMode=preserveAlpha&&!record.opaque?'source':'opaque';
+        const variant=paletteKey+'|'+bg.join(',')+'|'+alphaMode;
+        let canvas=record.variants.get(variant);
+        if(!canvas){
+            canvas=document.createElement('canvas');canvas.width=record.width;canvas.height=record.height;
+            const ctx=get2dContext(canvas,{willReadFrequently:true});
+            const image=ctx.createImageData?ctx.createImageData(record.width,record.height):ctx.getImageData(0,0,record.width,record.height);
+            const data=image.data;
+            for(let pixel=0;pixel<record.indices.length;pixel++){
+                const a=record.alpha[pixel],offset=pixel*4;
+                if(alphaMode==='source'&&a===0)continue;
+                const color=record.background[pixel]?bg:lut[record.indices[pixel]];
+                data[offset]=color[0];data[offset+1]=color[1];data[offset+2]=color[2];
+                data[offset+3]=alphaMode==='source'?a:255;
+            }
+            ctx.putImageData(image,0,0);
+            record.variants.set(variant,canvas);
+            // Bound alternate palette/alpha derivatives within each layer too.
+            while(record.variants.size>4){
+                const oldest=record.variants.keys().next().value;
+                if(record.canvas===record.variants.get(oldest))delete record.canvas;
+                record.variants.delete(oldest);
+            }
+            record._bytes=record.width*record.height*(3+record.variants.size*4);
+            this._msiLutCache.set(key,record);
+        }else{
+            record.variants.delete(variant);record.variants.set(variant,canvas);
+        }
+        // Keep the old main-display canvas field for consumers that inspect it.
+        if(!preserveAlpha||!record.canvas){record.canvas=canvas;record.sig=record.baseSig+'|'+variant;}
+        return canvas;
+    }
+
+    _heGrayscaleCanvas(key,img) {
+        if(!this._heGrayscaleCache)this._heGrayscaleCache=this._newDisplayCache(4);
+        const cached=this._heGrayscaleCache.get(key);
+        if(cached&&cached.source===img&&cached.width===img.naturalWidth&&cached.height===img.naturalHeight)return cached.canvas;
+        const canvas=document.createElement('canvas');canvas.width=img.naturalWidth;canvas.height=img.naturalHeight;
+        const ctx=get2dContext(canvas,{willReadFrequently:true});ctx.drawImage(img,0,0);
+        const image=ctx.getImageData(0,0,canvas.width,canvas.height),data=image.data;
+        for(let i=0;i<data.length;i+=4){
+            const y=0.299*data[i]+0.587*data[i+1]+0.114*data[i+2];data[i]=y;data[i+1]=y;data[i+2]=y;
+        }
+        ctx.putImageData(image,0,0);
+        this._heGrayscaleCache.set(key,{source:img,width:canvas.width,height:canvas.height,canvas,_bytes:canvas.width*canvas.height*4});
+        return canvas;
+    }
+
     // ---- Composite renderer ----
     // Per-source alignment: cdisp is sized to the focus compound's source
     // raster (Compound mode) or the first MSI (Free mode), and the HE→MSI
@@ -9250,124 +9399,10 @@ class SectionPanel {
                 // 背景を非表示（Otsu）: keep grid が 0 のピクセルは背景として backdrop に
                 // 落とす(out-of-grid と同じ扱い)。全イオン像で同一マスクを共有する。
                 const keepGrid = otsuKeepGridForLayer(this.section, key);
-                const vrCache = this.msiValueRasters && this.msiValueRasters.get(key);
-                // ---- 焼き済みキャンバスのキャッシュ ----------------------------
-                // 下の 10 万画素ループの出力は、ここに並べた入力だけで決まる。
-                // Method 行を 1 回クリックすると renderComposite はパネル数 ×
-                // レイヤー数ぶん走るので、同じ絵を何度も焼き直していた。
-                //
-                // 値で入れるもの / 参照の同一性で入れるものを取り違えないこと:
-                //  - winC は getMsiWindow が毎回新しいオブジェクトを返すので値で入れる。
-                //    'same' スケールでは getMsiAbsMax が全パネルを走査するライブ計算
-                //    なので、他パネルの変化はこの min/max に必ず現れる → 自動的に正しい。
-                //  - rrC も配列が使い回されうるので値で入れる。
-                //  - getColormapBackground() は毎回新しい [0,0,0] を返すので、
-                //    参照ではなくカラーマップ名 (bg を一意に決める) を入れる。
-                //  - オーバーレイ定義は色ピッカーでその場で書き換えられるので、
-                //    定義の参照ではなく解決済みの色文字列を入れる。「明るさを揃える」の
-                //    倍率も同じ理由で**解決済みの数値**を入れる。入れ忘れると、揃えを
-                //    切り替えても同じ署名になって古い焼きがそのまま返る。
-                //  - img / 値ラスタ / keep グリッドは作り直されたら必ず別オブジェクト
-                //    になるので、同一性スタンプで足りる。
-                //
-                // Median filters a temporary display-index raster before colour mapping.
-                // Source values, masks and ROI statistics are never modified.
-                const smoothingStrength = App.msiSmoothing === 'median' ? (App.msiSmoothingStrength || 1) : 0;
-                const lutSig = identStamp(img) + '|' + img.naturalWidth + 'x' + img.naturalHeight
-                    + '|' + identStamp(vrCache)
-                    + '|' + (rrC ? (rrC[0] + ',' + rrC[1]) : '-')
-                    + '|' + (winC ? (winC.min + ',' + winC.max) : '-')
-                    + '|' + (overlay ? ('o' + ovColor + '@' + ovScale) : ('c' + _activeColormapName))
-                    + '|' + (App.otsuBgRemove ? '1' : '0')
-                    + '|' + identStamp(keepGrid && keepGrid.keep)
-                    + '|smooth:' + smoothingStrength;
-                this._msiLutCache = this._msiLutCache || new Map();
-                const cached = this._msiLutCache.get(key);
-                if (cached && cached.sig === lutSig) {
-                    // LRU: 使ったものを末尾へ回す
-                    this._msiLutCache.delete(key);
-                    this._msiLutCache.set(key, cached);
-                    drawSource = cached.canvas;
-                }
-                if (!drawSource) {
-                const tc = document.createElement('canvas');
-                tc.width = img.naturalWidth; tc.height = img.naturalHeight;
-                const tctx = get2dContext(tc, { willReadFrequently: true });
-                tctx.drawImage(img, 0, 0);
-                const data = tctx.getImageData(0, 0, tc.width, tc.height);
-                const d = data.data;
-                const useKeep = keepGrid && keepGrid.W === tc.width && keepGrid.H === tc.height;
-                const smoothMask = smoothingStrength > 0 ? new Uint8Array(tc.width * tc.height) : null;
-                const smoothIndices = smoothMask ? new Uint8Array(tc.width * tc.height) : null;
-                // 生強度ラスタ (段階A で保持) があれば 8bit PNG への往復を挟まず、値を
-                // そのまま窓へ写して色にする。8bit は 1 LSB = (rawRange の幅)/255 の
-                // 粗さがあり、Range を低信号側へ寄せると数階調に潰れていた。
-                // 寸法が食い違うとき (キャッシュ画像の差し替え等) だけ従来経路に落ちる。
-                // 「データ無し」の判定は従来どおり alpha === 0 のままなので幾何は不変。
-                const vrC = vrCache;
-                const useValsC = !!(vrC && vrC.W === tc.width && vrC.H === tc.height);
-                const fbC = msiRawFallbackMax(rrC);
-                for (let i = 0; i < d.length; i += 4) {
-                    const a = d[i+3];
-                    // Compositing rule (HDI-style, no auto threshold):
-                    //   - Only out-of-grid pixels (a === 0; not scanned) become the
-                    //     opaque backdrop, so genuine no-data reads as background.
-                    //   - Every in-raster pixel — including the weakest — goes
-                    //     through the colormap (low → lut[0]) for a CONTINUOUS
-                    //     image with no black speckles. (Hiding low pixels is a
-                    //     separate manual Threshold, not applied here.)
-                    //   - Backdrop = getColormapBackground(): black for most
-                    //     colormaps, white for Grayscale. ctx.globalAlpha blends HE.
-                    if (a === 0 || (useKeep && keepGrid.keep[i >> 2] === 0)) {
-                        d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; d[i+3] = 255;
-                    } else {
-                        const vRaw = useValsC ? vrC.values[i >> 2] : NaN;
-                        if (smoothMask) smoothMask[i >> 2] = !useValsC || (Number.isFinite(vRaw)
-                            && (!vrC.measuredMask || vrC.measuredMask[i >> 2])) ? 1 : 0;
-                        const ev = Number.isFinite(vRaw)
-                            ? msiValueEval(vRaw, winC, fbC)
-                            : msiWindowEval(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2], rrC, winC);
-                        const index = Math.round(ev.n * 255);
-                        if (smoothIndices) smoothIndices[i >> 2] = index;
-                        const c = lut[index];
-                        d[i] = c[0]; d[i+1] = c[1]; d[i+2] = c[2]; d[i+3] = 255;
-                    }
-                }
-                if (smoothMask) {
-                    const filtered = MsiSmoothing.medianIndices(smoothIndices, tc.width, tc.height, smoothingStrength, smoothMask);
-                    for (let pixel=0;pixel<filtered.length;pixel++) if(smoothMask[pixel]) {
-                        const color=lut[filtered[pixel]],offset=pixel*4;
-                        d[offset]=color[0];d[offset+1]=color[1];d[offset+2]=color[2];
-                    }
-                }
-                tctx.putImageData(data, 0, 0);
-                drawSource = tc;
-                // 焼き上がりを署名つきで保存。上限を超えたぶんは挿入順(= 使った
-                // 順)の先頭から捨てる。10 万画素 × 4 B ≒ 400 KB/枚なので
-                // MSI_LUT_CACHE_MAX 枚でも数 MB に収まる。
-                this._msiLutCache.delete(key);
-                this._msiLutCache.set(key, { sig: lutSig, canvas: tc });
-                while (this._msiLutCache.size > MSI_LUT_CACHE_MAX) {
-                    const oldest = this._msiLutCache.keys().next().value;
-                    if (oldest === undefined) break;
-                    this._msiLutCache.delete(oldest);
-                }
-                }
+                drawSource=this._msiColorCanvas(key,img,rrC,winC,keepGrid,lut,bg,
+                    overlay?('o'+ovColor+'@'+ovScale):('c'+_activeColormapName));
             } else if (isHeLike && settings.grayscale) {
-                // BT.601 luma so RGB collapses to a single channel; alpha
-                // preserved so any masked HE areas stay transparent.
-                const tc = document.createElement('canvas');
-                tc.width = img.naturalWidth; tc.height = img.naturalHeight;
-                const tctx = get2dContext(tc, { willReadFrequently: true });
-                tctx.drawImage(img, 0, 0);
-                const data = tctx.getImageData(0, 0, tc.width, tc.height);
-                const d = data.data;
-                for (let i = 0; i < d.length; i += 4) {
-                    const y = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-                    d[i] = y; d[i+1] = y; d[i+2] = y;
-                }
-                tctx.putImageData(data, 0, 0);
-                drawSource = tc;
+                drawSource=this._heGrayscaleCanvas(key,img);
             } else {
                 drawSource = img;
             }
@@ -9408,13 +9443,17 @@ class SectionPanel {
                 const geometry = typeof msiLayerSourceGeometry === 'function'
                     ? msiLayerSourceGeometry(this.section, this._pickRefMsiKey()) : null;
                 const signature = JSON.stringify([T, this._pickRefMsiKey(), sxT, syT]);
-                if (!this._heGeometryWarpCache) this._heGeometryWarpCache = new Map();
+                if (!this._heGeometryWarpCache?.displayBudgetManaged) this._heGeometryWarpCache = this._newDisplayCache(4);
                 let warped = this._heGeometryWarpCache.get(key);
                 if (!warped || warped.signature !== signature || warped.source !== drawSource || warped.geometry !== geometry) {
                     warped = { signature, source:drawSource, geometry,
                         canvas:heMsiDisplayWarp(drawSource, T, this.section, this._pickRefMsiKey(), Math.max(sxT,syT)) };
+                    // A warp retains its source derivative as well as its own
+                    // canvas. Account for both, even if the grey-cache entry
+                    // is evicted first (double accounting is conservative).
+                    warped._bytes=(warped.canvas?warped.canvas.width*warped.canvas.height*4:0)
+                        +(typeof drawSource.getContext==='function'?drawSource.width*drawSource.height*4:0);
                     this._heGeometryWarpCache.set(key, warped);
-                    if (this._heGeometryWarpCache.size > 4) this._heGeometryWarpCache.delete(this._heGeometryWarpCache.keys().next().value);
                 }
                 const physicalFrame=this._displayCanvasFrame&&this._displayCanvasFrame.msiDisplay;
                 if (warped.canvas) {
@@ -9496,6 +9535,7 @@ class SectionPanel {
         // would override their blend. Keep the historical CSS behavior at 10.
         this.dom.cdisp.classList.toggle('smooth', App.msiSmoothing === 'linear' && (App.msiLinearStrength||10) === 10);
         this.updateScaleBar();
+        this._displayRevision=(this._displayRevision||0)+1;
     }
 
     // ---- MSI scale bar -------------------------------------------------------
@@ -10095,8 +10135,7 @@ class SectionPanel {
         windows[key] = cur;
         for (const p of App.panels.values()) {
             try {
-                p.renderComposite();
-                if (p.msiThumbRefs && p.msiThumbRefs.has(key)) p.renderMsiThumbnail(key);
+                App.requestPanelDisplay(p,{thumbnails:key});
             } catch (e) {}
         }
         // Range (表示窓) は Method 表のどのセルにも出ない (Mean/Max は ent の
@@ -10117,8 +10156,7 @@ class SectionPanel {
         if (windows) delete windows[key];
         for (const p of App.panels.values()) {
             try {
-                p.renderComposite();
-                if (p.msiThumbRefs && p.msiThumbRefs.has(key)) p.renderMsiThumbnail(key);
+                App.requestPanelDisplay(p,{thumbnails:key});
             } catch (e) {}
         }
         if (App.activeSectionId === this.section.id) _refreshMethodRowState();   // 上と同じ理由
@@ -10301,6 +10339,8 @@ class SectionPanel {
         this._thumbPaint.delete(key);
         this.msiValueRasters.delete(key);
         if (this._msiLutCache) this._msiLutCache.delete(key);
+        if (this._heGrayscaleCache) this._heGrayscaleCache.delete(key);
+        if (this._heGeometryWarpCache) this._heGeometryWarpCache.delete(key);
         this.visibleLayers.delete(key);
         this._persistVisibleLayers();
         this.msiThumbRefs.delete(key);
@@ -11045,51 +11085,10 @@ class SectionPanel {
         const im = this.msiThumbRefs.get(key);
         const src = this.imageSources[key];
         if (!im || !src || !src.complete || src.naturalWidth === 0) return;
-        const c = document.createElement('canvas');
-        c.width = src.naturalWidth; c.height = src.naturalHeight;
-        const ctx = get2dContext(c, { willReadFrequently: true });
-        ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(src, 0, 0);
-        const data = ctx.getImageData(0, 0, c.width, c.height);
-        const d = data.data;
-        // Per-section display window (raw units), matching renderComposite.
-        const rrT = (displayMsiEntry(this.section, key)) ? displayMsiEntry(this.section, key).rawRange : null;
-        const entT = (displayMsiEntry(this.section, key)) || {};
-        const winT = App.getMsiWindow(key, rrT, entT.rawDispMax, entT.rawTrueMax, this.section);
-        const lut = getActiveColormap();
-        const bg = getColormapBackground();
-        // 背景を非表示（Otsu）: メイン表示と一致させるため縮小サムネにも同じマスクを反映。
-        const keepGridT = otsuKeepGridForLayer(this.section, key);
-        const useKeepT = keepGridT && keepGridT.W === c.width && keepGridT.H === c.height;
-        // メイン表示と同じく生強度ラスタから直接色にする(無ければ従来の輝度経路)。
-        const vrT = this.msiValueRasters && this.msiValueRasters.get(key);
-        const useValsT = !!(vrT && vrT.W === c.width && vrT.H === c.height);
-        const fbT = msiRawFallbackMax(rrT);
-        const smoothingStrength = App.msiSmoothing === 'median' ? (App.msiSmoothingStrength || 1) : 0;
-        const smoothMask = smoothingStrength > 0 ? new Uint8Array(c.width * c.height) : null;
-        const smoothIndices = smoothMask ? new Uint8Array(c.width * c.height) : null;
-        for (let i = 0; i < d.length; i += 4) {
-            if (d[i+3] === 0) continue;
-            if (useKeepT && keepGridT.keep[i >> 2] === 0) { d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; continue; }
-            const vRaw = useValsT ? vrT.values[i >> 2] : NaN;
-            if (smoothMask) smoothMask[i >> 2] = !useValsT || (Number.isFinite(vRaw)
-                && (!vrT.measuredMask || vrT.measuredMask[i >> 2])) ? 1 : 0;
-            const ev = Number.isFinite(vRaw)
-                ? msiValueEval(vRaw, winT, fbT)
-                : msiWindowEval(0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2], rrT, winT);
-            const index = Math.round(ev.n * 255);
-            if (smoothIndices) smoothIndices[i >> 2] = index;
-            const cm = lut[index];
-            d[i] = cm[0]; d[i+1] = cm[1]; d[i+2] = cm[2];
-        }
-        if (smoothMask) {
-            const filtered = MsiSmoothing.medianIndices(smoothIndices, c.width, c.height, smoothingStrength, smoothMask);
-            for (let pixel=0;pixel<filtered.length;pixel++) if(smoothMask[pixel]) {
-                const color=lut[filtered[pixel]],offset=pixel*4;
-                d[offset]=color[0];d[offset+1]=color[1];d[offset+2]=color[2];
-            }
-        }
-        ctx.putImageData(data, 0, 0);
+        const entry=displayMsiEntry(this.section,key)||{},range=entry.rawRange||null;
+        const window=App.getMsiWindow(key,range,entry.rawDispMax,entry.rawTrueMax,this.section);
+        const c=this._msiColorCanvas(key,src,range,window,otsuKeepGridForLayer(this.section,key),
+            getActiveColormap(),getColormapBackground(),'c'+_activeColormapName,true);
         const orientation=sectionLayerViewLinear(this.section,'msi');
         const frame=sectionMsiPhysicalFrame(this.section,key,c.width,c.height,orientation);
         const smooth=App.msiSmoothing==='linear'?(App.msiLinearStrength||10):false;
@@ -11109,10 +11108,8 @@ class SectionPanel {
         if (this._thumbRebakeRaf) return;
         this._thumbRebakeRaf = requestAnimationFrame(() => {
             this._thumbRebakeRaf = 0;
-            if (!this.msiThumbRefs) return;
-            for (const k of this.msiThumbRefs.keys()) {
-                try { this.renderMsiThumbnail(k); } catch (e) {}
-            }
+            if (this._destroyed || !this.msiThumbRefs) return;
+            this.markAllThumbsDirty();
         });
     }
 
@@ -20161,11 +20158,25 @@ const SharePreview = {
     _demandRaf: 0,
     _demandObserver: null,
     _demandResizeObserver: null,
+    _displayRefreshRaf: 0,
+    _displayRefreshRequest: null,
+    _imageGridProject: null,
+    _imageGridSignature: null,
+    _snapshotProject: null,
+    _snapshotCache: new Map(),
+    _snapshotBytes: 0,
+    _snapshotMaxBytes: 64 * 1024 * 1024,
+    _closing: false,
 
-    isOpen() { return !!(this.overlay && document.body.contains(this.overlay)); },
+    isOpen() { return !this._closing && !!(this.overlay && document.body.contains(this.overlay)); },
 
     close() {
+        this._closing=true;
         this._focusLoadSeq++;
+        if(this._displayRefreshRaf)cancelAnimationFrame(this._displayRefreshRaf);
+        this._displayRefreshRaf=0;this._displayRefreshRequest=null;
+        this._imageGridProject=null;this._imageGridSignature=null;
+        this._snapshotProject=null;this._snapshotCache.clear();this._snapshotBytes=0;
         this._wantedSectionIds = new Set();
         this._demandLoads.clear();
         if(this._demandRaf)cancelAnimationFrame(this._demandRaf);
@@ -20175,7 +20186,7 @@ const SharePreview = {
         this._loadingFocusKey = null;
         this._focusLoadStatus = null;
         this._cancelAdjacentPrefetch();
-        if (!this.overlay) return;
+        if (!this.overlay) {this._closing=false;return;}
         // Order matters: restore HE grayscale flags first (no DOM impact),
         // then drop synthetic TIC backdrops (mutates imageSources +
         // section.images), then restore visibility / opacity, then
@@ -20253,6 +20264,7 @@ const SharePreview = {
         this._onKeyDownBound = null;
         this.overlay.remove();
         this.overlay = null;
+        this._closing=false;
         if(App._scheduleSectionLoadDemand)App._scheduleSectionLoadDemand();
     },
 
@@ -20426,12 +20438,11 @@ const SharePreview = {
                 }
             }
             if (dirty) {
-                try { panel.renderComposite(); } catch (e) {}
+                try { if(App.requestPanelDisplay)App.requestPanelDisplay(panel);else panel.renderComposite(); } catch (e) {}
             }
         }
-        // Same fix as _applyPreviewOpacity: rebake cell <img>'s in place
-        // so the toggle reflects without resetting zoom/pan state.
-        try { this._rebakeCellImages(App.project, App.focusCompoundKey); } catch (e) {}
+        // Update the same cells after the coalesced panel paints.
+        try { this.requestDisplayRefresh(App.project); } catch (e) {}
     },
 
     _restoreGrayscale() {
@@ -20515,13 +20526,9 @@ const SharePreview = {
                     if (!/^MSI_/i.test(key)) continue;
                     settings[key].opacity = v;
                 }
-                try { panel.renderComposite(); } catch (e) {}
+                try { if(App.requestPanelDisplay)App.requestPanelDisplay(panel);else panel.renderComposite(); } catch (e) {}
             }
-            // Was: this.refresh(App.project) — but refresh() rebuilds the
-            // image grid and resets _cellTransforms, which discards the
-            // user's zoom/pan state every time the slider moves. Rebake
-            // the cell <img>'s in place instead.
-            try { this._rebakeCellImages(App.project, App.focusCompoundKey); } catch (e) {}
+            try { this.requestDisplayRefresh(App.project); } catch (e) {}
         });
     },
 
@@ -20869,8 +20876,10 @@ const SharePreview = {
         setTimeout(() => location.reload(), 700);
     },
 
-    refresh(project) {
+    refresh(project, options = {}) {
         if (!this.isOpen() || project !== App.project) return;
+        if(this._displayRefreshRaf)cancelAnimationFrame(this._displayRefreshRaf);
+        this._displayRefreshRaf=0;this._displayRefreshRequest=null;
         const focusKey = App.focusCompoundKey;
         const titleEl = this.overlay.querySelector('[data-preview-title]');
         if (titleEl) titleEl.textContent = App.activeOverlay
@@ -20881,13 +20890,67 @@ const SharePreview = {
         this._renderOverlayPanel(project);
         this._renderMethodHighlight(focusKey);
         this._renderImageGrid(project, focusKey);
-        this._renderStatsTable(project, focusKey);
+        // Range/opacity/palette changes do not change original statistics.
+        if(!options.displayOnly)this._renderStatsTable(project, focusKey);
         this._refreshRangeInputs(project, focusKey);
         // 単一化合物 ⇄ 重ね合わせ の切り替えで右端の見せ方が変わる (グラデーション
         // ⇄ 分子=色の凡例)。open() と配色変更でしか描き直していなかったので、
         // 重ね合わせに入っても Plasma のバーが残っていた。18x256 の描画なので
         // 毎回呼んでも実質ゼロコスト。
         this._drawColorbar();
+    },
+
+    // Coalesce UI display changes without rebuilding the cells or resetting
+    // their viewport. Structural/focus changes still call refresh directly.
+    requestDisplayRefresh(project) {
+        if(!this.isOpen() || project!==App.project)return;
+        this._displayRefreshRequest={project,focus:App.focusCompoundKey,overlay:this.overlay};
+        if(this._displayRefreshRaf)return;
+        this._displayRefreshRaf=requestAnimationFrame(()=>{
+            this._displayRefreshRaf=0;
+            const request=this._displayRefreshRequest;this._displayRefreshRequest=null;
+            if(!request || !this.isOpen() || this.overlay!==request.overlay
+                || App.project!==request.project || App.focusCompoundKey!==request.focus)return;
+            this.refresh(request.project,{displayOnly:true});
+        });
+    },
+
+    // Keep only the newest encoded snapshot per panel, within one bounded
+    // Preview session. The numerical raster and source images remain owned by
+    // the panel; only this display PNG is cached here.
+    _cellSnapshot(project,panel,rotDeg) {
+        if(this._snapshotProject!==project){
+            this._snapshotCache.clear();this._snapshotBytes=0;this._snapshotProject=project;
+        }
+        if(App.flushPanelDisplay)App.flushPanelDisplay(panel);
+        const canvas=panel.dom.cdisp;
+        const cacheable=Number.isFinite(panel._displayRevision);
+        const signature=JSON.stringify([panel._displayRevision||0,canvas.width,canvas.height,rotDeg,
+            App.msiSmoothing==='linear'&&(App.msiLinearStrength||10)===10]);
+        const previous=this._snapshotCache.get(panel);
+        if(cacheable && previous && previous.canvas===canvas && previous.signature===signature){
+            this._snapshotCache.delete(panel);this._snapshotCache.set(panel,previous);
+            return previous;
+        }
+        if(previous){this._snapshotCache.delete(panel);this._snapshotBytes-=previous.bytes;}
+        const baked=this._bakeRotatedCanvas(canvas,rotDeg),url=baked.toDataURL('image/png');
+        const snapshot={canvas,signature,url,width:baked.width,height:baked.height,bytes:url.length*2};
+        if(cacheable && snapshot.bytes<=this._snapshotMaxBytes){
+            while(this._snapshotBytes+snapshot.bytes>this._snapshotMaxBytes && this._snapshotCache.size){
+                const oldest=this._snapshotCache.keys().next().value;
+                this._snapshotBytes-=this._snapshotCache.get(oldest).bytes;this._snapshotCache.delete(oldest);
+            }
+            this._snapshotCache.set(panel,snapshot);this._snapshotBytes+=snapshot.bytes;
+        }
+        return snapshot;
+    },
+
+    _setCellSnapshot(img,snapshot) {
+        img.dataset.natW=String(snapshot.width);img.dataset.natH=String(snapshot.height);
+        // Reassigning the same URL still initiates image work in some browsers.
+        if((img.getAttribute?img.getAttribute('src'):img.src)===snapshot.url)return;
+        img.src=snapshot.url;
+        if(img.decode)img.decode().catch(()=>{});
     },
 
     isSectionWanted(sectionId) {
@@ -20970,6 +21033,9 @@ const SharePreview = {
         }
         this._forceHeBackdrop();
         this._injectTicBackdrops().catch(error=>console.warn('Preview TIC demand failed',error));
+        // A newly visible cell may already have its original in the panel
+        // cache, so no load callback will arrive to replace its placeholder.
+        this._rebakeCellImages(project,focus);
         return pending;
     },
 
@@ -21041,14 +21107,20 @@ const SharePreview = {
         const state=this._previewLoadState(panel,focusKey);
         if(state!=='ready') {
             stage.innerHTML='<div class="cell-empty preview-loading">'+this._previewLoadText(state)+'</div>';
+            this._applyCellTransform(idx, false, true);
             return;
         }
         try {
             const rotDeg = (this._sectionRotations[String(sec.id)] || 0) - 90;
-            const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
+            const snapshot = this._cellSnapshot(project,panel,rotDeg);
             const safeName = String(sec.displayName || '')
                 .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
-            stage.innerHTML = `<img src="${baked.toDataURL('image/png')}" alt="${safeName}" data-cell-img data-nat-w="${baked.width}" data-nat-h="${baked.height}">`;
+            let img=stage.querySelector('[data-cell-img]');
+            if(!img){
+                stage.innerHTML=`<img alt="${safeName}" data-cell-img>`;
+                img=stage.querySelector('[data-cell-img]');
+            }
+            this._setCellSnapshot(img,snapshot);
             this._applyCellTransform(idx, false, true);
             this._wireCellInteractions(idx, wrap, stage);
         } catch (e) { console.warn('Preview progressive bake failed', sectionId, e); }
@@ -21103,19 +21175,16 @@ const SharePreview = {
         const repaint = (focusKey) => {
             for (const p of App.panels.values()) {
                 try {
-                    p.renderComposite();
-                    if (p.msiThumbRefs && p.msiThumbRefs.has(focusKey)) p.renderMsiThumbnail(focusKey);
+                    if(App.requestPanelDisplay)App.requestPanelDisplay(p,{thumbnails:focusKey});
+                    else {
+                        p.renderComposite();
+                        if (p.msiThumbRefs && p.msiThumbRefs.has(focusKey)) p.renderMsiThumbnail(focusKey);
+                    }
                 } catch (e) {}
             }
             try { Toolbar.refreshRange(); } catch (e) {}
             this._refreshRangeInputs(App.project, focusKey);
-            // cdisp updates synchronously, but Preview uses baked data URLs.
-            // Coalesce a rapid min/max pair into one rebake.
-            if (this._rangeRebakeRaf) cancelAnimationFrame(this._rangeRebakeRaf);
-            this._rangeRebakeRaf = requestAnimationFrame(() => {
-                this._rangeRebakeRaf = 0;
-                this._rebakeCellImages(App.project, App.focusCompoundKey);
-            });
+            this.requestDisplayRefresh(App.project);
         };
         const apply = (edge, raw) => {
             const focusKey = App.focusCompoundKey;
@@ -21565,6 +21634,24 @@ const SharePreview = {
         const grid = this.overlay.querySelector('[data-image-grid]');
         if (!grid) return;
         const sections = this._sectionsForGrid(project);
+        const overlay=App.activeOverlay;
+        const signature=JSON.stringify([focusKey,overlay?.id||null,(overlay?.layers||[]).map(l=>l&&l.key),
+            sections.map(sec=>[String(sec.id),overlay
+                ? (overlay.layers||[]).some(l=>l&&(sec.msiSeries||{})[l.key]) : !!displayMsiEntry(sec,focusKey)])]);
+        if(this._imageGridProject===project && this._imageGridSignature===signature
+            && grid.querySelectorAll('.cell-img-wrap').length===sections.length){
+            // Style/range/opacity changes leave the cells and zoom/pan intact.
+            // Captions can still change after rename or calibration edits.
+            const cells=grid.querySelectorAll('.preview-image-cell');
+            sections.forEach((sec,idx)=>{
+                const title=cells[idx]?.querySelector('.cell-title');
+                if(title){const pitch=formatPixelPitchLabel(sec);title.textContent=(sec.displayName||'')+(pitch?' · '+pitch:'');}
+            });
+            this._rebakeCellImages(project,focusKey);
+            this._scheduleDemand();
+            return;
+        }
+        this._imageGridProject=project;this._imageGridSignature=signature;
         this._captureCellViewports();
         if (this._cellResizeObserver) this._cellResizeObserver.disconnect();
         grid.style.gridTemplateColumns = sections.map(() => 'minmax(0, 1fr)').join(' ') || 'minmax(0, 1fr)';
@@ -21603,6 +21690,10 @@ const SharePreview = {
                 body = '<div class="cell-empty">MSI load failed</div>';
             } else if (!hasContent || !panel || !panel.dom || !panel.dom.cdisp || panel.dom.cdisp.width === 0) {
                 body = '<div class="cell-empty">No data for this compound</div>';
+            } else if(!this.isSectionWanted(sec.id)) {
+                // Demand is recalculated after layout below; cached off-screen
+                // canvases need not be encoded until their cell is visible.
+                body = '<div class="cell-empty preview-loading">Loading MSI…</div>';
             } else {
                 // Bake the master-saved rotation into a fresh canvas so the
                 // resulting <img> has the correct natural width/height for
@@ -21614,9 +21705,9 @@ const SharePreview = {
                 let natW = 0, natH = 0;
                 try {
                     const rotDeg = (this._sectionRotations[String(sec.id)] || 0) - 90;
-                    const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
-                    natW = baked.width; natH = baked.height;
-                    dataUrl = baked.toDataURL('image/png');
+                    const snapshot = this._cellSnapshot(project,panel,rotDeg);
+                    natW = snapshot.width; natH = snapshot.height;
+                    dataUrl = snapshot.url;
                 } catch (e) { console.warn('preview bake failed', e); }
                 body = dataUrl
                     ? `<img src="${dataUrl}" alt="${safeName}" data-cell-img data-nat-w="${natW}" data-nat-h="${natH}">`
@@ -21896,20 +21987,16 @@ const SharePreview = {
             const stage=wrap.querySelector('[data-cell-stage]');
             if(state!=='ready') {
                 if(stage)stage.innerHTML='<div class="cell-empty preview-loading">'+this._previewLoadText(state)+'</div>';
+                this._applyCellTransform(idx, false, true);
                 return;
             }
             const img = wrap.querySelector('[data-cell-img]');
             if (!img) { this._showLoadedPreviewCell(project,focusKey,sec.id);return; }
             try {
                 const rotDeg = (this._sectionRotations[String(sec.id)] || 0) - 90;
-                const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
-                img.src = baked.toDataURL('image/png');
-                img.dataset.natW = String(baked.width); img.dataset.natH = String(baked.height);
+                const snapshot = this._cellSnapshot(project,panel,rotDeg);
+                this._setCellSnapshot(img,snapshot);
                 this._applyCellTransform(idx, false, true);
-                // 使い回しの <img> は src 差し替え後のデコードが非同期で、静止した
-                // オーバーレイでは再描画が確実にトリガーされず反映が遅れる。decode()
-                // でデコードを確定させ、そのフレームで確実に描画させる。
-                if (img.decode) img.decode().catch(() => {});
             } catch (e) { console.warn('preview rebake failed', idx, e); }
         });
     },
@@ -23693,14 +23780,12 @@ const App = {
         this.msiLinearStrength = stored.linearStrength;
         this.refreshMsiDisplayControls();
         if (redraw) {
+            this.recomputeMsiAbsScale({paint:false});
             for (const panel of this.panels.values()) {
-                if (patch.aspectMode || patch.interpolation) panel.setupCanvasSize();
-                panel.renderComposite(); panel.markAllThumbsDirty(); panel.drawAllRois();
-                if (patch.aspectMode && panel._scheduleThumbRebake) panel._scheduleThumbRebake();
+                this.requestPanelDisplay(panel, {resize:!!(patch.aspectMode || patch.interpolation),rois:true,thumbnails:true});
             }
-            this.recomputeMsiAbsScale();
             try { Toolbar.refreshRange(); Toolbar.refreshOutlierClip(); } catch (_) {}
-            try { if (SharePreview.isOpen()) SharePreview.refresh(this.project); } catch (_) {}
+            try { SharePreview.requestDisplayRefresh(this.project); } catch (_) {}
         }
     },
     async setMsiDisplayPreset(name) {
@@ -24479,7 +24564,7 @@ const App = {
             }
         } catch (e) { console.warn('ROI range Preview refresh failed', e); }
     },
-    async refreshRoiDisplayRanges() {
+    async refreshRoiDisplayRanges(options={}) {
         if (!this.roiOnlyMode || !this.project) return;
         const project = this.project, jobs = [];
         for (const panel of this.panels.values()) {
@@ -24490,7 +24575,9 @@ const App = {
             for (const key of keys) if (displayMsiEntry(panel.section, key)) jobs.push(this.ensureRoiDisplayRange(panel.section, key));
         }
         await Promise.all(jobs);
-        if (this.project === project && this.roiOnlyMode) this.repaintRoiRangeViews();
+        // New results already schedule their repaint in ensureRoiDisplayRange.
+        // A caller painting the current settings can skip this cached-result pass.
+        if (options.paint!==false && this.project === project && this.roiOnlyMode) this.repaintRoiRangeViews();
     },
     async setRoiOnlyMode(on) {
         ensureMsiDisplayContext(this);
@@ -24650,9 +24737,9 @@ const App = {
     // Recompute App.msiAbsMax across all loaded panels and re-render the panels
     // whose MSI layers changed scale. Mirrors broadcastRangeToSameMrm's panel
     // sweep; call after any section's layers load or after add/remove.
-    recomputeMsiAbsScale() {
+    recomputeMsiAbsScale(options={}) {
         if (this.roiOnlyMode && this.refreshRoiDisplayRanges) {
-            this.refreshRoiDisplayRanges();
+            this.refreshRoiDisplayRanges(options);
             return;
         }
         this.msiAbsMax = this.msiAbsMax || {};
@@ -24682,7 +24769,7 @@ const App = {
             if (this.msiAbsMax[key] !== next[key]) changed.add(key);
         }
         this.msiAbsMax = next;
-        if (!changed.size) return;
+        if (!changed.size || options.paint===false) return;
         for (const panel of this.panels.values()) {
             let touched = false;
             for (const key of (keysByPanel.get(panel) || [])) {
@@ -24690,12 +24777,7 @@ const App = {
             }
             if (!touched) continue;
             try {
-                panel.renderComposite();
-                if (panel.msiThumbRefs) {
-                    for (const key of panel.msiThumbRefs.keys()) {
-                        if (changed.has(key)) panel.renderMsiThumbnail(key);
-                    }
-                }
+                this.requestPanelDisplay(panel,{thumbnails:[...(panel.msiThumbRefs?.keys()||[])].filter(key=>changed.has(key))});
             } catch (e) { console.warn('recomputeMsiAbsScale render failed', e); }
         }
     },
@@ -24717,26 +24799,54 @@ const App = {
     // (which only re-renders layers whose cached cross-section max changed), this
     // repaints unconditionally — needed when the scale MODE or organ scope
     // changes (getMsiWindow's result changes but the cached max may not).
+    // Only painting is deferred. Scientific summaries and Same Range still
+    // include every selected section, regardless of viewport demand.
+    isPanelDisplayWanted(panel) {
+        if (!panel || panel._destroyed) return false;
+        if (!panel._managedSectionLoad) return true;
+        if (panel.project !== this.project) return false;
+        if (!this.sectionVisibility().ensure().has(String(panel.section.id))) return false;
+        return typeof SharePreview !== 'undefined' && SharePreview.isOpen()
+            ? !!SharePreview.isSectionWanted(panel.section.id) : !!panel._loadRequested;
+    },
+    requestPanelDisplay(panel, options={}) {
+        if (!panel || panel._destroyed) return;
+        const dirty=panel._displayDirty || (panel._displayDirty={resize:false,rois:false,thumbnails:null});
+        dirty.resize=dirty.resize||!!options.resize;
+        dirty.rois=dirty.rois||!!options.rois;
+        if(options.thumbnails===true)dirty.thumbnails=true;
+        else if((typeof options.thumbnails==='string' || Array.isArray(options.thumbnails)) && dirty.thumbnails!==true) {
+            if(!dirty.thumbnails)dirty.thumbnails=new Set();
+            for(const key of (Array.isArray(options.thumbnails)?options.thumbnails:[options.thumbnails]))dirty.thumbnails.add(key);
+        }
+        if(this.isPanelDisplayWanted(panel))this.flushPanelDisplay(panel);
+    },
+    // Synchronous consumers (including Preview snapshots) must see a complete
+    // canvas. Never make every renderComposite call asynchronous globally.
+    flushPanelDisplay(panel) {
+        if (!panel || panel._destroyed || !panel._displayDirty) return false;
+        if (panel._managedSectionLoad && panel.project !== this.project) return false;
+        const dirty=panel._displayDirty;panel._displayDirty=null;
+        try {
+            const painted=dirty.resize && panel.setupCanvasSize();
+            if(!painted)panel.renderComposite();
+            if(dirty.rois && !painted)panel.drawAllRois();
+            if(dirty.thumbnails===true)panel.markAllThumbsDirty();
+            else if(dirty.thumbnails)for(const key of dirty.thumbnails)panel.markAllThumbsDirty(key);
+            return true;
+        } catch(error) {panel._displayDirty=dirty;throw error;}
+    },
     repaintAllMsi() {
         for (const panel of this.panels.values()) {
             try {
-                panel.renderComposite();
-                panel.markAllThumbsDirty();
+                this.requestPanelDisplay(panel,{thumbnails:true});
             } catch (e) { console.warn('repaintAllMsi render failed', e); }
         }
         try { Toolbar.refreshRange(); } catch (e) {}
         // スケールモード / 平滑化 / 臓器フィルタの変更で呼ばれるが、Method 表の
         // セルはどれもこれらに依存しない。クラスの貼り直しだけにする。
         _refreshMethodRowState();
-        if(typeof SharePreview!=='undefined' && SharePreview.isOpen() && !SharePreview._displayRefreshRaf) {
-            const project=this.project;
-            SharePreview._displayRefreshRaf=requestAnimationFrame(()=>{
-                SharePreview._displayRefreshRaf=0;
-                if(this.project!==project || !SharePreview.isOpen())return;
-                SharePreview._refreshRangeInputs(project,this.focusCompoundKey);
-                SharePreview._rebakeCellImages(project,this.focusCompoundKey);
-            });
-        }
+        if(typeof SharePreview!=='undefined')SharePreview.requestDisplayRefresh(this.project);
     },
     // Switch MSI intensity scale ('same' | 'individual') and repaint everything.
     setMsiScaleMode(mode) {
@@ -24782,7 +24892,6 @@ const App = {
             this._smoothingRepaintRaf = 0;
             if (this.project !== project || this._msiPresentationKey !== context) return;
             this.repaintAllMsi();
-            try { if (SharePreview.isOpen()) SharePreview.refresh(project); } catch (_) {}
         });
     },
 
@@ -27149,6 +27258,8 @@ const App = {
                 if(was && panel.cancelTicBackdrop)panel.cancelTicBackdrop();
                 continue;
             }
+            this.flushPanelDisplay(panel);
+            if(!was)panel.markAllThumbsDirty();
             const signature=JSON.stringify([this.viewMode,this.focusCompoundKey,[...panel.visibleLayers]]);
             if(!was || panel._requestedDisplaySignature!==signature) {
                 panel._requestedDisplaySignature=signature;
@@ -27274,7 +27385,7 @@ const App = {
                 intents[key] = want;
                 if (settings[key] && settings[key].grayscale !== want) { settings[key].grayscale = want; dirty = true; }
             }
-            if (dirty) { try { p.renderComposite(); } catch (e) {} }
+            if (dirty) { try { this.requestPanelDisplay(p); } catch (e) {} }
         }
     },
     refreshOrganFilter() {

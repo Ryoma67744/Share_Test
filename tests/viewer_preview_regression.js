@@ -171,6 +171,7 @@ function attachDemandViewport(preview, context, app) {
   preview.overlay = { querySelector: selector => selector === '[data-image-grid]' ? grid : null };
   preview._forceHeBackdrop = () => {};
   preview._injectTicBackdrops = async () => {};
+  preview._rebakeCellImages = () => {};
   preview._renderStatsTable = () => {};
   preview._refreshRangeInputs = () => {};
 }
@@ -347,6 +348,8 @@ function testRangeResetAndSingleRepaint() {
     cancelAnimationFrame() {},
   });
   preview.overlay = { querySelector(selector) { return bySelector.get(selector) || null; } };
+  preview.isOpen = () => true;
+  preview.refresh = () => {};
   preview._refreshRangeInputs = () => {};
   preview._rebakeCellImages = () => {};
   preview._wireRangeInputs();
@@ -1618,11 +1621,11 @@ function testOverlayScaleReachesTheBake() {
 
   // renderComposite の焼き済みキャンバス署名。倍率を入れ忘れると、揃えを切り替えても
   // 署名が変わらず古い焼きが返る (絵が変わらないだけでエラーは出ない)。
-  const sigAt = html.indexOf('const lutSig = identStamp(img)');
-  assert.ok(sigAt > 0, 'lutSig が見つからない');
-  const sig = html.slice(sigAt, html.indexOf(';', html.indexOf('identStamp(keepGrid', sigAt)));
-  assert.match(sig, /overlay \? \('o' \+ ovColor \+ '@' \+ ovScale\)/,
-    'lutSig の重ね合わせ項に解決済みの倍率 ovScale が入っていない');
+  const sigAt = html.indexOf('drawSource=this._msiColorCanvas');
+  assert.ok(sigAt > 0, '共有色変換の呼び出しが見つからない');
+  const sig = html.slice(sigAt, html.indexOf(';', sigAt));
+  assert.match(sig, /overlay\?\('o'\+ovColor\+'@'\+ovScale\)/,
+    '共有色変換の重ね合わせ項に解決済みの倍率 ovScale が入っていない');
   // 倍率は定義の参照ではなく解決済みの値であること (モーダルが existing をその場で書き換えるため)。
   assert.match(html, /const ovScale = \(overlay && overlayScale\) \? \(overlayScale\[ovColor\] \|\| 1\) : 1;/);
   assert.match(html, /const lut = overlay \? monoLut\(ovColor, ovScale\) : getActiveColormap\(\);/);

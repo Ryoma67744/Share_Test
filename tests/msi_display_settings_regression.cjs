@@ -99,9 +99,10 @@ function fixture(storage=new Map()) {
     cancelAnimationFrame:id=>frames.delete(id),
     sessionStorage:{getItem:key=>storage.get(key)||null,setItem:(key,value)=>storage.set(key,value)},
     setActiveColormap:map=>{calls.colormap=map;},showToast(){},
-    Toolbar:{refreshRange(){},refreshOutlierClip(){}},SharePreview:{isOpen:()=>false}});
+    Toolbar:{refreshRange(){},refreshOutlierClip(){}},SharePreview:{isOpen:()=>false,requestDisplayRefresh(){}}});
   vm.runInContext(standalone('msiDisplayContextKey')+'\n'+standalone('ensureMsiDisplayContext')+'\n'+
     'globalThis.app={'+['getMsiDisplaySettings','refreshMsiDisplayControls','updateMsiDisplaySettings',
+      'isPanelDisplayWanted','requestPanelDisplay','flushPanelDisplay',
       'setMsiDisplayPreset','setMsiSmoothing','deferMsiSmoothingDrag','setMsiSmoothingStrength','setMsiOutlierClipAll','getMsiWindow','getMsiAbsMax','_organInScope'].map(method).join(',')+'};',context);
   const app=context.app;
   app.project=plain(old);app.project.sections[0].id='section';app.project.sections[0].msiSeries={};

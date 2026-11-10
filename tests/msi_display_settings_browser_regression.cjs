@@ -121,6 +121,171 @@ async function displayRanges(page) {
   return page.evaluate(()=>App.project.sections.flatMap(section=>Object.entries(section.msiSeries||{}).map(([key,entry])=>({
     id:section.id,key,window:App.getMsiWindow(key,entry.rawRange,entry.rawDispMax,entry.rawTrueMax)}))));
 }
+async function verifyDisplayRefreshLifecycle(page) {
+  const counts=await page.evaluate(async()=>{
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    const previous=App.getMsiDisplaySettings(),panels=[...App.panels.values()],calls=new Map();
+    const originals=panels.map(panel=>({panel,render:panel.renderComposite}));
+    for(const {panel,render} of originals) {
+      App.flushPanelDisplay(panel);
+      calls.set(panel.section.id,0);
+      panel.renderComposite=function(...args){calls.set(this.section.id,calls.get(this.section.id)+1);return render.apply(this,args);};
+    }
+    try {
+      App.updateMsiDisplaySettings({interpolation:previous.interpolation==='linear'?'none':'linear',preset:'custom'});
+      const resized=[...calls.values()];
+      for(const panel of panels)calls.set(panel.section.id,0);
+      App.updateMsiDisplaySettings({rangePolicy:previous.rangePolicy==='maximum'?'legacy':'maximum',preset:'custom'});
+      const rangePolicy=[...calls.values()];
+      const panel=panels[0],setup=panel.setupCanvasSize;
+      calls.set(panel.section.id,0);
+      try {
+        // A false sizing result must still paint an already available canvas.
+        panel.setupCanvasSize=()=>false;
+        App.requestPanelDisplay(panel,{resize:true,rois:true});
+      } finally {panel.setupCanvasSize=setup;}
+      return {resized,rangePolicy,fallback:calls.get(panel.section.id)};
+    } finally {
+      for(const {panel,render} of originals)panel.renderComposite=render;
+      App.updateMsiDisplaySettings(previous);
+    }
+  });
+  assert.ok(counts.resized.length>0&&counts.resized.every(count=>count===1),
+    'One interpolation change composites each ready visible section once: '+JSON.stringify(counts.resized));
+  assert.equal(counts.fallback,1,'A false sizing result still composites once');
+  assert.ok(counts.rangePolicy.every(count=>count===1),
+    'An automatic Range policy change updates summaries before one visible paint: '+JSON.stringify(counts.rangePolicy));
+
+  const offscreen=await page.evaluate(()=>{
+    const panels=[...App.panels.values()],previous=App.getMsiDisplaySettings();
+    // Keep the largest source selected, but simulate viewport demand moving
+    // away from it. Same Range must still include its numerical summaries.
+    const hidden=panels[panels.length-1],loadRequested=hidden._loadRequested,calls=new Map();
+    const originals=panels.map(panel=>({panel,render:panel.renderComposite}));
+    const clear=()=>{for(const panel of panels)calls.set(panel.section.id,0);};
+    const count=()=>panels.map(panel=>calls.get(panel.section.id));
+    const windows=()=>panels.map(panel=>{const key='MSI_A',ent=panel.section.msiSeries[key];
+      return App.getMsiWindow(key,ent.rawRange,ent.rawDispMax,ent.rawTrueMax,panel.section).max;});
+    for(const {panel,render} of originals) {
+      App.flushPanelDisplay(panel);
+      panel.renderComposite=function(...args){calls.set(this.section.id,calls.get(this.section.id)+1);return render.apply(this,args);};
+    }
+    hidden._loadRequested=false;
+    try {
+      clear();App.updateMsiDisplaySettings({rangePolicy:'legacy',preset:'custom'});
+      const legacy={counts:count(),maxima:windows(),expected:Math.max(...panels.map(p=>p.section.msiSeries.MSI_A.rawDispMax))};
+      clear();App.updateMsiDisplaySettings({rangePolicy:'maximum',preset:'custom'});
+      const maximum={counts:count(),maxima:windows(),expected:Math.max(...panels.map(p=>p.section.msiSeries.MSI_A.rawTrueMax))};
+      // Exercise a normal summary recompute, not updateSettings' paint:false.
+      clear();App.msiAbsMax={};App.recomputeMsiAbsScale();
+      const recomputed=count();
+      return {legacy,maximum,recomputed};
+    } finally {
+      hidden._loadRequested=loadRequested;
+      for(const {panel,render} of originals)panel.renderComposite=render;
+      App.updateMsiDisplaySettings(previous);App.flushPanelDisplay(hidden);
+    }
+  });
+  for(const mode of ['legacy','maximum']) {
+    assert.deepEqual(offscreen[mode].counts,[1,0],mode+' repaints the visible section once and defers the offscreen section');
+    assert.ok(offscreen[mode].maxima.every(value=>value===offscreen[mode].expected),
+      mode+' Same Range still includes the selected offscreen source with the largest signal');
+  }
+  assert.deepEqual(offscreen.recomputed,[1,0],'Normal summary recomputation also respects display demand');
+
+  const hiddenId=await page.evaluate(async()=>{
+    if(App.project.sections.length<2)throw new Error('Hidden-panel regression needs two sections');
+    const id=App.project.sections[0].id;
+    App.sectionVisibility().change([id],false);
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    App._updateSectionLoadDemand();
+    return id;
+  });
+  try {
+    const hidden=await page.evaluate(id=>{
+      const panel=App.panels.get(id),render=panel.renderComposite,previous=App.getMsiDisplaySettings();
+      const frame=()=>panel.dom.cdisp.toDataURL('image/png');
+      let calls=0;panel.renderComposite=function(...args){calls++;return render.apply(this,args);};
+      try {
+        const before=frame();
+        // Only the last palette is needed when this section is next requested.
+        App.updateMsiDisplaySettings({colormap:'plasma',preset:'custom'});
+        App.updateMsiDisplaySettings({colormap:'grayscale',preset:'custom'});
+        const deferredCalls=calls,stillPrevious=frame()===before;
+        App.flushPanelDisplay(panel);
+        const refreshed=frame(),flushCalls=calls;
+        // Independently force the normal renderer to verify the deferred canvas
+        // contains the latest settings, not an earlier queued palette.
+        render.call(panel);
+        const matchesLatest=frame()===refreshed;
+        return {deferredCalls,stillPrevious,flushCalls,matchesLatest,changed:refreshed!==before};
+      } finally {panel.renderComposite=render;App.updateMsiDisplaySettings(previous);App.flushPanelDisplay(panel);}
+    },hiddenId);
+    assert.equal(hidden.deferredCalls,0,'A hidden section defers display-only changes');
+    assert.equal(hidden.stillPrevious,true,'Deferred work does not erase the existing canvas');
+    assert.equal(hidden.flushCalls,1,'An explicit consumer flush combines the pending display changes');
+    assert.equal(hidden.matchesLatest,true,'A flushed hidden section has exactly the latest rendered pixels');
+    assert.equal(hidden.changed,true,'The latest palette was actually applied');
+  } finally {
+    await page.evaluate(async id=>{
+      App.sectionVisibility().change([id],true);
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+      App._updateSectionLoadDemand();
+    },hiddenId);
+  }
+}
+async function verifyHeGrayscaleReuse(page) {
+  const result=await page.evaluate(async()=>{
+    const panel=App.panels.get(App.project.sections[0].id),key='HE_STAIN_TEST_RENDER_REUSE';
+    const makeImage=async shift=>{
+      const canvas=document.createElement('canvas');canvas.width=17;canvas.height=13;
+      const ctx=canvas.getContext('2d'),pixels=ctx.createImageData(canvas.width,canvas.height);
+      for(let p=0;p<canvas.width*canvas.height;p++) {
+        pixels.data[p*4]=(p*23+shift)%256;pixels.data[p*4+1]=(p*37+shift)%256;
+        pixels.data[p*4+2]=(p*59+shift)%256;pixels.data[p*4+3]=[0,128,255][p%3];
+      }
+      ctx.putImageData(pixels,0,0);
+      const image=new Image();image.src=canvas.toDataURL();await image.decode();return image;
+    };
+    const image=await makeImage(0),replacement=await makeImage(41);
+    const nativeRead=CanvasRenderingContext2D.prototype.getImageData;
+    const expected=image=>{
+      const canvas=document.createElement('canvas');canvas.width=image.naturalWidth;canvas.height=image.naturalHeight;
+      const ctx=canvas.getContext('2d');ctx.drawImage(image,0,0);
+      const pixels=nativeRead.call(ctx,0,0,canvas.width,canvas.height);
+      for(let p=0;p<pixels.data.length;p+=4) {
+        const gray=.299*pixels.data[p]+.587*pixels.data[p+1]+.114*pixels.data[p+2];
+        pixels.data[p]=gray;pixels.data[p+1]=gray;pixels.data[p+2]=gray;
+      }
+      // Preserve the browser's existing put/get premultiplication rounding.
+      ctx.putImageData(pixels,0,0);return nativeRead.call(ctx,0,0,canvas.width,canvas.height).data;
+    };
+    const oldExpected=expected(image),newExpected=expected(replacement);
+    let reads=0;
+    CanvasRenderingContext2D.prototype.getImageData=function(...args){
+      if(this.canvas.width===17&&this.canvas.height===13)reads++;
+      return nativeRead.apply(this,args);
+    };
+    const pixels=canvas=>nativeRead.call(canvas.getContext('2d'),0,0,canvas.width,canvas.height).data;
+    try {
+      const first=panel._heGrayscaleCanvas(key,image),firstReads=reads;
+      const second=panel._heGrayscaleCanvas(key,image),repeatReads=reads;
+      const firstMatches=pixels(first).every((value,index)=>value===oldExpected[index]);
+      const next=panel._heGrayscaleCanvas(key,replacement),replacementReads=reads;
+      return {firstReads,repeatReads,replacementReads,reused:first===second,replaced:next!==first,
+        firstMatches,replacementMatches:pixels(next).every((value,index)=>value===newExpected[index])};
+    } finally {
+      CanvasRenderingContext2D.prototype.getImageData=nativeRead;
+      panel._heGrayscaleCache?.delete(key);
+    }
+  });
+  assert.equal(result.firstReads,1,'HE monochrome performs one initial source read');
+  assert.equal(result.repeatReads,1,'Unchanged HE monochrome does not read all pixels again');
+  assert.equal(result.replacementReads,2,'Replacing HE invalidates the old monochrome result');
+  assert.equal(result.reused,true);assert.equal(result.replaced,true);
+  assert.equal(result.firstMatches,true,'Cached HE monochrome preserves BT.601 and alpha bytes');
+  assert.equal(result.replacementMatches,true,'Replacement HE preserves the same monochrome calculation');
+}
 async function screenshot(page,name) {
   const directory=process.env.MSI_DISPLAY_SCREENSHOT_DIR;
   if(!directory)return;
@@ -213,6 +378,7 @@ async function main() {
     assert.equal(await page.locator('#tb-colormap').inputValue(),'hotmetal');
     assert.equal(await page.locator('#tb-smoothing').inputValue(),'none');
     assert.equal(await slider.isDisabled(),true,'None disables the strength slider');
+    await verifyHeGrayscaleReuse(page);
     const originalNone=await displayedImage(page),originalRanges=await displayRanges(page);
     await page.locator('#tb-smoothing').selectOption('linear');
     assert.equal(await slider.isEnabled(),true);assert.equal(await slider.inputValue(),'10');
@@ -337,6 +503,11 @@ async function main() {
         section.msiSeries.MSI_A.rawDispMax,section.msiSeries.MSI_A.rawTrueMax),range:section.msiSeries.MSI_A.rawRange,
         disp:section.msiSeries.MSI_A.rawDispMax,maximum:section.msiSeries.MSI_A.rawTrueMax,bakeMode:section.msiSeries.MSI_A.bakeMode}))}))));
     await style(viewer,'hdi');assert.deepEqual((await windows()).map(value=>value.max),[20000,20000]);
+    await verifyDisplayRefreshLifecycle(viewer);
+    assert.deepEqual((await windows()).map(value=>value.max),[20000,20000],
+      'Deferred painting and palette changes preserve the Same intensity windows');
+    assert.deepEqual(await sourceSnapshot(viewer),sharedSource,
+      'Display reuse and hidden-panel flushing preserve original bytes, values and ROI statistics');
     await viewer.locator('#msi-scale-mode').selectOption('individual');
     assert.deepEqual((await windows()).map(value=>value.max),[10000,20000],'Individual uses each measured maximum');
     await viewer.locator('#tb-range-max').fill('333');await viewer.locator('#tb-range-max').blur();

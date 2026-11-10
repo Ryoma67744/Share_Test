@@ -18,7 +18,7 @@ function method(name) {
 const store=new Map(),calls=[],notices=[];
 let remoteVersion=4,conflictCode='PT409';
 const App={shareMode:{token:'token'},panels:new Map(),_refreshShareAlignments:async()=>{}};
-const ctx=displayContext({JSON,Object,Array,Map,Set,Number,Math,console,App,
+const ctx=displayContext({JSON,Object,Array,Map,Set,Number,Math,console,App,SectionPanel:{},
   _shareAlignBySection:store,_shareAlignServerMissing:false,_shareAlignWriteGen:0,
   showToast:s=>notices.push(s),_isMissingRpc:()=>false,
   SupabaseClient:{async upsertShareAlignment(token,id,payload,version) {
@@ -111,6 +111,7 @@ assert.equal(ctx.resolve.call({...panel,section:badBasis},'HE_STAIN'),null,'an u
 // Run the real composite renderer, including its fallback branches. A managed
 // mismatch must not draw the HE raw image as if an identity alignment applied.
 vm.runInContext('this.render=({'+method('renderComposite')+'}).renderComposite;this.status=({'+method('_showAlignmentUnavailable')+'})._showAlignmentUnavailable',ctx);
+vm.runInContext('this.newDisplayCache=({'+method('_newDisplayCache')+'})._newDisplayCache',ctx);
 const I=[[1,0,0],[0,1,0],[0,0,1]],draws=[];
 ctx.sectionLayerCanvasLinear=()=>I;ctx.heMsiDisplayWarp=()=>null;
 ctx.document={createElement:()=>({style:{},setAttribute(){}})};
@@ -122,7 +123,7 @@ const drawPanel={...panel,section:swapped,
   imageSettings:{HE_STAIN:{opacity:1}},visibleLayers:new Set(['HE_STAIN']),
   _maybeWarnRasterDimMismatch(){},_ensureViewerTransform(){},_ensureDrawableLoaded(){},_showMsiLoadStatus(){},
   registeredMsiKeys:()=>['MSI_A'],getMsiRefSize:()=>({w:2,h:2}),_msiCanvasMatrix:()=>I,
-  updateScaleBar(){},_resolveTHeToMsi:ctx.resolve,_showAlignmentUnavailable:ctx.status};
+  updateScaleBar(){},_resolveTHeToMsi:ctx.resolve,_showAlignmentUnavailable:ctx.status,_newDisplayCache:ctx.newDisplayCache};
 ctx.render.call(drawPanel);
 assert.equal(draws.length,0,'mismatched managed HE is excluded from the actual composite');
 assert.match(drawPanel.dom.alignmentStatus.textContent,/HE\/IF を非表示/);

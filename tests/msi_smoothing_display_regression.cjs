@@ -7,12 +7,16 @@ const identity = [[1,0,0],[0,1,0],[0,0,1]];
 const key = 'MSI_signal';
 const pixelBytes = canvas => Buffer.from(canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data);
 
-function fixture({invalid = false, nonlinearPalette = false} = {}) {
+function fixture({invalid = false, nonlinearPalette = false, mixedAlpha = false} = {}) {
     const W=9,H=3,source=createCanvas(W,H),sourceContext=source.getContext('2d');
     // Deliberately opaque, bright legacy PNG data is inconsistent with the
     // numerical missingness. It must not become a smoothing neighbour merely
     // because PNG alpha is nonzero.
     sourceContext.fillStyle='#ffffff';sourceContext.fillRect(0,0,W,H);
+    if(mixedAlpha){
+        const data=sourceContext.getImageData(0,0,W,H);data.data[3]=0;data.data[7]=128;data.data[11]=128;
+        sourceContext.putImageData(data,0,0);
+    }
     Object.assign(source,{complete:true,naturalWidth:W,naturalHeight:H});
     const values=new Float64Array(W*H).fill(10),measuredMask=new Uint8Array(W*H).fill(1),keep=new Uint8Array(W*H).fill(1);
     const missing=W+3,unmeasured=W+4,hidden=W+5;
@@ -20,13 +24,14 @@ function fixture({invalid = false, nonlinearPalette = false} = {}) {
         values[missing]=NaN;
         values[unmeasured]=1e9;measuredMask[unmeasured]=0;
         values[hidden]=1e9;keep[hidden]=0;
-    } else values[unmeasured]=255;
+    } else if(!mixedAlpha) values[unmeasured]=255;
+    if(mixedAlpha)keep[2]=0;
     const raster={W,H,values,measuredMask},keepGrid={W,H,keep};
     const section={id:'section',meta:{displayTransform:{version:2,baseOrientation:'native-raster'}},
         msiSeries:{[key]:{rawRange:[0,255],rawDispMax:255,rawTrueMax:255}}};
     const project={id:'project',sections:[section],rois:[{id:'roi',polysBySection:{section:[[0,0],[8,0],[8,2]]}}]};
     const app={project,viewMode:'free',roiOnlyMode:false,activeOverlay:null,msiSmoothing:'linear',msiSmoothingStrength:1,msiLinearStrength:10,
-        otsuBgRemove:invalid,getMsiWindow:()=>({min:0,max:255}),getMsiDisplaySettings:()=>({aspectMode:'legacy'})};
+        otsuBgRemove:invalid||mixedAlpha,getMsiWindow:()=>({min:0,max:255}),getMsiDisplaySettings:()=>({aspectMode:'legacy'})};
     let smoothingCalls=0,stamp=0;const stamps=new WeakMap();
     const context=runtime({App:app,
         MsiSmoothing:{...Smoothing,medianIndices(...args){smoothingCalls++;return Smoothing.medianIndices(...args);}},
@@ -49,7 +54,7 @@ function fixture({invalid = false, nonlinearPalette = false} = {}) {
     });
     const science=()=>({values:Buffer.from(values.buffer).toString('hex'),measured:Buffer.from(measuredMask).toString('hex'),
         keep:Buffer.from(keep).toString('hex'),source:pixelBytes(source).toString('hex'),project:JSON.stringify(project)});
-    return {app,panel,thumb,W,H,values,missing,unmeasured,hidden,science,calls:()=>smoothingCalls,
+    return {app,panel,thumb,W,H,values,missing,unmeasured,hidden,science,context,source,keepGrid,calls:()=>smoothingCalls,
         async thumbnailPixels(){
             panel.renderMsiThumbnail(key);
             const decoded=await loadImage(thumb.src),out=createCanvas(decoded.width,decoded.height);
@@ -74,7 +79,7 @@ async function main() {
         assert.equal(filtered[p*4],10,'Every actual measured pixel retains its uniform colour');
     }
     assert.deepEqual(await legacy.thumbnailPixels(),filtered,'The independently baked thumbnail uses the same validity mask');
-    assert.equal(legacy.calls(),2,'The production thumbnail renderer also invokes the Median filter');
+    assert.equal(legacy.calls(),1,'The thumbnail reuses the exact original-scale Median result');
     assert.deepEqual(legacy.science(),before,'Rendering preserves original NaN bits, measured values, masks, PNG and ROI/project data');
 
     const peak=fixture(),peakBefore=peak.science(),zero=peak.render(),zeroCache=peak.panel._msiLutCache.get(key);
@@ -121,6 +126,41 @@ async function main() {
         assert.deepEqual(await palette.thumbnailPixels(),pixels,'Main/thumbnail median parity at level '+level);
     }
     assert.deepEqual(palette.science(),paletteBefore,'All ten Median levels preserve sources, masks, geometry and ROIs');
+    // Main's opaque no-data backdrop and thumbnail's source alpha are separate
+    // output policies, even though their scalar/Median result is shared.
+    const mixed=fixture({mixedAlpha:true}),mixedBefore=mixed.science();
+    mixed.app.msiSmoothing='median';mixed.app.msiSmoothingStrength=3;
+    const mainPixels=mixed.render(),thumbPixels=await mixed.thumbnailPixels();
+    assert.deepEqual([...mainPixels.subarray(0,12)],[0,0,0,255,10,10,10,255,0,0,0,255]);
+    assert.deepEqual([...thumbPixels.subarray(0,12)],[0,0,0,0,10,10,10,128,0,0,0,128]);
+    assert.equal(mixed.calls(),1,'Different alpha policies still share one Median calculation');
+    const paletteInput=Array.from({length:256},(_,i)=>[i,0,0]);
+    const canvasFor=name=>mixed.panel._msiColorCanvas(key,mixed.source,[0,255],{min:0,max:255},mixed.keepGrid,paletteInput,[0,0,0],name);
+    const red=canvasFor('overlay-red');
+    assert.deepEqual([...pixelBytes(red).subarray(4,8)],[10,0,0,255],'Overlay palette remains independent of thumbnail palette');
+    assert.deepEqual(await mixed.thumbnailPixels(),thumbPixels,'An overlay colour derivative never replaces the normal thumbnail');
+    assert.equal(mixed.calls(),1,'Palette-only changes do not recompute Median');
+    for(let i=0;i<7;i++)canvasFor('palette-'+i);
+    const record=mixed.panel._msiLutCache.get(key);
+    assert.equal(record.variants.size,4);
+    assert.ok(!record.canvas||[...record.variants.values()].includes(record.canvas),'Legacy canvas reference never retains an unbudgeted evicted variant');
+    assert.equal(record._bytes,mixed.W*mixed.H*(3+4*record.variants.size));
+    mixed.panel._msiLutCache.delete(key);
+    assert.equal(mixed.context.Panel._displayCacheBudget.bytes,0,'Deleting a layer releases all of its retained display bytes');
+    assert.deepEqual(mixed.render(),mainPixels,'Eviction changes only recomputation, never display pixels');
+    assert.deepEqual(mixed.science(),mixedBefore,'Shared derivatives never mutate original alpha, masks or scientific values');
+    // Force cross-cache pressure: a retained HE derivative must evict an older
+    // MSI derivative rather than growing an independent per-panel allowance.
+    const bounded=fixture(),boundedPixels=bounded.render(),pool=bounded.context.Panel._displayCacheBudget;
+    pool.maxBytes=bounded.W*bounded.H*7;
+    bounded.panel._heGrayscaleCanvas('HE_STAIN',bounded.source);
+    assert.ok(pool.bytes<=pool.maxBytes);assert.equal(bounded.panel._msiLutCache.size,0);
+    assert.deepEqual(bounded.render(),boundedPixels);
+    bounded.panel._msiLutCache.clear();bounded.panel._heGrayscaleCache.clear();
+    assert.equal(pool.bytes,0,'Map.clear releases byte accounting from both derivative types');
+    pool.maxBytes=1;
+    assert.deepEqual(bounded.render(),boundedPixels,'An item over budget is rendered without retention');
+    assert.equal(pool.bytes,0);assert.equal(bounded.panel._msiLutCache.size,0);
     console.log('MSI smoothing display: real main/thumbnail pixels, opaque legacy missingness, cache restoration and source invariance PASS');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
