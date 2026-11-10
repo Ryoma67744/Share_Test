@@ -6,6 +6,8 @@ const vm = require('node:vm');
 const Core = require('../viewer/tic-core.js');
 const Runtime = require('../viewer/tic-runtime.js');
 const Cache = require('../viewer/tic-cache.js');
+const AnalysisCore = require('../viewer/msi-analysis-core.js');
+const AnalysisWorker = require('../viewer/msi-analysis-worker.js');
 const html = fs.readFileSync(path.join(__dirname,'../viewer/index.html'),'utf8');
 const tick = () => new Promise(resolve=>setImmediate(resolve));
 const deferred = () => {let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return {promise,resolve,reject};};
@@ -61,11 +63,11 @@ function source(name) {
 async function worker() {
     const build=source('_buildParseWorkerSource');
     const names=build.match(/const fns = \[([\s\S]*?)\];/)[1].split(',').map(x=>x.trim()).filter(Boolean);
-    const c=vm.createContext({console,TextDecoder,TextEncoder,Blob,TicCore:Core,PARSE_WORKER_LIBS:[],MSI_ROBUST_PERCENTILE:.998,MSI_DEFAULT_DISPLAY_PERCENTILE:.99});
+    const c=vm.createContext({console,TextDecoder,TextEncoder,Blob,structuredClone,TicCore:Core,MsiAnalysisCore:AnalysisCore,MsiAnalysisWorker:AnalysisWorker,PARSE_WORKER_LIBS:[],MSI_ROBUST_PERCENTILE:.998,MSI_DEFAULT_DISPLAY_PERCENTILE:.99});
     vm.runInContext(names.map(source).join('\n')+'\n'+build,c);
     const generated=vm.runInContext('_buildParseWorkerSource()',c);
     const responses=[];
-    const w=vm.createContext({console,TextDecoder,TextEncoder,Blob,importScripts(){},self:{postMessage:r=>responses.push(r)}});
+    const w=vm.createContext({console,TextDecoder,TextEncoder,Blob,structuredClone,importScripts(){},self:{postMessage:r=>responses.push(r)}});
     vm.runInContext(generated,w);
     // Verify real generated worker code; replace only PNG encoding (no canvas in Node).
     vm.runInContext('_encodePixelsToDataUrl = async (w,h,p) => JSON.stringify(Array.from(p));',w);

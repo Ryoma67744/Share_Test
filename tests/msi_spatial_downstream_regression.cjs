@@ -9,7 +9,7 @@ const names=['msiSourceCell','msiSourceNumber','msiSourceRow','msiDelimitedRecor
     'msiCellMetadata','buildOneCsvTable','buildSampleCsvGroups','csvEscape','buildMsiGrid','buildLegacyMsiGrid',
     'msiSourceReference','createMsiSourceGeometry','msiAxisInterpolate','pointInPolygon','roiContainsSourcePoint',
     'msiValidRoiGeometry','msiRoiGeometryMeta','roiPolygonForDisplay','msiLayerSourceGeometry',
-    'tryAppendUserRoiColumnsToTxt','appendRoisToGenericLines','extractRoiRawFromSection'];
+    'tryAppendUserRoiColumnsToTxt','appendRoisToGenericLines','collectRoiSourceRows','extractRoiRawFromSection'];
 const ctx=vm.createContext({console,TextEncoder,TextDecoder,Blob,Map,Set,Float64Array,Uint8Array,Promise,
     MsiSpatialGroups:Groups,ProjectArchive:require('../viewer/project-archive.js'),
     MsiRoiRange:require('../viewer/msi-roi-range.js'),findCompoundMeta:()=>null,formatDisplayName:x=>x,

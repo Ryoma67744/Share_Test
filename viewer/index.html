@@ -19,6 +19,9 @@
 <script src="tic-runtime.js"></script>
 <script src="msi-ratio-core.js"></script>
 <script src="msi-ratio-model.js"></script>
+<script src="msi-analysis-core.js"></script>
+<script src="msi-analysis-service.js"></script>
+<script src="msi-analysis-worker.js"></script>
 <script src="msi-ratio-app.js"></script>
 <link rel="stylesheet" href="msi-ratio.css">
 <link rel="stylesheet" href="../help.css?v=2026-11-09.1">
@@ -4258,6 +4261,14 @@ function roiContainsSourcePoint(poly,meta,geometry,x,y,section,entry) {
     if(!g||g.confirmed===false)return null;
     return pointInPolygon(msiAxisInterpolate(g.x,x,false),msiAxisInterpolate(g.y,y,false),poly);
 }
+function analysisRoiSelection(section,poly,meta,geometry,entry) {
+    if(meta&&meta.version==='msi-group-v1') {
+        if(typeof MsiSpatialGroups==='undefined'||!MsiSpatialGroups.roiCompatible(meta,geometry,section,entry))
+            return {poly,meta,geometry,unavailable:true,reason:'roi-group-mismatch'};
+        return {poly,meta:Object.assign({},meta,{version:'msi-source-v1',sourceRef:geometry.sourceRef}),originalMeta:meta,geometry};
+    }
+    return {poly,meta,originalMeta:meta,geometry};
+}
 // Runtime geometry is separate from persisted scientific data and bounded by
 // the existing layer cache. Saved new ROIs carry their own affine source map.
 function msiLayerSourceGeometry(section,key) {
@@ -4617,9 +4628,38 @@ const _otsuTicCache = new Map();
 //   ソース (path/blobId) だけにすると 2 つ目以降の化合物が 1 つ目の列の値を受け取る。
 // 値 = { W, H, values: Float64Array(W*H) }   NaN = その格子点にデータ無し
 const _roiRawGridCache = new Map();
+let _msiAnalysisService = null;
+function getMsiAnalysisService() {
+    if(typeof Worker==='undefined'||typeof MsiAnalysisService==='undefined'||typeof createMsiAnalysisWorker!=='function')return null;
+    if(!_msiAnalysisService)_msiAnalysisService=MsiAnalysisService.create({createWorker:createMsiAnalysisWorker,
+        timeoutMs:180000,maxQueued:64,onReset:()=>_roiRawGridCache.clear()});
+    return _msiAnalysisService;
+}
+function analysisGridCurrent(grid) {
+    return !grid?.handle || !!getMsiAnalysisService()?.isHandleCurrent(grid.handle);
+}
+function analysisGridFromDescriptor(descriptor) {
+    if(!descriptor||!descriptor.snapshot)return null;
+    descriptor.snapshot.handle=descriptor.handle;
+    return Object.assign(MsiAnalysisCore.grid(descriptor.snapshot),{W:descriptor.W,H:descriptor.H,_bytes:descriptor.byteLength||0});
+}
+async function readAnalysisSource(section,entries,options={}) {
+    const service=getMsiAnalysisService(),owner=App.project,series=section.msiSeries;
+    const keys=entries.map(({layerKey,ent})=>_roiGridKey(section,layerKey,ent));
+    const current=()=>App.project===owner&&section.msiSeries===series&&entries.every(({layerKey,ent},i)=>
+        series[layerKey]===ent&&_roiGridKey(section,layerKey,ent)===keys[i])&&(!options.current||options.current());
+    const ent=entries[0].ent,record=await ensureLocalBlob(ent,owner,{signal:options.signal,current});
+    if(!record?.blob||!current())return [];
+    const key=JSON.stringify(['source',...keys.slice().sort()]);
+    const result=await service.request('source-open',{key,blob:record.blob,def:ent,entries,snapshots:true},
+        {key,signal:options.signal,current,priority:options.priority??0});
+    if(!current())return [];
+    return (result.grids||[result]).map(descriptor=>({layerKey:descriptor.layerKey,grid:analysisGridFromDescriptor(descriptor)}));
+}
 // 上限つき LRU。1 グリッドは W*H*8 バイト (200x200 で 320KB)。TIMS の 2000 features
 // のようなケースで全レイヤーを抱え込まないための歯止め。
 const ROI_RAW_GRID_CACHE_MAX = 24;
+const ROI_RAW_GRID_CACHE_BYTES = 64*1024*1024;
 // パネル 1 枚が同時に抱える MSI レイヤーの上限。1 レイヤーあたり
 // 生強度ラスタ + デコード済み画像 + PNG 文字列で 10 万画素なら約 850 KB。
 // 16 本 = 約 14 MB/パネル。TIMS の 2000 features でもここで頭打ちになる。
@@ -4666,7 +4706,8 @@ function _roiGridCacheGet(key) {
 function _roiGridCacheSet(key, val) {
     if (_roiRawGridCache.has(key)) _roiRawGridCache.delete(key);
     _roiRawGridCache.set(key, val);
-    while (_roiRawGridCache.size > ROI_RAW_GRID_CACHE_MAX) {
+    while (_roiRawGridCache.size > ROI_RAW_GRID_CACHE_MAX ||
+        Array.from(_roiRawGridCache.values()).reduce((total,grid)=>total+(grid._bytes||0),0)>ROI_RAW_GRID_CACHE_BYTES) {
         const oldest = _roiRawGridCache.keys().next().value;
         _roiRawGridCache.delete(oldest);
     }
@@ -4676,8 +4717,8 @@ function _roiGridCacheSet(key, val) {
 // 束ね方は computeSectionOtsuMasks (:2308-) / buildSampleCsvGroups (:8689-) と同じ。
 // 同時に materialize する列は LRU 上限まで — 1 ソースに数千 feature がある構成で
 // メモリを線形に食わないため。要求されたレイヤーを必ず先頭に置く。
-async function _ensureRoiRawGrid(section, layerKey) {
-    if (isRatioDisplayKey(layerKey) && App.ratioRawGrid) return App.ratioRawGrid(section, layerKey);
+async function _ensureRoiRawGrid(section, layerKey, options={}) {
+    if (isRatioDisplayKey(layerKey) && App.ratioRawGrid) return App.ratioRawGrid(section, layerKey,options);
     const series = (section && section.msiSeries) || {};
     const ent = series[layerKey];
     // ★ blobId の有無だけで弾いてはいけない。**共有先の parquet は blobId が null**
@@ -4689,8 +4730,12 @@ async function _ensureRoiRawGrid(section, layerKey) {
     //   表示ラスタ側 (SectionPanel.loadMsiLayer) と同じ判定に揃える。
     if (!ent || (!ent.blobId && !ent.sourceUrl)) return null;
     const wantKey = _roiGridKey(section, layerKey, ent);
+    const owner=typeof App!=='undefined'?App.project:null,consumerCurrent=options.current;
+    const current=()=> (typeof App==='undefined'||App.project===owner)&&series[layerKey]===ent
+        &&_roiGridKey(section,layerKey,ent)===wantKey&&(!consumerCurrent||consumerCurrent());
+    options={...options,current};
     const hit = _roiGridCacheGet(wantKey);
-    if (hit) return hit;
+    if (hit&&!options.force&&(typeof analysisGridCurrent!=='function'||analysisGridCurrent(hit))) return hit;
 
     const srcKey = ent.sourceFileId || ent.blobId;
     const entries = [{ layerKey, ent }];
@@ -4707,14 +4752,21 @@ async function _ensureRoiRawGrid(section, layerKey) {
         try {
             const src = await parquetSrcForEnt(ent);
             if (!src) return null;
-            const grid = await parquetRoiGrid(ent, src);
-            if (!grid) return null;
+            const grid = await parquetRoiGrid(ent, src,options);
+            if (!grid||!current()) return null;
             _roiGridCacheSet(wantKey, grid);
             return grid;
         } catch (e) {
             console.warn('[roi] parquet column read failed', layerKey, e);
             return null;
         }
+    }
+
+    if(typeof getMsiAnalysisService==='function'&&getMsiAnalysisService()) {
+        const grids=await readAnalysisSource(section,entries,options);
+        const grid=grids.find(item=>item.layerKey===layerKey)?.grid;
+        if(grid)_roiGridCacheSet(wantKey,grid);
+        return grid||null;
     }
 
     // xlsx/txt はファイル全体を 1 回で読む従来経路。
@@ -4725,6 +4777,7 @@ async function _ensureRoiRawGrid(section, layerKey) {
     let rec = null;
     try { rec = await ensureLocalBlob(ent, App.project); } catch (e) { rec = null; }
     if (!rec || !rec.blob) return null;
+    if(rec.blob.size>4*1024*1024)throw Object.assign(new Error('この原本の解析には Web Worker に対応したブラウザが必要です。'),{code:'ANALYSIS_WORKER_REQUIRED'});
 
     let m = null;
     try { m = await extractSourceMatrixForExport(await rec.blob.arrayBuffer(), ent, entries); }
@@ -4748,10 +4801,10 @@ async function _ensureRoiRawGrid(section, layerKey) {
 // and original positions; build each feature's ordinary ROI geometry/statistics
 // independently so legacy-coordinate and precision guards stay unchanged.
 const _ratioInputGridInFlight = new WeakMap();
-async function _ensureRatioInputGrids(section, numeratorKey, denominatorKey) {
-    if(numeratorKey===denominatorKey){const grid=await _ensureRoiRawGrid(section,numeratorKey);return [grid,grid];}
+async function _ensureRatioInputGrids(section, numeratorKey, denominatorKey,options={}) {
+    if(numeratorKey===denominatorKey){const grid=await _ensureRoiRawGrid(section,numeratorKey,options);return [grid,grid];}
     const series=section&&section.msiSeries||{},x=series[numeratorKey],y=series[denominatorKey];
-    const fallback=()=>Promise.all([_ensureRoiRawGrid(section,numeratorKey),_ensureRoiRawGrid(section,denominatorKey)]);
+    const fallback=()=>Promise.all([_ensureRoiRawGrid(section,numeratorKey,options),_ensureRoiRawGrid(section,denominatorKey,options)]);
     if(!x||!y||!x.blobId||x.blobId!==y.blobId||x.kind==='parquet'||y.kind==='parquet'
         ||msiOtsuSourceKey(x)!==msiOtsuSourceKey(y))return fallback();
     try {
@@ -4760,8 +4813,16 @@ async function _ensureRatioInputGrids(section, numeratorKey, denominatorKey) {
             ||((x.kind==='raw'||y.kind==='raw')&&(x.snap!==false)!==(y.snap!==false)))return fallback();
     }catch(_){return fallback();}
     const xCacheKey=_roiGridKey(section,numeratorKey,x),yCacheKey=_roiGridKey(section,denominatorKey,y);
-    const xHit=_roiGridCacheGet(xCacheKey),yHit=_roiGridCacheGet(yCacheKey);
-    if(xHit||yHit)return [xHit||await _ensureRoiRawGrid(section,numeratorKey),yHit||await _ensureRoiRawGrid(section,denominatorKey)];
+    const cachedX=_roiGridCacheGet(xCacheKey),cachedY=_roiGridCacheGet(yCacheKey);
+    const xHit=!options.force&&cachedX&&(typeof analysisGridCurrent!=='function'||analysisGridCurrent(cachedX))?cachedX:null;
+    const yHit=!options.force&&cachedY&&(typeof analysisGridCurrent!=='function'||analysisGridCurrent(cachedY))?cachedY:null;
+    if(xHit||yHit)return [xHit||await _ensureRoiRawGrid(section,numeratorKey,options),yHit||await _ensureRoiRawGrid(section,denominatorKey,options)];
+    if(typeof getMsiAnalysisService==='function'&&getMsiAnalysisService()) {
+        const grids=await readAnalysisSource(section,[{layerKey:numeratorKey,ent:x},{layerKey:denominatorKey,ent:y}],options);
+        const gx=grids.find(item=>item.layerKey===numeratorKey)?.grid,gy=grids.find(item=>item.layerKey===denominatorKey)?.grid;
+        if(!gx||!gy)return [null,null];
+        _roiGridCacheSet(xCacheKey,gx);_roiGridCacheSet(yCacheKey,gy);return [gx,gy];
+    }
     let pending=_ratioInputGridInFlight.get(section);
     if(!pending){pending=new Map();_ratioInputGridInFlight.set(section,pending);}
     const pairKey=JSON.stringify([xCacheKey,yCacheKey].sort());
@@ -6279,9 +6340,9 @@ function rawLayerKeyFor(section, label, polarity) {
 // thread so importing large files no longer freezes the UI. The worker
 // importScripts the same pinned XLSX/UTIF libs and runs the EXACT same pure
 // functions (injected via Function.prototype.toString) as the main thread, so
-// output is identical by construction. When Worker/OffscreenCanvas are
-// unavailable or the worker errors, every caller falls back to the unchanged
-// main-thread functions — no regression.
+// rendering and numerical analysis share one bounded queue/cache. Supported
+// Worker failures remain explicit; unsupported browsers retain only a small
+// source fallback. Numerical operations do not require canvas capabilities.
 // =============================================================
 const PARSE_WORKER_LIBS = [
     'xlsx.full.min.js',
@@ -6289,10 +6350,9 @@ const PARSE_WORKER_LIBS = [
     'UTIF.js',
 ].map(filename => typeof window !== 'undefined' && window.DesiRuntime && window.DesiRuntime.asset
     ? window.DesiRuntime.asset(filename) : new URL('../vendor/' + filename, location.href).href);
-let _parseWorker = null;
-let _parseWorkerBroken = false;
 let _parseSeq = 0;
 const _parsePending = new Map();
+const MSI_MAIN_THREAD_SOURCE_MAX_BYTES = 4 * 1024 * 1024;
 // parquet worker に投げて返ってきていない仕事の数。xlsx/txt の _parsePending とは
 // 別のワーカーなので別勘定だが、進捗ピルでは足して 1 つに見せる
 // (_updateParseBusyIndicator)。増減は parquet worker ラッパの call() が管理する。
@@ -6306,7 +6366,27 @@ function parseWorkerSupported() {
         && typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
 }
 function parseWorkerAvailable() {
-    return parseWorkerSupported() && !_parseWorkerBroken;
+    return parseWorkerSupported();
+}
+
+// Numeric source/ROI/ratio operations do not require canvas or image codecs.
+function createMsiAnalysisWorker() {
+    if(typeof Worker==='undefined'||typeof Blob==='undefined'||typeof URL.createObjectURL!=='function')
+        throw Object.assign(new Error('このブラウザーは解析 Worker に対応していません。'),{code:'ANALYSIS_WORKER_UNAVAILABLE'});
+    const url=URL.createObjectURL(new Blob([_buildParseWorkerSource()],{type:'text/javascript'}));
+    try{return new Worker(url);}finally{URL.revokeObjectURL(url);}
+}
+
+function _analysisWorkerEngine() {
+    if(!self.__analysisEngine)self.__analysisEngine=MsiAnalysisWorker.create({Core:MsiAnalysisCore,
+        RatioCore:typeof MsiRatioCore==='undefined'?null:MsiRatioCore,
+        RoiRange:typeof MsiRoiRange==='undefined'?null:MsiRoiRange,functions:{
+            parseXlsxSheet,rowsFromParsedXlsx,msiTextTable,msiTextValueColumn,msiSourceRow,
+            rawDecodeFunction,rawBundleFromZip,rawRowsFromDecoded,msiMatrixFromRows,msiMatrixRows,
+            msiSourceFrameKey,msiSourceReference,createMsiSourceGeometry,msiSourceStats,parquetSourceRows,
+            roiContainsSourcePoint,collectRoiSourceRows,pointInPolygon,calcStats,
+            buildParquetGeometryColumns,buildParquetRasterValues,accumulateParquetColumns}});
+    return self.__analysisEngine;
 }
 
 // Non-blocking busy pill (bottom-right). Shown while parse jobs are in flight
@@ -6356,55 +6436,8 @@ async function _parseWorkerOnMessage(e) {
         let result;
         const rasterOp = msg.op === 'tic-step' || msg.op === 'tic-probe' ? p.rasterOp : msg.op;
         if (rasterOp === 'xlsx-raster' || rasterOp === 'txt-raster' || rasterOp === 'raw-raster') {
-            let rows;
-            if (rasterOp === 'xlsx-raster') {
-                // Keep decoded sheets inside the long-lived worker. Blob
-                // structured-cloning is cheap; arrayBuffer/XLSX decoding is
-                // skipped entirely on a cache hit. The bounded LRU prevents
-                // projects with many source files from growing without limit.
-                const cache = self.__xlsxSheetCache || (self.__xlsxSheetCache = new Map());
-                const cacheKey = p.cacheKey || '';
-                let parsed = cacheKey ? cache.get(cacheKey) : null;
-                if (!parsed) {
-                    buf = p.blob ? await p.blob.arrayBuffer() : null;
-                    parsed = parseXlsxSheet(buf, p.def);
-                    if (cacheKey) {
-                        cache.set(cacheKey, parsed);
-                        while (cache.size > 8) cache.delete(cache.keys().next().value);
-                    }
-                } else {
-                    // Map insertion order is the LRU order; touch on every hit.
-                    cache.delete(cacheKey);
-                    cache.set(cacheKey, parsed);
-                }
-                rows = rowsFromParsedXlsx(parsed, p.def);
-            } else if (rasterOp === 'raw-raster') {
-                // One .raw carries every MRM channel, so what is cached is the
-                // decoded FUNCTION (coordinates + all channel columns) keyed on
-                // blobId + function number only — `channel` is excluded for the
-                // same reason `col_v` is excluded above, so registering 8
-                // channels from one file costs one unzip+decode, not eight.
-                // These payloads are megabytes rather than a parsed sheet, so
-                // the LRU is much smaller than the xlsx one.
-                const cache = self.__rawDecodeCache || (self.__rawDecodeCache = new Map());
-                const cacheKey = p.cacheKey || '';
-                let decoded = cacheKey ? cache.get(cacheKey) : null;
-                if (!decoded) {
-                    buf = p.blob ? await p.blob.arrayBuffer() : null;
-                    decoded = await rawDecodeFunction(rawBundleFromZip(buf), (p.def && p.def.func) || 1);
-                    if (cacheKey) {
-                        cache.set(cacheKey, decoded);
-                        while (cache.size > 2) cache.delete(cache.keys().next().value);
-                    }
-                } else {
-                    cache.delete(cacheKey);
-                    cache.set(cacheKey, decoded);
-                }
-                rows = rawRowsFromDecoded(decoded, p.def);
-            } else {
-                buf = p.blob ? await p.blob.arrayBuffer() : null;
-                rows = parseTxtToRows(buf, p.def);
-            }
+            const rows=await _analysisWorkerEngine().rows({...p,def:{...p.def,
+                kind:p.def?.kind||(rasterOp==='raw-raster'?'raw':rasterOp==='txt-raster'?'txt':'xlsx')}});
             const px = computeRasterPixels(rows, p.def && p.def.range, p.def && p.def.bakeMode);
             if (msg.op === 'tic-probe') {
                 result = {width:px.width,height:px.height};
@@ -6440,15 +6473,14 @@ async function _parseWorkerOnMessage(e) {
         } else if (msg.op === 'xlsx-columns') {
             buf = p.blob ? await p.blob.arrayBuffer() : null;
             result = await inspectXlsxColumns(buf, p.sheet, p.headerRow);
-        } else {
-            throw new Error('unknown op: ' + msg.op);
-        }
+        } else result=await _analysisWorkerEngine().dispatch(msg.op,p);
         // Float32Array があれば転送 (detach) してコピーを省く。worker 側ではこの後
         // result を使わないので detach して問題ない。
-        const transfer = (result && result.values && result.values.buffer) ? [result.values.buffer] : [];
-        self.postMessage({ id: id, ok: true, result: result }, transfer);
+        const transfer = MsiAnalysisCore.transferables(result);
+        self.postMessage({ id, generation:msg.generation, ok:true, result }, transfer);
     } catch (err) {
-        self.postMessage({ id: id, ok: false, error: String((err && err.message) || err) });
+        self.postMessage({ id, generation:msg.generation, ok:false,
+            error:{message:String((err && err.message) || err),code:err?.code||'ANALYSIS_OPERATION_FAILED'} });
     }
 }
 
@@ -6482,6 +6514,9 @@ function _buildParseWorkerSource() {
     const fns = [
         a1ColToIndex, indexToA1Col, percentileOfSorted, buildMsiGrid, buildLegacyMsiGrid,
         createMsiSourceGeometry, msiSourceReference, msiSourceStats, calcStats,
+        msiMatrixFromRows,msiMatrixRows,msiSourceFrameKey,
+        pointInPolygon,msiAxisInterpolate,msiValidRoiGeometry,roiContainsSourcePoint,collectRoiSourceRows,
+        parquetSourceRows,scatterParquetColumn,buildParquetGeometryColumns,buildParquetRasterValues,accumulateParquetColumns,
         labToSrgb, get2dContext, _mkCanvas, _canvasToDataUrl, _encodePixelsToDataUrl,
         deriveBakeStats, blankStats, bakeRasterFromValues, computeRasterPixels,
         msiSourceCell, msiSourceNumber, msiSourceRow, msiDelimitedRecords, msiTextTable, msiTextValueColumn,
@@ -6490,86 +6525,39 @@ function _buildParseWorkerSource() {
         rawDecodeText, rawInflate, rawZipIndex, rawZipRead, rawBundleFromZip,
         rawFindMember, rawFuncTag, parseWatersParamTable, parseWatersIdx,
         decodeWatersIntensity, rawPitchOf, rawDecodeFunction, rawSnapCoords, rawRowsFromDecoded,
-        _parseWorkerOnMessage,
+        _analysisWorkerEngine, _parseWorkerOnMessage,
     ];
     return [
         'importScripts(' + PARSE_WORKER_LIBS.map(u => JSON.stringify(u)).join(', ') + ');',
         'const MSI_ROBUST_PERCENTILE = ' + MSI_ROBUST_PERCENTILE + ';',
         'const MSI_DEFAULT_DISPLAY_PERCENTILE = ' + MSI_DEFAULT_DISPLAY_PERCENTILE + ';',
         'const TicCore = ' + TicCore.workerSource() + ';',
+        'const MsiAnalysisCore = ' + MsiAnalysisCore.workerSource() + ';',
+        'const MsiAnalysisWorker = ' + MsiAnalysisWorker.workerSource() + ';',
+        typeof location==='undefined'?'':'importScripts('+['msi-ratio-core.js','msi-roi-range.js'].map(name=>JSON.stringify(new URL(name,location.href).href)).join(',')+');',
         fns.map(f => f.toString()).join('\n\n'),
         'self.onmessage = _parseWorkerOnMessage;',
     ].join('\n\n');
 }
 
-function _getParseWorker() {
-    if (_parseWorkerBroken) return null;
-    if (_parseWorker) return _parseWorker;
-    try {
-        const src = _buildParseWorkerSource();
-        const url = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
-        const w = new Worker(url);
-        setTimeout(() => { try { URL.revokeObjectURL(url); } catch (_) {} }, 60000);
-        w.onmessage = (e) => {
-            const d = e.data || {};
-            const pend = _parsePending.get(d.id);
-            if (!pend) return;
-            if (d.ok) pend.resolve(d.result);
-            else pend.reject(new Error(d.error || 'parse worker error'));
-        };
-        w.onerror = (ev) => {
-            // A worker-level failure (e.g. importScripts blocked) is not
-            // recoverable per-job: mark broken, reject all pending jobs so they
-            // fall back to the main thread, and tear the worker down.
-            console.warn('parse worker error', ev && (ev.message || ev));
-            _parseWorkerBroken = true;
-            const pendings = Array.from(_parsePending.values());
-            _parsePending.clear();
-            _updateParseBusyIndicator();
-            pendings.forEach(p => { try { p.reject(new Error('parse worker crashed')); } catch (_) {} });
-            try { w.terminate(); } catch (_) {}
-            _parseWorker = null;
-        };
-        _parseWorker = w;
-        return _parseWorker;
-    } catch (e) {
-        console.warn('parse worker init failed', e);
-        _parseWorkerBroken = true;
-        return null;
-    }
-}
-
 // op: 'xlsx-raster' | 'txt-raster' | 'raw-raster' | 'tiff-decode' | 'xlsx-columns'.
 // payload carries a Blob (posted by reference; the worker reads its bytes) plus
-// op-specific params. Rejects on worker-unavailable / error / timeout so the
-// caller can fall back to the main-thread parser.
-function callParseWorker(op, payload, timeoutMs) {
-    return new Promise((resolve, reject) => {
-        const w = _getParseWorker();
-        if (!w) { reject(new Error('parse worker unavailable')); return; }
-        const id = ++_parseSeq;
-        let timer = null;
-        const settle = {
-            resolve: (v) => { if (timer) clearTimeout(timer); _parsePending.delete(id); _updateParseBusyIndicator(); resolve(v); },
-            reject:  (e) => { if (timer) clearTimeout(timer); _parsePending.delete(id); _updateParseBusyIndicator(); reject(e); },
-        };
-        _parsePending.set(id, settle);
-        _updateParseBusyIndicator();
-        if (timeoutMs) timer = setTimeout(() => {
-            if (_parsePending.has(id)) settle.reject(new Error('parse worker timeout'));
-        }, timeoutMs);
-        try { w.postMessage({ id: id, op: op, payload: payload }); }
-        catch (e) { settle.reject(e); }
-    });
+// op-specific params. Rendering and analysis share one queue and decoded cache.
+async function callParseWorker(op, payload, timeoutMs, options={}) {
+    const service=getMsiAnalysisService();
+    if(!service)throw Object.assign(new Error('parse worker unavailable'),{code:'ANALYSIS_WORKER_UNAVAILABLE'});
+    const id=++_parseSeq;_parsePending.set(id,true);_updateParseBusyIndicator();
+    try{return await service.request(op,payload,{priority:op.startsWith('tic-')?30:10,...options,timeoutMs});}
+    finally{_parsePending.delete(id);_updateParseBusyIndicator();}
 }
 
-// Column/sheet preview for the MSI wizard: worker when possible, else the
-// unchanged main-thread inspectXlsxColumns.
+// Numerical column inspection requires no canvas capability. Supported Worker
+// failures remain explicit; only small files in unsupported browsers use UI parsing.
 async function inspectXlsxColumnsAuto(file, buf, sheetName, headerRow1based) {
-    if (parseWorkerAvailable() && file) {
-        try { return await callParseWorker('xlsx-columns', { blob: file, sheet: sheetName, headerRow: headerRow1based }, 120000); }
-        catch (e) { console.warn('xlsx-columns worker failed, main-thread fallback', e); }
-    }
+    if (file && getMsiAnalysisService())
+        return callParseWorker('xlsx-columns', { blob: file, sheet: sheetName, headerRow: headerRow1based }, 120000);
+    if((file?.size||buf?.byteLength||0)>MSI_MAIN_THREAD_SOURCE_MAX_BYTES)
+        throw Object.assign(new Error('この大きさの原本は解析 Worker が必要です。Chrome / Edge など対応ブラウザーで開いてください。'),{code:'ANALYSIS_WORKER_REQUIRED'});
     return inspectXlsxColumns(buf, sheetName, headerRow1based);
 }
 
@@ -7394,6 +7382,14 @@ async function _parquetBuildGeometry(blobId, src) {
     if (roles.annIdx >= 0) idxs.push(roles.annIdx);
     const cols = await callParquetWorker(
         Object.assign({ op: 'columns', fileId: st.fileId, colIdxs: idxs }, src), [], PARQUET_COLUMN_TIMEOUT_MS);
+    const service=getMsiAnalysisService();
+    st.geom=service?await service.request('parquet-geometry',{cols,roles},{key:'parquet-geometry:'+blobId}):buildParquetGeometryColumns(cols,roles);
+    if(service)st.geom.sections=st.geom.sections.map(MsiAnalysisCore.parquetSection);
+    return st.geom;
+}
+
+// The existing coordinate/annotation algorithm, shared verbatim with the Worker.
+function buildParquetGeometryColumns(cols,roles) {
     const xs = Array.from(cols[0],msiSourceNumber), ys = Array.from(cols[1],msiSourceNumber);
     // annotation 列が無いファイルは全行を 1 切片として扱う。
     const ann = (roles.annIdx >= 0 && cols[2]) ? cols[2] : null;
@@ -7434,8 +7430,7 @@ async function _parquetBuildGeometry(blobId, src) {
     }
     // 並びを安定させる (登録ダイアログの表示順とセクション番号が毎回同じになる)。
     sections.sort((a, b) => (a.label < b.label ? -1 : a.label > b.label ? 1 : 0));
-    st.geom = { roles, sections };
-    return st.geom;
+    return { roles, sections };
 }
 
 // ent が指す切片の幾何 (行→格子の対応表) を引く。buildParquetRaster と
@@ -7504,10 +7499,16 @@ function parquetSourceRows(col, sec) {
 
 // ROI 統計用の生強度グリッド。1 化合物 = 1 列なので、836 MB のファイルから
 // 読むのは約 0.3 MB の 1 列だけ。xlsx/txt のようにファイル全体を展開しない。
-async function parquetRoiGrid(ent, src) {
+async function parquetRoiGrid(ent, src,options={}) {
     const {sec,st}=await parquetSectionGeom(ent,src);
     const col=await parquetReadColumnShared(st,src,parquetKeyForEnt(ent),ent.colIdx,null);
     if(!col)return null;
+    if(typeof getMsiAnalysisService==='function'&&getMsiAnalysisService()) {
+        const key=JSON.stringify(['parquet-grid',parquetKeyForEnt(ent),ent.annotation,ent.colIdx,msiSourceFrameKey(ent)]);
+        const result=await getMsiAnalysisService().request('source-register',{
+            key,def:ent,column:MsiAnalysisCore.packParquetColumn(col),section:MsiAnalysisCore.packParquetSection(sec),snapshots:true},{key,signal:options.signal,current:options.current});
+        return analysisGridFromDescriptor(result);
+    }
     const rows=parquetSourceRows(col,sec);
     return {W:sec.W,H:sec.H,rows,sourceStats:msiSourceStats(rows),
         sourceGeometry:Object.assign({},sec.sourceGeometry,{sourceRef:msiSourceReference(ent)})};
@@ -7521,11 +7522,8 @@ async function buildParquetRaster(ent, src) {
     if (!col) throw new Error('parquet: 列を読めませんでした');
     // 格子へ散らす (ROI 統計と同じ関数を通す)。触れなかったセルは NaN のまま
     // = データ無し (走査外)。
-    const values = scatterParquetColumn(col, sec, Float64Array);
-    // ベイクは DESI と同じ関数を通す。経路によって Range や Max が食い違わない。
-    const r = bakeRasterFromValues(values, sec.W, sec.H, ent.range, ent.bakeMode,
-        { gridFallback: sec.gridFallback,dupCells:sec.dupCells,dupRows:sec.dupRows,sourceStats:msiSourceStats(parquetSourceRows(col,sec)),
-          sourceGeometry:Object.assign({},sec.sourceGeometry,{sourceRef:msiSourceReference(ent)}) });
+    const service=getMsiAnalysisService();
+    const r=service?await service.request('parquet-raster',{col:MsiAnalysisCore.packParquetColumn(col),sec:MsiAnalysisCore.packParquetSection(sec),ent}):buildParquetRasterValues(col,sec,ent);
     const canvas = document.createElement('canvas');
     canvas.width = r.width; canvas.height = r.height;
     get2dContext(canvas, { willReadFrequently: true })
@@ -7536,6 +7534,15 @@ async function buildParquetRaster(ent, src) {
         rawRange: r.rawRange, rawMean: r.rawMean, rawTrueMax: r.rawTrueMax,
         rawDispMax: r.rawDispMax, diag: r.diag, sourceStats:r.sourceStats,sourceGeometry:r.sourceGeometry,
     };
+}
+
+// Preserve sum/count order, precision checks and display Range calculation.
+function buildParquetRasterValues(col,sec,ent) {
+    const values = scatterParquetColumn(col, sec, Float64Array);
+    // ベイクは DESI と同じ関数を通す。経路によって Range や Max が食い違わない。
+    return bakeRasterFromValues(values, sec.W, sec.H, ent.range, ent.bakeMode,
+        { gridFallback: sec.gridFallback,dupCells:sec.dupCells,dupRows:sec.dupRows,sourceStats:msiSourceStats(parquetSourceRows(col,sec)),
+          sourceGeometry:Object.assign({},sec.sourceGeometry,{sourceRef:msiSourceReference(ent)}) });
 }
 
 // 累積した合成 TIC を 1 枚の灰色画像にする仕上げ。DESI の自動生成
@@ -7621,6 +7628,10 @@ async function parquetAccumulateTicAndStats(blobId, src, features, targets, opts
         slots.push({ t, g, values: new Float64Array(g.W * g.H), ticRaw: new Float64Array(g.W * g.H) });
     }
     if (!slots.length) throw new Error('parquet: 対象の切片が見つかりません');
+    const service=getMsiAnalysisService();
+    const workerHandle=service?(await service.request('parquet-tic-start',{
+        slots:slots.map(slot=>({...slot,g:MsiAnalysisCore.packParquetSection(slot.g)}))},{current:()=>!shouldAbort()})).handle:null;
+    try {
     const statsByKey = new Map();
     // 計測: 列読みと集計のどちらが支配的かを実機で見えるようにする
     // (コード読解で決め打ちしないため)。
@@ -7636,6 +7647,32 @@ async function parquetAccumulateTicAndStats(blobId, src, features, targets, opts
             [], 900000);
         readMs += Date.now() - t0;
         const t1 = Date.now();
+        if(service) {
+            const reply=await service.request('parquet-tic-chunk',{handle:workerHandle,chunk,cols:cols.map(MsiAnalysisCore.packParquetColumn)},{current:()=>!shouldAbort()});
+            for(const [key,value] of reply.statsByKey)statsByKey.set(key,value);
+        }else for(const [key,value] of accumulateParquetColumns(chunk,cols,slots))statsByKey.set(key,value);
+        calcMs += Date.now() - t1;
+        onCol(Math.min(i + chunk.length, features.length), features.length, { readMs, calcMs });
+    }
+    if(service) {
+        const reply=await service.request('parquet-tic-finish',{handle:workerHandle},{current:()=>!shouldAbort()});
+        for(let i=0;i<slots.length;i++) {
+            slots[i].t.accum=reply.slots[i].t.accum;slots[i].t.count=reply.slots[i].t.count;
+            slots[i].ticRaw=reply.slots[i].ticRaw;
+        }
+    }
+    // 貯めた素の合計を切片ごとに返す。呼び出し側が Otsu の記録を組む。
+    const ticBySection = new Map();
+    for (const s of slots) ticBySection.set(s.t.sectionId, { ticRaw: s.ticRaw, g: s.g });
+    return { aborted: false, statsByKey, ticBySection, readMs, calcMs };
+    } finally {
+        if(workerHandle)await service.request('analysis-release',{handle:workerHandle}).catch(()=>{});
+    }
+}
+
+// The original feature/section/pixel loop executes in the same order in both paths.
+function accumulateParquetColumns(chunk,cols,slots) {
+    const statsByKey=new Map();
         for (let c = 0; c < chunk.length; c++) {
             const col = cols[c];
             if (!col) continue;
@@ -7683,13 +7720,7 @@ async function parquetAccumulateTicAndStats(blobId, src, features, targets, opts
             }
             statsByKey.set(chunk[c].key, perSection);
         }
-        calcMs += Date.now() - t1;
-        onCol(Math.min(i + chunk.length, features.length), features.length, { readMs, calcMs });
-    }
-    // 貯めた素の合計を切片ごとに返す。呼び出し側が Otsu の記録を組む。
-    const ticBySection = new Map();
-    for (const s of slots) ticBySection.set(s.t.sectionId, { ticRaw: s.ticRaw, g: s.g });
-    return { aborted: false, statsByKey, ticBySection, readMs, calcMs };
+    return statsByKey;
 }
 
 function callParquetWorker(msg, transfer, timeoutMs) {
@@ -8024,7 +8055,7 @@ class SectionPanel {
         if (isRatioDisplayKey(key) && App.loadRatioLayer) {
             if (this._destroyed) return Promise.resolve(false);
             if (options.retry === false && this._msiLoadErrors.get(key)?.identity === this._msiLoadIdentity(key)) return Promise.resolve(false);
-            return App.loadRatioLayer(this,key);
+            return App.loadRatioLayer(this,key,options);
         }
         if (this._destroyed || !key || !/^MSI_/i.test(key)) return Promise.resolve(false);
         const identity = this._msiLoadIdentity(key);
@@ -8357,9 +8388,9 @@ class SectionPanel {
         if (!ent || (!ent.blobId && !ent.sourceUrl)) {
             throw new Error('この化合物には元データの参照がありません (' + key + ')');
         }
-        // Parse + rasterize in the worker (keeps the UI responsive on large
-        // xlsx/txt); fall back to the identical main-thread parser on any
-        // worker failure or when workers aren't supported.
+        // Supported Worker failures are retryable errors. Never repeat a
+        // failed large parse on the UI thread. Only unsupported environments
+        // retain the bounded, identical parser fallback.
         let result = null;
         if (ent.kind === 'parquet') {
             // parquet は列指向なので、この化合物の 1 列だけを読む。ファイル全体を
@@ -8383,25 +8414,24 @@ class SectionPanel {
                     + '足りずに書き込みが取り消された可能性があります)');
             }
             if (parseWorkerAvailable()) {
-                try {
-                    const op = (ent.kind === 'txt') ? 'txt-raster'
-                        : (ent.kind === 'raw') ? 'raw-raster' : 'xlsx-raster';
-                    // blobId + sheet identifies the expensive workbook decode.
-                    // col_v is intentionally excluded: every MRM column in the
-                    // same sheet should reuse the decoded cell matrix.
-                    // .raw is the same idea one level up: blobId + function
-                    // identifies the unzip+decode, and `channel` is excluded so
-                    // every MRM channel of that function reuses it.
-                    const cacheKey = (op === 'xlsx-raster')
-                        ? String(ent.blobId || '') + '|' + String(ent.sheet || '')
-                        : (op === 'raw-raster')
-                            ? String(ent.blobId || '') + '|F' + String(ent.func || 1)
-                            : '';
-                    result = await callParseWorker(op, { blob: rec.blob, def: ent, cacheKey }, 120000);
-                } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
+                const op = (ent.kind === 'txt') ? 'txt-raster'
+                    : (ent.kind === 'raw') ? 'raw-raster' : 'xlsx-raster';
+                // blobId + sheet identifies the expensive workbook decode.
+                // col_v is intentionally excluded: every MRM column in the
+                // same sheet should reuse the decoded cell matrix.
+                // .raw is the same idea one level up: blobId + function
+                // identifies the unzip+decode, and `channel` is excluded so
+                // every MRM channel of that function reuses it.
+                const cacheKey = (op === 'xlsx-raster')
+                    ? String(ent.blobId || '') + '|' + String(ent.sheet || '')
+                    : (op === 'raw-raster')
+                        ? String(ent.blobId || '') + '|F' + String(ent.func || 1)
+                        : '';
+                result = await callParseWorker(op, { blob: rec.blob, def: ent, cacheKey }, 120000,{signal:options.signal,current});
             }
             if (!current()) return;
             if (!result) {
+                if(rec.blob.size>MSI_MAIN_THREAD_SOURCE_MAX_BYTES)throw Object.assign(new Error('この大きさの原本は解析 Worker が必要です。Chrome / Edge など対応ブラウザーで開いてください。'),{code:'ANALYSIS_WORKER_REQUIRED'});
                 const buf = await rec.blob.arrayBuffer();
                 if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
                 else if (ent.kind === 'raw') result = await buildPngFromRawArrayBuffer(buf, ent);
@@ -11732,9 +11762,9 @@ function collectAvailableCompoundLayers(project) {
 // 「画面の数値」「CSV」「AI が読む数値」の 3 者が一致する。
 //
 // Otsuは画像の表示だけに適用する。ROI定量は背景表示と独立した元測定行を使う。
-async function extractRoiRawFromSection(panel, layerKey, polyMsi, roi) {
+async function extractRoiRawFromSection(panel, layerKey, polyMsi, roi, options={}) {
     if(!panel||!polyMsi||!polyMsi.length)return {values:[],rowIds:[],nUniqueCoordinates:0,unavailable:false};
-    const section=panel.section,grid=await _ensureRoiRawGrid(section,layerKey);
+    const section=panel.section,grid=await _ensureRoiRawGrid(section,layerKey,options);
     if(!grid)return {values:[],unavailable:true,reason:'source-unavailable'};
     roi=roi||(panel.project&&panel.project.rois||[]).find(r=>(r.polysBySection||{})[section.id]===polyMsi);
     const meta=msiRoiGeometryMeta(roi,section);
@@ -11748,11 +11778,28 @@ async function extractRoiRawFromSection(panel, layerKey, polyMsi, roi) {
     } else if(meta&&meta.sourceRef!==grid.sourceGeometry.sourceRef)return {values:[],unavailable:true,reason:'roi-source-mismatch'};
     if(!meta&&grid.sourceGeometry.legacy&&grid.sourceGeometry.legacy.confirmed===false)
         return {values:[],unavailable:true,reason:grid.sourceGeometry.legacy.reason};
-    const out=[],rowIds=[],coords=new Set();let unlocatedRows=0;
     // Membership was verified once above. Keep the per-row containment loop
     // independent of the size of the coordinate/group registry.
     const membershipMeta=meta&&meta.version==='msi-group-v1'
         ? Object.assign({},meta,{version:'msi-source-v1',sourceRef:grid.sourceGeometry.sourceRef}) : meta;
+    if(grid.handle&&typeof getMsiAnalysisService==='function'&&getMsiAnalysisService()) {
+        try {
+            return await getMsiAnalysisService().request('roi',{handle:grid.handle,
+                selection:{poly:polyMsi,meta:membershipMeta,originalMeta:meta},includeValues:options.includeValues!==false},
+                {signal:options.signal,current:options.current,priority:options.priority});
+        }catch(error) {
+            if(error.code==='ANALYSIS_HANDLE_EXPIRED'&&!options.force)
+                return extractRoiRawFromSection(panel,layerKey,polyMsi,roi,{...options,force:true});
+            throw error;
+        }
+    }
+    return collectRoiSourceRows(grid,polyMsi,membershipMeta,meta);
+}
+
+// The identical numeric loop is serialized into the analysis Worker. Validation
+// of project/group membership stays on the UI side and runs once per ROI.
+function collectRoiSourceRows(grid,polyMsi,membershipMeta,meta) {
+    const out=[],rowIds=[],coords=new Set();let unlocatedRows=0;
     // No display setting (including Otsu) is consulted in this loop.
     for(const row of grid.rows) {
         if(!Number.isFinite(row.x)||!Number.isFinite(row.y)){unlocatedRows++;continue;}
@@ -11773,7 +11820,7 @@ async function extractRoiRawFromSection(panel, layerKey, polyMsi, roi) {
 // gen = App._analysisGen のスナップショット。ROI 統計はソース blob をパースするため
 // 非同期になり、ROI を連続で切り替えると複数走る。自分より新しい実行が始まっていたら
 // 描画せず捨てる (古い結果が新しい ROI を上書きしないように)。
-async function renderAnalysisChart(gen) {
+async function renderAnalysisChart(gen,signal) {
     if (App.analysisMode === 'otsu') { try { renderOtsuAnalysis(); } catch (e) { console.warn('[otsu] analysis render failed', e); } return; }
     if (App.analysisMode === 'kmd') { try { renderKmdAnalysis(); } catch (e) { console.warn('[kmd] analysis render failed', e); } return; }
     const stale = () => (gen !== undefined && gen !== App._analysisGen);
@@ -11817,10 +11864,11 @@ async function renderAnalysisChart(gen) {
         if (!panel) continue;
         stats[s.id] = {};
         for (const ch of channels) {
-            const res = await extractRoiRawFromSection(panel, ch, roi.polysBySection[s.id],roi);
+            const res = await extractRoiRawFromSection(panel, ch, roi.polysBySection[s.id],roi,
+                {includeValues:false,signal,current:()=>!stale()&&App.project===project});
             if (stale()) return;
             if (res.unavailable) unavailable++;
-            stats[s.id][ch] = Object.assign(calcStats(res.values),{nUniqueCoordinates:res.nUniqueCoordinates,unavailable:res.unavailable,reason:res.reason});
+            stats[s.id][ch] = Object.assign(res.stats||calcStats(res.values),{nUniqueCoordinates:res.nUniqueCoordinates,unavailable:res.unavailable,reason:res.reason});
         }
     }
     if (stale()) return;
@@ -24338,16 +24386,30 @@ const App = {
                 .filter(item => item.poly && item.poly.length);
             if (!raster || !raster.sourceGeometry) return {status:'unavailable'};
             if (!polygons.length) return {status:'no-roi'};
-            const rasterStats = MsiRoiRange.summarizeRaster(raster,
-                polygons.map(item => (x, y) => pointInPolygon(x, y, item.poly)),
-                {bakeMode:request.ent.bakeMode, percentile:MSI_DEFAULT_DISPLAY_PERCENTILE});
-            const grid = await _ensureRoiRawGrid(section, key);
+            let grid = await _ensureRoiRawGrid(section, key,{current});
             const latestRaster = panel.msiValueRasters.get(key);
             const sameLoad = entry.loadIdentity != null && panel._msiLoadIdentity
                 && entry.loadIdentity === panel._msiLoadIdentity(key);
             if (!current() || (latestRaster && !sameLoad && entry.rasterStamp !== identStamp(latestRaster))) return {status:'stale'};
             const sourceKey=typeof this.ratioSourceKey==='function'?this.ratioSourceKey(section,key)||key:key;
             const sourceEntry=section.msiSeries && section.msiSeries[sourceKey];
+            if(grid?.handle&&typeof getMsiAnalysisService==='function'&&getMsiAnalysisService()) {
+                const run=()=>getMsiAnalysisService().request('roi-range',{
+                    handle:grid.handle,raster:{W:raster.W,H:raster.H,values:raster.values},
+                    polygons:polygons.map(({roi,poly})=>({polyRaster:poly,
+                        selection:analysisRoiSelection(section,roi.polysBySection[section.id],msiRoiGeometryMeta(roi,section),grid.sourceGeometry,sourceEntry)})),
+                    bakeMode:request.ent.bakeMode,percentile:MSI_DEFAULT_DISPLAY_PERCENTILE},{current});
+                try { return await run(); }
+                catch(error) {
+                    if(error.code!=='ANALYSIS_HANDLE_EXPIRED')throw error;
+                    grid=await _ensureRoiRawGrid(section,key,{current,force:true});
+                    if(!grid?.handle)throw error;
+                    return await run();
+                }
+            }
+            const rasterStats = MsiRoiRange.summarizeRaster(raster,
+                polygons.map(item => (x, y) => pointInPolygon(x, y, item.poly)),
+                {bakeMode:request.ent.bakeMode, percentile:MSI_DEFAULT_DISPLAY_PERCENTILE});
             const predicates=polygons.map(({roi})=>{
                 let meta=msiRoiGeometryMeta(roi,section);
                 if(meta&&meta.version==='msi-group-v1') {
@@ -27248,7 +27310,14 @@ const App = {
         // 測定PJを切り替えると、前の鍵の集合で Method 表が絞られたままになる。
         try { resetKmdSelectionIfProjectChanged(this.project); } catch (e) {}
         const gen = ++this._analysisGen;
-        renderAnalysisChart(gen).catch(e => console.warn('renderAnalysis failed', e));
+        this._analysisAbort?.abort();
+        this._analysisAbort=typeof AbortController!=='undefined'?new AbortController():null;
+        renderAnalysisChart(gen,this._analysisAbort?.signal).catch(e => {
+            if(e.name==='AbortError'||e.code==='ANALYSIS_CANCELLED'||gen!==this._analysisGen)return;
+            console.warn('renderAnalysis failed',e);
+            const host=document.getElementById('graph-container');
+            if(host)host.textContent='ROI統計を計算できませんでした。もう一度選択して再試行してください。';
+        });
     },
 
     // ---- ROI drawing ----
@@ -28893,6 +28962,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sourceIdentity:(section,key)=>App.panels.get(section.id)?._msiLoadIdentity(key)
             || JSON.stringify((section.msiSeries||{})[key]),
         readGrid:_ensureRoiRawGrid,readPair:_ensureRatioInputGrids,roiMeta:msiRoiGeometryMeta,roiContains:roiContainsSourcePoint,
+        numericService:()=>getMsiAnalysisService(),roiSelection:analysisRoiSelection,
         otsuGrid:_otsuKeepGridRaw,otsuStamp:section=>JSON.stringify(section.meta&&section.meta.otsu||null),
         inputLabel:(section,key)=>ratioSafeName((section.msiSeries?.[key]?.compoundMeta?.base)
             || (section.msiSeries?.[key]?.compoundMeta?.name) || splitCeCv(formatDisplayName(key)).base),

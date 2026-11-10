@@ -19,7 +19,7 @@ for(const name of common){
   vm.runInContext(lift(html,name),viewer);
   vm.runInContext(lift(connector,name),cv);
 }
-for(const name of ['msiSourceCell','msiSourceRow','msiRoiGeometryMeta','extractRoiRawFromSection'])
+for(const name of ['msiSourceCell','msiSourceRow','msiRoiGeometryMeta','collectRoiSourceRows','extractRoiRawFromSection'])
   vm.runInContext(lift(html,name),viewer);
 vm.runInContext(lift(connector,'resolveRoiGeometryForSource')+'\n'+lift(connector,'extractRoiValues'),cv);
 const def={kind:'txt',sourceFileId:'original'};
