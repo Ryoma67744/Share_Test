@@ -22537,8 +22537,8 @@ const Toolbar = {
             App.deleteSection(p.section.id);
         });
 
-        this.rangeMin.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRangeRaw('min', this.rangeMin.value); });
-        this.rangeMax.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRangeRaw('max', this.rangeMax.value); });
+        this.rangeMin.addEventListener('change', () => { const p = this.activePanel(); if (p && !this.rangeMin.disabled) p.applyRangeRaw('min', this.rangeMin.value); });
+        this.rangeMax.addEventListener('change', () => { const p = this.activePanel(); if (p && !this.rangeMax.disabled) p.applyRangeRaw('max', this.rangeMax.value); });
         if (this.rangeResetBtn) this.rangeResetBtn.addEventListener('click', () => { const p = this.activePanel(); if (p) p.resetRange(); });
         this.opacityInp.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyOpacity(this.opacityInp.value); });
         this.rotationInp.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRotation(this.rotationInp.value, App.rotTarget); });
