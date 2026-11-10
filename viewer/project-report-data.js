@@ -5,7 +5,7 @@
   if (root) root.ProjectReportData = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function(MsiSmoothing) {
   'use strict';
-  const REPORT_REVISION = 'ppt-20261106-2';
+  const REPORT_REVISION = 'ppt-20261110-1';
 
   // Report colour clipping is a display operation. Quantitative table values
   // are supplied by the application's original-measurement statistics, never
@@ -289,9 +289,101 @@
       ...physicalDimensions(g, o.pixelPitch)};
   }
 
+  function captureOutputPlan(plan, sections) {
+    if (plan == null) return null; // Existing non-UI callers keep their legacy range contract.
+    const invalid = () => new Error('PPT の比較グループと対象切片を確認してください。');
+    if (plan.version !== 1 || !Array.isArray(plan.groups) || !plan.groups.length) throw invalid();
+    const known = new Set(), assigned = new Map(), ids = new Set();
+    for (const section of sections) {
+      const id = text(section.id);
+      if (!id || known.has(id)) throw invalid();
+      known.add(id);
+    }
+    const groups = plan.groups.map(group => {
+      if (!group || typeof group.id !== 'string' || !group.id || ids.has(group.id)
+          || !['compare', 'independent'].includes(group.kind) || !Array.isArray(group.sectionIds)
+          || !group.sectionIds.length || group.kind === 'independent' && group.sectionIds.length !== 1) throw invalid();
+      ids.add(group.id);
+      const sectionIds = group.sectionIds.map(value => {
+        const id = text(value);
+        if (!known.has(id) || assigned.has(id)) throw invalid();
+        assigned.set(id, group.id); return id;
+      });
+      return {id: group.id, name: text(group.name), kind: group.kind, sectionIds};
+    });
+    if (assigned.size !== known.size) throw invalid();
+    return {plan: {version: 1, groups}, assigned};
+  }
+
+  // Range scopes belong to this export only. Never read a manual window or
+  // derive one from an already colour-mapped image, and never edit source entries.
+  async function automaticOutputScales(states, captured, style, isRatio, assertCurrent) {
+    const members = new Map(captured.plan.groups.map(group => [group.id, []]));
+    for (const state of states) members.get(state.outputGroupId).push(state);
+    const scales = [];
+    for (const group of captured.plan.groups) {
+      assertCurrent();
+      const all = members.get(group.id);
+      if (!all.length) continue; // A molecule need not be registered in every group.
+      const valid = all.filter(state => state.count > 0 && !state.error);
+      const sampleCount = valid.reduce((sum, state) => sum + state.count, 0);
+      let min = 0, max = 1, percentileValue = null, upperBasis = 'unit-fallback';
+      const policy = !style ? 'pooled-p99.8' : style.rangePolicy === 'maximum' ? 'display-maximum' : 'display-adaptive';
+      if (!style && sampleCount) {
+        // Allocate at most this group's pool, retaining the per-molecule 20M
+        // safety limit checked before any group is rendered.
+        let pool = new Float64Array(sampleCount), offset = 0, maximum = -Infinity;
+        for (const state of valid) {
+          maximum = Math.max(maximum, state.maximum);
+          for (let i = 0; i < state.size; i++) {
+            if (i % 262144 === 0) { assertCurrent(); await yieldTask(); }
+            if (measured(state.entry.raster, i)) pool[offset++] = state.entry.raster.values[i];
+          }
+        }
+        percentileValue = percentileOwned(pool, PERCENTILE); pool = null;
+        assertCurrent();
+        max = percentileValue > 0 ? percentileValue : maximum > 0 ? maximum : 1;
+        upperBasis = percentileValue > 0 ? 'percentile' : maximum > 0 ? 'positive-maximum-fallback' : 'unit-fallback';
+      } else if (style && sampleCount) {
+        let maximum = -Infinity, low = Infinity, high = -Infinity;
+        for (const state of valid) {
+          const auto = state.entry.displayAuto;
+          if (!auto || !Number.isFinite(auto.max)) throw new Error('PPT の自動表示範囲を確認できません。');
+          maximum = Math.max(maximum, auto.max);
+          const rr = auto.rawRange;
+          if (Array.isArray(rr) && rr.length === 2 && rr.every(Number.isFinite)) {
+            low = Math.min(low, rr[0]); high = Math.max(high, rr[1]);
+          }
+        }
+        upperBasis = 'display-style';
+        if (style.rangePolicy === 'maximum' || isRatio) {
+          max = maximum > 0 ? maximum : 1;
+          if (!(maximum > 0)) upperBasis = 'unit-fallback';
+        } else if (group.kind === 'independent') {
+          min = Number.isFinite(low) ? low : 0; max = maximum;
+          if (!(max > min)) max = min + (Math.abs(max - min) || 1);
+        } else if (maximum > 0) {
+          max = maximum;
+        } else {
+          // A comparison of negative-only legacy layers still needs one shared
+          // lower AND upper bound; per-section fallbacks would mislabel colours.
+          min = Number.isFinite(low) ? low : 0;
+          max = Number.isFinite(high) ? high : maximum;
+          if (!(max > min)) max = min + (Math.abs(max - min) || 1);
+        }
+      }
+      if (!Number.isFinite(min) || !Number.isFinite(max) || !(max > min))
+        throw new Error('PPT の自動表示範囲を確認できません。');
+      scales.push([group.id, {min, max, upperBasis, percentileValue, sampleCount, policy, available: sampleCount > 0}]);
+      await yieldTask(); assertCurrent();
+    }
+    return Object.fromEntries(scales);
+  }
+
   async function prepare(input, options) {
     const o = options || {};
     if (!input || !Array.isArray(input.molecules) || !Array.isArray(input.sections)) throw new Error('プロジェクトのレポート情報が不正です。');
+    const capturedPlan = captureOutputPlan(input.outputPlan, input.sections);
     if(input.displayStyle && (!Array.isArray(input.displayStyle.lut)||input.displayStyle.lut.length!==256
         ||!input.displayStyle.lut.every(c=>Array.isArray(c)&&c.length===3&&c.every(v=>Number.isFinite(v)&&v>=0&&v<=255))))
       throw new Error('表示スタイルの配色を確認できません。');
@@ -303,6 +395,7 @@
     const result = {
       projectName: text(input.projectName), generatedAt: input.generatedAt || new Date().toISOString(),
       metadata: metadataCopy(input.metadata || {}), displayStyle:metadataCopy(input.displayStyle || null),
+      ...(capturedPlan ? {outputPlan: capturedPlan.plan} : {}),
       sections: input.sections.map(s => ({...s})), molecules: [],
       intensityScale: {percentile: PERCENTILE, basis: 'finite-measured-display-raster',
         statisticsBasis: 'original-measurement-rows',
@@ -310,6 +403,8 @@
     };
     if(input.displayStyle)result.intensityScale={basis:'display-style',statisticsBasis:'original-measurement-rows',
       note:'全切片・全分子を開始時の表示スタイルで出力。Same自動上限は全出力切片で再計算。元測定行の最大・平均は変更しない。'};
+    if(capturedPlan)result.intensityScale={basis:'group-automatic',statisticsBasis:'original-measurement-rows',
+      note:'比較グループ内は同一分子の共通自動Range、個別出力は各切片の自動Rangeを使用。手動Rangeは使用しない。元測定行の最大・平均は変更しない。'};
     if(input.molecules.some(source=>source.kind==='ratio')) {
       result.intensityScale.statisticsBasis='per-layer';
       result.intensityScale.note+=' 比の統計は同じ有効な原本ペアから計算し、実測Intensityの統計とは区別する。';
@@ -317,15 +412,20 @@
     for (let moleculeIndex = 0; moleculeIndex < input.molecules.length; moleculeIndex++) {
       assertCurrent();
       const source = input.molecules[moleculeIndex];
-      const displayStyle=source.displayStyle || input.displayStyle;
+      const displayStyle=capturedPlan ? metadataCopy(source.displayStyle || input.displayStyle) : source.displayStyle || input.displayStyle;
       const entries = typeof source.loadEntries === 'function' ? await source.loadEntries() : source.sections;
       assertCurrent();
       if (!Array.isArray(entries)) throw new Error('分子の切片情報を読み込めません。');
       const states = [];
+      const seenSections = new Set();
       let totalSize = 0, measuredCount = 0, max = -Infinity;
       for (const entry of entries) {
         assertCurrent();
-        let error = entry.missingReason || null, size = 0, count = 0;
+        const outputGroupId = capturedPlan && capturedPlan.assigned.get(text(entry.sectionId));
+        if (capturedPlan && (!outputGroupId || seenSections.has(text(entry.sectionId))))
+          throw new Error('分子の出力対象切片が比較グループと一致しません。');
+        seenSections.add(text(entry.sectionId));
+        let error = entry.missingReason || null, size = 0, count = 0, maximum = -Infinity;
         if (entry.raster && !error) {
           size = validateRaster(entry.raster);
           totalSize += size;
@@ -335,15 +435,17 @@
           try { affine(entry.transform); } catch (e) { error = e.message; }
           if (!error) for (let i = 0; i < size; i++) {
             if (i % 262144 === 0) { assertCurrent(); await yieldTask(); }
-            if (measured(entry.raster, i)) { count++; max = Math.max(max, entry.raster.values[i]); }
+            if (measured(entry.raster, i)) { count++; maximum = Math.max(maximum, entry.raster.values[i]); }
           }
         }
         if (!entry.raster && !error) error = '元データのMSI強度を利用できません。';
         if (!count && !error) error = '有効な測定画素がありません。';
         measuredCount += count;
-        states.push({entry, size, count, error});
+        max = Math.max(max, maximum);
+        states.push({entry, size, count, error, maximum, outputGroupId});
       }
-      let pool = displayStyle ? null : new Float64Array(measuredCount), offset = 0;
+      const outputScales = capturedPlan ? await automaticOutputScales(states, capturedPlan, displayStyle, source.kind === 'ratio', assertCurrent) : null;
+      let pool = displayStyle || capturedPlan ? null : new Float64Array(measuredCount), offset = 0;
       for (const state of states) if (state.count && pool) {
         const raster = state.entry.raster;
         for (let i = 0; i < state.size; i++) {
@@ -366,6 +468,13 @@
         molecule.lower=ranges.length?Math.min(...ranges.map(w=>w.min)):0;
         molecule.intensityScale={basis:'display-style',upperBasis:'display-style',statisticsBasis:'original-measurement-rows'};
       }
+      if(capturedPlan) {
+        molecule.outputScales = outputScales;
+        const ranges = Object.values(outputScales);
+        molecule.upper = ranges.length ? Math.max(...ranges.map(range => range.max)) : 1;
+        molecule.lower = ranges.length ? Math.min(...ranges.map(range => range.min)) : 0;
+        molecule.intensityScale = {basis:'group-automatic',statisticsBasis:'original-measurement-rows'};
+      }
       if(source.kind==='ratio') {
         molecule.intensityScale.statisticsBasis='valid-paired-original-rows';
         const formulas=[...new Set(entries.map(e=>text(e.metadata && e.metadata.formula)).filter(Boolean))];
@@ -376,20 +485,23 @@
       for (const state of states) {
         assertCurrent();
         const entry = state.entry, stats = statistics(entry.stats);
-        if(state.count && displayStyle && (!entry.displayWindow || !Number.isFinite(entry.displayWindow.min)
-          || !Number.isFinite(entry.displayWindow.max) || !(entry.displayWindow.max>entry.displayWindow.min)))
+        const scope = capturedPlan && outputScales[state.outputGroupId];
+        const displayWindow = scope ? {min:scope.min,max:scope.max} : entry.displayWindow;
+        if(state.count && displayStyle && (!displayWindow || !Number.isFinite(displayWindow.min)
+          || !Number.isFinite(displayWindow.max) || !(displayWindow.max>displayWindow.min)))
           throw new Error('表示スタイルの強度範囲を確認できません。');
-        const image = state.count ? await render(entry.raster, upper, {
+        const image = state.count ? await render(entry.raster, scope ? scope.max : upper, {
           createCanvas: o.createCanvas, transform: entry.transform, frame:entry.frame, pixelPitch: entry.pixelPitch, assertCurrent,
-          displayStyle, displayWindow:entry.displayWindow, keepGrid:entry.keepGrid,
+          displayStyle, displayWindow, keepGrid:entry.keepGrid,
           nearestUpscale: o.nearestUpscale !== false
         }) : null;
         molecule.sections.push({sectionId: entry.sectionId, name: text(entry.name), ...stats,
+          ...(capturedPlan ? {outputGroupId:state.outputGroupId} : {}),
           ...(source.kind==='ratio'?{ratioStatistics:ratioStatistics(entry.ratioStatistics),
             ratioRois:(entry.ratioRois || []).map(row=>({roiId:text(row.roiId),name:text(row.name),
               status:text(row.status),reason:text(row.reason),
               statistics:ratioStatistics(row.statistics)}))}:{}),
-          image, missingReason: state.error, pixelPitch: entry.pixelPitch || null, displayWindow:entry.displayWindow || null,
+          image, missingReason: state.error, pixelPitch: entry.pixelPitch || null, displayWindow:displayWindow || null,
           registeredPixelPitch: metadataCopy(entry.registeredPixelPitch || null),
           otsuApplied:!!entry.keepGrid,
           archiveProvenance: metadataCopy(entry.archiveProvenance || null), qualityNote: text(entry.qualityNote),

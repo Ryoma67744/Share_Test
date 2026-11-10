@@ -65,6 +65,75 @@ function assertPublicReport(snapshot) {
 }
 
 const tests = [
+    ['output selection defaults to independent and reconciles section inventory without persistence', async () => {
+        const f=fixture(), state=report.reconcileSelection(f.sections);
+        assert.deepEqual(report.selectionPlan(f.sections,state).groups.map(g=>[g.kind,g.sectionIds]),[
+            ['independent',['left']],['independent',['right']]]);
+        state.groups=[{id:'compare-1',name:'比較 A'}];state.assignments[0].groupId='compare-1';state.assignments[1].included=false;
+        const updated=report.reconcileSelection([f.sections[1],{id:'new'},f.sections[0]],state);
+        assert.deepEqual(updated.assignments,[{sectionId:'right',included:false,groupId:''},
+            {sectionId:'new',included:true,groupId:''},{sectionId:'left',included:true,groupId:'compare-1'}]);
+        assert.deepEqual(report.selectionPlan([f.sections[1],{id:'new'},f.sections[0]],updated).groups.map(g=>[g.kind,g.sectionIds]),[
+            ['compare',['left']],['independent',['new']]],'one-member comparison keeps explicit semantics');
+        updated.groups[0].name='Changed';assert.equal(state.groups[0].name,'比較 A');
+        const removed=report.reconcileSelection([f.sections[1]],state);assert.equal(removed.assignments.length,1);
+        assert.throws(()=>report.selectionPlan([f.sections[1]],removed),{code:'REPORT_OUTPUT_PLAN_INVALID'});
+        const invalidPlans=[{version:2,groups:[]},{version:1,groups:[]},
+            {version:1,groups:[{id:'g',name:'G',kind:'independent',sectionIds:['left','right']}]},
+            {version:1,groups:[{id:'g',name:'G',kind:'compare',sectionIds:['left','left']}]},
+            {version:1,groups:[{id:'g',name:'G',kind:'compare',sectionIds:['unknown']}]}];
+        for(const plan of invalidPlans)assert.throws(()=>report.normalizeOutputPlan(f.sections,plan),{code:'REPORT_OUTPUT_PLAN_INVALID'});
+    }],
+    ['explicit output selection skips excluded numeric, ratio and reference loads while guarding full inventory', async () => {
+        const f=fixture(), plan={version:1,groups:[{id:'g',name:'比較 A',kind:'compare',sectionIds:['right']}]};
+        f.sections[0].msiSeries.MSI_DA.compoundMeta.sourceFile='EXCLUDED_SOURCE.txt';
+        f.sections[1].msiSeries.MSI_DA.compoundMeta.sourceFile='INCLUDED_SOURCE.txt';
+        const refs=[],ratios=[];
+        f.hooks.referenceImage=async section=>{refs.push(section.id);return null;};
+        f.sections[1].meta.client_id='canonical-right';
+        f.app.getRatioDefinitions=()=>[{id:'r',bindings:{left:{numerator:{labelHint:'EXCLUDED_RATIO_INPUT'},denominator:{labelHint:'EXCLUDED_DENOMINATOR'}},
+            'canonical-right':{numerator:{labelHint:'INCLUDED_X'},denominator:{labelHint:'INCLUDED_Y'}}}}];
+        f.app.resolveRatio=async section=>{ratios.push(section.id);return null;};
+        const input=report.createAdapter(f.hooks,{outputPlan:plan,includeRatios:true,includeCeCv:true});
+        plan.groups[0].sectionIds.push('left');plan.groups[0].name='Changed';
+        assert.deepEqual(input.outputPlan.groups[0].sectionIds,['right']);assert.equal(input.outputPlan.groups[0].name,'比較 A');
+        assert.deepEqual(input.sections.map(s=>s.id),['right']);
+        for(const molecule of input.molecules) {
+            const entries=await molecule.loadEntries();assert.deepEqual(entries.map(e=>e.sectionId),['right']);
+            assert.doesNotMatch(JSON.stringify(entries),/EXCLUDED_RATIO_INPUT|EXCLUDED_DENOMINATOR/);
+            if(molecule.kind==='ratio')assert.equal(entries[0].metadata.formula,'INCLUDED_X / INCLUDED_Y');
+        }
+        await input.loadSectionReferences();
+        assert.deepEqual(f.calls,[['right','MSI_DA']]);assert.deepEqual(refs,['right']);assert.deepEqual(ratios,['right']);
+        assert.doesNotMatch(JSON.stringify(input),/EXCLUDED_SOURCE|EXCLUDED_RATIO_INPUT|EXCLUDED_DENOMINATOR/);
+        assert.equal(input.molecules[0].metadata.sourceFile,'INCLUDED_SOURCE.txt');
+        input.assertCurrent();f.project.sections.reverse();assert.throws(input.assertCurrent,{code:'REPORT_SOURCE_CHANGED'});
+    }],
+    ['explicit output groups leave MRM identities and hidden condition matching unchanged', async () => {
+        const f=sharedFixture(), plan={version:1,groups:[{id:'g',name:'比較 A',kind:'compare',sectionIds:['left','right']}]};
+        f.sections[1].msiSeries.MSI_DA.compoundMeta.ce+=1;
+        const input=report.createAdapter(f.hooks,{outputPlan:plan});
+        assert.equal(input.molecules.length,2,'one changed condition remains a separate measurement, not a separate output group');
+        assert.equal(input.outputPlan.groups.length,1);assert.equal(input.outputPlan.groups[0].kind,'compare');
+        for(const molecule of input.molecules)assert.equal((await molecule.loadEntries()).length,1);
+        assertPublicReport(input);
+        const duplicate=fixture();duplicate.sections[0].msiSeries.MSI_second=duplicate.makeEntry('duplicate');
+        const all=report.createAdapter(duplicate.hooks,{includeCeCv:true});
+        const selected=report.createAdapter(duplicate.hooks,{includeCeCv:true,outputPlan:{version:1,groups:[
+            {id:'i',name:'独立',kind:'independent',sectionIds:['right']} ]}});
+        assert.equal(selected.molecules[0].key,all.molecules.find(m=>m.layerKey==='MSI_DA').key,
+            'an excluded duplicate does not change scientific identity keys');
+    }],
+    ['explicit plans capture automatic style inputs and never expose manual ranges to preparation', async () => {
+        const f=fixture();f.app.msiUserWindow={MSI_DA:{min:5,max:800}};
+        f.hooks.displayStyle=()=>({mode:'same',rangePolicy:'maximum',lut:Array.from({length:256},(_,i)=>[i,i,i]),smoothing:'none'});
+        const before=JSON.stringify(f.project),ranges=JSON.stringify(f.app.msiUserWindow);
+        const input=report.createAdapter(f.hooks,{useDisplayStyle:true,outputPlan:report.selectionPlan(f.sections,report.reconcileSelection(f.sections))});
+        for(const entry of await input.molecules[0].loadEntries()) {
+            assert.equal(entry.displayAuto.max,100);assert.equal(entry.manualWindow,undefined);assert.equal(entry.displayWindow,undefined);
+        }
+        assert.equal(JSON.stringify(f.project),before);assert.equal(JSON.stringify(f.app.msiUserWindow),ranges);
+    }],
     ['all registered sections load lazily and retain source-row statistics', async () => {
         const f = fixture(), before = JSON.stringify(f.project), input = report.createAdapter(f.hooks);
         assert.equal(input.molecules.length, 1);

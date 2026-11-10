@@ -242,8 +242,8 @@
     {
       "id": "report",
       "path": "docs/help/images/report.png",
-      "sha256": "47225614084623154e850d5f3f4eec55a9d4ed280751ef7eb25966d53c0d1bd2",
-      "scenario": "Actual PPT export options",
+      "sha256": "c7e66602012940c4f7ee97a3e10258aca836b3423ead19ca7b4912ea49200f42",
+      "scenario": "Actual PPT export options: two comparison members, one independent automatic Range, and one excluded section",
       "role": "local author",
       "uiLanguage": "ja / en (application labels)",
       "viewport": {
@@ -254,7 +254,18 @@
       "mode": "offline",
       "chapterIds": [
         "preview"
-      ]
+      ],
+      "browser": "151.0.7922.34",
+      "fixture": "tools/help-capture.cjs fixture(): four named copies of the same synthetic X/Y section, no ROI",
+      "captureMethod": "Local-only isolated Playwright capture using tools/help-capture.cjs fixture/startServer exports",
+      "fixtureSha256": "5f94053caf563048aa6d8180c0a6d0d8e2743d73cc6fc4e0f04c7b1c3356a5d5",
+      "numericalSourceSha256": "f5e4c58d3a04cc51c2e7569f35e1aeb99365856b37bdde37fd3350c0fd253835",
+      "sourceFilesSha256": {
+        "viewer/index.html": "9a4d445abf84540b99bb4c41b43863e3d49806427db33367eed22430d13cb3b7",
+        "viewer/project-report-app.js": "50dbd1aec33e401d0085f6fdb2e936fb241abf2c4dc9ccd5b61c25e1d56c0afc",
+        "viewer/project-report-data.js": "9c3390e247a82074a5c599950aae131632ab28190b6d5379ff9cfc833b340283",
+        "viewer/project-report-deck.js": "05b5024488b9f7720a73fb0cdc4b1f02e37e3b531ea34c229208d14bde97502d"
+      }
     },
     {
       "id": "roi",
