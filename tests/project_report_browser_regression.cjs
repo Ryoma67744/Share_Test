@@ -618,9 +618,13 @@ async function main() {
     // The real import now reviews archive completeness/provenance before writing.
     await page.getByRole('button', {name:'復元 / Restore', exact:true}).click();
     await page.waitForFunction(() => App.project && App.project.displayName === 'Offline smoke fixture' && App.panels.size > 0);
-    // Import populates visible layers and auto-Otsu asynchronously. Finish
-    // those unrelated initial derivations before checking export invariance.
-    await page.waitForFunction(() => App.project.sections.every(section => App._otsuIsFresh(section) && Array.isArray(section.meta.visibleLayers)));
+    // Initial visibility is restored without writing project metadata. Finish
+    // the selected image loads and auto-Otsu before checking export invariance.
+    await page.waitForFunction(() => App.project.sections.every(section => {
+      const panel=App.panels.get(section.id);
+      return App._otsuIsFresh(section)&&panel?._initialStatePrepared&&panel.requestedLayerKeys().every(key=>
+        /^MSI_/i.test(key)?panel.isMsiLayerReady(key):panel.isImageLayerReady(key));
+    }));
     if (process.env.PPT_REPORT_CALIBRATION_ONLY === '1') {
       await checkManualPixelCalibration(page);
       assert.deepEqual(external,[],'Manual calibration needs no external connection');

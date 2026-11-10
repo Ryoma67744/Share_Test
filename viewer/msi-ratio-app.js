@@ -441,6 +441,9 @@
             const group=ranges[scope]||(ranges[scope]={});
             if(edge==='reset')delete group[id];
             else{
+                // Disabling a focused, not-yet-ready toolbar input can emit a
+                // final change with ''. An empty field must not become zero.
+                if((typeof value!=='number'&&typeof value!=='string')||(typeof value==='string'&&!value.trim()))return false;
                 const number=Number(value);if(!Number.isFinite(number))return false;
                 const window={...(group[id]||{})};window[edge==='min'?'min':'max']=number;
                 if(Number.isFinite(window.min)&&Number.isFinite(window.max)&&window.min>=window.max){

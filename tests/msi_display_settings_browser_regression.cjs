@@ -193,7 +193,11 @@ async function main() {
     await page.locator('#hidden-import-input').setInputFiles({name:'old-noisy-msi.zip',mimeType:'application/zip',
       buffer:await oldArchive.generateAsync({type:'nodebuffer'})});
     await page.getByRole('button',{name:'復元 / Restore',exact:true}).click();await prepare(page);
-    await page.waitForFunction(()=>App.project.sections.every(section=>App._otsuIsFresh(section)&&Array.isArray(section.meta.visibleLayers)));
+    await page.waitForFunction(()=>App.project.sections.every(section=>{
+      const panel=App.panels.get(section.id);
+      return App._otsuIsFresh(section)&&panel?._initialStatePrepared&&panel.requestedLayerKeys().every(key=>
+        /^MSI_/i.test(key)?panel.isMsiLayerReady(key):panel.isImageLayerReady(key));
+    }));
     const before=await sourceSnapshot(page),oldId=await page.evaluate(()=>App.project.id);
     const initial=await page.evaluate(async()=>({settings:App.getMsiDisplaySettings(),meta:App.project.meta,
       savedMeta:(await ProjectStorage.getProject(App.project.id)).meta}));

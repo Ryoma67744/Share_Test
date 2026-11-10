@@ -9,7 +9,7 @@ const { createManifest } = require('../offline/make-manifest.cjs');
 const { verifyPackage } = require('../offline/server.cjs');
 const JSZip = require('../vendor/jszip.min.js');
 const root = path.resolve(__dirname, '..');
-const publicDocs = ['docs/EXP_EDITOR.md', 'docs/LOCAL_STORAGE_UPGRADE.md', 'docs/ARCHIVE_COMPATIBILITY.md', 'docs/ARCHIVE_COMPATIBILITY.en.md'];
+const publicDocs = ['docs/EXP_EDITOR.md', 'docs/LOCAL_STORAGE_UPGRADE.md', 'docs/ARCHIVE_COMPATIBILITY.md', 'docs/ARCHIVE_COMPATIBILITY.en.md', 'docs/VIEWER_LOADING.md'];
 const help = JSON.parse(fs.readFileSync(path.join(root,'docs/help/manifest.json'),'utf8'));
 publicDocs.push('docs/help/manifest.json','docs/help/capture-manifest.json','docs/help/images/brain-colorbar.png',
   ...help.screenshots.flatMap(shot=>[shot.path,...(shot.provenance?[shot.provenance]:[])]));

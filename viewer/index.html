@@ -12,6 +12,10 @@
 <script src="../offline/offline.js"></script>
 <script src="msi-smoothing.js"></script>
 <script src="msi-roi-range.js"></script>
+<script src="section-load-scheduler.js"></script>
+<script src="tic-core.js"></script>
+<script src="tic-cache.js"></script>
+<script src="tic-runtime.js"></script>
 <script src="msi-ratio-core.js"></script>
 <script src="msi-ratio-model.js"></script>
 <script src="msi-ratio-app.js"></script>
@@ -6348,9 +6352,10 @@ async function _parseWorkerOnMessage(e) {
         const p = msg.payload || {};
         let buf = null;
         let result;
-        if (msg.op === 'xlsx-raster' || msg.op === 'txt-raster' || msg.op === 'raw-raster') {
+        const rasterOp = msg.op === 'tic-step' || msg.op === 'tic-probe' ? p.rasterOp : msg.op;
+        if (rasterOp === 'xlsx-raster' || rasterOp === 'txt-raster' || rasterOp === 'raw-raster') {
             let rows;
-            if (msg.op === 'xlsx-raster') {
+            if (rasterOp === 'xlsx-raster') {
                 // Keep decoded sheets inside the long-lived worker. Blob
                 // structured-cloning is cheap; arrayBuffer/XLSX decoding is
                 // skipped entirely on a cache hit. The bounded LRU prevents
@@ -6371,7 +6376,7 @@ async function _parseWorkerOnMessage(e) {
                     cache.set(cacheKey, parsed);
                 }
                 rows = rowsFromParsedXlsx(parsed, p.def);
-            } else if (msg.op === 'raw-raster') {
+            } else if (rasterOp === 'raw-raster') {
                 // One .raw carries every MRM channel, so what is cached is the
                 // decoded FUNCTION (coordinates + all channel columns) keyed on
                 // blobId + function number only — `channel` is excluded for the
@@ -6399,11 +6404,34 @@ async function _parseWorkerOnMessage(e) {
                 rows = parseTxtToRows(buf, p.def);
             }
             const px = computeRasterPixels(rows, p.def && p.def.range, p.def && p.def.bakeMode);
+            if (msg.op === 'tic-probe') {
+                result = {width:px.width,height:px.height};
+            } else if (msg.op === 'tic-step') {
+                const state = self.__ticJobs && self.__ticJobs.get(p.jobId);
+                if (!state) throw new Error('TIC accumulator is no longer active');
+                result = {contributed:TicCore.accumulate(state,px)};
+            } else {
             const dataUrl = await _encodePixelsToDataUrl(px.width, px.height, px.pixels);
             // values は Float32Array。転送リストに載せてコピーを避ける (下の
             // postMessage 参照)。構造化複製だと 10 万画素級で無駄なコピーが乗る。
             result = { dataUrl: dataUrl, values: px.values, width: px.width, height: px.height,
                        rawRange: px.rawRange, rawMean: px.rawMean, rawTrueMax: px.rawTrueMax, rawDispMax: px.rawDispMax, diag: px.diag, sourceStats:px.sourceStats, sourceGeometry:px.sourceGeometry };
+            }
+        } else if (msg.op === 'tic-begin') {
+            const jobs = self.__ticJobs || (self.__ticJobs = new Map());
+            // The caller serializes accumulators; bound abandoned jobs after a timeout.
+            while (jobs.size >= 2) jobs.delete(jobs.keys().next().value);
+            jobs.set(p.jobId,TicCore.create(p.width,p.height));
+            result = {started:true};
+        } else if (msg.op === 'tic-finish') {
+            const state = self.__ticJobs && self.__ticJobs.get(p.jobId);
+            if (!state) throw new Error('TIC accumulator is no longer active');
+            const raster = TicCore.finish(state);
+            self.__ticJobs.delete(p.jobId);
+            result = raster ? {dataUrl:await _encodePixelsToDataUrl(raster.width,raster.height,raster.pixels),width:raster.width,height:raster.height} : null;
+        } else if (msg.op === 'tic-dispose') {
+            if (self.__ticJobs) self.__ticJobs.delete(p.jobId);
+            result = {disposed:true};
         } else if (msg.op === 'tiff-decode') {
             buf = p.blob ? await p.blob.arrayBuffer() : null;
             result = { dataUrl: await decodeTiffArrayBufferToDataUrl(buf) };
@@ -6466,6 +6494,7 @@ function _buildParseWorkerSource() {
         'importScripts(' + PARSE_WORKER_LIBS.map(u => JSON.stringify(u)).join(', ') + ');',
         'const MSI_ROBUST_PERCENTILE = ' + MSI_ROBUST_PERCENTILE + ';',
         'const MSI_DEFAULT_DISPLAY_PERCENTILE = ' + MSI_DEFAULT_DISPLAY_PERCENTILE + ';',
+        'const TicCore = ' + TicCore.workerSource() + ';',
         fns.map(f => f.toString()).join('\n\n'),
         'self.onmessage = _parseWorkerOnMessage;',
     ].join('\n\n');
@@ -7144,6 +7173,7 @@ function parquetFileState(blobId) { return _pqFiles.get(blobId) || null; }
 //   (次に同じファイルを開くときは IndexedDB の pq_index から復元されるので、
 //    フッタを読み直すことにはならない。)
 function parquetReleaseAll() {
+    _pqOpenEpoch++;
     const ids = [];
     for (const st of _pqFiles.values()) if (st && st.fileId) ids.push(st.fileId);
     _pqFiles.clear();
@@ -7258,12 +7288,15 @@ async function _pqOpenViaThrowawayWorker(fileId, src) {
     }
 }
 
+let _pqOpenEpoch = 0;
 async function parquetEnsureOpen(blobId, src) {
     const cached = _pqFiles.get(blobId);
     if (cached && cached.info) return cached;
     const running = _pqOpening.get(blobId);
     if (running) return running;                 // ← 4 本目までが同じ Promise を待つ
-    const p = (async () => {
+    const epoch=_pqOpenEpoch;
+    const open = async () => {
+        if(epoch!==_pqOpenEpoch) throw new Error('Parquet load superseded');
         const fileId = 'pq_' + blobId;
         let info = null;
         // ② 保存済みの索引があれば、フッタを一切読まずに worker へ戻す。
@@ -7308,12 +7341,17 @@ async function parquetEnsureOpen(blobId, src) {
         // 供給元 (blob / url) はここに持たない。呼び出しごとに src を受け取る
         // 形にしたので、state が握ると master と共有で食い違う余地ができる。
         const st = { fileId, info, mz, geom: null };
+        if(epoch!==_pqOpenEpoch) {
+            await callParquetWorker({op:'close',fileId},[],15000).catch(()=>{});
+            throw new Error('Parquet load superseded');
+        }
         _pqFiles.set(blobId, st);
         return st;
-    })();
+    };
+    const p = typeof SectionLoadScheduler !== 'undefined' ? SectionLoadScheduler.warmSource(open) : open();
     _pqOpening.set(blobId, p);
     try { return await p; }
-    finally { _pqOpening.delete(blobId); }
+    finally { if(_pqOpening.get(blobId)===p) _pqOpening.delete(blobId); }
 }
 
 // m/z 列の範囲。仕様で列順は id, x, y, <m/z 群>, annotation に固定されている。
@@ -7664,6 +7702,14 @@ function callParquetWorker(msg, transfer, timeoutMs) {
 // =============================================================
 // SectionPanel - one tissue-section panel (canvas + thumbs + UI)
 // =============================================================
+let _ticRuntime = null;
+function getTicRuntime() {
+    if (!_ticRuntime && typeof TicRuntime !== 'undefined' && typeof TicCache !== 'undefined') {
+        _ticRuntime = TicRuntime.create({cache:TicCache.create()});
+    }
+    return _ticRuntime;
+}
+
 class SectionPanel {
     constructor(section, project) {
         this.section = section;
@@ -7852,91 +7898,66 @@ class SectionPanel {
     }
 
     // ---- Layer loading ----
-    async loadAllLayers() {
-        const initialVisibility={derivedSave:!!App._hydratingServerProjectId&&App._hydratingServerProjectId===App.project?.id};
-        // HE/IF は 1 切片に数枚しかないので従来どおり全部読む。MSI は数千になりうるので
-        // 「最初に画面へ出すもの」だけ読む。何を出すかは visibleLayers で決まるが、その
-        // 復元は従来この後だった (= 全部読んでから決めていた) ので、先に前倒しする。
-        const tasks = [];
-        for (const [key, ent] of Object.entries(this.section.images || {})) tasks.push(this.loadImageLayer(key, ent));
-        await Promise.all(tasks);
-
-        const registeredMsi = this.registeredMsiKeys();
-        const persistedVis = (this.section.meta && this.section.meta.visibleLayers) || null;
-        const wantMsi = new Set();
-        if (Array.isArray(persistedVis)) {
-            // ★ Compound モードでは描かれるのはフォーカス 1 本だけなので、
-            //   保存された可視レイヤーを全部読むのは丸損。行をクリックするたび
-            //   visibleLayers が増える仕様と組み合わさると、1390 本ぶんの列読みを
-            //   開くたびに直列で走らせることになっていた。
-            //   Free モードでは従来どおり全部復元する (実際に重ねて描くため)。
-            const registered = new Set(registeredMsi);
-            const compound = (typeof App !== 'undefined' && App && App.viewMode === 'compound');
-            for (const k of persistedVis) {
-                if (!/^MSI_/i.test(k) || !registered.has(k)) continue;
-                if (compound && App.focusCompoundKey && k !== App.focusCompoundKey) continue;
-                wantMsi.add(k);
-            }
-        }
-        // 既定 (初回) は先頭 1 本だけ。従来の「先頭 MSI を表示」と同じ絵になる。
-        if (!wantMsi.size && registeredMsi.length) wantMsi.add(registeredMsi[0]);
-        // Compound モードのフォーカスがこの切片にあるなら、それも先に要る。
-        if (typeof App !== 'undefined' && App && App.focusCompoundKey
-            && registeredMsi.includes(App.focusCompoundKey)) wantMsi.add(App.focusCompoundKey);
-        for (const k of wantMsi) await this.ensureMsiLayerLoaded(k);
-
-        await this.analyzeAndInitSettings();
-        await this.ensureTicBackdrop();
-        this.renderEmptyOverlay();
-        this.rebuildLayerBar();
-        this.populateThumbnails();
-        this.setupCanvasSize();
-        // Restore the user's last visibility choice for this section, then
-        // fall back to a "HE + first MSI" default so the histology backdrop is
-        // never lost across reloads / first-time loads of a project.
-        if (Array.isArray(persistedVis)) {
-            for (const k of persistedVis) {
-                // 判定を imageSources (読み込み済み) から在庫へ移す。未読込でも
-                // 登録されていれば表示対象にしてよい — 描画側が必要になった時点で読む。
-                if (this.imageSources[k] || registeredMsi.includes(k)) this.visibleLayers.add(k);
-            }
-        }
-        if (this.visibleLayers.size === 0) {
-            // Default: first MSI + every registered HE/IF. HE is always
-            // wanted as a backdrop alongside the MSI heatmap.
-            const msiKeys = registeredMsi;
-            const heKeys  = Object.keys(this.section.images || {})
-                                  .filter(k => /HE_STAIN|IF_STAIN/i.test(k));
-            if (msiKeys.length) this.toggleLayer(msiKeys[0], true,initialVisibility);
-            for (const k of heKeys) this.toggleLayer(k, true,initialVisibility);
-            // Auto-enable the synthetic TIC backdrop on first load. It only
-            // exists in imageSources (ensureTicBackdrop never touches
-            // section.images), so the heKeys filter above can't see it.
-            if (this.imageSources && this.imageSources['HE_STAIN_TIC']) {
-                this.toggleLayer('HE_STAIN_TIC', true,initialVisibility);
-            }
-            if (!msiKeys.length && !heKeys.length) {
-                const first = this.firstLayerKey();
-                if (first) this.toggleLayer(first, true,initialVisibility);
-            }
+    prepareInitialState() {
+        if (this._initialStatePrepared) return;
+        this._initialStatePrepared = true;
+        const msi = this.registeredMsiKeys(), images = Object.keys(this.section.images || {});
+        const saved = this.section.meta && this.section.meta.visibleLayers;
+        const inventory = new Set([...msi,...images,'HE_STAIN_TIC']);
+        // Initial restoration is not an edit. In particular, an asynchronously
+        // arriving backdrop must never save or turn a user-hidden layer back on.
+        if (Array.isArray(saved)) {
+            for (const key of saved) if (inventory.has(key)) this.visibleLayers.add(key);
         } else {
-            this.renderComposite();
+            if (msi.length) this.visibleLayers.add(msi[0]);
+            for (const key of images.filter(k=>/HE_STAIN|IF_STAIN/i.test(k))) this.visibleLayers.add(key);
+            if (!images.some(k=>/HE_STAIN/i.test(k)) && msi.length>1) this.visibleLayers.add('HE_STAIN_TIC');
+            if (!this.visibleLayers.size && images.length) this.visibleLayers.add(images[0]);
+        }
+        this.activeMsiKey = this.fallbackActiveMsiKey() || msi[0] || null;
+        this.rebuildLayerBar();
+        this.renderEmptyOverlay();
+        this.setupCanvasSize();
+    }
+
+    requestedLayerKeys() {
+        const keys = [...this.visibleLayers].filter(k=>k!=='HE_STAIN_TIC');
+        if (App.viewMode !== 'compound' || !App.focusCompoundKey) return keys;
+        const wanted = keys.filter(k=>!/^MSI_/i.test(k));
+        if (this.registeredMsiKeys().includes(App.focusCompoundKey)) wanted.push(App.focusCompoundKey);
+        return wanted;
+    }
+
+    async loadAllLayers(options = {}) {
+        this.prepareInitialState();
+        const epoch = this._loadEpoch || 0;
+        const current = () => !this._destroyed && epoch === (this._loadEpoch || 0)
+            && (options.all || !App.isSectionLoadWanted || App.isSectionLoadWanted(this));
+        const keys = options.all ? this.registeredLayerKeys().filter(k=>k!=='HE_STAIN_TIC') : this.requestedLayerKeys();
+        // Each image paints independently; a slow HE or another section is not
+        // a barrier for a selected MSI image (or vice versa).
+        await Promise.all(keys.map(async key => {
+            const ok = await this.ensureLayerLoaded(key,{automatic:!options.all,priority:options.priority ?? 10,retry:false});
+            if (!ok || !current()) return;
+            if (!this.setupCanvasSize()) this.renderComposite();
             this.drawAllRois();
-        }
-        // Pick a default active MSI layer for the Range editor.
-        if (!this.activeMsiKey) {
-            const msiKeys = Object.keys(this.section.msiSeries || {});
-            this.activeMsiKey = this.fallbackActiveMsiKey() || msiKeys[0] || null;
-        }
-        // After this section's rasters are loaded & analysed, refresh the per-MRM
-        // absolute scale across all panels (a larger max here re-dims earlier
-        // sections of the same molecule, and a smaller set re-brightens them).
-        // Debounced: batch loads coalesce into one trailing recompute.
-        App.scheduleMsiAbsScale();
-        this.refreshRangeEditor();
+            this.renderEmptyOverlay();
+            this.refreshRangeEditor();
+            if (App.scheduleMsiAbsScale) App.scheduleMsiAbsScale();
+        }));
+        if (!current()) return false;
+        this.populateThumbnails();
         this.refreshActiveOutline();
-        this.applyViewerTransform();
-        this._wireViewerHostInteractions();
+        if (this.visibleLayers.has('HE_STAIN_TIC')) {
+            const tic = this.ensureTicBackdrop({explicit:!!options.all});
+            if (options.all) await tic;
+            else Promise.resolve(tic).catch(e=>console.warn('TIC backdrop failed',e));
+        }
+        return true;
+    }
+
+    ensureLayerLoaded(key, options = {}) {
+        return /^MSI_/i.test(key) ? this.ensureMsiLayerLoaded(key,options) : this.ensureImageLayerLoaded(key,options);
     }
 
     firstLayerKey() {
@@ -7963,6 +7984,8 @@ class SectionPanel {
         for (const k of Object.keys(this.section.images || {})) push(k);
         for (const k of Object.keys(this.imageSources)) if (!/^MSI_/i.test(k)) push(k);
         for (const k of this.registeredMsiKeys()) push(k);
+        if (!Object.keys(this.section.images || {}).some(k=>/HE_STAIN/i.test(k) && k!=='HE_STAIN_TIC')
+            && this.registeredMsiKeys().length>1) push('HE_STAIN_TIC');
         return out;
     }
     // ラスタの画素寸法。読み込み済みなら実物から、未読込なら ent の記録から返す。
@@ -8004,7 +8027,10 @@ class SectionPanel {
         if (this._destroyed || !key || !/^MSI_/i.test(key)) return Promise.resolve(false);
         const identity = this._msiLoadIdentity(key);
         const inflight = this._msiLoadInFlight.get(key);
-        if (inflight && inflight.identity === identity) return inflight;
+        if (inflight && inflight.identity === identity) {
+            if (App.promoteLayerLoad) App.promoteLayerLoad(this,'msi:'+key+':'+identity,options.priority,!!options.automatic);
+            return inflight;
+        }
         if (this.isMsiLayerReady(key)) { this._touchMsiLru(key); return Promise.resolve(true); }
         const ent = displayMsiEntry(this.section, key);
         if (!ent || (!ent.blobId && !ent.sourceUrl)) return Promise.resolve(false);
@@ -8015,7 +8041,7 @@ class SectionPanel {
         // synchronously. Only this source revision may commit or clear its state.
         const current = () => !this._destroyed && this.section.msiSeries[key] === ent
             && identity === this._msiLoadIdentity(key);
-        const p = Promise.resolve().then(async () => {
+        const run = async () => {
             try {
                 if (!current()) return false;
                 await this.loadMsiLayer(key, ent);
@@ -8042,9 +8068,13 @@ class SectionPanel {
             } finally {
                 if (this._msiLoadInFlight.get(key) === p) this._msiLoadInFlight.delete(key);
             }
-        });
+        };
+        const p = App.requestLayerLoad
+            ? App.requestLayerLoad(this,'msi:'+key+':'+identity,'msi',run,options)
+            : Promise.resolve().then(run);
         p.identity = identity;
         this._msiLoadInFlight.set(key, p);
+        p.then(()=>{if(this._msiLoadInFlight.get(key)===p)this._msiLoadInFlight.delete(key);},()=>{if(this._msiLoadInFlight.get(key)===p)this._msiLoadInFlight.delete(key);});
         return p;
     }
 
@@ -8054,10 +8084,17 @@ class SectionPanel {
         const paint = () => {
             if (!this._thumbDirty.has(key)) return;
             this._thumbDirty.delete(key);
-            this.ensureMsiLayerLoaded(key, { retry:false }).then((ok) => {
+            this.ensureLayerLoaded(key, { retry:false, automatic:true, priority:20 }).then((ok) => {
                 if (this._destroyed) return;
                 if (!ok) { this._thumbDirty.add(key); return; }
-                try { this.renderMsiThumbnail(key); } catch (e) {}
+                try {
+                    if (/^MSI_/i.test(key)) this.renderMsiThumbnail(key);
+                    else {
+                        const cell=this.dom.thumbCells && this.dom.thumbCells.get(key);
+                        const img=cell && cell.querySelector('img');
+                        if(img && this.imageDataUrls[key]) img.src=this.imageDataUrls[key];
+                    }
+                } catch (e) {}
             });
         };
         if (typeof IntersectionObserver !== 'function') { paint(); return; }
@@ -8086,7 +8123,11 @@ class SectionPanel {
     // パネルを捨てるときに焼き済みキャンバスも明示的に手放す。GC 任せでも
     // 回収はされるが、退避を確定的にしておく。
     releaseCaches() {
+        this.cancelTicBackdrop();
         this._loadEpoch = (this._loadEpoch || 0) + 1;
+        if (this._imageLoadInFlight) this._imageLoadInFlight.clear();
+        if (this._imageLoadErrors) this._imageLoadErrors.clear();
+        if (this._imageLoadIdentityByKey) this._imageLoadIdentityByKey.clear();
         if (this._msiLoadInFlight) this._msiLoadInFlight.clear();
         if (this._msiLoadErrors) this._msiLoadErrors.clear();
         if (this._msiDrawWaiters) this._msiDrawWaiters.clear();
@@ -8120,21 +8161,24 @@ class SectionPanel {
     // 引っかからない。同じ描画サイクルで何度呼ばれても再描画は 1 回にまとめる。
     _ensureDrawableLoaded(keys) {
         if (this._destroyed) return;
-        this._drawableMsiKeys = new Set((keys || []).filter(k => /^MSI_/i.test(k)));
+        if (App.isSectionLoadWanted && !App.isSectionLoadWanted(this)) return;
+        this._drawableMsiKeys = new Set((keys || []).filter(k => k !== 'HE_STAIN_TIC'));
         const waiters = this._msiDrawWaiters || (this._msiDrawWaiters = new Map());
         for (const key of this._drawableMsiKeys) {
-            if (this.isMsiLayerReady(key)) continue;
-            const identity = this._msiLoadIdentity(key);
-            const ent = displayMsiEntry(this.section, key);
+            const msi=/^MSI_/i.test(key);
+            if (msi ? this.isMsiLayerReady(key) : this.isImageLayerReady(key)) continue;
+            const identity = msi ? this._msiLoadIdentity(key) : this._imageLoadIdentity(key);
+            const ent = msi ? displayMsiEntry(this.section, key) : (this.section.images || {})[key];
             if (!ent || (ent.kind !== 'ratio' && !ent.blobId && !ent.sourceUrl)) continue;
-            if (this._msiLoadErrors?.get(key)?.identity === identity) continue;
+            if ((msi?this._msiLoadErrors:this._imageLoadErrors)?.get(key)?.identity === identity) continue;
             if (waiters.get(key)?.identity === identity) continue;
-            const promise = this.ensureMsiLayerLoaded(key, { retry:false });
+            const promise = this.ensureLayerLoaded(key, { retry:false, automatic:true });
             const waiter = { identity, promise }; waiters.set(key, waiter);
             promise.then(ok => {
                 if (waiters.get(key) !== waiter) return;
                 waiters.delete(key);
-                if (this._destroyed || identity !== this._msiLoadIdentity(key)
+                if (this._destroyed || identity !== (msi?this._msiLoadIdentity(key):this._imageLoadIdentity(key))
+                    || (App.isSectionLoadWanted && !App.isSectionLoadWanted(this))
                     || !this._drawableMsiKeys.has(key)) return;
                 if (ok) {
                     // Recompute the current reference, never the old request's
@@ -8227,14 +8271,70 @@ class SectionPanel {
         }
     }
 
-    async loadImageLayer(key, ent) {
-        if (!ent || !ent.blobId) return;
-        // blob が消えていても publish 済みなら Storage から取り直す (ensureLocalBlob)。
-        const rec = await ensureLocalBlob(ent, App.project);
-        if (!rec || !rec.blob) return;
+    _imageLoadIdentity(key) {
+        const ent=(this.section.images || {})[key] || {};
+        return JSON.stringify([this._loadEpoch || 0,ent.blobId,ent.storagePath,ent.sourceUrl,ent.mime,ent.sourceRevision]);
+    }
+
+    isImageLayerReady(key) {
+        const img=this.imageSources[key];
+        return !!(img && img.complete && img.naturalWidth>0 && this.imageSettings[key]
+            && this._imageLoadIdentityByKey?.get(key)===this._imageLoadIdentity(key));
+    }
+
+    ensureImageLayerLoaded(key, options = {}) {
+        if(this._destroyed || key==='HE_STAIN_TIC') return Promise.resolve(false);
+        const ent=(this.section.images || {})[key];
+        if(!ent || !ent.blobId) return Promise.resolve(false);
+        const identity=this._imageLoadIdentity(key), token='image:'+key+':'+identity;
+        const inflight=this._imageLoadInFlight || (this._imageLoadInFlight=new Map());
+        const errors=this._imageLoadErrors || (this._imageLoadErrors=new Map());
+        const old=inflight.get(key);
+        if(old && old.identity===identity) {
+            if(App.promoteLayerLoad) App.promoteLayerLoad(this,token,options.priority,!!options.automatic);
+            return old;
+        }
+        if(this.isImageLayerReady(key)) return Promise.resolve(true);
+        if(options.retry===false && errors.get(key)?.identity===identity) return Promise.resolve(false);
+        errors.delete(key);
+        const current=()=>!this._destroyed && this.section.images[key]===ent && identity===this._imageLoadIdentity(key);
+        const run=async()=>{
+            try {
+                if(!current() || !await this.loadImageLayer(key,ent,current) || !current()) return false;
+                this._initLayerSettings(key);
+                const saved=this.section.meta?.layerDisplay?.[key];
+                if(saved) for(const field of ['vmin','vmax']) if(Number.isFinite(saved[field])) this.imageSettings[key][field]=saved[field];
+                (this._imageLoadIdentityByKey || (this._imageLoadIdentityByKey=new Map())).set(key,identity);
+                return true;
+            } catch(error) {
+                if(current()) {
+                    errors.set(key,{identity,error});
+                    delete this.imageSources[key];delete this.imageDataUrls[key];
+                    console.warn('HE/IF image load failed',key,error);
+                    if(typeof showToast==='function') showToast('画像を読み込めませんでした。レイヤーを選び直すと再試行できます。',6000);
+                }
+                return false;
+            } finally { if(inflight.get(key)===job) inflight.delete(key); }
+        };
+        const job=App.requestLayerLoad ? App.requestLayerLoad(this,token,'image',run,options) : Promise.resolve().then(run);
+        job.identity=identity;inflight.set(key,job);
+        // Queued cancellation never enters run's finally.
+        job.then(()=>{if(inflight.get(key)===job)inflight.delete(key);},()=>{if(inflight.get(key)===job)inflight.delete(key);});
+        return job;
+    }
+
+    async loadImageLayer(key, ent, guard) {
+        if (!ent || !ent.blobId) return false;
+        const identity=this._imageLoadIdentity(key), project=this.project;
+        const current=guard || (()=>!this._destroyed && this.section.images[key]===ent && identity===this._imageLoadIdentity(key));
+        const rec = await ensureLocalBlob(ent, project);
+        if (!current()) return false;
+        if (!rec || !rec.blob) throw new Error('画像の原本が見つかりません ('+key+')');
         const dataUrl = await decodeImageBlobToDataUrl(rec.blob, rec.mime);
+        if (!current()) return false;
+        if (!await this.attachImage(key, dataUrl,current) || !current()) return false;
         this.imageDataUrls[key] = dataUrl;
-        await this.attachImage(key, dataUrl);
+        return true;
     }
 
     async loadMsiLayer(key, ent) {
@@ -8409,8 +8509,11 @@ class SectionPanel {
         const isMsi = /^MSI_/i.test(key);
         const opacity = isMsi ? this._msiOpacityValue(key) : (Number.isFinite(previous.opacity) ? previous.opacity : 1);
         const persistedDisp = (this.section.meta && this.section.meta.layerDisplay && this.section.meta.layerDisplay[key]) || null;
-        const persistedGray = persistedDisp && typeof persistedDisp.grayscale === 'boolean'
-            ? persistedDisp.grayscale : !!previous.grayscale;
+        const grayIntent = /HE_STAIN|IF_STAIN/i.test(key) && !/_TIC$/.test(key)
+            ? this._heGrayscaleIntent?.[key] : undefined;
+        const persistedGray = typeof grayIntent === 'boolean' ? grayIntent
+            : persistedDisp && typeof persistedDisp.grayscale === 'boolean'
+                ? persistedDisp.grayscale : !!previous.grayscale;
         // applyOpacity defaults: HE/IF off (always opaque), everything else on.
         // Persisted boolean wins regardless of layer type.
         const isHeLikeKey = /HE_STAIN|IF_STAIN/i.test(key);
@@ -8481,67 +8584,146 @@ class SectionPanel {
     // gets an anatomical reference when the section has no HE backing it.
     // Skipped when HE is registered or fewer than 2 MSI series exist
     // (1-series TIC = the series itself, no point in duplicating).
-    async ensureTicBackdrop() {
-        try {
-            const TIC_KEY = 'HE_STAIN_TIC';
-            // Skip when this panel already has a real HE layer (HE_STAIN_TIC
-            // is excluded so a previously injected backdrop doesn't lock the
-            // panel out of regeneration).
-            const hasHE = Object.keys(this.section.images || {})
-                .some(k => /HE_STAIN/i.test(k) && k !== TIC_KEY);
-            if (hasHE) return;
-            const msiKeys = this.registeredMsiKeys();
-            if (msiKeys.length < 2) return;
-            if (this.imageSources && this.imageSources[TIC_KEY]) return;   // already injected
-            // 合成 TIC は全化合物の合計なので、遅延読み込みと相性が悪い唯一の処理。
-            // 1 枚ずつ読んで足す (_generateSyntheticTic 側) のでメモリは増えないが、
-            // 読み込み回数は化合物数ぶんかかる。
-            //
-            // ノンターゲット (数千化合物) では自動生成しない — 開くたびに数分
-            // かかってしまうため。ツールバーの「TIC を作る」から明示的に作り、
-            // 結果は切片へ保存して次回以降は再計算しない (下の savedTic)。
-            const saved = this.section.meta && this.section.meta.ticDataUrl;
-            if (!saved && this.isNonTargetSection()) {
-                console.info('[tic] ノンターゲットでは合成 TIC を自動生成しません (「TIC を作る」から実行してください)');
-                return;
-            }
-            const ticImg = saved ? await this._imageFromDataUrl(saved)
-                                 : await this._generateSyntheticTic(msiKeys);
-            if (!ticImg) return;
-            this.imageSources = this.imageSources || {};
-            this.imageSettings = this.imageSettings || {};
-            this.imageSources[TIC_KEY] = ticImg;
-            // populateThumbnails reads imageDataUrls[key] for the <img src>;
-            // without this the thumbnail cell renders an empty (black) box
-            // even though the main canvas and the chip work fine. ticImg.src
-            // is the same `data:image/png;base64,...` we just generated so
-            // there's no extra encode.
-            this.imageDataUrls = this.imageDataUrls || {};
-            this.imageDataUrls[TIC_KEY] = ticImg.src;
-            this.imageSettings[TIC_KEY] = {
-                opacity: 1.0,
-                vmin: 0, vmax: 255,
-                actualMin: 0, actualMax: 255,
-                grayscale: false,
-                applyOpacity: false,
-                synthetic: true,
-            };
-            // TIC_KEY is deliberately NOT written to section.images — that
-            // dict is part of the saved project and a {virtual:true} stub
-            // would persist into IDB and the published payload. The render
-            // path keys on imageSources / imageSettings instead, so the
-            // backdrop works without polluting section state.
-            //
-            // Visibility is also NOT set here. The "no persistedVis → defaults"
-            // branch in loadAllLayers explicitly toggles TIC on for fresh
-            // sections (so first-time loads still get the backdrop), and
-            // persistedVis acts as the source of truth on subsequent loads —
-            // so toggling the TIC chip off survives reload instead of being
-            // clobbered by an unconditional add here.
-        } catch (e) {
-            console.warn('TIC backdrop injection failed', e);
+    _ticInputs(freeze = true) {
+        if (typeof TicCore === 'undefined') return null;
+        const project=this.project || App.project, section=this.section;
+        const entries=this.registeredMsiKeys().filter(key=>!isRatioDisplayKey(key))
+            .map(key=>({key,entry:displayMsiEntry(section,key)})).filter(x=>x.entry);
+        let reference=null;
+        for(const {key} of entries){reference=this.msiRasterSize(key);if(reference)break;}
+        const shared=!!(project?.__share || App.shareMode);
+        const scope={project:shared?(App.shareMode?.slug || project?.id):project?.id,
+            section:section.meta?.client_id || section.client_id || section.id,shared};
+        const versions={parser:'msi-source-rows-v1',grid:'msi-proportional-v1',robust:MSI_ROBUST_PERCENTILE};
+        const sourceSignature=TicCore.describe(scope,entries,null,versions).signature;
+        if(!reference && this._ticReference?.sourceSignature===sourceSignature)reference=this._ticReference.reference;
+        const identity=TicCore.describe(scope,entries,reference,versions);
+        return {...identity,sourceSignature,reference,entries:freeze?entries.map(({key,entry})=>({key,entry:JSON.parse(JSON.stringify(entry))})):entries};
+    }
+
+    cancelTicBackdrop() {
+        if (typeof _ticRuntime !== 'undefined' && _ticRuntime) _ticRuntime.cancel(this);
+        this._ticGeneration=(this._ticGeneration||0)+1;
+    }
+
+    invalidateTicBackdrop(restart = true) {
+        this.cancelTicBackdrop();
+        this._ticReference=null;
+        // A saved/imported TIC is authored project data, not this derived cache.
+        if(this.section.meta?.ticDataUrl)return;
+        const key='HE_STAIN_TIC';
+        delete this.imageSources[key];delete this.imageDataUrls[key];delete this.imageSettings[key];
+        this._ticSignature=null;
+        if(restart){
+            this.renderComposite();
+            if(this.visibleLayers.has(key)&&!this._destroyed)Promise.resolve(this.ensureTicBackdrop()).catch(()=>{});
         }
     }
+
+    async ensureTicBackdrop(options = {}) {
+        const key='HE_STAIN_TIC', project=this.project || App.project;
+        const epoch=this._loadEpoch || 0, generation=this._ticGeneration || 0;
+        const current=()=>!this._destroyed && (this._loadEpoch||0)===epoch
+            && (this._ticGeneration||0)===generation && (!App.project || App.project===project)
+            && !options.signal?.aborted && (!options.current || options.current());
+        const install=async(dataUrl,signature)=>{
+            const img=await this._imageFromDataUrl(dataUrl);
+            if(!img||!current())return false;
+            if(!signature.startsWith('saved:')){
+                const active=this._ticInputs(false);
+                if(active?.signature!==signature || img.naturalWidth!==active.reference?.w || img.naturalHeight!==active.reference?.h)return false;
+            }
+            this.imageSources[key]=img;this.imageDataUrls[key]=dataUrl;
+            this.imageSettings[key]={opacity:1,vmin:0,vmax:255,actualMin:0,actualMax:255,
+                grayscale:false,applyOpacity:false,synthetic:true};
+            this._ticSignature=signature;
+            // Never write the project, change visibility, or publish a cache hit.
+            this.rebuildLayerBar();this.populateThumbnails();this.setupCanvasSize();this.renderComposite();
+            return true;
+        };
+        try {
+            if(!current() || Object.keys(this.section.images||{}).some(k=>/HE_STAIN/i.test(k)&&k!==key))return false;
+            const measured=this.registeredMsiKeys().filter(k=>!isRatioDisplayKey(k));
+            if(measured.length<(options.allowSingle?1:2))return false;
+            const saved=this.section.meta?.ticDataUrl;
+            if(saved){if(this.imageSources[key]&&this._ticSignature==='saved:'+saved)return true;return install(saved,'saved:'+saved);}
+            if(this.isNonTargetSection())return false;
+            if(!options.explicit){
+                // Large projects have thousands of signature entries. Let the
+                // requested image paint before even preparing the derived job.
+                await new Promise(resolve=>{
+                    if(typeof requestAnimationFrame==='function')requestAnimationFrame(()=>setTimeout(resolve,0));
+                    else setTimeout(resolve,0);
+                });
+                if(!current())return false;
+            }
+            let input=this._ticInputs();
+            const runtime=getTicRuntime(), useWorker=parseWorkerAvailable();
+            if(!input||!runtime)return false;
+            const source=async({entry})=>{
+                // Repair only the local original/lease. This never edits the project.
+                const rec=await ensureLocalBlob(entry,project);
+                if(!rec?.blob)throw new Error('TIC の原本がありません。必要な画像は引き続き閲覧できます。');
+                const rasterOp=entry.kind==='raw'?'raw-raster':entry.kind==='txt'||entry.kind==='txt-analyte'?'txt-raster':'xlsx-raster';
+                const cacheKey=rasterOp==='xlsx-raster'?String(entry.blobId||'')+'|'+String(entry.sheet||'')
+                    :rasterOp==='raw-raster'?String(entry.blobId||'')+'|F'+String(entry.func||1):'';
+                return {blob:rec.blob,def:entry,rasterOp,cacheKey};
+            };
+            let fallbackState=null;
+            const call=async(op,payload)=>{
+                if(useWorker)return callParseWorker(op,payload,120000);
+                // Preserve explicit export/report behavior on browsers without workers.
+                // Automatic display never runs this parsing on the main thread.
+                if(!options.explicit)throw new Error('TIC background worker is unavailable');
+                if(op==='tic-begin'){fallbackState=TicCore.create(payload.width,payload.height);return {started:true};}
+                if(op==='tic-dispose'){fallbackState=null;return {disposed:true};}
+                if(op==='tic-finish'){
+                    const raster=TicCore.finish(fallbackState);fallbackState=null;
+                    return raster?{dataUrl:await _encodePixelsToDataUrl(raster.width,raster.height,raster.pixels),width:raster.width,height:raster.height}:null;
+                }
+                const buf=await payload.blob.arrayBuffer(), def=payload.def;
+                const rows=payload.rasterOp==='raw-raster'?await parseRawToRows(buf,def)
+                    :payload.rasterOp==='txt-raster'?parseTxtToRows(buf,def):parseXlsxToRows(buf,def);
+                const raster=computeRasterPixels(rows,def.range,def.bakeMode);
+                return op==='tic-probe'?{width:raster.width,height:raster.height}:{contributed:TicCore.accumulate(fallbackState,raster)};
+            };
+            const step=async(id,run)=>{
+                if(!current())return false;
+                if(App.requestBackgroundLayer&&!options.explicit)return App.requestBackgroundLayer(this,id,run);
+                await new Promise(resolve=>setTimeout(resolve,0));
+                while(_parsePending.size||_pqInFlight){if(!current())return false;await new Promise(resolve=>setTimeout(resolve,20));}
+                return current()?run():false;
+            };
+            if(!input.reference){
+                if((!useWorker&&!options.explicit)||input.entries.some(x=>x.entry.kind==='parquet'))return false;
+                // TIC-only visibility can have no displayed MSI and no saved geometry.
+                // Probe one measured source without creating/decoding a layer image.
+                const original=input.sourceSignature;
+                const ref=await step('tic-probe:'+generation,async()=>{
+                    const payload=await source(input.entries[0]);
+                    return current()?call('tic-probe',payload):false;
+                });
+                if(!current()||!ref?.width||!ref?.height||this._ticInputs(false)?.sourceSignature!==original)return false;
+                this._ticReference={sourceSignature:original,reference:{w:ref.width,h:ref.height}};
+                input=this._ticInputs();
+            }
+            const retry=!!options.explicit&&['failed','unavailable','incomplete'].includes(this._ticJob?.state);
+            if(this.imageSources[key]&&this._ticSignature===input.signature&&!retry)return true;
+            if(this.imageSources[key]){delete this.imageSources[key];delete this.imageDataUrls[key];delete this.imageSettings[key];this.renderComposite();}
+            // Mutation hooks cancel by generation in O(1). Recheck the full input
+            // signature once at install; rebuilding it for every compound is O(N²).
+            const same=current;
+            return await runtime.ensure(this,{
+                ...input,width:input.reference.w,height:input.reference.h,signal:options.signal,current:same,retry:!!options.explicit,explicit:!!options.explicit,
+                available:()=>(useWorker||options.explicit)&&input.entries.every(x=>x.entry.kind!=='parquet'),
+                decodeCache:row=>TicCache.blobDataUrl(row.blob),encodeCache:TicCache.dataUrlBlob,
+                accept:data=>same()?install(data,input.signature):false,
+                call,step,source,
+                error:error=>console.warn('TIC background generation failed',error)
+            });
+        } catch(error){console.warn('TIC backdrop injection failed',error);return false;}
+    }
+
 
     // data URL から <img> を作る。保存済みの合成 TIC を復元するのに使う。
     _imageFromDataUrl(dataUrl) {
@@ -8591,58 +8773,10 @@ class SectionPanel {
     //   0..255 に正規化した値。値から作り直しても **最終的な 8bit の TIC は
     //   バイト単位で一致する** (tic_speed_test.js で固定)。PNG のデコードと
     //   キャンバス読み戻しがまるごと不要になる。
-    async _generateSyntheticTic(msiKeys) {
-        msiKeys = msiKeys.filter(key => !isRatioDisplayKey(key));
-        // 基準寸法。ent の記録から取れるので、まだ 1 枚も読んでいなくても決まる。
-        let ref = null;
-        for (const k of msiKeys) { ref = this.msiRasterSize(k); if (ref) break; }
-        if (!ref) return null;
-        const w = ref.w, h = ref.h;
-        const accum = new Float64Array(w * h);
-        const count = new Uint32Array(w * h);
-        let tctx = null;   // PNG フォールバック用 (値ラスタが無い層だけ)
-        let summed = 0;
-        for (const key of msiKeys) {
-            // 読めなければ黙って飛ばす (従来と同じ寛容さ)。
-            if (!this.imageSources[key]) {
-                try { await this.ensureMsiLayerLoaded(key); } catch (e) { continue; }
-            }
-            const vr = this.msiValueRasters.get(key);
-            const ent = displayMsiEntry(this.section, key);
-            const rr = ent && ent.rawRange;
-            if (vr && vr.W === w && vr.H === h && vr.values
-                && Array.isArray(rr) && Number.isFinite(rr[0]) && rr[1] > rr[0]) {
-                const lo = rr[0], span = rr[1] - rr[0];
-                for (let p = 0; p < vr.values.length; p++) {
-                    const v = vr.values[p];
-                    if (!Number.isFinite(v)) continue;
-                    accum[p] += Math.round(Math.max(0, Math.min(1, (v - lo) / span)) * 255);
-                    count[p]++;
-                }
-                summed++;
-                continue;
-            }
-            // フォールバック: 値ラスタが無い層 (寸法不一致・古いキャッシュ) は
-            // 従来どおり焼いた PNG の輝度から足す。
-            const img = this.imageSources[key];
-            if (!img || !img.complete || img.naturalWidth !== w || img.naturalHeight !== h) continue;
-            if (!tctx) {
-                const tc = document.createElement('canvas');
-                tc.width = w; tc.height = h;
-                tctx = get2dContext(tc, { willReadFrequently: true });
-            }
-            tctx.clearRect(0, 0, w, h);
-            tctx.drawImage(img, 0, 0);
-            const d = tctx.getImageData(0, 0, w, h).data;
-            for (let i = 0, p = 0; i < d.length; i += 4, p++) {
-                if (d[i+3] === 0) continue;
-                accum[p] += 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-                count[p]++;
-            }
-            summed++;
-        }
-        if (summed === 0) return null;
-        return _ticImageFromAccum(accum, count, w, h);
+    async _generateSyntheticTic(msiKeys, options = {}) {
+        // Compatibility entry point; generation no longer loads every panel raster.
+        const ok = await this.ensureTicBackdrop(options);
+        return ok ? this.imageSources.HE_STAIN_TIC || null : null;
     }
 
     // One-time per-panel warning for genuinely anomalous MSI rasters.
@@ -8958,6 +9092,7 @@ class SectionPanel {
         const alignmentManaged=Object.values((this.section.meta&&this.section.meta.alignment)||{})
             .some(r=>r&&(Object.keys(r.byFrame||{}).length||Object.keys(r.sharedByCoordinate||{}).length||Object.keys(r.byGroup||{}).length));
         const alignmentUnavailable=[];
+        let commonScaleState = 'ready';
 
         // In Compound mode the focus compound is the only MSI layer drawn,
         // regardless of per-section visibility flags. HE/IF stays under
@@ -9035,6 +9170,10 @@ class SectionPanel {
 
             const isTicBackdrop = (key === 'HE_STAIN_TIC');
             const isMsiLayer = /^MSI_/i.test(key);
+            if (isMsiLayer && App.getCommonScaleStatus) {
+                const state = App.getCommonScaleStatus(key);
+                if (state !== 'ready') { commonScaleState = state; continue; }
+            }
             // Synthetic TIC lives in MSI native space (we built it from MSI
             // rasters), so it must NOT go through the HE→MSI affine. Excluding
             // it from isHeLike steers the drawing branch to the MSI-space
@@ -9299,6 +9438,19 @@ class SectionPanel {
         ctx.globalCompositeOperation = 'source-over';
         ctx.globalAlpha = 1.0;
         if(this._showAlignmentUnavailable)this._showAlignmentUnavailable(alignmentUnavailable);
+        if (this.dom.host && this.dom.host.appendChild) {
+            if (!this.dom.commonScaleStatus && commonScaleState !== 'ready') {
+                const status = document.createElement('div');
+                status.className = 'msi-scale-status'; status.setAttribute('role', 'status');
+                status.style.bottom = '28px';
+                this.dom.host.appendChild(status); this.dom.commonScaleStatus = status;
+            }
+            if (this.dom.commonScaleStatus) {
+                this.dom.commonScaleStatus.hidden = commonScaleState === 'ready';
+                this.dom.commonScaleStatus.textContent = commonScaleState === 'failed'
+                    ? '共通スケールを取得できません。対象画像の読み込みを確認してください。' : '共通スケールを準備中…';
+            }
+        }
         this._showMsiLoadStatus();
         // Intermediate Linear amounts are already baked; CSS interpolation
         // would override their blend. Keep the historical CSS behavior at 10.
@@ -9751,6 +9903,10 @@ class SectionPanel {
     toggleLayer(key, force, opts) {
         const want = (force === undefined) ? !this.visibleLayers.has(key) : !!force;
         if (want) this.visibleLayers.add(key); else this.visibleLayers.delete(key);
+        if(key==='HE_STAIN_TIC') {
+            if(want)Promise.resolve(this.ensureTicBackdrop()).catch(e=>console.warn('TIC backdrop failed',e));
+            else if(this.cancelTicBackdrop)this.cancelTicBackdrop();
+        } else if(want && (this.section.images?.[key] || this._msiLoadErrors?.has(key))) this.ensureLayerLoaded(key,{priority:0}).then(ok=>{if(ok&&!this._destroyed){if(!this.setupCanvasSize())this.renderComposite();}});
         if (/^MSI_/i.test(key)) {
             if (want) this.activeMsiKey = key;
             else if (this.activeMsiKey === key) this.activeMsiKey = this.fallbackActiveMsiKey();
@@ -9789,6 +9945,9 @@ class SectionPanel {
         this.visibleLayers.clear();
         for (const h of preservedHe) this.visibleLayers.add(h);
         this.visibleLayers.add(key);
+        if(!this.visibleLayers.has('HE_STAIN_TIC') && this.cancelTicBackdrop)this.cancelTicBackdrop();
+        if(key==='HE_STAIN_TIC')Promise.resolve(this.ensureTicBackdrop()).catch(e=>console.warn('TIC backdrop failed',e));
+        else if(this.section.images?.[key])this.ensureLayerLoaded(key,{priority:0}).then(ok=>{if(ok&&!this._destroyed){if(!this.setupCanvasSize())this.renderComposite();}});
         if (/^MSI_/i.test(key)) this.activeMsiKey = key;
         this._persistVisibleLayers();
         this.rebuildLayerBar();
@@ -10086,6 +10245,7 @@ class SectionPanel {
         if (!keepBlob && ent && ent.blobId && !blobStillUsed(ent.blobId)) ProjectStorage.deleteBlob(ent.blobId).catch(() => {});
         if (this.section.images) delete this.section.images[key];
         if (this.section.msiSeries) delete this.section.msiSeries[key];
+        this.invalidateTicBackdrop(false);
         delete this.imageSources[key];
         delete this.imageSettings[key];
         delete this.imageDataUrls[key];
@@ -10118,6 +10278,7 @@ class SectionPanel {
         // This molecule may have lost its global-max holder; rescale others.
         App.recomputeMsiAbsScale();
         // Refresh source compatibility while preserving unsaved photo fields.
+        this.invalidateTicBackdrop();
         if (typeof RoiMediaApp !== 'undefined') RoiMediaApp.refresh(true);
         App.queueSave();
     }
@@ -10563,6 +10724,7 @@ class SectionPanel {
             const gs = pop.querySelector('.gs');
             gs.addEventListener('change', () => {
                 settings.grayscale = !!gs.checked;
+                if (this._heGrayscaleIntent) this._heGrayscaleIntent[key] = settings.grayscale;
                 this.section.meta = this.section.meta || {};
                 this.section.meta.layerDisplay = this.section.meta.layerDisplay || {};
                 this.section.meta.layerDisplay[key] = this.section.meta.layerDisplay[key] || {};
@@ -10839,6 +11001,7 @@ class SectionPanel {
     }
 
     renderMsiThumbnail(key) {
+        if(App.getCommonScaleStatus && App.getCommonScaleStatus(key)!=='ready')return;
         const im = this.msiThumbRefs.get(key);
         const src = this.imageSources[key];
         if (!im || !src || !src.complete || src.naturalWidth === 0) return;
@@ -10919,6 +11082,7 @@ class SectionPanel {
         await ProjectStorage.putBlob({ id: blobId, blob, mime: mime || blob.type, filename: blob.name || (key + '.tif') });
         this.section.images = this.section.images || {};
         this.section.images[key] = { blobId, mime: mime || blob.type, filename: blob.name || (key + '.tif') };
+        this.invalidateTicBackdrop(false);
         if (transformJson) {
             this.section.meta = this.section.meta || {};
             this.section.meta.world_coords = Object.assign({}, this.section.meta.world_coords || {}, transformJson);
@@ -10929,6 +11093,7 @@ class SectionPanel {
         this.populateThumbnails();
         this.renderEmptyOverlay();
         this.setupCanvasSize();
+        this.invalidateTicBackdrop();
         App.queueSave();
     }
 
@@ -10968,6 +11133,7 @@ class SectionPanel {
         delete ent.src;
         this.section.msiSeries = this.section.msiSeries || {};
         this.section.msiSeries[key] = ent;
+        this.invalidateTicBackdrop(false);
         _bumpMethodSeries();   // 行が 1 つ増える
         if (opts.sourceFileId) {
             this.section.msiFiles = this.section.msiFiles || {};
@@ -10996,6 +11162,7 @@ class SectionPanel {
     async finishBulkAdd(lastKey) {
         await this.analyzeAndInitSettings();
         App.recomputeMsiAbsScale();
+        this.invalidateTicBackdrop();
         try { Toolbar.refreshOutlierClip(); } catch (e) {}
         if (lastKey) this.toggleLayer(lastKey, true);
         this.populateThumbnails();
@@ -19976,6 +20143,7 @@ const SharePreview = {
         this._onKeyDownBound = null;
         this.overlay.remove();
         this.overlay = null;
+        if(App._scheduleSectionLoadDemand)App._scheduleSectionLoadDemand();
     },
 
     // Snapshot every panel's MSI layer opacity so we can restore it on close.
@@ -20044,13 +20212,14 @@ const SharePreview = {
     // to IndexedDB.
     _forceHeBackdrop() {
         if (!App || !App.panels) return 0;
+        const project=App.project,overlay=this.overlay;
         let touched = 0;
-        for (const panel of App.panels.values()) {
+        for (const [id,panel] of App.panels) {
+            if(project && App.sectionVisibility && !App.sectionVisibility().ensure().has(String(id)))continue;
             const images = (panel.section && panel.section.images) || {};
             const heKeys = Object.keys(images).filter(k => /HE_STAIN|IF_STAIN/i.test(k));
             for (const k of heKeys) {
-                if (panel.imageSources && panel.imageSources[k]
-                    && !panel.visibleLayers.has(k)) {
+                if (!panel.visibleLayers.has(k)) {
                     // persist:false が要る。プレビューを開いている間だけの強制表示
                     // なのに、toggleLayer は section.meta.visibleLayers を書いて
                     // App.queueSave() まで呼ぶ。共有プロジェクトは _doSave が
@@ -20061,6 +20230,11 @@ const SharePreview = {
                     // ローカルにも共有先にも表示状態で残る」ことになる。
                     try { panel.toggleLayer(k, true, { persist: false }); touched++; } catch (e) {}
                 }
+                if(panel.ensureImageLayerLoaded)panel.ensureImageLayerLoaded(k,{priority:0}).then(ok=>{
+                    if(!ok || !this.isOpen() || this.overlay!==overlay || App.project!==project || panel._destroyed)return;
+                    if(!panel.setupCanvasSize())panel.renderComposite();
+                    this._rebakeCellImages(project,App.focusCompoundKey);
+                }).catch(e=>console.warn('Preview HE load failed',e));
             }
         }
         if (!touched) {
@@ -20079,7 +20253,8 @@ const SharePreview = {
             if (!panel) continue;
             panel.visibleLayers.clear();
             for (const k of entry.live) {
-                if (panel.imageSources && panel.imageSources[k]) panel.visibleLayers.add(k);
+                // A chosen layer remains chosen even when its pixels are still pending.
+                panel.visibleLayers.add(k);
             }
             if (panel.section) {
                 panel.section.meta = panel.section.meta || {};
@@ -20106,15 +20281,16 @@ const SharePreview = {
         if (!App || !App.panels) { this._grayscaleSnapshot = snap; return; }
         for (const [pid, panel] of App.panels.entries()) {
             const byKey = {};
-            const settings = panel && panel.imageSettings;
-            if (settings) {
-                for (const key of Object.keys(settings)) {
-                    if (!/HE_STAIN|IF_STAIN/i.test(key)) continue;
-                    if (/_TIC$/.test(key)) continue;  // skip synthetic TIC
-                    byKey[key] = !!settings[key].grayscale;
-                }
+            const settings = panel.imageSettings || {};
+            const intents = panel._heGrayscaleIntent;
+            const keys = new Set([...Object.keys(panel.section?.images || {}), ...Object.keys(settings)]);
+            for (const key of keys) {
+                if (!/HE_STAIN|IF_STAIN/i.test(key) || /_TIC$/.test(key)) continue;
+                const saved = panel.section?.meta?.layerDisplay?.[key];
+                byKey[key] = settings[key] ? !!settings[key].grayscale
+                    : typeof intents?.[key] === 'boolean' ? intents[key] : !!saved?.grayscale;
             }
-            snap.push({ pid, byKey });
+            snap.push({ pid, byKey, intents: intents ? {...intents} : null });
         }
         this._grayscaleSnapshot = snap;
     },
@@ -20128,11 +20304,13 @@ const SharePreview = {
         for (const panel of App.panels.values()) {
             const settings = panel && panel.imageSettings;
             if (!settings) continue;
+            const intents = panel._heGrayscaleIntent || (panel._heGrayscaleIntent = {});
             let dirty = false;
-            for (const key of Object.keys(settings)) {
+            for (const key of new Set([...Object.keys(panel.section?.images || {}), ...Object.keys(settings)])) {
                 if (!/HE_STAIN|IF_STAIN/i.test(key)) continue;
                 if (/_TIC$/.test(key)) continue;
-                if (settings[key].grayscale !== want) {
+                intents[key] = want;
+                if (settings[key] && settings[key].grayscale !== want) {
                     settings[key].grayscale = want;
                     dirty = true;
                 }
@@ -20151,6 +20329,8 @@ const SharePreview = {
         for (const entry of this._grayscaleSnapshot) {
             const panel = App.panels.get(entry.pid);
             if (!panel || !panel.imageSettings) continue;
+            if (entry.intents) panel._heGrayscaleIntent = {...entry.intents};
+            else delete panel._heGrayscaleIntent;
             for (const [key, gray] of Object.entries(entry.byKey)) {
                 if (panel.imageSettings[key]) panel.imageSettings[key].grayscale = !!gray;
             }
@@ -20167,119 +20347,40 @@ const SharePreview = {
     // satisfied because the TIC goes through the identical compositing
     // path (translate → rotate(-90) → scale → drawImage with
     // ctx.globalAlpha = settings.opacity, source-over).
-    _generateTicForPanel(panel) {
-        return new Promise((resolve) => {
-            try {
-                const msiKeys = Object.keys(panel.section.msiSeries || {})
-                    .filter(k => /^MSI_/i.test(k));
-                if (msiKeys.length === 0) { resolve(null); return; }
-                let refImg = null;
-                for (const k of msiKeys) {
-                    const im = panel.imageSources && panel.imageSources[k];
-                    if (im && im.complete && im.naturalWidth > 0) { refImg = im; break; }
-                }
-                if (!refImg) { resolve(null); return; }
-                const w = refImg.naturalWidth, h = refImg.naturalHeight;
-                const accum = new Float32Array(w * h);
-                const count = new Uint32Array(w * h);
-                const tc = document.createElement('canvas');
-                tc.width = w; tc.height = h;
-                const tctx = get2dContext(tc, { willReadFrequently: true });
-                let summed = 0;
-                for (const key of msiKeys) {
-                    const img = panel.imageSources[key];
-                    if (!img || !img.complete || img.naturalWidth !== w || img.naturalHeight !== h) continue;
-                    tctx.clearRect(0, 0, w, h);
-                    tctx.drawImage(img, 0, 0);
-                    const d = tctx.getImageData(0, 0, w, h).data;
-                    for (let i = 0, p = 0; i < d.length; i += 4, p++) {
-                        if (d[i+3] === 0) continue;
-                        const lum = 0.299*d[i] + 0.587*d[i+1] + 0.114*d[i+2];
-                        accum[p] += lum;
-                        count[p]++;
-                    }
-                    summed++;
-                }
-                if (summed === 0) { resolve(null); return; }
-                let maxAvg = 0;
-                for (let p = 0; p < w * h; p++) {
-                    if (count[p] === 0) continue;
-                    const v = accum[p] / count[p];
-                    if (v > maxAvg) maxAvg = v;
-                }
-                const norm = maxAvg > 0 ? 255 / maxAvg : 0;
-                const out = document.createElement('canvas');
-                out.width = w; out.height = h;
-                const octx = get2dContext(out);
-                const outData = octx.createImageData(w, h);
-                for (let p = 0, j = 0; p < w * h; p++, j += 4) {
-                    if (count[p] === 0) {
-                        outData.data[j+3] = 0;
-                    } else {
-                        const g = Math.max(0, Math.min(255, Math.round(accum[p] / count[p] * norm)));
-                        outData.data[j] = g;
-                        outData.data[j+1] = g;
-                        outData.data[j+2] = g;
-                        outData.data[j+3] = 255;
-                    }
-                }
-                octx.putImageData(outData, 0, 0);
-                const dataUrl = out.toDataURL('image/png');
-                const im = new Image();
-                im.onload = () => resolve(im);
-                im.onerror = () => resolve(null);
-                im.src = dataUrl;
-            } catch (e) {
-                console.warn('TIC generation failed', e);
-                resolve(null);
-            }
-        });
+    async _generateTicForPanel(panel, options = {}) {
+        const ok = await panel.ensureTicBackdrop({allowSingle:true,...options});
+        return ok ? panel.imageSources.HE_STAIN_TIC || null : null;
     },
 
     async _injectTicBackdrops() {
-        this._syntheticHeKeys = new Map();
-        if (!App || !App.panels) return;
-        for (const [pid, panel] of App.panels.entries()) {
-            const heKeys = Object.keys(panel.section.images || {})
-                .filter(k => /HE_STAIN|IF_STAIN/i.test(k));
-            if (heKeys.length > 0) continue;       // already has histology
-            const ticImg = await this._generateTicForPanel(panel);
-            if (!ticImg) continue;
-            const key = 'HE_STAIN_TIC';             // matches heLikeKeys regex
-            panel.imageSources = panel.imageSources || {};
-            panel.imageSettings = panel.imageSettings || {};
-            panel.section.images = panel.section.images || {};
-            panel.imageSources[key] = ticImg;
-            // applyOpacity:false → renderComposite forces globalAlpha=1 so
-            // the TIC backdrop stays fully opaque even when the user pulls
-            // MSI Opacity down (requirement ③: "背景に固定して").
-            panel.imageSettings[key] = {
-                opacity: 1.0,
-                vmin: 0, vmax: 255,
-                actualMin: 0, actualMax: 255,
-                grayscale: false,
-                applyOpacity: false,
-                synthetic: true,
-            };
-            panel.section.images[key] = { virtual: true, key };
+        const overlay=this.overlay, project=App.project;
+        this._syntheticHeKeys=new Map();
+        const changes=this._syntheticHeKeys;
+        if(!App.panels)return;
+        for(const [pid,panel] of App.panels){
+            if(!App.sectionVisibility().ensure().has(String(pid)))continue;
+            if(Object.keys(panel.section.images||{}).some(k=>/HE_STAIN|IF_STAIN/i.test(k)))continue;
+            const current=()=>this.isOpen()&&this.overlay===overlay&&App.project===project&&App.panels.get(pid)===panel;
+            const key="HE_STAIN_TIC",wasVisible=panel.visibleLayers.has(key);
+            const ticImg=await this._generateTicForPanel(panel,{current});
+            if(!current())return;
+            if(!ticImg)continue;
+            // The panel owns this derived image. Preview only owns its visibility.
+            changes.set(pid,{key,wasVisible});
             panel.visibleLayers.add(key);
-            this._syntheticHeKeys.set(pid, key);
-            try { panel.renderComposite(); } catch (e) {}
+            panel.renderComposite();
         }
     },
 
     _removeTicBackdrop() {
-        if (!this._syntheticHeKeys || !App || !App.panels) return;
-        for (const [pid, key] of this._syntheticHeKeys.entries()) {
-            const panel = App.panels.get(pid);
-            if (!panel) continue;
-            if (panel.imageSources)  delete panel.imageSources[key];
-            if (panel.imageSettings) delete panel.imageSettings[key];
-            if (panel.section && panel.section.images) delete panel.section.images[key];
-            if (panel.visibleLayers) panel.visibleLayers.delete(key);
-            try { panel.renderComposite(); } catch (e) {}
+        if(!this._syntheticHeKeys||!App.panels)return;
+        for(const [pid,state] of this._syntheticHeKeys){
+            const panel=App.panels.get(pid);if(!panel)continue;
+            const key=typeof state==="string"?state:state.key;
+            if(state.wasVisible)panel.visibleLayers.add(key);else panel.visibleLayers.delete(key);
+            panel.renderComposite();
         }
-        this._syntheticHeKeys = null;
+        this._syntheticHeKeys=null;
     },
 
     // Apply a preview-only MSI opacity (0..1) across every section. Mutates
@@ -20351,17 +20452,11 @@ const SharePreview = {
         this._snapshotOpacity();
         this._snapshotVisibility();
         this._snapshotGrayscale();
-        this._forceHeBackdrop();
         // TIC backdrop injection is async (toDataURL + Image load). Kick
         // off and refresh the preview cells once it finishes — image grid
         // will still render synchronously below from existing cdisp data,
         // then re-sample once TIC is in place. Sections with HE/IF skip
         // injection entirely.
-        this._injectTicBackdrops().then(() => {
-            try {
-                if (this.isOpen() && this.overlay === overlay && App.project === project) this.refresh(project);
-            } catch (e) {}
-        }).catch(e => console.warn('TIC inject failed', e));
         // Section view state belongs to the session, including across Preview open/close.
 
         // プレビューは「1 化合物 × 全切片」の画面なので Compound へ倒すが、
@@ -20452,6 +20547,11 @@ const SharePreview = {
             </div>`;
         document.body.appendChild(overlay);
         this.overlay = overlay;
+        if(App._updateSectionLoadDemand)App._updateSectionLoadDemand();
+        this._forceHeBackdrop();
+        this._injectTicBackdrops().then(()=>{
+            if(this.isOpen() && this.overlay===overlay && App.project===project)this._rebakeCellImages(project,App.focusCompoundKey);
+        }).catch(e=>console.warn('TIC inject failed',e));
 
         // Make the overlay focusable so it can capture ArrowUp/Down without
         // requiring the user to click a control first.
@@ -20709,6 +20809,7 @@ const SharePreview = {
             this._prefetchKind = null;
             if (!this.isOpen() || project !== App.project || loadSeq !== this._focusLoadSeq || App.activeOverlay) return;
             for (const sec of (project.sections || [])) {
+                if(!App.sectionVisibility().ensure().has(String(sec.id)))continue;
                 // Start one section at a time so a real click can stop the
                 // remaining speculative work instead of sitting behind an
                 // already-queued batch of worker jobs.
@@ -20717,7 +20818,7 @@ const SharePreview = {
                 const ent = displayMsiEntry(sec, nextKey);
                 if (!panel || !ent || panel.isMsiLayerReady(nextKey)) continue;
                 if (!ent.blobId && !ent.sourceUrl) continue;
-                try { await panel.ensureMsiLayerLoaded(nextKey); } catch (e) {}
+                try { await panel.ensureMsiLayerLoaded(nextKey,{priority:30}); } catch (e) {}
             }
         };
         if (typeof requestIdleCallback === 'function') {
@@ -20744,6 +20845,11 @@ const SharePreview = {
         const sec = sections[idx];
         const panel = App.panels && App.panels.get(sec.id);
         if (!stage || !panel || !panel.dom || !panel.dom.cdisp || panel.dom.cdisp.width === 0) return;
+        const state=this._previewLoadState(panel,focusKey);
+        if(state!=='ready') {
+            stage.innerHTML='<div class="cell-empty preview-loading">'+this._previewLoadText(state)+'</div>';
+            return;
+        }
         try {
             const rotDeg = (this._sectionRotations[String(sec.id)] || 0) - 90;
             const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
@@ -20770,6 +20876,7 @@ const SharePreview = {
         const pending = [];
         for (const sec of (App.project.sections || [])) {
             const sid = String(sec.id);
+            if(!visibility.ensure().has(sid))continue;
             const panel = App.panels.get(sec.id);
             const ent = displayMsiEntry(sec, key);
             if (!ent || !panel) continue;
@@ -20929,6 +21036,14 @@ const SharePreview = {
         const maxEl = this.overlay.querySelector('[data-preview-range-max]');
         const resetEl = this.overlay.querySelector('[data-preview-range-reset]');
         if (!minEl || !maxEl) return;
+        const common=focusKey && App.getCommonScaleStatus ? App.getCommonScaleStatus(focusKey) : 'ready';
+        if(common!=='ready') {
+            minEl.disabled=maxEl.disabled=true;
+            if(resetEl)resetEl.disabled=true;
+            minEl.value=maxEl.value='';
+            minEl.title=maxEl.title=common==='failed'?'共通Rangeを取得できません':'共通Rangeを準備中…';
+            return;
+        }
         const fmt = (typeof formatRawForInput === 'function')
             ? formatRawForInput
             : (v) => (Number.isFinite(v) ? String(Number(v.toPrecision(6))) : '');
@@ -21255,6 +21370,21 @@ const SharePreview = {
         this.refresh(App.project);
     },
 
+    _previewLoadState(panel,focusKey) {
+        if(!panel)return 'loading';
+        const keys=App.activeOverlay ? (App.activeOverlay.layers || []).map(x=>x.key).filter(k=>displayMsiEntry(panel.section,k)) : [focusKey];
+        let state='ready';
+        for(const key of keys) {
+            const common=App.getCommonScaleStatus ? App.getCommonScaleStatus(key) : 'ready';
+            if(common==='failed' || panel._msiLoadErrors?.has(key))return 'failed';
+            if(common!=='ready')state='pending';
+            else if(panel.isMsiLayerReady && !panel.isMsiLayerReady(key) && state==='ready')state='loading';
+        }
+        return state;
+    },
+    _previewLoadText(state) {
+        return state==='failed'?'MSI / 共通Rangeを取得できません':state==='pending'?'共通Rangeを準備中…':'Loading MSI…';
+    },
     _renderImageGrid(project, focusKey) {
         const grid = this.overlay.querySelector('[data-image-grid]');
         if (!grid) return;
@@ -21288,7 +21418,10 @@ const SharePreview = {
             const caption = safePitch ? (safeName + ' · ' + safePitch) : safeName;
             const panel = App.panels && App.panels.get(sec.id);
             let body;
-            if (loadStatus === 'loading') {
+            const readiness=hasContent?this._previewLoadState(panel,focusKey):'ready';
+            if (readiness!=='ready') {
+                body='<div class="cell-empty preview-loading">'+this._previewLoadText(readiness)+'</div>';
+            } else if (loadStatus === 'loading') {
                 body = '<div class="cell-empty preview-loading">Loading MSI…</div>';
             } else if (loadStatus === 'failed') {
                 body = '<div class="cell-empty">MSI load failed</div>';
@@ -21569,8 +21702,6 @@ const SharePreview = {
         sections.forEach((sec, idx) => {
             const wrap = grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
             if (!wrap) return;
-            const img = wrap.querySelector('[data-cell-img]');
-            if (!img) return;
             const panel = App && App.panels && App.panels.get(sec.id);
             if (!panel || !panel.dom || !panel.dom.cdisp || panel.dom.cdisp.width === 0) return;
             // 「中身があるか」を focusKey だけで見ていた。重ね合わせ表示中でも
@@ -21583,6 +21714,14 @@ const SharePreview = {
                 ? (_ov.layers || []).some(l => l && (sec.msiSeries || {})[l.key])
                 : !!(focusKey && displayMsiEntry(sec, focusKey));
             if (!hasContent) return;
+            const state=this._previewLoadState(panel,focusKey);
+            const stage=wrap.querySelector('[data-cell-stage]');
+            if(state!=='ready') {
+                if(stage)stage.innerHTML='<div class="cell-empty preview-loading">'+this._previewLoadText(state)+'</div>';
+                return;
+            }
+            const img = wrap.querySelector('[data-cell-img]');
+            if (!img) { this._showLoadedPreviewCell(project,focusKey,sec.id);return; }
             try {
                 const rotDeg = (this._sectionRotations[String(sec.id)] || 0) - 90;
                 const baked = this._bakeRotatedCanvas(panel.dom.cdisp, rotDeg);
@@ -22398,8 +22537,8 @@ const Toolbar = {
             App.deleteSection(p.section.id);
         });
 
-        this.rangeMin.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRangeRaw('min', this.rangeMin.value); });
-        this.rangeMax.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRangeRaw('max', this.rangeMax.value); });
+        this.rangeMin.addEventListener('change', () => { const p = this.activePanel(); if (p && !this.rangeMin.disabled) p.applyRangeRaw('min', this.rangeMin.value); });
+        this.rangeMax.addEventListener('change', () => { const p = this.activePanel(); if (p && !this.rangeMax.disabled) p.applyRangeRaw('max', this.rangeMax.value); });
         if (this.rangeResetBtn) this.rangeResetBtn.addEventListener('click', () => { const p = this.activePanel(); if (p) p.resetRange(); });
         this.opacityInp.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyOpacity(this.opacityInp.value); });
         this.rotationInp.addEventListener('change', () => { const p = this.activePanel(); if (p) p.applyRotation(this.rotationInp.value, App.rotTarget); });
@@ -23852,13 +23991,14 @@ const App = {
     // Shared by setMsiBakeMode (one MRM) and setMsiOutlierClipAll (whole project).
     async _rebakeJobs(jobs, doneMsg) {
         if (!jobs || !jobs.length) return 0;
+        const touched = new Set(jobs.map(j => j.panel));
+        for(const panel of touched)panel.invalidateTicBackdrop(false);
         for (const { panel, key, ent } of jobs) {
             try { await panel.loadMsiLayer(key, ent); }
             catch (e) { console.warn('bake-mode re-raster failed', key, e); }
         }
-        const touched = new Set(jobs.map(j => j.panel));
         for (const panel of touched) {
-            try { panel.renderComposite(); panel.populateThumbnails(); } catch (e) {}
+            try { panel.invalidateTicBackdrop(); panel.renderComposite(); panel.populateThumbnails(); } catch (e) {}
         }
         // rawDispMax moved, so the shared 'same' ceiling — and the toolbar Range,
         // which reads it through getMsiWindow — must be recomputed. A manual
@@ -24169,6 +24309,54 @@ const App = {
         this.repaintRoiRangeViews();
         if (this.roiOnlyMode) await this.refreshRoiDisplayRanges();
     },
+    // Viewport scheduling must never change the numerical scope of Same.
+    // Saved summaries avoid any extra reads on normal reopen. Old projects
+    // missing summaries load only this molecule's required inputs explicitly.
+    getCommonScaleStatus(key) {
+        if (!this.project || this.msiScaleMode !== 'same') return 'ready';
+        const windows = this.getMsiUserWindows();
+        if (windows[key] && Number.isFinite(windows[key].max)) return 'ready';
+        const project = this.project;
+        const maximum = this.getMsiDisplaySettings().rangePolicy === 'maximum';
+        const jobs = this._commonScaleJobs || (this._commonScaleJobs = new Map());
+        let state = 'ready';
+        for (const panel of this.panels.values()) {
+            const section = panel.section, ent = displayMsiEntry(section, key);
+            if (!this._organInScope(section) || !ent) continue;
+            if (this.roiOnlyMode) {
+                const result = this.getRoiDisplayRange(section, key);
+                const selected = maximum ? result.source : result.raster;
+                const status = selected ? selected.status : result.status;
+                if (status === 'pending') state = state === 'failed' ? state : 'pending';
+                else if (status === 'unavailable' || status === 'stale') state = 'failed';
+                continue;
+            }
+            const summary = maximum ? ent.rawTrueMax
+                : Number.isFinite(ent.rawDispMax) ? ent.rawDispMax : ent.rawRange && ent.rawRange[1];
+            if (Number.isFinite(summary) || (panel.isMsiLayerReady && panel.isMsiLayerReady(key))) continue;
+            const identity = panel._msiLoadIdentity ? panel._msiLoadIdentity(key) : JSON.stringify(ent);
+            const jobKey = JSON.stringify([section.id, key]);
+            let job = jobs.get(jobKey);
+            if (!job || job.project !== project || job.panel !== panel || job.identity !== identity) {
+                job = {project, panel, identity, status:'pending'};
+                jobs.set(jobKey, job);
+                Promise.resolve().then(() => {
+                    if (this.project !== project || this.panels.get(section.id) !== panel) return false;
+                    return panel.ensureMsiLayerLoaded(key, {priority:0, retry:false});
+                }).then(ok => { job.status = ok ? 'ready' : 'failed'; }, () => { job.status = 'failed'; })
+                    .finally(() => {
+                        if (this.project !== project || this.panels.get(section.id) !== panel) return;
+                        // Defer a paint until all loader bookkeeping has settled.
+                        setTimeout(() => {
+                            if (this.project === project) this.repaintAllMsi();
+                        }, 0);
+                    });
+            }
+            if (job.status === 'failed') state = 'failed';
+            else if (job.status !== 'ready' && state !== 'failed') state = 'pending';
+        }
+        return state;
+    },
     getMsiWindow(key, rawRange, dispMax, trueMax, section) {
         ensureMsiDisplayContext(this, key);
         const windows = this.roiOnlyMode ? (this.msiRoiUserWindow || (this.msiRoiUserWindow = {}))
@@ -24341,6 +24529,15 @@ const App = {
         // スケールモード / 平滑化 / 臓器フィルタの変更で呼ばれるが、Method 表の
         // セルはどれもこれらに依存しない。クラスの貼り直しだけにする。
         _refreshMethodRowState();
+        if(typeof SharePreview!=='undefined' && SharePreview.isOpen() && !SharePreview._displayRefreshRaf) {
+            const project=this.project;
+            SharePreview._displayRefreshRaf=requestAnimationFrame(()=>{
+                SharePreview._displayRefreshRaf=0;
+                if(this.project!==project || !SharePreview.isOpen())return;
+                SharePreview._refreshRangeInputs(project,this.focusCompoundKey);
+                SharePreview._rebakeCellImages(project,this.focusCompoundKey);
+            });
+        }
     },
     // Switch MSI intensity scale ('same' | 'individual') and repaint everything.
     setMsiScaleMode(mode) {
@@ -24810,6 +25007,7 @@ const App = {
         }
         const requestedId = params.get('project') || '';
         const last = localStorage.getItem('desi:lastProjectId');
+        this.wireUi();
         let opened = false;
         if (requestedId) {
             try { await this.openProject(requestedId); opened = !!this.project; }
@@ -25816,6 +26014,7 @@ const App = {
         document.getElementById('project-name-input').disabled = true;
         document.getElementById('section-count').textContent = project.sections.length + ' sections';
         document.getElementById('sections-empty').classList.toggle('hidden', project.sections.length > 0);
+        this.viewMode='compound';
         await this.rebuildSectionPanels();
         // ON で開くのは「この受信者がこのタブで自分で ON にした」ときだけ
         // (publish 値では ON にしない — 常に OFF で開く)。
@@ -25853,7 +26052,7 @@ const App = {
             for (const p of this.panels.values()) {
                 const ser = (p.section && p.section.msiSeries) || {};
                 for (const k of Object.keys(ser))
-                    if (/^MSI_/i.test(k) && ser[k] && ser[k].blobId) loadableMsi.add(k);
+                    if (/^MSI_/i.test(k) && ser[k] && (ser[k].blobId || ser[k].sourceUrl)) loadableMsi.add(k);
             }
             // Preview embed: honor focus=<compound> from the hash — resolve it
             // to a loadable MSI layer (match compoundMeta.name or the MSI_<name>
@@ -25894,7 +26093,8 @@ const App = {
                     // 1) Ensure the focus raster is loaded for THIS panel.
                     //    ensureMsiLayerLoaded は読み込みに加えて imageSettings の
                     //    初期化と LRU への登録もやる (loadMsiLayer 単体はやらない)。
-                    if (fk) await p.ensureMsiLayerLoaded(fk);
+                    // Metadata establishes focus before viewport work starts.
+                    // renderComposite requests pixels only for wanted panels.
                     // 2) 保険: 何らかの理由で設定が無ければ作る。renderComposite は
                     //    設定の無いレイヤーを描画対象から外すため (自己修復パネルが
                     //    HE だけになっていた原因)。
@@ -25903,7 +26103,7 @@ const App = {
                     }
                     // 3) Make the focus visible + the active MSI, then size the
                     //    canvas to the focus source grid and render.
-                    if (fk && p.imageSources[fk]) { p.visibleLayers.add(fk); p.activeMsiKey = fk; }
+                    if (fk && p.registeredMsiKeys().includes(fk)) { p.visibleLayers.add(fk); p.activeMsiKey = fk; }
                     p.setupCanvasSize();
                     p.renderComposite();
                 } catch (e) { console.warn('share focus apply failed', p.section && p.section.id, e); }
@@ -25915,7 +26115,7 @@ const App = {
             if (this._previewMode) {
                 for (const p of this.panels.values()) {
                     try {
-                        const keys = Object.keys(p.imageSources || {});
+                        const keys = p.registeredLayerKeys();
                         const hasBg = keys.some(k => /HE_STAIN|IF_STAIN/i.test(k) && p.visibleLayers.has(k));
                         if (!hasBg) {
                             const bg = keys.find(k => /HE_STAIN|IF_STAIN/i.test(k));
@@ -26046,6 +26246,7 @@ const App = {
     },
 
     async openProject(id) {
+        const request=this._openProjectRequest=(this._openProjectRequest||0)+1;
         if(this._shareRefreshOperation&&!this._shareRefreshOperation.finished){
             if(this._shareRefreshOperation.committing){showToast('共有版の保存を確定しています。完了後に切り替えてください。');return;}
             this._shareRefreshOperation.abort.abort();
@@ -26071,6 +26272,7 @@ const App = {
             abortSwitch();
             return;
         }
+        if(request!==this._openProjectRequest)return;
         // Tear down the old project's collaborator poll only after its edits
         // have reached disk; a failed write leaves that project open to retry.
         this._stopMasterCollabPoll();
@@ -26081,6 +26283,8 @@ const App = {
         this._publishDirty = false;
         if (this._autoPublishTimer) { clearTimeout(this._autoPublishTimer); this._autoPublishTimer = 0; }
         const project = await ProjectStorage.getProject(id, {activate:true});
+        if(request!==this._openProjectRequest)return;
+        this._stopSectionLoads();
         if (!project) {
             await ProjectStorage.releaseProject();
             this.project = null;
@@ -26755,48 +26959,121 @@ const App = {
         await this._verifyPersistence('deleteSection', { sectionCount: expectedCount });
     },
 
+    isSectionLoadWanted(panel) {
+        return !panel._destroyed && (!panel._managedSectionLoad || (panel.project===this.project && panel._loadRequested
+            && this.sectionVisibility().ensure().has(String(panel.section.id))));
+    },
+    requestLayerLoad(panel,key,kind,run,options={}) {
+        if(!this._sectionLoadScheduler || !panel._managedSectionLoad) return Promise.resolve().then(run);
+        const baseValid=()=>!panel._destroyed && panel.project===this.project;
+        const valid=()=>baseValid() && (!options.automatic || this.isSectionLoadWanted(panel));
+        return this._sectionLoadScheduler.enqueue({key:panel.section.id+'|'+key,kind,run,
+            panel,automatic:!!options.automatic,priority:options.priority??10,valid,baseValid});
+    },
+    promoteLayerLoad(panel,key,priority=0,automatic=false) {
+        this._sectionLoadScheduler?.promote(panel.section.id+'|'+key,priority,automatic);
+    },
+    requestBackgroundLayer(panel,key,run) {
+        return this.requestLayerLoad(panel,'background:'+key,'background',run,{automatic:true,priority:40});
+    },
+    whenForegroundIdle() {
+        return this._sectionLoadScheduler ? this._sectionLoadScheduler.whenForegroundIdle() : Promise.resolve();
+    },
+    _stopSectionLoads() {
+        this._sectionLoadScheduler?.dispose();this._sectionLoadScheduler=null;
+        this._commonScaleJobs?.clear();
+        this._sectionLoadObserver?.disconnect();this._sectionLoadObserver=null;
+        if(this._sectionLoadRaf) cancelAnimationFrame(this._sectionLoadRaf);
+        this._sectionLoadRaf=0;
+    },
+    _resolveInitialLayerFocus() {
+        if(this.viewMode!=='compound')return;
+        const loadable=[];
+        for(const sec of this.project.sections || []) for(const key of displayMsiKeys(sec)) {
+            const ent=displayMsiEntry(sec,key);
+            if(ent && (ent.blobId || ent.sourceUrl || ent.kind==='ratio')) loadable.push({key,ent});
+        }
+        if(this._focusParam) {
+            const norm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'');
+            const match=loadable.find(x=>norm(x.ent.compoundMeta?.name)===norm(this._focusParam)
+                || norm(x.key.replace(/^MSI_/,''))===norm(this._focusParam));
+            this._previewFocusKey=match?.key || null;this._previewFocusMissing=!match;
+            if(match)this.focusCompoundKey=match.key;
+        }
+        if(!loadable.some(x=>x.key===this.focusCompoundKey)) this.focusCompoundKey=loadable[0]?.key || null;
+    },
+    _updateSectionLoadDemand() {
+        if(!this.project || !this._sectionLoadScheduler)return;
+        const grid=document.getElementById('sections-grid'), bounds=grid?.getBoundingClientRect();
+        const selected=this.sectionVisibility().ensure();
+        for(const panel of this.panels.values()) {
+            const rect=panel.dom.canvasCell.getBoundingClientRect();
+            const intersects=!!bounds && rect.width>0 && rect.height>0 && rect.right>bounds.left && rect.left<bounds.right
+                && rect.bottom>bounds.top && rect.top<bounds.bottom;
+            const nearby=!!bounds && rect.width>0 && rect.height>0 && rect.right>bounds.left-320 && rect.left<bounds.right+320
+                && rect.bottom>bounds.top && rect.top<bounds.bottom;
+            const wanted=selected.has(String(panel.section.id)) && (nearby || SharePreview.isOpen());
+            const was=panel._loadRequested;panel._loadRequested=wanted;
+            if(!wanted) {
+                this._sectionLoadScheduler.cancelWhere(job=>job.panel===panel && job.automatic && !job.started);
+                if(was && panel.cancelTicBackdrop)panel.cancelTicBackdrop();
+                continue;
+            }
+            const signature=JSON.stringify([this.viewMode,this.focusCompoundKey,[...panel.visibleLayers]]);
+            if(!was || panel._requestedDisplaySignature!==signature) {
+                panel._requestedDisplaySignature=signature;
+                panel.loadAllLayers({priority:intersects?(panel.section.id===this.activeSectionId?0:10):30})
+                    .catch(error=>console.warn('section display load failed',error));
+            }
+        }
+        this._sectionLoadScheduler.refresh();
+    },
+    _scheduleSectionLoadDemand() {
+        if(!this._sectionLoadScheduler)return;
+        if(this._sectionLoadRaf)return;
+        this._sectionLoadRaf=requestAnimationFrame(()=>{this._sectionLoadRaf=0;this._updateSectionLoadDemand();});
+    },
     async rebuildSectionPanels() {
         if (typeof RoiMediaApp !== 'undefined') RoiMediaApp.close();
+        this._stopSectionLoads();
+        if(typeof SectionLoadScheduler!=='undefined')this._sectionLoadScheduler=SectionLoadScheduler.create({concurrency:2,imageConcurrency:1});
+        this._resolveInitialLayerFocus();
         const grid = document.getElementById('sections-grid');
         grid.innerHTML = '';
         this.panels.forEach(p => p.destroy());
         this.panels.clear();
-        // Create panels in order (preserves left-to-right DOM order), then load
-        // their layers with bounded concurrency so a later section no longer
-        // waits for an earlier one to finish decoding — without spiking memory
-        // when a project has many sections. Each panel paints as its layers ready.
+        // Construct metadata and controls first. Pixel work is scheduled from
+        // viewport demand; no off-screen image is an opening barrier.
         const panelsToLoad = this.project.sections.map((sec) => {
             const panel = new SectionPanel(sec, this.project);
+            panel._managedSectionLoad=!!this._sectionLoadScheduler;panel._loadRequested=false;
             this.panels.set(sec.id, panel);
             grid.appendChild(panel.root);
+            panel.prepareInitialState();
             return panel;
         });
-        // ★ 1 枚目だけは単独で読む。
-        //   parquet を共有する切片では、1 枚目が「フッタ索引」と「行→格子の
-        //   対応表」を作る。これらは parquetEnsureOpen / parquetEnsureGeometry の
-        //   in-flight 共有で 1 回にまとめられるが、**1 枚目を先に通しておけば
-        //   そもそも同時に走らない**ので、ピークが確実に 1 本ぶんで収まる。
-        //   (ここが並行度 4 のままだったため、280 MB のフッタを 4 回同時に
-        //    展開してタブが Out of Memory で落ちていた。)
-        if (panelsToLoad.length) {
-            try { await panelsToLoad[0].loadAllLayers(); }
-            catch (e) { console.warn('loadAllLayers failed', panelsToLoad[0].section && panelsToLoad[0].section.id, e); }
-        }
-        let liIdx = 1;
-        await Promise.all(Array.from({ length: Math.min(4, Math.max(0, panelsToLoad.length - 1)) }, async () => {
-            while (liIdx < panelsToLoad.length) {
-                const p = panelsToLoad[liIdx++];
-                try { await p.loadAllLayers(); }
-                catch (e) { console.warn('loadAllLayers failed', p.section && p.section.id, e); }
-            }
-        }));
         document.getElementById('section-count').textContent = this.project.sections.length + ' sections';
         document.getElementById('sections-empty').classList.toggle('hidden', this.project.sections.length > 0);
         // The shared splitter is a child of #sections-grid; it gets wiped by
         // innerHTML='' above so we recreate it after the panels are in place.
         this.setupGlobalSectionSplitter();
-        if (this.project.sections[0]) this.setActiveSection(this.project.sections[0].id);
+        this.applyOrganFilter();
+        const selected=this.sectionVisibility().ensure();
+        const first=this.project.sections.find(sec=>selected.has(String(sec.id)));
+        if (first) this.setActiveSection(first.id);
         else Toolbar.refreshAll();
+        if(this._sectionLoadScheduler) {
+            if(typeof IntersectionObserver==='function') {
+                this._sectionLoadObserver=new IntersectionObserver(()=>this._scheduleSectionLoadDemand(),{root:grid,rootMargin:'0px 320px'});
+                for(const panel of panelsToLoad)this._sectionLoadObserver.observe(panel.dom.canvasCell);
+            }
+            if(!grid.dataset.loadDemandWired) {
+                grid.dataset.loadDemandWired='1';
+                grid.addEventListener('scroll',()=>this._scheduleSectionLoadDemand(),{passive:true});
+                window.addEventListener('resize',()=>this._scheduleSectionLoadDemand());
+            }
+            this._updateSectionLoadDemand();
+        } else for(const panel of panelsToLoad) panel.loadAllLayers().catch(e=>console.warn('section load failed',e));
     },
 
     setActiveSection(id) {
@@ -26805,6 +27082,7 @@ const App = {
         this.panels.forEach(p => p.setActive(p.section.id === id));
         renderMethodTable();
         Toolbar.refreshAll();
+        this._scheduleSectionLoadDemand();
     },
 
     // Display selection is session-local and independent of ROI analysis.
@@ -26850,6 +27128,7 @@ const App = {
             // sections passed to renderAnalysisChart / export remain untouched.
             if (next) this.setActiveSection(next.id);
         }
+        this._scheduleSectionLoadDemand();
     },
     // Global HE/IF grayscale toggle for the share view (transient — not saved;
     // recipients never persist). Mirrors SharePreview._applyHeGrayscale.
@@ -26858,10 +27137,12 @@ const App = {
         for (const p of (this.panels ? this.panels.values() : [])) {
             const settings = p && p.imageSettings;
             if (!settings) continue;
+            const intents = p._heGrayscaleIntent || (p._heGrayscaleIntent = {});
             let dirty = false;
-            for (const key of Object.keys(settings)) {
+            for (const key of new Set([...Object.keys(p.section?.images || {}), ...Object.keys(settings)])) {
                 if (!/HE_STAIN|IF_STAIN/i.test(key) || /_TIC$/.test(key)) continue;
-                if (settings[key].grayscale !== want) { settings[key].grayscale = want; dirty = true; }
+                intents[key] = want;
+                if (settings[key] && settings[key].grayscale !== want) { settings[key].grayscale = want; dirty = true; }
             }
             if (dirty) { try { p.renderComposite(); } catch (e) {} }
         }
@@ -26998,6 +27279,10 @@ const App = {
         const projectAtStart=this.project,sectionAtStart=this.activeSectionId;
         const panelAtStart=this.panels.get(sectionAtStart);
         const keyAtStart=panelAtStart&&panelAtStart._pickRefMsiKey();
+        if(panelAtStart?.isMsiLayerReady && !panelAtStart.isMsiLayerReady(keyAtStart)) {
+            panelAtStart.ensureMsiLayerLoaded(keyAtStart,{priority:0}).catch(()=>{});
+            showToast('対象の画像を読み込んでいます。表示後に描画を開始してください',5000);return;
+        }
         const sourceKeyAtStart=this.ratioSourceKey&&/^MSI_RATIO_/.test(keyAtStart)?this.ratioSourceKey(panelAtStart.section,keyAtStart):keyAtStart;
         const sourceAtStart=panelAtStart&&msiLayerSourceGeometry(panelAtStart.section,keyAtStart);
         let snapshot=sourceAtStart&&{sourceRef:sourceAtStart.sourceRef,
@@ -28088,6 +28373,8 @@ const App = {
 
     // ---- UI wiring ----
     wireUi() {
+        if(this._uiWired)return;
+        this._uiWired=true;
         document.getElementById('project-picker').addEventListener('change', (e) => {
             const id = e.target.value;
             this.openProject(id || null);

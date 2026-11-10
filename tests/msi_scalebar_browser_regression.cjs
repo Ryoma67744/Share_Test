@@ -81,7 +81,10 @@ async function main() {
       for (const section of sections) {
         const panel = Object.create(SectionPanel.prototype);
         Object.assign(panel,{section,project,imageSources:{[key]:{naturalWidth:W,naturalHeight:H,complete:true}},
-          imageSettings:{},imageDataUrls:{},visibleLayers:new Set([key]),
+          // A decoded production layer also has initialized display settings.
+          // Keep the real readiness guard active for Preview's loading states.
+          imageSettings:{[key]:{opacity:1,vmin:0,vmax:255,actualMin:0,actualMax:255,grayscale:false,applyOpacity:true}},
+          imageDataUrls:{},visibleLayers:new Set([key]),
           msiValueRasters:new Map([[key,{W,H,values:Float32Array.from(rows,row=>row.v),sourceGeometry:structuredClone(geometry)}]]),
           _scheduleRoiRedraw(){},_wireViewerHostInteractions(){},drawAllRois(){},
           renderComposite(){

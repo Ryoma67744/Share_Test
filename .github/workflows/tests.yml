@@ -83,6 +83,8 @@ jobs:
         run: node tests/msi_scalebar_browser_regression.cjs
       - name: MSI display presets and compatibility
         run: node tests/msi_display_settings_browser_regression.cjs
+      - name: Progressive section loading and persistent TIC backgrounds
+        run: node tests/fast_display_browser_regression.cjs
       - name: ROI-only automatic display ranges and restoration
         run: node tests/msi_roi_range_browser_regression.cjs
       - name: Shared section HE alignment and ROI workflows

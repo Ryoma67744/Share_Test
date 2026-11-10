@@ -20,7 +20,7 @@ function fixture(n) {
       denominator:Model.makeInputRef(section.msiSeries.MSI_Y,'MSI_Y'),coordinateConfirmed:false,coordinateEvidence:''}}};
   const project={id:'p',meta:{msiRatios:{schemaVersion:1,definitions:[def]}},sections:[section],
     rois:[{id:'roi',name:'Legacy ROI',polysBySection:{s:[[0,0],[2,0],[2,1],[0,1]]}}]};
-  const app={project,panels:new Map(),getMsiDisplaySettings:()=>Display.preset('hdi'),queueSave(){},
+  const app={project,panels:new Map(),getMsiDisplaySettings:()=>Display.preset('hdi'),saveCount:0,queueSave(){this.saveCount++;},
     updateMsiDisplaySettings(){},setFocusCompoundKey(){},refreshMsiDisplayControls(){},repaintAllMsi(){}};
   class Panel {renderComposite(){}renderMsiThumbnail(){}}
   const geometry={sourceRef:'original',displayGeometry:{version:'msi-proportional-v1',W:n,H:1,x:{origin:0,step:1},y:{origin:0,step:1}}};
@@ -28,10 +28,22 @@ function fixture(n) {
   const runtime=Runtime.install({app,Panel,viewerBase:'http://localhost/viewer/',contextKey:()=>project.id,
     sourceReference:e=>e.sourceReference,frameKey:e=>e.sourceReference,sourceIdentity:(s,k)=>JSON.stringify(s.msiSeries[k]),
     readGrid:async()=>({rows,sourceGeometry:geometry}),roiMeta:()=>null,roiContains:()=>true,
-    otsuGrid:()=>null,otsuStamp:()=>'',inputLabel:(s,k)=>k,safeName:s=>s});
+    otsuGrid:()=>null,otsuStamp:()=>'',inputLabel:(s,k)=>k,safeName:s=>s,refreshToolbar(){}});
   return {runtime,app,section,def,rows};
 }
 (async()=>{
+  const range=fixture(2),rangeKey=Model.displayKey(range.def.id);
+  assert.equal(range.app.updateRatioRange(rangeKey,range.section,'max',4),true);
+  const rangeSaves=range.app.saveCount;
+  for(const value of ['', '  ', null, undefined, false, NaN, Infinity, 'not a number']) {
+    assert.equal(range.app.updateRatioRange(rangeKey,range.section,'max',value),false);
+    assert.equal(range.app.getRatioManualRange(rangeKey,range.section).max,4,'blank/unready controls preserve saved range');
+  }
+  assert.equal(range.app.saveCount,rangeSaves,'invalid range input never queues a project save');
+  for(const value of [0,'0']) {
+    assert.equal(range.app.updateRatioRange(rangeKey,range.section,'max',value),true);
+    assert.equal(range.app.getRatioManualRange(rangeKey,range.section).max,0,'explicit numeric zero remains valid');
+  }
   const small=fixture(2),key=Model.displayKey(small.def.id);
   const result=await small.runtime.resolve(small.section,key);
   assert.equal(result.statistics.totalRatio,1);assert.equal(result.roiStats[0].status,'ready');

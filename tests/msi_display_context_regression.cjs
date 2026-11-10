@@ -27,6 +27,9 @@ async function main(){
  vm.runInContext('(function(){'+listener+'}).call(testToolbar)',c);callbacks.get('change')({target:{value:'10'}});
  app.setMsiScaleMode('individual');
  assert.equal(app.getMsiWindow('MSI_same',[0,100],100).max,10);
+ c.testToolbar.rangeMax.disabled=true;c.testToolbar.rangeMax.value='22';callbacks.get('change')();
+ assert.equal(app.getMsiWindow('MSI_same',[0,100],100).max,10,'disabled loading controls cannot write a range on blur');
+ c.testToolbar.rangeMax.disabled=false;
  await app.openProject('B');
  assert.equal(app.getMsiWindow('MSI_same',[0,1000],1000).max,1000);
  assert.equal(app.msiScaleMode,'same');
