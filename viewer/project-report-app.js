@@ -698,6 +698,7 @@
             for (const group of state.groups) {
                 const line=el('div');line.setAttribute('data-report-group-id',group.id);line.style.cssText=toolbar.style.cssText;
                 const name=el('input'); name.type='text';name.value=group.name;name.maxLength=120;name.required=true;
+                name.style.cssText='border:1px solid #cbd5e1;border-radius:4px;padding:6px 8px;background:white;max-width:100%';name.title='比較グループ名';name.placeholder='比較グループ名';
                 name.setAttribute('data-report-group-name','');name.setAttribute('aria-label','比較グループ名');
                 const remove=button('削除','data-report-delete-group'); remove.setAttribute('aria-label',group.name+'を削除');
                 name.addEventListener('input',()=>{
