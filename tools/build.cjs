@@ -13,6 +13,7 @@ const GENERATOR = 'Share_Test distribution builder';
 const VIEWER_FILES = [
   'section-load-scheduler.js', 'source-loader.js', 'tic-core.js', 'tic-cache.js', 'tic-runtime.js',
   'msi-ratio-core.js', 'msi-ratio-model.js', 'msi-ratio-worker.js', 'msi-ratio-app.js', 'msi-ratio.css',
+  'msi-analysis-core.js', 'msi-analysis-service.js', 'msi-analysis-worker.js',
   'msi-display-settings.js', 'msi-display-geometry.js', 'msi-smoothing.js', 'msi-roi-range.js', 'msi-spatial-groups.js',
   'alignment-session.js', 'alignment-workspace.css', 'alignment-workspace.js',
   'fixed-colors.js', 'index.html', 'roi-cursor.svg', 'roi-media-app.js',

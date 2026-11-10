@@ -7,6 +7,8 @@ const path = require('node:path');
 const vm = require('node:vm');
 const { deflateRawSync } = require('node:zlib');
 const SectionVisibility = require('../viewer/section-visibility.js');
+const AnalysisCore = require('../viewer/msi-analysis-core.js');
+const AnalysisWorker = require('../viewer/msi-analysis-worker.js');
 
 const root = path.resolve(__dirname, '..');
 const html = fs.readFileSync(path.join(root, 'viewer', 'index.html'), 'utf8');
@@ -65,9 +67,20 @@ function extractFunction(source, name) {
     markerAt = source.indexOf(marker);
   }
   assert.notEqual(markerAt, -1, `missing function ${name}`);
-  const openAt = source.indexOf('{', markerAt + marker.length);
+  const openAt = functionBodyOpen(source, source.indexOf('(', markerAt + marker.length));
   const closeAt = scanBalanced(source, openAt);
   return source.slice(markerAt, closeAt + 1);
+}
+
+function functionBodyOpen(source, paramsAt) {
+  let depth=0,quote=null,escaped=false;
+  for(let i=paramsAt;i<source.length;i++){
+    const ch=source[i];
+    if(quote){if(escaped)escaped=false;else if(ch==='\\')escaped=true;else if(ch===quote)quote=null;continue;}
+    if(ch==='"'||ch==="'"||ch==='`'){quote=ch;continue;}
+    if(ch==='(')depth++;else if(ch===')'&&!--depth)return source.indexOf('{',i+1);
+  }
+  throw new Error('unbalanced function parameters');
 }
 
 // 構文ゲート。アプリは 1 ファイル 1 ページの inline script なので、ここが
@@ -852,6 +865,7 @@ async function testWorkerXlsxDecodeCache() {
   const self = { postMessage(message) { posts.push(message); } };
   const context = displayContext({
     self,
+    MsiAnalysisCore:AnalysisCore,
     parseXlsxSheet() { parseCalls++; return { aoa: [[1, 2, 3]] }; },
     rowsFromParsedXlsx(parsed, def) { extractedColumns.push(def.col_v); return [{ x: 0, y: 0, v: 1 }]; },
     parseTxtToRows() { throw new Error('not used'); },
@@ -867,6 +881,8 @@ async function testWorkerXlsxDecodeCache() {
     inspectXlsxColumns() {},
     Map,
   });
+  const engine=AnalysisWorker.create({Core:AnalysisCore,functions:context});
+  context._analysisWorkerEngine=()=>engine;
   const fnSource = extractFunction(html, '_parseWorkerOnMessage');
   vm.runInContext(`${fnSource}; self.handler = _parseWorkerOnMessage;`, context);
   const blob = { async arrayBuffer() { arrayBufferCalls++; return new ArrayBuffer(1); } };
@@ -893,6 +909,7 @@ async function testWorkerXlsxColumnsAwaitsInspection() {
   const self = { postMessage(message) { posts.push(structuredClone(message)); } };
   const context = displayContext({
     self,
+    MsiAnalysisCore:AnalysisCore,
     async inspectXlsxColumns() {
       await Promise.resolve();
       if (fail) throw new Error('column inspection failed');
@@ -901,12 +918,12 @@ async function testWorkerXlsxColumnsAwaitsInspection() {
   });
   vm.runInContext(`${extractFunction(html, '_parseWorkerOnMessage')}; self.handler = _parseWorkerOnMessage;`, context);
   const payload = { blob: new Blob(['fixture']), sheet: 'Sheet1', headerRow: 1 };
-  await self.handler({ data: { id: 1, op: 'xlsx-columns', payload } });
-  assert.deepEqual(posts, [{ id: 1, ok: true, result: expected }],
+  await self.handler({ data: { id: 1, generation:2, op: 'xlsx-columns', payload } });
+  assert.deepEqual(posts, [{ id: 1, generation:2, ok: true, result: expected }],
     'XLSX column inspection must resolve before crossing the worker message boundary');
   fail = true;
-  await self.handler({ data: { id: 2, op: 'xlsx-columns', payload } });
-  assert.deepEqual(posts[1], { id: 2, ok: false, error: 'column inspection failed' },
+  await self.handler({ data: { id: 2, generation:2, op: 'xlsx-columns', payload } });
+  assert.deepEqual(posts[1], { id: 2, generation:2, ok: false, error: {message:'column inspection failed',code:'ANALYSIS_OPERATION_FAILED'} },
     'async inspection rejection must use the worker error envelope');
 }
 
@@ -1187,7 +1204,7 @@ function extractTopLevelFunction(name) {
   const m = re.exec(html);
   assert.ok(m, `missing top-level function ${name}`);
   const startAt = m.index + (m[1] ? m[1].length : 0);
-  const openAt = html.indexOf('{', m.index + m[0].length - 1);
+  const openAt = functionBodyOpen(html, m.index + m[0].length - 1);
   return html.slice(startAt, scanBalanced(html, openAt) + 1);
 }
 
@@ -1791,7 +1808,7 @@ async function testRoiStatsReadSharedParquet() {
     parquetRoiGrid: async () => ({ W: 2, H: 1, values: Float64Array.from([1, 3]) }),
   });
   vm.runInContext(
-    'const ROI_RAW_GRID_CACHE_MAX = 24;\n'
+    'const ROI_RAW_GRID_CACHE_MAX = 24;const ROI_RAW_GRID_CACHE_BYTES=64*1024*1024;\n'
     + 'const _roiRawGridCache = new Map();\n'
     + `${extractFunction(html, 'msiSourceReference')}\n`
     + `${extractFunction(html, '_roiGridKey')}\n`
@@ -2525,7 +2542,7 @@ function testWorkerAssetsFollowApplicationBase() {
   const parseStart = html.indexOf('const PARSE_WORKER_LIBS = [');
   const parquetStart = html.indexOf('const PARQUET_LIBS = {');
   assert.ok(parseStart >= 0 && parquetStart >= 0);
-  const parse = html.slice(parseStart, html.indexOf('\nlet _parseWorker', parseStart));
+  const parse = html.slice(parseStart, html.indexOf('\nlet _parseSeq', parseStart));
   const parquet = html.slice(parquetStart, html.indexOf('\n};', parquetStart) + 3);
   for (const base of ['http://127.0.0.1:8765/', 'https://example.invalid/Share_Test/']) {
     for (const withRuntime of [true, false]) {

@@ -202,7 +202,13 @@ async function main() {
     await page.waitForFunction(() => typeof App !== 'undefined' && App.project && App.panels.size === 2
       && typeof SharePreview !== 'undefined' && SharePreview.isOpen());
     await page.locator('[data-preview-close]').click();
-    await page.evaluate(async () => {
+    // Keep the asynchronous fixture in the page while source/worker/image jobs
+    // finish. CDP's weak reference to an evaluate-returned Promise can be
+    // collected during a cold load; readiness is observed separately so an
+    // unresolved application operation still fails the bounded wait below.
+    await page.evaluate(() => {
+      const setup = window.__roiRangeSetup = {done:false, error:null};
+      setup.promise = (async () => {
       App._stopShareRoiPoll();
       for (const section of App.project.sections) {
         if (!await App.panels.get(section.id).ensureMsiLayerLoaded('MSI_A')) throw new Error('Fixture source failed');
@@ -225,7 +231,16 @@ async function main() {
       App.project.rois = [primary, outside]; App.project.roiHidden = {'roi-right':true};
       App.activeRoiId = primary.id; populateRoiList(); App.redrawAllRois();
       App.recomputeMsiAbsScale(); App.repaintAllMsi();
+      })().then(() => { setup.done = true; }, error => {
+        setup.error = error.stack || error.message || String(error); setup.done = true;
+      });
     });
+    await page.waitForFunction(() => window.__roiRangeSetup.done);
+    const setup = await page.evaluate(() => ({error:window.__roiRangeSetup.error,
+      ready:App.project.sections.map(section => App.panels.get(section.id).isMsiLayerReady('MSI_A'))}));
+    assert.equal(setup.error, null, 'ROI fixture setup completes without an application error');
+    assert.deepEqual(setup.ready, [true,true], 'Both fixture source layers have finished decoding');
+    await page.evaluate(() => { delete window.__roiRangeSetup; });
     const originalSources = await sourceSnapshot(page);
     assert.deepEqual(originalSources.map(source => source.roi.stats.max), [95,190], 'Fixture includes duplicate source rows in the ROI');
     await expectMaxima(page, [2000,2000], 'Whole-image Same uses the original global maximum');

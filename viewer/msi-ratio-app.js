@@ -137,6 +137,77 @@
             }
             return bytes;
         }
+        function numericBytes(result) {
+            // Typed snapshots share buffers for identical inputs. Count each
+            // buffer once; never materialize a million position/cell objects.
+            const buffers=new Set();let bytes=0;
+            const count=value=>{if(ArrayBuffer.isView(value)&&!buffers.has(value.buffer)){buffers.add(value.buffer);bytes+=value.byteLength;}};
+            for(const key of ['values','valid','reasons','denominatorOrder','rgba'])count(result[key]);
+            count(result.raster?.values);
+            for(const input of [result.numerator,result.denominator])if(input){
+                for(const key of ['x','y','values','rowIds'])count(input[key]);
+                if(Array.isArray(input.rowIds))bytes+=input.rowIds.length*24;
+            }
+            return bytes;
+        }
+        function restoreNumeric(value,section,key,p,stamp,assertCurrent,service) {
+            if(value.status==='unavailable')throw error('比を計算できません: '+value.reason,'RATIO_'+value.reason);
+            const adapters=root.MsiAnalysisCore;
+            if(!adapters)throw error('数値解析モジュールを利用できません。','ANALYSIS_UNAVAILABLE');
+            const X=adapters.input(value.numerator),Y=value.denominator===value.numerator?X:adapters.input(value.denominator);
+            const numeric={...value,numerator:X,denominator:Y,positions:X.positions,rowIds:X.rowIds};
+            const raster=value.raster,max=value.summary.max,upper=value.displayAuto.rawRange[1];
+            const ent=entry(section,key);Object.assign(ent,{rawRange:[0,upper],rawDispMax:upper,rawTrueMax:max,
+                rasterW:raster.W,rasterH:raster.H,sourceGeometry:raster.sourceGeometry});
+            entries.get(section.id+'|'+key).sourceGeometries={x:clone(X.sourceGeometry),y:clone(Y.sourceGeometry)};
+            const out={...numeric,kind:'ratio',key,name:h.safeName(p.def.name),
+                formula:h.inputLabel(section,p.x.key)+' / '+h.inputLabel(section,p.y.key),
+                statistics:value.summary,inputSignature:stamp,sourceKey:p.x.key,frameSourceKey:p.x.key,
+                sourceGeometry:raster.sourceGeometry,assertCurrent};
+            Object.defineProperty(out,'_numericService',{value:service});
+            return out;
+        }
+        async function resolveNumeric(section,key,options={}) {
+            const service=typeof h.numericService==='function'?h.numericService():h.numericService;
+            if(!service)throw error('数値解析Workerを利用できません。再読み込みしてお試しください。','ANALYSIS_UNAVAILABLE');
+            const p=inputs(section,key),stamp=signature(section,key),owner=app.project,id=section.id+'|'+key;
+            const controller=new AbortController(),signal=controller.signal,task={cancel:()=>controller.abort()};
+            const abort=()=>controller.abort();workers.add(task);
+            if(options.signal){options.signal.addEventListener('abort',abort,{once:true});if(options.signal.aborted)abort();}
+            const current=()=>!signal.aborted&&app.project===owner&&signature(section,key)===stamp&&(!options.current||options.current());
+            const assertCurrent=()=>{if(!current())throw error('入力または比の条件が変更されました。再計算してください。',signal.aborted?'RATIO_CANCELLED':'RATIO_SOURCE_CHANGED');};
+            const request=(op,payload,suffix)=>service.request(op,payload,{key:'ratio:'+stamp+':'+suffix,
+                signal,current,priority:options.priority??10});
+            async function build(force=false) {
+                const readOptions={signal,current,force};let gx,gy;
+                if(h.readPair)[gx,gy]=await h.readPair(section,p.x.key,p.y.key,readOptions);
+                else {gx=await h.readGrid(section,p.x.key,readOptions);assertCurrent();gy=p.x.key===p.y.key?gx:await h.readGrid(section,p.y.key,readOptions);}
+                assertCurrent();
+                if(!gx?.handle||!gy?.handle)throw error('元の数値データを解析Workerへ読み込めません。','RATIO_SOURCE_UNAVAILABLE');
+                const value=await request('ratio',{key:stamp,leftHandle:gx.handle,rightHandle:gy.handle,
+                    leftSourceFrame:h.frameKey(p.x.entry),rightSourceFrame:h.frameKey(p.y.entry),
+                    options:{denominatorMin:p.def.denominatorMin,coordinateConfirmed:!!p.b.coordinateConfirmed}},'calculate');
+                assertCurrent();
+                const result=restoreNumeric(value,section,key,p,stamp,assertCurrent,service);
+                cache.set(id,{stamp,result,bytes:Number.isFinite(value.retainedBytes)?value.retainedBytes:numericBytes(value)});trimCache();return result;
+            }
+            try {
+                assertCurrent();let rec=cache.get(id),result;
+                if(!options.force&&rec?.stamp===stamp&&rec.result?._numericService===service&&service.isHandleCurrent(rec.result.handle)){
+                    result=rec.result;cache.delete(id);cache.set(id,rec);
+                }
+                for(let attempt=0;attempt<2;attempt++)try {
+                    if(!result)result=await build(options.force||attempt>0);
+                    const keep=await ensureNumericKeep(section,key,result,{signal,current,priority:options.priority});
+                    const roiStats=options.roiStats===false?null:await numericRoiStatistics(section,result,{signal,current,priority:options.priority});
+                    assertCurrent();return {...result,assertCurrent,keepGrid:keep,...(roiStats?{roiStats}:{})};
+                }catch(e){
+                    assertCurrent();
+                    if(attempt||e.code!=='ANALYSIS_HANDLE_EXPIRED')throw e;
+                    if(cache.get(id)?.result===result)cache.delete(id);result=null;
+                }
+            } finally {workers.delete(task);options.signal?.removeEventListener('abort',abort);}
+        }
         async function rasterize(result,geometry,assertCurrent) {
             const g=geometry&&geometry.displayGeometry;if(!g)throw error('測定座標の情報を取得できません。','RATIO_GEOMETRY');
             const W=g.W,H=g.H,values=new Float64Array(W*H).fill(NaN),counts=new Uint32Array(W*H);
@@ -173,6 +244,60 @@
                 return {roiId:roi.id,name:roi.name||roi.id,status:unavailable?'unavailable':'ready',reason:unavailable?'roi-geometry-unavailable':null,statistics:unavailable?null:stats};
             });
         }
+        async function numericRoiStatistics(section,result,options) {
+            const owner=app.project,roiStamp=Model.fingerprint([owner.rois||[],section.meta?.spatialGroups||null]);
+            const ambiguousLegacy=new Set(Object.values(section.msiSeries||{}).map(ent=>h.sourceReference(ent))).size>1;
+            const pair=inputs(section,result.key),rows=[],selections=[];
+            for(const roi of app.project.rois||[]) {
+                if(!roi.polysBySection?.[section.id])continue;
+                const row={roiId:roi.id,name:roi.name||roi.id},poly=roi.polysBySection[section.id],meta=h.roiMeta(roi,section);
+                const unavailable=reason=>Object.assign(row,{status:'unavailable',reason,statistics:null});
+                rows.push(row);
+                if(!meta&&ambiguousLegacy){unavailable('legacy-roi-source-ambiguous');continue;}
+                const denominator=meta&&meta.sourceRef===result.denominator.sourceGeometry.sourceRef;
+                let geometry=denominator?result.denominator.sourceGeometry:result.sourceGeometry;
+                let sourceEntry=denominator?pair.y.entry:pair.x.entry,preparedMeta=meta;
+                if(meta?.version==='msi-group-v1') {
+                    const groups=root.MsiSpatialGroups;
+                    if(!groups||!groups.roiCompatible(meta,result.numerator.sourceGeometry,section,pair.x.entry)
+                        ||!groups.roiCompatible(meta,result.denominator.sourceGeometry,section,pair.y.entry)){
+                        unavailable('roi-group-mismatch');continue;
+                    }
+                    geometry=result.sourceGeometry;sourceEntry=pair.x.entry;
+                    preparedMeta={...meta,version:'msi-source-v1',sourceRef:geometry.sourceRef};
+                }else if(meta&&meta.sourceRef!==geometry.sourceRef){unavailable('roi-source-mismatch');continue;}
+                const selection=h.roiSelection?h.roiSelection(section,poly,preparedMeta,geometry,sourceEntry):{poly,meta:preparedMeta,geometry};
+                if(selection.unavailable){unavailable(selection.reason||'roi-geometry-unavailable');continue;}
+                selections.push({...selection,id:rows.length-1});
+            }
+            if(selections.length) {
+                const snapshot=clone(selections);
+                const computed=await result._numericService.request('ratio-roi',{handle:result.handle,selections:snapshot},
+                    {...options,key:'ratio-roi:'+result.inputSignature+':'+Model.fingerprint(snapshot)});
+                if(app.project!==owner||Model.fingerprint([owner.rois||[],section.meta?.spatialGroups||null])!==roiStamp)
+                    throw error('集計中にROIが変更されました。再計算してください。','RATIO_SOURCE_CHANGED');
+                for(const item of computed)Object.assign(rows[item.id],{status:item.status,reason:item.reason||null,statistics:item.statistics});
+            }
+            return rows;
+        }
+        function numericKeepInputs(section,key,result) {
+            const pair=inputs(section,key),x=h.otsuGrid(section,pair.x.key),y=h.otsuGrid(section,pair.y.key);
+            if(!x||!y)return null;
+            const gx=result.numerator.sourceGeometry.displayGeometry,gy=result.denominator.sourceGeometry.displayGeometry;
+            if(x.W!==gx.W||x.H!==gx.H||y.W!==gy.W||y.H!==gy.H)return null;
+            return {x,y,stamp:JSON.stringify([h.otsuStamp(section),result.inputSignature])};
+        }
+        async function ensureNumericKeep(section,key,result,options={}) {
+            const input=numericKeepInputs(section,key,result);if(!input)return null;
+            if(result._keepStamp===input.stamp)return result._keep;
+            const value=await result._numericService.request('ratio-keep',{handle:result.handle,x:input.x,y:input.y},
+                {...options,key:'ratio-keep:'+input.stamp});
+            if(options.current&&!options.current())throw error('比の計算を中止しました。','RATIO_CANCELLED');
+            const retained=cache.get(section.id+'|'+key),bytes=value?.keep?.byteLength||0;
+            if(retained?.result===result)retained.bytes+=bytes-(result._keepBytes||0);
+            result._keepBytes=bytes;
+            result._keepStamp=input.stamp;result._keep=value;trimCache();return value;
+        }
         // Synchronous overlay/drawing guard. Keep the verified input frames
         // with the display entry even after the large numeric LRU is evicted.
         // Painting never starts another parse.
@@ -187,6 +312,7 @@
             } catch (_) { return false; }
         }
         async function resolve(section,key,options={}) {
+            if(h.numericService){syncContext();return resolveNumeric(section,key,options);}
             syncContext();const p=inputs(section,key),stamp=signature(section,key),owner=app.project,id=section.id+'|'+key;
             const assertCurrent=()=>{if(app.project!==owner||signature(section,key)!==stamp||options.signal&&options.signal.aborted)throw error('入力または比の条件が変更されました。再計算してください。','RATIO_SOURCE_CHANGED');};
             let rec=cache.get(id);
@@ -222,6 +348,24 @@
             return out;
         }
         function keepGrid(section,key,result) {
+            const retained=cache.get(section.id+'|'+key)?.result;
+            if(retained?._numericService) {
+                const input=numericKeepInputs(section,key,retained);if(!input)return null;
+                if(retained._keepStamp===input.stamp)return retained._keep;
+                if(retained._keepPending!==input.stamp) {
+                    retained._keepPending=input.stamp;
+                    const owner=app.project,current=()=>app.project===owner&&signature(section,key)===retained.inputSignature;
+                    ensureNumericKeep(section,key,retained,{current,priority:10}).then(()=>{
+                        if(current())app.repaintAllMsi();
+                    }).catch(e=>{
+                        // A lost handle is rebuilt through the normal bounded
+                        // service, never by a synchronous main-thread fallback.
+                        if(e.code==='ANALYSIS_HANDLE_EXPIRED'&&current())resolve(section,key,{roiStats:false,current})
+                            .then(()=>{if(current())app.repaintAllMsi();}).catch(()=>{});
+                    }).finally(()=>{if(retained._keepPending===input.stamp)retained._keepPending=null;});
+                }
+                return null;
+            }
             let pair;try{pair=inputs(section,key);}catch(_){return null;}
             const x=h.otsuGrid(section,pair.x.key),y=h.otsuGrid(section,pair.y.key);
             if(!x||!y)return null;
@@ -239,26 +383,35 @@
             }
             r._keepStamp=JSON.stringify(stamp);r._keep={W:r.raster.W,H:r.raster.H,keep};return r._keep;
         }
-        async function load(panel,key) {
+        function load(panel,key,options={}) {
             const stamp=signature(panel.section,key),epoch=panel._loadEpoch;
-            const inflight=panel._msiLoadInFlight.get(key);if(inflight&&inflight.identity===stamp)return inflight;
-            if(panel.isMsiLayerReady(key))return true;
-            const promise=(async()=>{
+            const inflight=panel._msiLoadInFlight.get(key);
+            if(inflight&&inflight.identity===stamp&&!inflight.signal?.aborted){
+                app.promoteLayerLoad?.(panel,'msi:'+key+':'+stamp,options.priority,!!options.automatic);return inflight;
+            }
+            if(panel.isMsiLayerReady(key))return Promise.resolve(true);
+            const run=async(request={})=>{
+                const current=()=>!request.signal?.aborted&&!panel._destroyed&&panel._loadEpoch===epoch&&signature(panel.section,key)===stamp
+                    &&(!options.current||options.current());
                 try{
-                    const result=await resolve(panel.section,key,{roiStats:false});
-                    const current=()=>!panel._destroyed&&panel._loadEpoch===epoch&&signature(panel.section,key)===stamp;
+                    const result=await resolve(panel.section,key,{roiStats:false,signal:request.signal,current,priority:options.priority});
                     if(!current())return false;
                     const r=result.raster,canvas=document.createElement('canvas');canvas.width=r.W;canvas.height=r.H;
                     const ctx=canvas.getContext('2d'),image=ctx.createImageData(r.W,r.H),max=result.displayAuto.rawRange[1];
-                    for(let i=0;i<r.values.length;i++)if(Number.isFinite(r.values[i])){const n=Math.round(Math.max(0,Math.min(1,r.values[i]/max))*255);image.data[i*4]=image.data[i*4+1]=image.data[i*4+2]=n;image.data[i*4+3]=255;}
+                    if(result.rgba)image.data.set(result.rgba);
+                    else for(let i=0;i<r.values.length;i++)if(Number.isFinite(r.values[i])){const n=Math.round(Math.max(0,Math.min(1,r.values[i]/max))*255);image.data[i*4]=image.data[i*4+1]=image.data[i*4+2]=n;image.data[i*4+3]=255;}
                     ctx.putImageData(image,0,0);const url=canvas.toDataURL('image/png');
                     if(!await panel.attachImage(key,url,current)||!current())return false;
                     panel.imageDataUrls[key]=url;panel.msiValueRasters.set(key,r);panel._initLayerSettings(key);panel._msiImageIdentity.set(key,stamp);panel._msiLoadErrors.delete(key);panel._touchMsiLru(key);
                     updateStatus(panel,key,result.status==='empty'?'有効な比なし':app.otsuBgRemove&&!result.keepGrid?'TIC背景maskを利用できません':'');
                     return true;
-                }catch(e){if(!panel._destroyed&&signature(panel.section,key)===stamp){delete panel.imageSources[key];delete panel.imageDataUrls[key];panel.msiValueRasters.delete(key);panel._msiLoadErrors.set(key,{identity:stamp,error:e});updateStatus(panel,key,e.message);}return false;}
+                }catch(e){if(current()&&!['RATIO_CANCELLED','ANALYSIS_CANCELLED'].includes(e.code)&&e.name!=='AbortError'){delete panel.imageSources[key];delete panel.imageDataUrls[key];panel.msiValueRasters.delete(key);panel._msiLoadErrors.set(key,{identity:stamp,error:e});updateStatus(panel,key,e.message);}return false;}
                 finally{if(panel._msiLoadInFlight.get(key)===promise)panel._msiLoadInFlight.delete(key);}
-            })();promise.identity=stamp;panel._msiLoadInFlight.set(key,promise);return promise;
+            };
+            const promise=app.requestLayerLoad?app.requestLayerLoad(panel,'msi:'+key+':'+stamp,'msi',run,options):Promise.resolve().then(run);
+            promise.identity=stamp;panel._msiLoadInFlight.set(key,promise);
+            const clear=()=>{if(panel._msiLoadInFlight.get(key)===promise)panel._msiLoadInFlight.delete(key);};
+            promise.then(clear,clear);return promise;
         }
         function updateStatus(panel,key,message){let node=panel.dom.canvasCell.querySelector('.ratio-status');if(!node){node=document.createElement('div');node.className='ratio-status';node.setAttribute('role','status');panel.dom.canvasCell.appendChild(node);}node.dataset.ratioKey=key;node.textContent=message;node.hidden=!message;}
         function display(key){const def=find(key);const value=def&&def.display||defaultDisplay();return {...defaultDisplay(),...value,...(shared()&&local.styles[key]||{})};}
@@ -268,6 +421,16 @@
             if(!app.project)return;
             const selection=++selectionEpoch;
             const projectAtStart=app.project,targets=app.viewMode==='free'?[app.panels.get(app.activeSectionId)].filter(Boolean):Array.from(app.panels.values());
+            // Keep the complete scientific scope, but start visible panels
+            // first and dispatch at most two display consumers at a time.
+            targets.sort((a,b)=>Number(!!app.isSectionLoadWanted?.(b))-Number(!!app.isSectionLoadWanted?.(a)));
+            const runTargets=async run=>{
+                let next=0;
+                const lane=async()=>{while(app.project===projectAtStart&&selection===selectionEpoch){
+                    const panel=targets[next++];if(!panel)return;await run(panel);
+                }};
+                await Promise.all(Array.from({length:Math.min(2,targets.length)},lane));
+            };
             const refresh=()=>{
                 const style=app.getMsiDisplaySettings();app.msiSmoothing=style.interpolation;
                 app.msiSmoothingStrength=style.smoothingStrength;app.msiLinearStrength=style.linearStrength;
@@ -278,33 +441,35 @@
                 const previous=app._ratioPreviousKey;
                 const fallback=previous&&app.project.sections.some(s=>s.msiSeries&&s.msiSeries[previous])?previous:Object.keys(app.project.sections[0]?.msiSeries||{})[0];
                 if(app.viewMode==='compound'&&fallback)app.setFocusCompoundKey(fallback);
-                await Promise.all(targets.map(async p=>{
+                await runTargets(async p=>{
                     const series=p.section.msiSeries||{},chosen=series[key]?key:app.viewMode==='free'&&series[p._ratioPreviousKey]?p._ratioPreviousKey:series[fallback]?fallback:Object.keys(series)[0];
                     if(!chosen||!await p.ensureMsiLayerLoaded(chosen)||app.project!==projectAtStart||selection!==selectionEpoch)return;
                     for(const k of [...p.visibleLayers])if(/^MSI_/i.test(k))p.visibleLayers.delete(k);
                     p.visibleLayers.add(chosen);p.activeMsiKey=chosen;
                     const status=p.dom.canvasCell.querySelector('.ratio-status');if(status)status.hidden=true;
                     p.setupCanvasSize();p.populateThumbnails();p.rebuildLayerBar();p.renderComposite();p.drawAllRois();
-                }));
+                });
                 if(app.project===projectAtStart&&selection===selectionEpoch)refresh();return;
             }
             if(!isRatio(app.focusCompoundKey))app._ratioPreviousKey=app.focusCompoundKey;
             app.activeOverlay=null;
             for(const p of targets){if(!isRatio(p.activeMsiKey)&&p.section.msiSeries?.[p.activeMsiKey])p._ratioPreviousKey=p.activeMsiKey;updateStatus(p,key,'比を計算中…');p._msiLoadErrors.delete(key);}
             if(app.viewMode==='compound')app.setFocusCompoundKey(key);
-            await Promise.all(targets.map(async p=>{if(await load(p,key)){if(app.project!==projectAtStart||selection!==selectionEpoch)return;for(const k of [...p.visibleLayers])if(/^MSI_/i.test(k))p.visibleLayers.delete(k);p.visibleLayers.add(key);p.activeMsiKey=key;p.setupCanvasSize();p.populateThumbnails();p.rebuildLayerBar();p.renderComposite();p.drawAllRois();}}));
+            await runTargets(async p=>{if(await load(p,key,{priority:app.isSectionLoadWanted?.(p)?0:30,
+                current:()=>app.project===projectAtStart&&selection===selectionEpoch})){if(app.project!==projectAtStart||selection!==selectionEpoch)return;for(const k of [...p.visibleLayers])if(/^MSI_/i.test(k))p.visibleLayers.delete(k);p.visibleLayers.add(key);p.activeMsiKey=key;p.setupCanvasSize();p.populateThumbnails();p.rebuildLayerBar();p.renderComposite();p.drawAllRois();}});
             if(app.project!==projectAtStart||selection!==selectionEpoch)return;refresh();
         }
         const format=v=>typeof v==='number'&&Number.isFinite(v)?v.toLocaleString(undefined,{maximumSignificantDigits:7}):'—';
         async function summaryTable(host,key) {
             const request=(host._ratioSummaryRequest||0)+1;host._ratioSummaryRequest=request;
+            host._ratioSummaryController?.abort();const controller=new AbortController();host._ratioSummaryController=controller;
             const owner=app.project,sections=(owner.sections||[]).slice(),results=[];
             const definitionStamp=Model.fingerprint(find(key)),roiStamp=Model.fingerprint(owner.rois||[]);
             const sectionStamp=()=>Model.fingerprint((app.project?.sections||[]).map(sec=>[sec.id,sec.name,sec.displayName]));
             const expectedSections=sectionStamp(),inputsAtStart=sections.map(sec=>[sec,signature(sec,key)]);
             host.textContent='集計中…';
             const current=()=>{
-                if(host._ratioSummaryRequest!==request||!host.isConnected)return false;
+                if(controller.signal.aborted||host._ratioSummaryRequest!==request||!host.isConnected)return false;
                 if(app.project!==owner||Model.fingerprint(find(key))!==definitionStamp
                     ||Model.fingerprint(owner.rois||[])!==roiStamp||sectionStamp()!==expectedSections
                     ||inputsAtStart.some(([sec,stamp])=>signature(sec,key)!==stamp)){
@@ -315,7 +480,10 @@
             };
             for(const sec of sections){
                 if(!current())return;
-                try{const r=await resolve(sec,key);if(!current())return;r.assertCurrent();results.push({sec,r});}
+                try{const r=await resolve(sec,key,{signal:controller.signal,current});if(!current())return;r.assertCurrent();
+                    // The table needs small summaries only. Do not retain each
+                    // section's original numeric snapshots until the last row.
+                    results.push({sec,r:{statistics:r.statistics,roiStats:r.roiStats}});}
                 catch(e){if(!current())return;results.push({sec,error:e.message});}
             }
             if(!current())return;
@@ -357,7 +525,8 @@
         function openDialog(key) {
             if(!app.project){h.toast('プロジェクトを開いてください。');return;}
             if(app.project.meta?.msiRatios&&app.project.meta.msiRatios.schemaVersion!==1){h.toast('この比は新しいアプリ版で保存されています。対応版で表示・編集してください。');return;}
-            document.getElementById('msi-ratio-dialog')?.remove();
+            const previousDialog=document.getElementById('msi-ratio-dialog');
+            previousDialog?.querySelector('[data-ratio-results]')?._ratioSummaryController?.abort();previousDialog?.remove();
             let current=find(key);
             const draft=current?clone(current):{id:h.uid('ratio'),name:'',revision:1,operation:'divide',calculationVersion:'msi-ratio-v1',denominatorMin:0,numeratorPolicy:'nonnegative',invalidPolicy:'exclude',bindings:{},display:defaultDisplay()};
             const owner=app.project,dialog=document.createElement('dialog');dialog.id='msi-ratio-dialog';
@@ -390,14 +559,14 @@
             dialog.querySelector('[data-ratio-summary]').onclick=act(async()=>{requireSaved();await summaryTable(dialog.querySelector('[data-ratio-results]'),appliedKey);});
             dialog.querySelectorAll('[data-ratio-csv]').forEach(btn=>btn.onclick=act(async()=>{requireSaved();status('CSVを作成中…');await exportCsv(appliedKey,btn.dataset.ratioCsv);status('CSVを出力しました。');}));
             dialog.querySelector('[data-ratio-delete]').onclick=act(async()=>{if(!current)return;if(shared()){local.definitions=local.definitions.filter(d=>d.id!==current.id);if(!local.hidden.includes(current.id))local.hidden.push(current.id);saveLocal();}else{app.project.meta.msiRatios.definitions=definitions().filter(d=>d.id!==current.id);app.queueSave();}invalidate();await activate('');dialog.close();});
-            dialog.addEventListener('close',()=>dialog.remove(),{once:true});
+            dialog.addEventListener('close',()=>{dialog.querySelector('[data-ratio-results]')?._ratioSummaryController?.abort();dialog.remove();},{once:true});
         }
         Object.assign(app,{getRatioDefinitions:definitions,ratioSignature:signature,ratioEntry:entry,
             ratioRoiCompatible:roiCompatible,
             ratioSourceKey(section,key){try{return inputs(section,key).x.key;}catch(_){return null;}},
             ratioKeys(section){return definitions().filter(d=>binding(section,d)).map(keyOf);},resolveRatio:resolve,openRatioDialog:openDialog,
             ratioKeepGrid:keepGrid,loadRatioLayer:load,activateRatio:activate,
-            async ratioRawGrid(section,key){const r=await resolve(section,key,{roiStats:false});return {rows:ratioRows(r),sourceGeometry:r.sourceGeometry,W:r.raster.W,H:r.raster.H};},
+            async ratioRawGrid(section,key,options={}){const r=await resolve(section,key,{...options,roiStats:false});return {rows:ratioRows(r),sourceGeometry:r.sourceGeometry,W:r.raster.W,H:r.raster.H,handle:r.handle,ratio:true};},
             getRatioDisplayStyle(key){const s=display(key);return {...s,kind:'ratio',mode:s.scaleMode||'same',lut:h.colormap(s.colormap),background:h.colormap(s.colormap)[0],smoothing:s.interpolation,otsu:app.otsuBgRemove};},
             ratioExportRegistry(includePersonal=true){syncContext();const saved=clone(app.project.meta?.msiRatios)||{schemaVersion:1,definitions:[]};return shared()&&includePersonal?{schemaVersion:1,definitions:clone(definitions()).map(d=>({...d,display:display(keyOf(d))}))}:saved;}
         });

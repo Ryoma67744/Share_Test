@@ -363,7 +363,7 @@ console.log('parquet (TIMS non-target) — connector vs app');
       });
       ctx.globalThis = ctx;
       const pureFunctions = [...sourceFunctionNames, ...geometryFunctionNames,
-        'parquetSourceRows', 'extractRoiRawFromSection', 'calcStats'];
+        'parquetSourceRows', 'collectRoiSourceRows', 'extractRoiRawFromSection', 'calcStats'];
       new vm.Script(pureFunctions.map(name => appFunction(viewerSrc, name)).join('\n')
         + '\n' + body + '\nglobalThis.__body = _parquetWorkerBody;').runInContext(ctx);
       appContext = ctx;

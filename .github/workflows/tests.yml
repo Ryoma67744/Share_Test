@@ -97,6 +97,8 @@ jobs:
         run: node tests/msi_spatial_browser_regression.cjs
       - name: Ratio creation, display isolation, ROI statistics and CSV
         run: node tests/msi_ratio_browser_regression.cjs
+      - name: Analysis worker numeric parity and responsiveness
+        run: node tests/msi_ratio_analysis_browser_regression.cjs
       - name: Ratio ZIP roundtrip and shared personal settings
         run: node tests/msi_ratio_archive_browser_regression.cjs
       - name: Ratio PowerPoint and microscope comparison outputs

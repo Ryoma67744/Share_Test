@@ -191,6 +191,8 @@ async function registeredCalibrationChecks() {
   assert.equal(f.context.resolveMsiCoordinateCalibration(f.toxo,key).status,'unknown',
     'Rounded TXT coordinates reproduce the old coordinate-gated bar rejection');
   const extraction = html.indexOf('async function extractRoiRawFromSection(');
+  const collection = html.indexOf('function collectRoiSourceRows(');
+  vm.runInContext(html.slice(collection,html.indexOf('\n}',collection)+2),f.context);
   vm.runInContext(html.slice(extraction,html.indexOf('\n}',extraction)+2),f.context);
   f.context._ensureRoiRawGrid = async () => ({rows,sourceGeometry:geometry});
   const quantitative = async () => {

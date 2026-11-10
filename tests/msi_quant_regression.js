@@ -14,11 +14,11 @@ function lift(source,name){
 const names=['pointInPolygon','calcStats','buildLegacyMsiGrid','buildMsiGrid','msiSourceReference',
   'createMsiSourceGeometry','msiAxisInterpolate','msiValidRoiGeometry','roiContainsSourcePoint','msiRoiGeometryMeta',
   'msiSourceStats','percentileOfSorted','deriveBakeStats','blankStats','bakeRasterFromValues',
-  'computeRasterPixels','scatterParquetColumn','parquetSourceRows','parquetAccumulateTicAndStats','msiMaxIntensity','msiQuantMean',
-  'extractRoiRawFromSection','msiLayerSourceGeometry','msiLegacyRasterPointToDisplay',
+  'computeRasterPixels','scatterParquetColumn','parquetSourceRows','parquetAccumulateTicAndStats','accumulateParquetColumns','msiMaxIntensity','msiQuantMean',
+  'collectRoiSourceRows','extractRoiRawFromSection','msiLayerSourceGeometry','msiLegacyRasterPointToDisplay',
   'msiDisplayRasterPointToLegacy','roiPolygonForDisplay','_roiGridKey','otsuHasMasks','msiOtsuSourceKey','otsuCurrentRecords'];
 const ctx=vm.createContext({console,Float64Array,Float32Array,Uint32Array,Uint8ClampedArray,Map,Set,
-  msiSourceNumber:Number, App:{panels:new Map()},MSI_ROBUST_PERCENTILE:0.999,MSI_DEFAULT_DISPLAY_PERCENTILE:0.999});
+  getMsiAnalysisService:()=>null,msiSourceNumber:Number, App:{panels:new Map()},MSI_ROBUST_PERCENTILE:0.999,MSI_DEFAULT_DISPLAY_PERCENTILE:0.999});
 vm.runInContext(names.map(n=>lift(html,n)).join('\n')+'\nthis.api={'+names.join(',')+'};',ctx);
 const api=ctx.api;
 const plain=v=>JSON.parse(JSON.stringify(v));

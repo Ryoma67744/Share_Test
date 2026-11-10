@@ -15,7 +15,7 @@ const ctx=vm.createContext({console,Map,Set,Float64Array,setTimeout,clearTimeout
 });
 const functions=['pointInPolygon','buildLegacyMsiGrid','buildMsiGrid','msiSourceReference','createMsiSourceGeometry',
     'msiAxisInterpolate','msiValidRoiGeometry','roiContainsSourcePoint','msiRoiGeometryMeta','msiLayerSourceGeometry',
-    'roiPolygonForDisplay','extractRoiRawFromSection','encodeRoiPolygon','decodeRoiPolygon','remapRoiGeometry',
+    'roiPolygonForDisplay','collectRoiSourceRows','extractRoiRawFromSection','encodeRoiPolygon','decodeRoiPolygon','remapRoiGeometry',
     'ensureSpatialServerSupport','_isMissingRpc','_isStaleVersionError','groupRoiRowsByColor'];
 vm.runInContext(functions.map(name=>(html.includes('async function '+name+'(')?'async ':'')+standalone(name)).join('\n')+'\n'+html.slice(html.indexOf('const App = {'),html.indexOf('\n};',html.indexOf('const App = {'))+3)+'\nthis.app=App;',ctx);
 const app=ctx.app;
