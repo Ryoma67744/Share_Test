@@ -62,6 +62,23 @@ async function txt(){
     assert.equal(legacy.grids[0].sourceGeometry.legacy.confirmed,false);
     assert.equal(legacy.grids[1].sourceGeometry.legacy.confirmed,true,'one MRM must not change another feature legacy geometry');
 }
+async function analyteRaster(){
+    // Legacy registrations may rely solely on kind:'txt-analyte': neither the
+    // magic header nor an explicit feature index is required by the parser.
+    const bytes=new TextEncoder().encode('legacy export\nmetadata\nmetadata\nmetadata\n1\t0\t0\t10\t900\n2\t1\t0\t20\t800\n3\t0\t1\t30\t700\n');
+    const def={kind:'txt-analyte',blobId:'legacy-analyte'};
+    const rows=baseline.parseTxtToRows(bytes,def);
+    same(Array.from(rows,row=>row.v),[10,20,30],'kind selects the default first feature without header/index hints');
+    const expected=baseline.computeRasterPixels(rows,def.range,def.bakeMode);
+    const result=await call('txt-raster',{blob:new Blob([bytes]),def});
+    for(const key of ['width','height','values','rawRange','rawMean','rawTrueMax','rawDispMax','diag','sourceStats','sourceGeometry'])
+        same(result[key],expected[key],'explicit txt-analyte raster '+key);
+    await originalParity('legacy-analyte-source',bytes,def,[{layerKey:'first',ent:def}]);
+    const csv=new TextEncoder().encode('x,y,v\n0,0,2\n1,0,4\n'),implicit={blobId:'kind-inferred'};
+    const inferred=await call('txt-raster',{blob:new Blob([csv]),def:implicit});
+    same(inferred.values,baseline.computeRasterPixels(baseline.parseTxtToRows(csv,implicit)).values,
+        'raster operation supplies kind only when registration omitted it');
+}
 async function xlsx(){
     const wb=XLSX.utils.book_new(),sheet=XLSX.utils.aoa_to_sheet([['x','y','A','B'],[2,0,1.0000000000000002,10],[2,0,null,20],[null,0,9,30],[1,0,-0,0],[1,1,-2,2],[1,2,'bad',3]]);
     sheet.C2.f='1+2^-52';sheet.C7={t:'e',v:7,w:'#DIV/0!'};
@@ -151,6 +168,6 @@ async function fallbackPolicy(){
     await assert.rejects(context.inspectXlsxColumnsAuto({size:5*1024*1024},new ArrayBuffer(1),'S',1),{code:'ANALYSIS_WORKER_REQUIRED'});
     assert.equal(mainCalls,1);assert.equal(workerCalls,1);
 }
-async function main(){await txt();await xlsx();await raw();await parquet();await cache();await fallbackPolicy();console.log('MSI analysis source regression: PASS (TXT/XLSX/RAW/Parquet golden rows, lexical cells, geometry, stats, ROI, transfer and bounded shared decode)');}
+async function main(){await txt();await analyteRaster();await xlsx();await raw();await parquet();await cache();await fallbackPolicy();console.log('MSI analysis source regression: PASS (TXT/XLSX/RAW/Parquet golden rows, lexical cells, geometry, stats, ROI, transfer and bounded shared decode)');}
 const watchdog=setTimeout(()=>{console.error('MSI analysis source regression timed out');process.exitCode=1;},30000);
 main().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>clearTimeout(watchdog));
