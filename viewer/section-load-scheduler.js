@@ -22,7 +22,7 @@
             queueMicrotask(() => {
                 pumping = false;
                 for (const job of [...jobs.values()]) if (!job.started && !valid(job)) {
-                    remove(job); job.resolve(false);
+                    job.cancelled=true;job.controller.abort();remove(job);job.resolve(false);
                 }
                 const waiting = [...jobs.values()].filter(job => !job.started)
                     .sort((a,b) => a.priority - b.priority || a.sequence - b.sequence);
@@ -32,8 +32,11 @@
                     // Background work yields whenever foreground is queued or active.
                     if (job.priority >= 30 && [...jobs.values()].some(j => !j.cancelled && j.priority < 30)) continue;
                     job.started = true; active++; if (job.kind === 'image') images++;
-                    Promise.resolve().then(() => valid(job) ? job.run() : false)
-                        .then(value => job.resolve(valid(job) ? value : false), job.reject)
+                    Promise.resolve().then(() => valid(job) ? job.run({signal:job.controller.signal}) : false)
+                        .then(value => job.resolve(valid(job) ? value : false), error => {
+                            if (!valid(job) || job.controller.signal.aborted) job.resolve(false);
+                            else job.reject(error);
+                        })
                         .finally(() => { active--; if (job.kind === 'image') images--; remove(job); notifyIdle(); pump(); });
                 }
                 notifyIdle();
@@ -50,14 +53,16 @@
                 }
                 pump(); return old.promise;
             }
-            const job = {...spec, priority:spec.priority ?? 10, sequence:sequence++, started:false};
+            const job = {...spec, priority:spec.priority ?? 10, sequence:sequence++, started:false,controller:new AbortController()};
             job.promise = new Promise((resolve,reject) => { job.resolve=resolve; job.reject=reject; });
+            job.promise.signal = job.controller.signal;
             jobs.set(job.key,job); pump(); return job.promise;
         }
         function cancelWhere(predicate) {
             for (const job of [...jobs.values()]) if (predicate(job)) {
                 job.cancelled=true;
-                if (!job.started) { remove(job); job.resolve(false); }
+                job.controller.abort();job.resolve(false);
+                if (!job.started) remove(job);
             }
             notifyIdle(); pump();
         }

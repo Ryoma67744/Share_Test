@@ -6,6 +6,7 @@
 <script src="../project-store-safety.js"></script>
 <script src="../project-navigation.js"></script>
 <script src="share-refresh.js"></script>
+<script src="source-loader.js"></script>
 <script src="msi-display-settings.js"></script>
 <script src="msi-display-geometry.js"></script>
 <script src="msi-spatial-groups.js"></script>
@@ -3248,11 +3249,12 @@ const ProjectStorage = (() => {
     const deleteArchiveJob = (...args) => storeSafety().deleteArchiveJob(...args);
     const beginBlobLease = (...args) => storeSafety().beginBlobLease(...args);
     const pinBlobLease = (...args) => storeSafety().pinBlobLease(...args);
+    const getBlobWithLease = (...args) => storeSafety().getBlobWithLease(...args);
     const finishBlobLease = (...args) => storeSafety().finishBlobLease(...args);
     const reclaimInactiveBlobLeases = (...args) => storeSafety().reclaimInactiveBlobLeases(...args);
     return { open, listProjects, getProject, putProject, deleteProject, putBlob, getBlob, renameBlob, deleteBlob, pruneShareOrphans,
              patchProject, recordPublishReceipt, replaceProjectFromServer, listRecoveries, getRecoveryEnabled, setRecoveryEnabled, restoreRecovery, discardRecovery, releaseProject, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
-             beginBlobLease, pinBlobLease, finishBlobLease, reclaimInactiveBlobLeases, getPqIndex, putPqIndex, deletePqIndex };
+             beginBlobLease, pinBlobLease, getBlobWithLease, finishBlobLease, reclaimInactiveBlobLeases, getPqIndex, putPqIndex, deletePqIndex };
 })();
 
 // =============================================================
@@ -8027,7 +8029,7 @@ class SectionPanel {
         if (this._destroyed || !key || !/^MSI_/i.test(key)) return Promise.resolve(false);
         const identity = this._msiLoadIdentity(key);
         const inflight = this._msiLoadInFlight.get(key);
-        if (inflight && inflight.identity === identity) {
+        if (inflight && inflight.identity === identity && !inflight.signal?.aborted) {
             if (App.promoteLayerLoad) App.promoteLayerLoad(this,'msi:'+key+':'+identity,options.priority,!!options.automatic);
             return inflight;
         }
@@ -8039,12 +8041,14 @@ class SectionPanel {
         errors.delete(key);
         // Defer entry so the in-flight promise exists even if the parser throws
         // synchronously. Only this source revision may commit or clear its state.
-        const current = () => !this._destroyed && this.section.msiSeries[key] === ent
+        let signal;
+        const current = () => !signal?.aborted && !this._destroyed && this.section.msiSeries[key] === ent
             && identity === this._msiLoadIdentity(key);
-        const run = async () => {
+        const run = async (request = {}) => {
+            signal=request.signal;
             try {
                 if (!current()) return false;
-                await this.loadMsiLayer(key, ent);
+                await this.loadMsiLayer(key, ent, {signal,current});
                 if (!current()) return false;
                 const img = this.imageSources[key];
                 if (!img || !img.complete || !(img.naturalWidth > 0 && img.naturalHeight > 0)) {
@@ -8055,7 +8059,7 @@ class SectionPanel {
                 this._touchMsiLru(key);
                 return true;
             } catch (e) {
-                if (current()) {
+                if (current() && e?.name !== 'AbortError' && e?.code !== 'SOURCE_CANCELLED') {
                     delete this.imageSources[key];
                     delete this.imageDataUrls[key];
                     this.msiValueRasters.delete(key);
@@ -8290,24 +8294,26 @@ class SectionPanel {
         const inflight=this._imageLoadInFlight || (this._imageLoadInFlight=new Map());
         const errors=this._imageLoadErrors || (this._imageLoadErrors=new Map());
         const old=inflight.get(key);
-        if(old && old.identity===identity) {
+        if(old && old.identity===identity && !old.signal?.aborted) {
             if(App.promoteLayerLoad) App.promoteLayerLoad(this,token,options.priority,!!options.automatic);
             return old;
         }
         if(this.isImageLayerReady(key)) return Promise.resolve(true);
         if(options.retry===false && errors.get(key)?.identity===identity) return Promise.resolve(false);
         errors.delete(key);
-        const current=()=>!this._destroyed && this.section.images[key]===ent && identity===this._imageLoadIdentity(key);
-        const run=async()=>{
+        let signal;
+        const current=()=>!signal?.aborted && !this._destroyed && this.section.images[key]===ent && identity===this._imageLoadIdentity(key);
+        const run=async(request={})=>{
+            signal=request.signal;
             try {
-                if(!current() || !await this.loadImageLayer(key,ent,current) || !current()) return false;
+                if(!current() || !await this.loadImageLayer(key,ent,current,{signal}) || !current()) return false;
                 this._initLayerSettings(key);
                 const saved=this.section.meta?.layerDisplay?.[key];
                 if(saved) for(const field of ['vmin','vmax']) if(Number.isFinite(saved[field])) this.imageSettings[key][field]=saved[field];
                 (this._imageLoadIdentityByKey || (this._imageLoadIdentityByKey=new Map())).set(key,identity);
                 return true;
             } catch(error) {
-                if(current()) {
+                if(current() && error?.name!=='AbortError' && error?.code!=='SOURCE_CANCELLED') {
                     errors.set(key,{identity,error});
                     delete this.imageSources[key];delete this.imageDataUrls[key];
                     console.warn('HE/IF image load failed',key,error);
@@ -8323,11 +8329,11 @@ class SectionPanel {
         return job;
     }
 
-    async loadImageLayer(key, ent, guard) {
+    async loadImageLayer(key, ent, guard, options={}) {
         if (!ent || !ent.blobId) return false;
         const identity=this._imageLoadIdentity(key), project=this.project;
-        const current=guard || (()=>!this._destroyed && this.section.images[key]===ent && identity===this._imageLoadIdentity(key));
-        const rec = await ensureLocalBlob(ent, project);
+        const current=()=>!options.signal?.aborted && (guard ? guard() : !this._destroyed && this.section.images[key]===ent && identity===this._imageLoadIdentity(key));
+        const rec = await ensureLocalBlob(ent, project, {signal:options.signal,current});
         if (!current()) return false;
         if (!rec || !rec.blob) throw new Error('画像の原本が見つかりません ('+key+')');
         const dataUrl = await decodeImageBlobToDataUrl(rec.blob, rec.mime);
@@ -8337,9 +8343,10 @@ class SectionPanel {
         return true;
     }
 
-    async loadMsiLayer(key, ent) {
+    async loadMsiLayer(key, ent, options={}) {
         const identity = this._msiLoadIdentity(key);
-        const current = () => !this._destroyed && displayMsiEntry(this.section, key) === ent
+        const current = () => !options.signal?.aborted && (!options.current || options.current())
+            && !this._destroyed && displayMsiEntry(this.section, key) === ent
             && identity === this._msiLoadIdentity(key);
         // ★ ここは無言で return してはいけない。
         //   以前は「登録は在るのに元データが無い」ときに黙って返していたので、
@@ -8361,13 +8368,15 @@ class SectionPanel {
             // 投げて、呼び出し側 (ensureMsiLayerLoaded) が 1 回だけ通知する。
             // 供給元は master ならローカル blob、共有先なら Storage の URL。
             const src = await parquetSrcForEnt(ent);
+            if (!current()) return;
             if (!src) {
                 throw new Error('元データが見つかりません (' + key + ')。'
                     + '保存容量が足りずに書き込みが取り消された可能性があります');
             }
             result = await buildParquetRaster(ent, src);
         } else {
-            const rec = await ensureLocalBlob(ent, App.project);
+            const rec = await ensureLocalBlob(ent, this.project || App.project, {signal:options.signal,current});
+            if (!current()) return;
             if (!rec || !rec.blob) {
                 throw new Error('元データがこの端末に保存されていません (' + key + ')。'
                     + 'サーバからも復元できませんでした (未 publish、または保存容量が'
@@ -8391,6 +8400,7 @@ class SectionPanel {
                     result = await callParseWorker(op, { blob: rec.blob, def: ent, cacheKey }, 120000);
                 } catch (e) { console.warn('MSI worker parse failed, main-thread fallback', e); result = null; }
             }
+            if (!current()) return;
             if (!result) {
                 const buf = await rec.blob.arrayBuffer();
                 if (ent.kind === 'txt') result = await buildPngFromTxtArrayBuffer(buf, ent);
@@ -11396,10 +11406,29 @@ async function fetchAllShareRois(token, sections, options = {}) {
     return out;
 }
 
+async function ensureSharedRoisReady(project) {
+    const state=project && project.__shareRoiState;
+    if(!state || state.status==='ready')return;
+    if(!await state.load())throw state.error || new Error('ROI を読み込めませんでした。再試行してください。');
+}
+
+async function releaseSharedProjectSources(project) {
+    if(!project?.__blobLease)return;
+    await project.__sourceLoader?.dispose();
+    await ProjectStorage.finishBlobLease(project.__blobLease,{discard:true});
+}
+
 function populateRoiList() {
     const host = document.getElementById('roi-list');
     host.innerHTML = '';
     const project = App.project;
+    if(project?.__shareRoiState && project.__shareRoiState.status!=='ready') {
+        const failed=project.__shareRoiState.status==='error';
+        host.innerHTML='<p class="text-gray-500">'+(failed?'ROI を読み込めませんでした。':'ROI を読み込み中…')+'</p>';
+        if(failed){const retry=document.createElement('button');retry.className='btn';retry.textContent='再試行';
+            retry.onclick=()=>App._refreshShareRois().catch(error=>showToast(error.message));host.appendChild(retry);}
+        return;
+    }
     const rois = (project && project.rois) || [];
     if (!rois.length) { host.innerHTML = '<p class="text-gray-500">No ROI yet.</p>'; return; }
     project.roiHidden = project.roiHidden || {};
@@ -11750,6 +11779,10 @@ async function renderAnalysisChart(gen) {
     const stale = () => (gen !== undefined && gen !== App._analysisGen);
     const host = document.getElementById('graph-container');
     const project = App.project;
+    if(project?.__shareRoiState && project.__shareRoiState.status!=='ready') {
+        host.textContent=project.__shareRoiState.status==='error'?'ROI を読み込めませんでした。ROI一覧から再試行してください。':'ROI を読み込み中…';
+        return;
+    }
     const roi = (project.rois || []).find(r => r.id === App.activeRoiId);
     // ROI チャートは Method 表のどのセルにも影響しない (ent の統計も焦点も
     // 変えない)。ROI やグラフ選択を触るたびに 1390 行を組み直していたので外す。
@@ -18282,11 +18315,18 @@ function storagePathForEnt(ent, project) {
 //   だから黙って取り直せばよい。同じ blob を 1390 化合物が共有するので、
 //   取得は blobId ごとに 1 本にまとめる。
 const _blobRepairInFlight = new Map();   // blobId -> Promise<rec|null>
-async function ensureLocalBlob(ent, project) {
+async function ensureLocalBlob(ent, project, options = {}) {
     if (!ent || !ent.blobId) return null;
+    if (project && project.__sourceLoader) {
+        try { return await project.__sourceLoader.ensure(ent,options); }
+        catch (error) {
+            if(error.name==='AbortError' || error.code==='SOURCE_CANCELLED')throw error;
+            console.warn('[source] 原本を取得できませんでした', ent.filename || ent.blobId, error); return null;
+        }
+    }
     let rec = null;
-    try { rec = await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
-    if (rec && rec.blob) { if(project?.__blobLease)await ProjectStorage.pinBlobLease(project.__blobLease,[ent.blobId]); return rec; }
+    try { rec = project?.__blobLease ? await ProjectStorage.getBlobWithLease(ent.blobId,project.__blobLease) : await ProjectStorage.getBlob(ent.blobId); } catch (e) { rec = null; }
+    if (rec && rec.blob) return rec;
     if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
         throw new Error('このPCに原本がありません: ' + (ent.filename || ent.blobId)
             + '。原本を含む ZIP を取り込むか、ファイルを再登録してください。');
@@ -18364,7 +18404,8 @@ async function _ensureHeImage(panel, sec, layerKey) {
     if (img && img.complete && img.naturalWidth) return img;
     const ent = (sec.images || {})[layerKey];
     if (!ent || !ent.blobId) return null;
-    const rec = await ProjectStorage.getBlob(ent.blobId);
+    const owner=panel?.project || App.project;
+    const rec = owner?.__sourceLoader ? await owner.__sourceLoader.ensure(ent) : await ProjectStorage.getBlob(ent.blobId);
     if (!rec) return null;
     const url = await decodeImageBlobToDataUrl(rec.blob, ent.mime);
     return await _loadImageFromUrl(url);
@@ -18739,12 +18780,22 @@ async function exportProjectAsZip() {
         try { await loadScript(LAZY_LIBS.jszip); } catch (e) { alert('JSZip の読み込みに失敗しました'); return; }
         if (typeof JSZip === 'undefined') { alert('JSZip not loaded'); return; }
         if (!App.project) return;
+        const exportOwner=App.project;
+        if(exportOwner.__shareRoiState)await ensureSharedRoisReady(exportOwner);
+        if(App.project!==exportOwner)throw new Error('プロジェクトが変更されました。出力をやり直してください。');
         const ratioOptions = await ratioZipOptions();
         if (!ratioOptions) return;
         const ratioRegistry = App.ratioExportRegistry ? App.ratioExportRegistry(ratioOptions.includePersonal) : undefined;
         const exportDisplaySettings = {otsuBgRemove: !!App.otsuBgRemove, otsuStrength: App.otsuStrength, otsuManualThreshold: App.otsuManualThreshold};
         exportSession = await ProjectArchive.beginExport(App.project, ProjectStorage, {
             currentProject: () => App.project, readMedia: item => roiMediaReadOriginal(item), ratioRegistry,
+            ensureEntry: async (entry, options) => {
+                options.assertCurrent();
+                const record=exportOwner.__sourceLoader
+                    ? await exportOwner.__sourceLoader.ensure(entry,{signal:options.signal,current:()=>App.project===exportOwner})
+                    : await ProjectStorage.getBlob(entry.blobId);
+                options.assertCurrent();return record;
+            },
             currentRatioRegistry: () => App.ratioExportRegistry ? App.ratioExportRegistry(ratioOptions.includePersonal) : undefined
         });
         const project = exportSession.project, snapshotStorage = exportSession.storage;
@@ -20057,11 +20108,22 @@ const SharePreview = {
     _focusLoadStatus: null,     // Map<sectionId, 'ready'|'loading'|'failed'>
     _prefetchHandle: null,
     _prefetchKind: null,
+    _wantedSectionIds: new Set(),
+    _demandLoads: new Map(),
+    _demandRaf: 0,
+    _demandObserver: null,
+    _demandResizeObserver: null,
 
     isOpen() { return !!(this.overlay && document.body.contains(this.overlay)); },
 
     close() {
         this._focusLoadSeq++;
+        this._wantedSectionIds = new Set();
+        this._demandLoads.clear();
+        if(this._demandRaf)cancelAnimationFrame(this._demandRaf);
+        this._demandRaf=0;
+        this._demandObserver?.disconnect();this._demandObserver=null;
+        this._demandResizeObserver?.disconnect();this._demandResizeObserver=null;
         this._loadingFocusKey = null;
         this._focusLoadStatus = null;
         this._cancelAdjacentPrefetch();
@@ -20204,18 +20266,14 @@ const SharePreview = {
         this._visibilitySnapshot = snap;
     },
 
-    // Force every HE/IF layer registered in any panel's section.images to
-    // be visible so the preview reliably blends MSI over a histology
-    // backdrop, regardless of what the master may have toggled off before
-    // publish. toggleLayer() handles renderComposite + thumb chip refresh
-    // internally; queueSave is a no-op in share-mode so this never leaks
-    // to IndexedDB.
+    // Preview owns temporary optical visibility only for demanded cells.
+    // Automatic requests retain scheduler validity and never persist visibility.
     _forceHeBackdrop() {
         if (!App || !App.panels) return 0;
         const project=App.project,overlay=this.overlay;
         let touched = 0;
         for (const [id,panel] of App.panels) {
-            if(project && App.sectionVisibility && !App.sectionVisibility().ensure().has(String(id)))continue;
+            if(!this.isSectionWanted(id))continue;
             const images = (panel.section && panel.section.images) || {};
             const heKeys = Object.keys(images).filter(k => /HE_STAIN|IF_STAIN/i.test(k));
             for (const k of heKeys) {
@@ -20228,17 +20286,21 @@ const SharePreview = {
                     // へ流れる。_restoreVisibility はメモリしか戻さないので、
                     // 「意図的に隠していた HE/IF が、プレビューを開いただけで
                     // ローカルにも共有先にも表示状態で残る」ことになる。
-                    try { panel.toggleLayer(k, true, { persist: false }); touched++; } catch (e) {}
+                    // Mark only this demanded panel. toggleLayer is an explicit
+                    // user-load path and would bypass automatic-load validity.
+                    panel.visibleLayers.add(k);touched++;
+                    panel.rebuildLayerBar();panel.refreshThumbHighlights();
+                    if(panel.isImageLayerReady?.(k)) {
+                        if(!panel.setupCanvasSize())panel.renderComposite();
+                    }
                 }
-                if(panel.ensureImageLayerLoaded)panel.ensureImageLayerLoaded(k,{priority:0}).then(ok=>{
-                    if(!ok || !this.isOpen() || this.overlay!==overlay || App.project!==project || panel._destroyed)return;
-                    if(!panel.setupCanvasSize())panel.renderComposite();
-                    this._rebakeCellImages(project,App.focusCompoundKey);
-                }).catch(e=>console.warn('Preview HE load failed',e));
+                if(panel.ensureImageLayerLoaded && !panel.isImageLayerReady?.(k))
+                    this._demandLoad('image:'+id+':'+k+':'+(panel._imageLoadIdentity?.(k)||''),()=>panel.ensureImageLayerLoaded(k,{automatic:true,priority:20,retry:false}),ok=>{
+                        if(!ok || !this.isOpen() || this.overlay!==overlay || App.project!==project || panel._destroyed || !this.isSectionWanted(id))return;
+                        if(!panel.setupCanvasSize())panel.renderComposite();
+                        this._showLoadedPreviewCell(project,App.focusCompoundKey,id);
+                    });
             }
-        }
-        if (!touched) {
-            console.info('SharePreview: no HE/IF layer toggled (already on or none registered)');
         }
         return touched;
     },
@@ -20354,22 +20416,25 @@ const SharePreview = {
 
     async _injectTicBackdrops() {
         const overlay=this.overlay, project=App.project;
-        this._syntheticHeKeys=new Map();
+        this._syntheticHeKeys=this._syntheticHeKeys || new Map();
         const changes=this._syntheticHeKeys;
         if(!App.panels)return;
+        const pending=[];
         for(const [pid,panel] of App.panels){
-            if(!App.sectionVisibility().ensure().has(String(pid)))continue;
+            if(!this.isSectionWanted(pid))continue;
             if(Object.keys(panel.section.images||{}).some(k=>/HE_STAIN|IF_STAIN/i.test(k)))continue;
-            const current=()=>this.isOpen()&&this.overlay===overlay&&App.project===project&&App.panels.get(pid)===panel;
+            const current=()=>this.isOpen()&&this.overlay===overlay&&App.project===project&&App.panels.get(pid)===panel&&this.isSectionWanted(pid);
             const key="HE_STAIN_TIC",wasVisible=panel.visibleLayers.has(key);
-            const ticImg=await this._generateTicForPanel(panel,{current});
-            if(!current())return;
-            if(!ticImg)continue;
-            // The panel owns this derived image. Preview only owns its visibility.
-            changes.set(pid,{key,wasVisible});
-            panel.visibleLayers.add(key);
-            panel.renderComposite();
+            if(changes.has(pid) && panel.imageSources[key])continue;
+            pending.push(this._demandLoad('tic:'+pid,()=>this._generateTicForPanel(panel,{current}),ticImg=>{
+                if(!ticImg || !current())return;
+                // The panel owns this derived image. Preview only owns visibility.
+                if(!changes.has(pid))changes.set(pid,{key,wasVisible});
+                panel.visibleLayers.add(key);panel.renderComposite();
+                this._showLoadedPreviewCell(project,App.focusCompoundKey,pid);
+            }));
         }
+        await Promise.allSettled(pending);
     },
 
     _removeTicBackdrop() {
@@ -20547,11 +20612,8 @@ const SharePreview = {
             </div>`;
         document.body.appendChild(overlay);
         this.overlay = overlay;
+        this._wantedSectionIds=new Set();
         if(App._updateSectionLoadDemand)App._updateSectionLoadDemand();
-        this._forceHeBackdrop();
-        this._injectTicBackdrops().then(()=>{
-            if(this.isOpen() && this.overlay===overlay && App.project===project)this._rebakeCellImages(project,App.focusCompoundKey);
-        }).catch(e=>console.warn('TIC inject failed',e));
 
         // Make the overlay focusable so it can capture ArrowUp/Down without
         // requiring the user to click a control first.
@@ -20780,6 +20842,89 @@ const SharePreview = {
         this._drawColorbar();
     },
 
+    isSectionWanted(sectionId) {
+        return this.isOpen() && this._wantedSectionIds.has(String(sectionId))
+            && App.sectionVisibility().ensure().has(String(sectionId));
+    },
+
+    _demandLoad(key, run, settled) {
+        const token=this._focusLoadSeq+'|'+key;
+        if(this._demandLoads.has(token))return this._demandLoads.get(token);
+        const promise=Promise.resolve().then(run).catch(error=>{
+            console.warn('Preview requested image load failed',error);return false;
+        }).then(value=>{if(settled)settled(value);return value;}).finally(()=>{
+            if(this._demandLoads.get(token)===promise)this._demandLoads.delete(token);
+        });
+        this._demandLoads.set(token,promise);return promise;
+    },
+
+    _scheduleDemand() {
+        if(this._demandRaf || !this.isOpen())return;
+        this._demandRaf=requestAnimationFrame(()=>{this._demandRaf=0;this._updateDemand();});
+    },
+
+    _observeDemand(grid) {
+        this._demandObserver?.disconnect();this._demandObserver=null;
+        this._demandResizeObserver?.disconnect();this._demandResizeObserver=null;
+        if(typeof IntersectionObserver==='function') {
+            this._demandObserver=new IntersectionObserver(()=>this._scheduleDemand(),{root:grid,rootMargin:'0px 320px'});
+            for(const wrap of grid.querySelectorAll('.cell-img-wrap'))this._demandObserver.observe(wrap);
+        }
+        if(typeof ResizeObserver==='function') {
+            this._demandResizeObserver=new ResizeObserver(()=>this._scheduleDemand());
+            this._demandResizeObserver.observe(grid);
+        }
+        if(!grid.dataset.demandWired) {
+            grid.dataset.demandWired='1';
+            grid.addEventListener('scroll',()=>this._scheduleDemand(),{passive:true});
+        }
+        this._updateDemand();
+    },
+
+    _updateDemand() {
+        if(!this.isOpen() || !App.project)return [];
+        const grid=this.overlay.querySelector('[data-image-grid]');
+        const wanted=new Set(),selected=App.sectionVisibility().ensure();
+        if(grid) {
+            const rect=grid.getBoundingClientRect(),main=this.overlay.querySelector('.preview-main')?.getBoundingClientRect() || rect;
+            const bounds={left:Math.max(0,rect.left,main.left),right:Math.min(innerWidth,rect.right,main.right),
+                top:Math.max(0,rect.top,main.top),bottom:Math.min(innerHeight,rect.bottom,main.bottom)};
+            if(bounds.right>bounds.left && bounds.bottom>bounds.top)for(const wrap of grid.querySelectorAll('.cell-img-wrap')) {
+                const sid=this._gridSectionIds[Number(wrap.dataset.cellIdx)],cell=wrap.getBoundingClientRect();
+                if(sid!=null && selected.has(String(sid)) && cell.width>0 && cell.height>0
+                    && cell.right>bounds.left-320 && cell.left<bounds.right+320 && cell.bottom>bounds.top && cell.top<bounds.bottom)
+                    wanted.add(String(sid));
+            }
+        }
+        this._wantedSectionIds=wanted;
+        // The underlying grid must use this demand before any Preview request.
+        if(App._updateSectionLoadDemand)App._updateSectionLoadDemand();
+        const project=App.project,overlay=this.overlay,seq=this._focusLoadSeq,focus=App.focusCompoundKey,pending=[];
+        for(const sec of this._sectionsForGrid(project)) {
+            if(!wanted.has(String(sec.id)))continue;
+            const panel=App.panels.get(sec.id);if(!panel)continue;
+            const keys=App.activeOverlay ? (App.activeOverlay.layers || []).map(layer=>layer.key) : [focus];
+            for(const key of keys) {
+                if(!displayMsiEntry(sec,key) || panel.isMsiLayerReady(key))continue;
+                const identity=panel._msiLoadIdentity?.(key);
+                const current=()=>this.isOpen() && this.overlay===overlay && App.project===project && seq===this._focusLoadSeq
+                    && App.focusCompoundKey===focus && this.isSectionWanted(sec.id) && !panel._destroyed
+                    && panel._msiLoadIdentity?.(key)===identity;
+                pending.push(this._demandLoad('msi:'+sec.id+':'+key+':'+identity,()=>current()
+                    ? panel.ensureMsiLayerLoaded(key,{automatic:true,priority:10,retry:false}) : false,ok=>{
+                    if(!current())return;
+                    if(this._loadingFocusKey===focus && this._focusLoadStatus)this._focusLoadStatus.set(String(sec.id),ok?'ready':'failed');
+                    if(ok){if(!panel.setupCanvasSize())panel.renderComposite();}
+                    this._showLoadedPreviewCell(project,focus,sec.id);
+                    this._renderStatsTable(project,focus);
+                }));
+            }
+        }
+        this._forceHeBackdrop();
+        this._injectTicBackdrops().catch(error=>console.warn('Preview TIC demand failed',error));
+        return pending;
+    },
+
     _cancelAdjacentPrefetch() {
         if (this._prefetchHandle == null) return;
         if (this._prefetchKind === 'idle' && typeof cancelIdleCallback === 'function') {
@@ -20798,7 +20943,7 @@ const SharePreview = {
     _scheduleAdjacentPrefetch(focusKey, loadSeq) {
         this._cancelAdjacentPrefetch();
         const project = App && App.project;
-        if (!project || App.activeOverlay || projectHasNonTargetSection(project)) return;
+        if (!project || App.shareMode || project.__share || App.activeOverlay || projectHasNonTargetSection(project)) return;
         if (!Array.isArray(this.compoundKeys) || this.compoundKeys.length > 100) return;
         const idx = this.compoundKeys.indexOf(focusKey);
         if (idx < 0) return;
@@ -20809,7 +20954,7 @@ const SharePreview = {
             this._prefetchKind = null;
             if (!this.isOpen() || project !== App.project || loadSeq !== this._focusLoadSeq || App.activeOverlay) return;
             for (const sec of (project.sections || [])) {
-                if(!App.sectionVisibility().ensure().has(String(sec.id)))continue;
+                if(!this.isSectionWanted(sec.id))continue;
                 // Start one section at a time so a real click can stop the
                 // remaining speculative work instead of sitting behind an
                 // already-queued batch of worker jobs.
@@ -20818,7 +20963,7 @@ const SharePreview = {
                 const ent = displayMsiEntry(sec, nextKey);
                 if (!panel || !ent || panel.isMsiLayerReady(nextKey)) continue;
                 if (!ent.blobId && !ent.sourceUrl) continue;
-                try { await panel.ensureMsiLayerLoaded(nextKey,{priority:30}); } catch (e) {}
+                try { await panel.ensureMsiLayerLoaded(nextKey,{automatic:true,priority:30}); } catch (e) {}
             }
         };
         if (typeof requestIdleCallback === 'function') {
@@ -20835,7 +20980,7 @@ const SharePreview = {
     // wait for the slowest source before any result becomes visible.
     _showLoadedPreviewCell(project, focusKey, sectionId) {
         if (!this.isOpen() || !project || project !== App.project || App.focusCompoundKey !== focusKey) return;
-        if (!App.sectionVisibility().ensure().has(String(sectionId))) return;
+        if (!this.isSectionWanted(sectionId)) return;
         const sections = this._sectionsForGrid(project);
         const idx = sections.findIndex(sec => String(sec.id) === String(sectionId));
         if (idx < 0) return;
@@ -20861,10 +21006,8 @@ const SharePreview = {
         } catch (e) { console.warn('Preview progressive bake failed', sectionId, e); }
     },
 
-    // Select an MRM and wait for every missing section raster before baking
-    // Preview's canvas snapshots. A monotonically increasing sequence rejects
-    // late completions from an older click, which prevents stale MRM images
-    // from overwriting the newest selection.
+    // Select an MRM without fetching off-screen originals. Visible requests join
+    // the ordinary scheduler; a sequence rejects older selection completions.
     async _selectCompound(key) {
         if (!key || !App || !App.project || !App.panels) return;
         const seq = ++this._focusLoadSeq;
@@ -20873,7 +21016,6 @@ const SharePreview = {
         visibility.ensure();
         this._cancelAdjacentPrefetch();
         const status = new Map();
-        const pending = [];
         for (const sec of (App.project.sections || [])) {
             const sid = String(sec.id);
             if(!visibility.ensure().has(sid))continue;
@@ -20883,35 +21025,21 @@ const SharePreview = {
             if (panel.isMsiLayerReady(key)) status.set(sid, 'ready');
             else if (ent.kind === 'ratio' || ent.blobId || ent.sourceUrl) {
                 status.set(sid, 'loading');
-                pending.push({ sid, panel });
             } else status.set(sid, 'failed');
         }
         this._loadingFocusKey = key;
         this._focusLoadStatus = status;
 
-        // This synchronously updates focus/highlight and starts the normal lazy
-        // loads. The explicit awaits below join those same in-flight Promises.
+        // App's automatic loads and the Preview grid share the same demand.
         App.setFocusCompoundKey(key);
         this.refresh(App.project);
-
-        if (pending.length) {
-            await Promise.allSettled(pending.map(async ({ sid, panel }) => {
-                const ok = await panel.ensureMsiLayerLoaded(key);
-                if (seq !== this._focusLoadSeq || project !== App.project || App.focusCompoundKey !== key) return;
-                status.set(sid, ok ? 'ready' : 'failed');
-                if (ok && visibility.ensure().has(sid)) {
-                    // Do not depend on renderComposite's background callback
-                    // ordering: explicitly put the newly loaded focus on cdisp.
-                    try { if (!panel.setupCanvasSize()) panel.renderComposite(); } catch (e) {}
-                    this._showLoadedPreviewCell(App.project, key, sid);
-                }
-            }));
-        }
+        await Promise.allSettled(this._updateDemand());
         if (seq !== this._focusLoadSeq || project !== App.project || !this.isOpen() || App.focusCompoundKey !== key) return;
         const anyFailed = Array.from(status.values()).some(value => value === 'failed');
-        this._loadingFocusKey = anyFailed ? key : null;
-        this._focusLoadStatus = anyFailed ? status : null;
-        this.refresh(App.project);
+        const incomplete = Array.from(status.values()).some(value => value !== 'ready');
+        this._loadingFocusKey = incomplete ? key : null;
+        this._focusLoadStatus = incomplete ? status : null;
+        this._renderStatsTable(project,key);this._refreshRangeInputs(project,key);
         if (!anyFailed) this._scheduleAdjacentPrefetch(key, seq);
     },
 
@@ -21489,6 +21617,7 @@ const SharePreview = {
             if (img) this._wireCellInteractions(idx, wrap, stage);
             else wrap.style.cursor = 'default';
         });
+        this._observeDemand(grid);
     },
 
     // Render `srcCanvas` into a new canvas rotated by `rotDeg`. Output
@@ -21700,6 +21829,7 @@ const SharePreview = {
         if (!grid || !project || project !== App.project || App.focusCompoundKey !== focusKey) return;
         const sections = this._sectionsForGrid(project);
         sections.forEach((sec, idx) => {
+            if(!this.isSectionWanted(sec.id))return;
             const wrap = grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
             if (!wrap) return;
             const panel = App && App.panels && App.panels.get(sec.id);
@@ -24149,6 +24279,8 @@ const App = {
                 rois.map(roi => [roi.id, roi.polysBySection[section.id], msiRoiGeometryMeta(roi, section)])])};
     },
     getRoiDisplayRange(section, key) {
+        if(this.project?.__shareRoiState && this.project.__shareRoiState.status!=='ready')
+            return {status:this.project.__shareRoiState.status==='error'?'unavailable':'pending'};
         const request = this._roiDisplayRangeRequest(section, key);
         if (!request) return {status:'unavailable'};
         const entry = this._roiDisplayRanges && this._roiDisplayRanges.get(request.cacheKey);
@@ -24168,6 +24300,11 @@ const App = {
         return {status:'pending'};
     },
     ensureRoiDisplayRange(section, key) {
+        if(this.project?.__shareRoiState && this.project.__shareRoiState.status!=='ready') {
+            const owner=this.project;
+            return ensureSharedRoisReady(owner).then(()=>this.project===owner?this.ensureRoiDisplayRange(section,key):{status:'stale'})
+                .catch(()=>({status:'unavailable'}));
+        }
         ensureMsiDisplayContext(this, key);
         const request = this._roiDisplayRangeRequest(section, key);
         if (!request) return Promise.resolve({status:'unavailable'});
@@ -25751,8 +25888,10 @@ const App = {
         return project;
     },
 
-    async _loadSharedProject(session) {
-        const doc = await SupabaseClient.fetchProjectDoc(session.token);
+    async _loadSharedProject(session, options = {}) {
+        const doc = await SupabaseClient.fetchProjectDoc(session.token,{signal:options.signal});
+        ShareRefresh.assertActive(options.signal);
+        if(options.current && !options.current())throw new Error('Shared project changed');
         if (!doc) throw new Error('Share project の取得に失敗しました');
         // The RPC returns { id, slug, displayName, anatomyPalette, sections[], meta }.
         // Sections must already carry storage paths so the client can fetch
@@ -25808,158 +25947,57 @@ const App = {
             sec.meta.__alignMaster = captureSectionAlignment(sec);
         }
 
-        // Pull blobs referenced in storage_paths, drop them into IndexedDB
-        // (so the existing rendering pipeline can address them by blobId),
-        // and rebuild section.images / msiSeries entries.
-        const fetchBlob = async (path) => {
-            const url = SupabaseClient.publicUrl('atlases', path);
-            if (!url) throw new Error('publicUrl returned null for ' + path);
-            let lastErr = null;
-            for (let attempt = 0; attempt < 3; attempt++) {
-                try {
-                    const resp = await fetch(url);
-                    if (!resp.ok) {
-                        // Include the HTTP status AND the encoded URL so
-                        // recipients can paste the failing URL into a
-                        // browser to confirm the 404 / RLS denial without
-                        // having to dig through the Network tab.
-                        const err = new Error('HTTP ' + resp.status + ' for ' + path + ' (url=' + url + ')');
-                        err.status = resp.status;
-                        throw err;
-                    }
-                    return await resp.blob();
-                } catch (e) {
-                    // A bare TypeError from `fetch` (no `status` set, since
-                    // it didn't reach the !resp.ok branch above) is almost
-                    // always a CORS / network failure. Supabase Storage
-                    // omits CORS headers on its 404 response for missing
-                    // objects, so an absent file surfaces here as
-                    // net::ERR_FAILED rather than a clean HTTP 404.
-                    // Annotate the error so the recipient can distinguish
-                    // "object missing on Storage" from a real outage.
-                    if (e && !e.status) {
-                        try { e.message = (e.message || 'fetch failed') + ' (likely missing on Storage; ask master to re-publish)'; } catch (_) {}
-                    }
-                    lastErr = e;
-                    if (attempt < 2) await new Promise(r => setTimeout(r, 600 * Math.pow(2, attempt)));
+        // Registration is available before bytes. IDs are reserved once so
+        // source/load/snapshot identities cannot change as downloads finish.
+        const loader=SourceLoader.create({storage:ProjectStorage,lease,createId:()=>uid('blob'),
+            current:()=>!options.signal?.aborted && (!options.current || options.current()),
+            resolveSource:entry=>{const path=entry.storagePath || entry.path;return {
+                path,url:path?SupabaseClient.publicUrl('atlases',path):null,
+                mime:entry.mime,filename:entry.filename,kind:entry.kind};},
+            fetchBlob:(url,settings)=>ShareRefresh.fetchBlob(url,settings)});
+        Object.defineProperty(project,'__sourceLoader',{value:loader,enumerable:false});
+        for(let i=0;i<project.sections.length;i++) {
+            const section=project.sections[i],remote=doc.sections[i] || {};
+            const paths=remote.storage_paths || remote.storagePaths || {};
+            for(const [collection,kind] of [['images','image'],['msiSeries','msi'],['msiFiles','source']]) {
+                for(const [key,ref] of Object.entries(paths[collection] || {})) {
+                    if(!ref || !ref.path)continue;
+                    const entry={...ref,blobId:null,storagePath:ref.path};
+                    if(kind==='image')Object.assign(entry,{alignmentImageReference:ref.alignmentImageReference});
+                    if(kind!=='image' && ref.kind==='parquet')entry.sourceUrl=SupabaseClient.publicUrl('atlases',ref.path);
+                    else loader.reserve(entry);
+                    section[collection][key]=entry;
                 }
             }
-            throw lastErr;
-        };
-        const failed = [];
-        // Reclaim only confirmed-ended load leases; live tabs and legacy bytes
-        // with unknown ownership remain protected.
-        await ProjectStorage.pruneShareOrphans().catch(() => {});
-        // Dedup by storage path WITHIN this hydrate. Many compounds share ONE
-        // consolidated source file (same ref.path). Storing a separate blob copy
-        // per compound (no dedup) blew the IndexedDB quota, so later putBlob/
-        // getBlob silently failed and ZERO images loaded. One fetch + one putBlob
-        // per UNIQUE path; every compound of that source shares its blobId.
-        // (Session-only — no cross-session deterministic cache, which earlier
-        // risked dangling ids.)
-        const blobByPath = new Map();   // path -> Promise<{ id, mime }>
-        const ensureBlob = (ref) => {
-            if (blobByPath.has(ref.path)) return blobByPath.get(ref.path);
-            const job = (async () => {
-                const blob = await fetchBlob(ref.path);
-                const mime = ref.mime || blob.type;
-                const id = uid('blob');
-                await ProjectStorage.putBlob({ id, blob, mime, filename: ref.filename || ref.path.split('/').pop() }, {lease});
-                // ★ 書けたことを読み戻して確かめる。putBlob は commit まで待つように
-                //   直したが、ブラウザ側の事後 eviction もありうるので、
-                //   「blobId だけ在って中身が無い」状態を絶対に先へ通さない。
-                //   これを通すと Method 表に 1390 行の幽霊が並び、画像だけ出ない。
-                const back = await ProjectStorage.getBlob(id);
-                if (!back || !back.blob) {
-                    throw new Error('保存できませんでした (' + Math.round((blob.size || 0) / 1e6) + ' MB)。'
-                        + '保存容量が足りない可能性があります');
-                }
-                return { id, mime };
-            })();
-            blobByPath.set(ref.path, job);
-            return job;
-        };
-        // Flatten every layer into one task list, then download with a bounded
-        // concurrency pool (kept from r47 — the pool itself is harmless).
-        const dlTasks = [];
-        for (let i = 0; i < project.sections.length; i++) {
-            const sec = project.sections[i];
-            const sp = (doc.sections[i] && doc.sections[i].storage_paths) || (doc.sections[i] && doc.sections[i].storagePaths) || {};
-            for (const [key, ref] of Object.entries(sp.images || {}))    dlTasks.push({ kind: 'image', sec, key, ref });
-            for (const [key, ref] of Object.entries(sp.msiSeries || {})) dlTasks.push({ kind: 'msi', sec, key, ref });
-            for (const [key, ref] of Object.entries(sp.msiFiles || {})) dlTasks.push({ kind: 'source', sec, key, ref });
-        }
-        const runDlTask = async ({ kind, sec, key, ref }) => {
-            try {
-                if(kind==='source') {
-                    const source={...ref,blobId:null,storagePath:ref.path,sourceUrl:SupabaseClient.publicUrl('atlases',ref.path)};
-                    sec.msiFiles[key]=source;
-                    if(ref.kind!=='parquet'){const {id,mime}=await ensureBlob(ref);source.blobId=id;source.mime=mime;}
-                    return;
-                }
-                // ★ parquet はダウンロードしない。
-                //   1 本のファイルに全切片 × 全化合物が入っていて 836 MB あるが、
-                //   列指向なので 1 化合物あたり実際に要るのは数百 KB。Storage の
-                //   URL に HTTP Range を投げれば足りる。丸ごと IndexedDB に置くと
-                //   容量超過でトランザクションが取り消され、「blobId は在るのに
-                //   中身が無い」状態になって MSI が 1 枚も出なくなっていた。
-                if (kind === 'msi' && ref.kind === 'parquet') {
-                    const url = SupabaseClient.publicUrl('atlases', ref.path);
-                    if (!url) throw new Error('publicUrl returned null for ' + ref.path);
-                    sec.msiSeries[key] = Object.assign({}, ref, { blobId: null, sourceUrl: url, storagePath: ref.path });
-                    if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
-                        sec.msiFiles[ref.sourceFileId] = {
-                            id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, sourceUrl: url,
-                        };
-                    }
-                    return;
-                }
-                const { id, mime } = await ensureBlob(ref);
-                // ★ storagePath を残す。blobId はこの端末で作った id なので、
-                //   ブラウザに blob を回収されたとき storagePathForEnt が
-                //   slug + blobId から組み立てる URL は必ず外れる。取り込み経路
-                //   (_buildLocalProjectFromDoc) は既に path を残していて、共有側
-                //   だけ漏れていた。これで ensureLocalBlob が正しい場所を引ける。
-                if (kind === 'image') {
-                    sec.images[key] = { blobId: id, mime, filename: ref.filename, storagePath: ref.path,
-                        alignmentImageReference:ref.alignmentImageReference };
-                } else {
-                    sec.msiSeries[key] = Object.assign({}, ref, { blobId: id, storagePath: ref.path });
-                    if (ref.sourceFileId && !sec.msiFiles[ref.sourceFileId]) {
-                        sec.msiFiles[ref.sourceFileId] = { id: ref.sourceFileId, kind: ref.kind, filename: ref.filename, blobId: id };
-                    }
-                }
-            } catch (e) {
-                console.warn('share ' + kind + ' fetch failed', key, e);
-                failed.push({ kind, key, path: ref.path, error: e });
+            for(const entry of Object.values(section.msiSeries)) {
+                if(!entry.sourceFileId || section.msiFiles[entry.sourceFileId])continue;
+                section.msiFiles[entry.sourceFileId]={id:entry.sourceFileId,kind:entry.kind,filename:entry.filename,
+                    blobId:entry.blobId,storagePath:entry.storagePath,sourceUrl:entry.sourceUrl};
             }
-        };
-        // Bounded-concurrency pool: keep up to 6 downloads in flight.
-        let dlIdx = 0;
-        await Promise.all(Array.from({ length: Math.min(6, dlTasks.length) }, async () => {
-            while (dlIdx < dlTasks.length) await runDlTask(dlTasks[dlIdx++]);
-        }));
-        if (failed.length) {
-            const summary = failed.length + ' 件のレイヤーをダウンロードできませんでした (' +
-                failed.slice(0, 3).map(f => f.kind + ':' + f.key).join(', ') +
-                (failed.length > 3 ? ', ...' : '') + ')';
-            showToast(summary, 6000);
         }
-
-        // Hydrate ROIs. list_rois is per-section in SQL, so fan out across
-        // every section and rebuild the in-memory shape (one ROI per
-        // colorKey, with polysBySection spanning every section that holds
-        // a polygon for it). The previous code called list_rois with no
-        // section id, which silently returned the empty set — that is the
-        // reason analyst A's ROIs vanished on reload and were never
-        // visible to analyst B or the master-published baseline.
-        try {
-            const rows = await fetchAllShareRois(session.token, project.sections);
-            project.rois = groupRoiRowsByColor(rows, project.anatomyPalette);
-        } catch (e) { console.warn('share ROI fetch failed', e); }
+        // ROI readiness is independent of first image readiness. Failed reads
+        // remain unavailable, never an authoritative empty collection.
+        const roiState={status:'pending',error:null,promise:null};
+        roiState.load=()=>{
+            if(roiState.status==='ready')return Promise.resolve(true);
+            if(roiState.promise)return roiState.promise;
+            roiState.status='pending';roiState.error=null;
+            roiState.promise=fetchAllShareRois(session.token,project.sections,
+                {strict:true,network:{signal:options.signal}}).then(rows=>{
+                    if(options.signal?.aborted || options.current && !options.current())throw new Error('Shared project changed');
+                    project.rois=groupRoiRowsByColor(rows,project.anatomyPalette);
+                    roiState.status='ready';return true;
+                }).catch(error=>{roiState.status='error';roiState.error=error;
+                    if(!options.signal?.aborted && (!options.current || options.current()) && _isExpiredTokenError(error))_noteShareTokenExpired();return false;
+                }).finally(()=>{roiState.promise=null;});
+            return roiState.promise;
+        };
+        Object.defineProperty(project,'__shareRoiState',{value:roiState,enumerable:false});
+        roiState.load();
 
         return project;
         } catch(error) {
+            await project.__sourceLoader?.dispose();
             await ProjectStorage.finishBlobLease(lease,{discard:true});
             throw error;
         }
@@ -25969,10 +26007,26 @@ const App = {
         if (this.offline) return;
         if (typeof RoiMediaApp !== 'undefined' && await RoiMediaApp.beforeProjectChange(this.project) === false) return;
         if (typeof FixedColors !== 'undefined') FixedColors.close({ restoreFocus: false });
+        const request=(this._openProjectRequest||0)+1;this._openProjectRequest=request;
+        this._pendingShareOpen?.abort();
+        const controller=new AbortController();this._pendingShareOpen=controller;
+        let adopted=false,project;
+        const current=()=>adopted?this.project===project:request===this._openProjectRequest;
         const previousProject=this.project;
-        const project=await this._loadSharedProject(session);
+        try { project=await this._loadSharedProject(session,{signal:controller.signal,current}); }
+        catch(error){if(controller.signal.aborted || request!==this._openProjectRequest)return;throw error;}
+        finally{if(this._pendingShareOpen===controller)this._pendingShareOpen=null;}
+        if(!current()){
+            await project.__sourceLoader?.dispose();
+            await ProjectStorage.finishBlobLease(project.__blobLease,{discard:true});return;
+        }
         const projectMeta=project.meta;
         this.project = project;
+        adopted=true;
+        const retired=previousProject?.__blobLease ? (async()=>{
+            await previousProject.__sourceLoader?.dispose();
+            await ProjectStorage.finishBlobLease(previousProject.__blobLease,{discard:true});
+        })().catch(error=>console.warn('previous shared load cleanup failed',error)) : Promise.resolve();
         ensureMsiDisplayContext(this);
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         parquetReleaseAll();               // worker が抱えている parquet 索引も返す
@@ -26016,6 +26070,7 @@ const App = {
         document.getElementById('sections-empty').classList.toggle('hidden', project.sections.length > 0);
         this.viewMode='compound';
         await this.rebuildSectionPanels();
+        if(!current())return;
         // ON で開くのは「この受信者がこのタブで自分で ON にした」ときだけ
         // (publish 値では ON にしない — 常に OFF で開く)。
         if (this.otsuBgRemove) { this.setOtsuBgRemove(true).catch(e => console.warn('[otsu] share restore failed', e)); }
@@ -26139,6 +26194,11 @@ const App = {
         renderMemoForm();
         this.renderAnalysis();
         Toolbar.refreshAll();
+        project.__shareRoiState.load().then(()=>{
+            if(!current())return;
+            populateRoiList();this.redrawAllRois();this.refreshAnalysisScope();this.renderAnalysis();
+            if(this.roiOnlyMode)this.refreshRoiDisplayRanges();
+        });
         // Start polling for ROI changes from other analysts / the master's
         // republished baseline. Cheap (~one RPC per section every 12 s)
         // and pauses automatically while the local user is drawing.
@@ -26176,11 +26236,12 @@ const App = {
             // this the cdisp width is still 0 and toDataURL would yield
             // blank images.
             requestAnimationFrame(() => requestAnimationFrame(() => {
+                if(!current())return;
                 try { SharePreview.open(project, role); }
                 catch (e) { console.warn('SharePreview.open failed', e); }
             }));
         }
-        if(previousProject?.__blobLease)await ProjectStorage.finishBlobLease(previousProject.__blobLease,{discard:true});
+        await retired;
     },
 
     renderEmpty() {
@@ -26247,6 +26308,7 @@ const App = {
 
     async openProject(id) {
         const request=this._openProjectRequest=(this._openProjectRequest||0)+1;
+        this._pendingShareOpen?.abort();
         if(this._shareRefreshOperation&&!this._shareRefreshOperation.finished){
             if(this._shareRefreshOperation.committing){showToast('共有版の保存を確定しています。完了後に切り替えてください。');return;}
             this._shareRefreshOperation.abort.abort();
@@ -26285,9 +26347,11 @@ const App = {
         const project = await ProjectStorage.getProject(id, {activate:true});
         if(request!==this._openProjectRequest)return;
         this._stopSectionLoads();
+        const previousShared=this.project?.__blobLease ? this.project : null;
         if (!project) {
             await ProjectStorage.releaseProject();
             this.project = null;
+            if(previousShared)releaseSharedProjectSources(previousShared).catch(error=>console.warn('shared load cleanup failed',error));
             this.activeSectionId = null;
             this.activeRoiId = null;
             this.panels.forEach(p => p.destroy());
@@ -26298,6 +26362,7 @@ const App = {
             return;
         }
         this.project = project;
+        if(previousShared)releaseSharedProjectSources(previousShared).catch(error=>console.warn('shared load cleanup failed',error));
         ensureMsiDisplayContext(this);
         // 前回のセッションで公開しきれなかった編集があればここで拾い直す。
         if (this.offline) {
@@ -26472,9 +26537,11 @@ const App = {
             try { await this._saveInflight; } catch (e) { console.warn('save before delete failed', e); }
         }
         const id = this.project.id;
+        const deletedShared=this.project?.__blobLease ? this.project : null;
         try { await ProjectStorage.deleteProject(id, {expectedRevision:this.project.storageRevision}); await ProjectStorage.releaseProject(); }
         catch (error) { this._showSaveError(error.message || String(error), 'delete'); return; }
         this.project = null;
+        if(deletedShared)releaseSharedProjectSources(deletedShared).catch(error=>console.warn('shared load cleanup failed',error));
         _roiRawGridCache.clear();
         parquetReleaseAll();
         this.panels.forEach(p => p.destroy());
@@ -27012,10 +27079,11 @@ const App = {
                 && rect.bottom>bounds.top && rect.top<bounds.bottom;
             const nearby=!!bounds && rect.width>0 && rect.height>0 && rect.right>bounds.left-320 && rect.left<bounds.right+320
                 && rect.bottom>bounds.top && rect.top<bounds.bottom;
-            const wanted=selected.has(String(panel.section.id)) && (nearby || SharePreview.isOpen());
+            const previewOpen=SharePreview.isOpen();
+            const wanted=selected.has(String(panel.section.id)) && (previewOpen ? !!SharePreview.isSectionWanted?.(panel.section.id) : nearby);
             const was=panel._loadRequested;panel._loadRequested=wanted;
             if(!wanted) {
-                this._sectionLoadScheduler.cancelWhere(job=>job.panel===panel && job.automatic && !job.started);
+                this._sectionLoadScheduler.cancelWhere(job=>job.panel===panel && job.automatic);
                 if(was && panel.cancelTicBackdrop)panel.cancelTicBackdrop();
                 continue;
             }
@@ -27275,6 +27343,9 @@ const App = {
 
     async startDrawing(targetRoiId) {
         if (!this.project) return;
+        const roiOwner=this.project;
+        try{if(roiOwner.__shareRoiState)await ensureSharedRoisReady(roiOwner);}catch(error){showToast(error.message);return;}
+        if(this.project!==roiOwner)return;
         if (!this.activeSectionId) { showToast('まず切片パネルをクリックしてアクティブにしてください'); return; }
         const projectAtStart=this.project,sectionAtStart=this.activeSectionId;
         const panelAtStart=this.panels.get(sectionAtStart);
@@ -27521,6 +27592,13 @@ const App = {
         if (!this.shareMode || !this.shareMode.token || !this.project) return;
         if (_shareTokenExpired) return;
         const project=this.project,share=this.shareMode,generation=this._roiWriteGeneration||0;
+        if(project.__shareRoiState && project.__shareRoiState.status!=='ready') {
+            await project.__shareRoiState.load();
+            if(this.project!==project || this.shareMode!==share)return;
+            populateRoiList();this.redrawAllRois();this.refreshAnalysisScope();this.renderAnalysis();
+            if(this.roiOnlyMode)this.refreshRoiDisplayRanges();
+            return;
+        }
         const rows = await fetchAllShareRois(share.token, project.sections);
         if(this.project!==project||this.shareMode!==share||generation!==(this._roiWriteGeneration||0))return;
         const remote = groupRoiRowsByColor(rows, this.project.anatomyPalette);

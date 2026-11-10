@@ -834,6 +834,8 @@
             try {
                 const getApp = () => typeof App !== 'undefined' ? App : root.App;
                 const context = captureExportContext(getApp);
+                if(typeof ensureSharedRoisReady==='function')await ensureSharedRoisReady(getApp().project);
+                context.assertCurrent();
                 const selected = await selectReportOptions(doc,context.canIncludeCeCv,
                     typeof getApp().getRatioDefinitions==='function' && getApp().getRatioDefinitions().length>0, getApp().project);
                 if (!selected) return null;

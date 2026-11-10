@@ -140,6 +140,28 @@ function deferred() {
   return { promise, resolve };
 }
 
+// Focus-race tests use real demand calculation with a small visible viewport;
+// browser coverage separately verifies clipping, scrolling and observer delivery.
+function attachDemandViewport(preview, context, app) {
+  context.innerWidth = 1000;
+  context.innerHeight = 700;
+  const rect = { left: 0, right: 800, top: 0, bottom: 500, width: 800, height: 500 };
+  const grid = {
+    getBoundingClientRect: () => rect,
+    querySelectorAll() {
+      preview._gridSectionIds = app.project.sections.map(section => section.id);
+      return app.project.sections.map((section, index) => ({
+        dataset: { cellIdx: String(index) }, getBoundingClientRect: () => rect,
+      }));
+    },
+  };
+  preview.overlay = { querySelector: selector => selector === '[data-image-grid]' ? grid : null };
+  preview._forceHeBackdrop = () => {};
+  preview._injectTicBackdrops = async () => {};
+  preview._renderStatsTable = () => {};
+  preview._refreshRangeInputs = () => {};
+}
+
 async function testFocusLoadAndRaceGuard() {
   const waits = { MSI_A: deferred(), MSI_B: deferred() };
   const panel = {
@@ -167,7 +189,8 @@ async function testFocusLoadAndRaceGuard() {
     activeOverlay: null,
     setFocusCompoundKey(key) { this.focusCompoundKey = key; this.activeOverlay = null; },
   };
-  const { preview } = makePreviewContext({ App });
+  const { preview, context } = makePreviewContext({ App });
+  attachDemandViewport(preview, context, App);
   const refreshes = [];
   const prefetched = [];
   const progressive = [];
@@ -187,14 +210,15 @@ async function testFocusLoadAndRaceGuard() {
 
   waits.MSI_B.resolve(true);
   await loadB;
-  assert.deepEqual(refreshes.at(-1), { key: 'MSI_B', loading: null });
+  assert.equal(preview._loadingFocusKey, null);
   assert.deepEqual(prefetched, ['MSI_B']);
   assert.deepEqual(progressive, [['MSI_B', 's1']]);
 
   waits.MSI_A.resolve(true);
   await loadA;
   assert.equal(App.focusCompoundKey, 'MSI_B');
-  assert.deepEqual(refreshes.at(-1), { key: 'MSI_B', loading: null });
+  assert.equal(preview._loadingFocusKey, null);
+  assert.deepEqual(refreshes.map(row => row.key), ['MSI_A', 'MSI_B'], 'completion updates cells without rebuilding the entire grid');
   assert.deepEqual(prefetched, ['MSI_B'], 'late MSI_A completion must not win');
   assert.deepEqual(progressive, [['MSI_B', 's1']], 'late MSI_A must not repaint a cell');
 }
@@ -215,7 +239,8 @@ async function testFailedLoadStaysExplicit() {
     activeOverlay: null,
     setFocusCompoundKey(key) { this.focusCompoundKey = key; },
   };
-  const { preview } = makePreviewContext({ App });
+  const { preview, context } = makePreviewContext({ App });
+  attachDemandViewport(preview, context, App);
   preview.isOpen = () => true;
   preview.refresh = () => {};
   preview._cancelAdjacentPrefetch = () => {};
@@ -243,7 +268,8 @@ async function testSelectionAndProjectLoadRaceGuard() {
   })) };
   const App = { project, panels, focusCompoundKey: null, activeOverlay: null,
     setFocusCompoundKey(key) { this.focusCompoundKey = key; } };
-  const { preview } = makePreviewContext({ App });
+  const { preview, context } = makePreviewContext({ App });
+  attachDemandViewport(preview, context, App);
   const painted = [], refreshed = [], prefetched = [];
   preview.isOpen = () => true;
   preview.refresh = projectArg => refreshed.push(projectArg.id);
@@ -252,6 +278,7 @@ async function testSelectionAndProjectLoadRaceGuard() {
   preview._scheduleAdjacentPrefetch = key => prefetched.push(key);
 
   const firstLoad = preview._selectCompound('MSI_A');
+  await Promise.resolve(); // queued demand has begun before selection changes
   App.sectionVisibility().change(['s1'], false);
   waits.get('s1:MSI_A').resolve(true);
   waits.get('s2:MSI_A').resolve(true);
@@ -262,6 +289,7 @@ async function testSelectionAndProjectLoadRaceGuard() {
   assert.deepEqual(Array.from(preview._sectionsForGrid(project), sec => sec.id), ['s2']);
 
   const secondLoad = preview._selectCompound('MSI_B');
+  await Promise.resolve();
   const refreshCount = refreshed.length;
   App.project = { id: 'second', sections: project.sections.map(sec => ({ ...sec })) };
   assert.equal(waits.has('s1:MSI_B'), false, 'a new focus does not start a read for an already hidden section');
@@ -368,6 +396,8 @@ function testRebakeCellImagesFollowsOverlay() {
   };
   const { preview } = makePreviewContext({ App });
   preview.overlay = { querySelector: (sel) => (sel === '[data-image-grid]' ? grid : null) };
+  preview.isOpen = () => true;
+  preview._wantedSectionIds.add('s1');
   preview._gridSectionIds = ['s1'];
   preview._sectionRotations.s1 = 0;
   preview._bakeRotatedCanvas = () => ({ width: 10, height: 10, toDataURL: () => 'NEW' });
@@ -517,17 +547,21 @@ function testForcedHeBackdropDoesNotPersist() {
     section: { images: { HE_STAIN_1: {} } },
     imageSources: { HE_STAIN_1: {} },
     visibleLayers: new Set(),
-    toggleLayer(key, force, opts) { calls.push({ key, force, opts }); this.visibleLayers.add(key); },
+    toggleLayer() { throw new Error('automatic Preview demand must not use the explicit load path'); },
+    rebuildLayerBar() { calls.push('bar'); },
+    refreshThumbHighlights() { calls.push('thumbs'); },
   };
-  const App = { panels: new Map([['s1', panel]]) };
+  const App = { panels: new Map([['s1', panel]]), project: { sections: [{ id: 's1' }] } };
   const { preview } = makePreviewContext({ App });
+  preview.overlay = {};
+  preview.isOpen = () => true;
+  preview._wantedSectionIds.add('s1');
 
   const touched = preview._forceHeBackdrop();
   assert.equal(touched, 1, '隠れている HE/IF を 1 枚点けること');
-  assert.equal(calls.length, 1);
-  // vm は別レアルムなので deepEqual はプロトタイプ違いで落ちる。値を直接見る。
-  assert.equal(calls[0].opts && calls[0].opts.persist, false,
-    'プレビューの強制表示は永続化してはいけない (persist:false を渡すこと)');
+  assert.deepEqual(calls, ['bar', 'thumbs']);
+  assert.ok(panel.visibleLayers.has('HE_STAIN_1'));
+  assert.equal(panel.section.meta, undefined, 'automatic temporary visibility must not persist section metadata');
 
   // toggleLayer 側がその指示を実際に見ていること
   assert.match(html, /if \(!opts \|\| opts\.persist !== false\) this\._persistVisibleLayers\(opts\);/,
@@ -1414,7 +1448,8 @@ function extractMethod(source, name) {
   const marker = `async ${name}(`;
   const markerAt = source.indexOf(marker);
   assert.notEqual(markerAt, -1, `missing method ${name}`);
-  const openAt = source.indexOf('{', markerAt + marker.length);
+  const paramsEnd = source.indexOf(')', markerAt + marker.length);
+  const openAt = source.indexOf('{', paramsEnd + 1);
   return source.slice(markerAt, scanBalanced(source, openAt) + 1);
 }
 
@@ -1434,7 +1469,7 @@ function testImportSectionIdKeying() {
   assert.match(importFn, /uuidToClient\[uuid\]/);
 
   assert.match(shareFn, /id:\s*s\.client_id \|\| s\.id/);
-  assert.match(shareFn, /fetchAllShareRois\(session\.token, project\.sections\)/);
+  assert.match(shareFn, /fetchAllShareRois\(session\.token,\s*project\.sections[,)]/);
 }
 
 // ★ 表示分位点とベイク分位点は必ず一緒に動かす。deriveBakeStats の最後が
@@ -2503,7 +2538,7 @@ function testWorkerAssetsFollowApplicationBase() {
     }
   }
   const scriptSources = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(scriptSources.slice(0, 9), ['../runtime-config.js', '../app-runtime.js', '../project-store-safety.js', '../project-navigation.js', 'share-refresh.js', 'msi-display-settings.js', 'msi-display-geometry.js', 'msi-spatial-groups.js', '../offline/offline.js']);
+  assert.deepEqual(scriptSources.slice(0, 10), ['../runtime-config.js', '../app-runtime.js', '../project-store-safety.js', '../project-navigation.js', 'share-refresh.js', 'source-loader.js', 'msi-display-settings.js', 'msi-display-geometry.js', 'msi-spatial-groups.js', '../offline/offline.js']);
   assert.ok(scriptSources.includes('../vendor/supabase.min.js'));
   assert.ok(!scriptSources.some(src => src.startsWith('/') || /^https?:/.test(src)), 'viewer assets must work under a project Pages path');
   assert.doesNotMatch(html, /window\.SUPABASE_(?:URL|ANON_KEY)\s*=/, 'shared runtime owns cloud configuration');
