@@ -53,6 +53,32 @@ async function expectMaxima(page, expected, message) {
   await settled(page);
   assert.deepEqual((await ranges(page)).map(window => window.max), expected, message);
 }
+async function expectCachedRoiSettingsSinglePaint(page) {
+  await settled(page);
+  const counts = await page.evaluate(async () => {
+    const panels = [...App.panels.values()], previous = App.getMsiDisplaySettings();
+    const wanted = panels.map(panel => App.isPanelDisplayWanted(panel)), calls = panels.map(() => 0);
+    const originals = panels.map(panel => panel.renderComposite);
+    panels.forEach((panel,index) => {
+      App.flushPanelDisplay(panel);
+      panel.renderComposite = function(...args) {calls[index]++; return originals[index].apply(this,args);};
+    });
+    try {
+      App.updateMsiDisplaySettings({rangePolicy:previous.rangePolicy === 'maximum' ? 'legacy' : 'maximum',preset:'custom'});
+      const immediate = [...calls];
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      return {wanted,immediate,settled:[...calls]};
+    } finally {
+      panels.forEach((panel,index) => {panel.renderComposite = originals[index];});
+      App.updateMsiDisplaySettings(previous);
+    }
+  });
+  assert.ok(counts.wanted.some(Boolean), 'The ROI fixture has a visible panel to repaint');
+  const expected = counts.wanted.map(wanted => wanted ? 1 : 0);
+  assert.deepEqual(counts.immediate, expected, 'ROI settings paint each wanted panel once');
+  assert.deepEqual(counts.settled, expected, 'Cached ROI ranges do not add a later duplicate settings paint');
+  await settled(page);
+}
 async function sourceSnapshot(page) {
   return page.evaluate(async () => {
     const out = [];
@@ -256,6 +282,8 @@ async function main() {
     assert.deepEqual(roiImage.color, expectedRoiColor, 'Real MSI pixels are recolored with the ROI range');
     assert.notDeepEqual(roiImage.color, whole.color, 'ROI auto range brightens the in-ROI signal');
     assert.notEqual(roiImage.thumbnail, whole.thumbnail, 'Thumbnail range follows the main renderer');
+    await expectCachedRoiSettingsSinglePaint(page);
+    await expectMaxima(page, [190,190], 'Display paint suppression preserves the original ROI range');
 
     await page.locator('#msi-scale-mode').selectOption('individual');
     await expectMaxima(page, [95,190], 'Individual uses each section ROI maximum');

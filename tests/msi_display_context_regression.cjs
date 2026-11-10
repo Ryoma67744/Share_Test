@@ -6,7 +6,7 @@ function node(){return {value:'',style:{},children:[],classList:{add(){},remove(
 function fixture(projects){
  const nodes=new Map(),document={getElementById(id){if(!nodes.has(id))nodes.set(id,node());return nodes.get(id);},createElement:node};
  const c=runtime({document,structuredClone,ProjectStorage:{getProject:async id=>structuredClone(projects[id])},
-  SharePreview:{isOpen:()=>false},_roiRawGridCache:new Map(),parquetReleaseAll(){},backfillLegacyCompoundMeta(){},
+  SharePreview:{isOpen:()=>false,requestDisplayRefresh(){}},_roiRawGridCache:new Map(),parquetReleaseAll(){},backfillLegacyCompoundMeta(){},
   ensureMemoShape:v=>v||{},localStorage:{setItem(){},removeItem(){}},sessionStorage:{getItem(){return null;}},
   COLORMAPS:{},_activeColormapName:'viridis',populateRoiList(){},setupGraphSelector(){},renderMemoForm(){},
   _refreshMethodRowState(){},Toolbar:{refreshRange(){}},showToast(){},ensureAnalysisResizeObserver(){}},['msiSourceReference']);

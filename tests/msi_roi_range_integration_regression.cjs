@@ -57,7 +57,7 @@ function fixture(initial = project('A')) {
         '_roiGridKey','msiRoiGeometryMeta','msiValidRoiGeometry','msiAxisInterpolate','pointInPolygon','roiContainsSourcePoint'];
     const methods = ['getMsiUserWindows','_roiDisplayRangeRequest','getRoiDisplayRange','ensureRoiDisplayRange',
         'roiDisplayCeiling','roiRangeStatusText','_organInScope','getMsiWindow','getMsiAbsMax',
-        'refreshRoiDisplayRanges','setRoiOnlyMode'];
+        'refreshRoiDisplayRanges','recomputeMsiAbsScale','setRoiOnlyMode'];
     vm.runInContext(helpers.map(standalone).join('\n') + '\nglobalThis.app = {\n' + methods.map(appMethod).join('\n') + '\n};', context);
     const app = context.app;
     Object.assign(app,{project:initial, panels:new Map(), roiOnlyMode:true, msiScaleMode:'same', rangePolicy:'legacy',
@@ -242,6 +242,44 @@ async function explicitRetryRecoversSourceFailure() {
     assert.deepEqual(windowFor(app),{min:0,max:20});
 }
 
+async function settingsPaintSkipsCachedRangePass() {
+    const {app,environment} = fixture();
+    await prepare(app);
+    const before = windowFor(app), refresh = app.refreshRoiDisplayRanges;
+    let refreshing;
+    app.refreshRoiDisplayRanges = function(...args) { return refreshing = refresh.apply(this,args); };
+    environment.repaints = 0;
+    app.recomputeMsiAbsScale({paint:false});
+    await refreshing;
+    assert.equal(environment.repaints,0,'settings that already paint must not repaint again for cached ROI ranges');
+    assert.deepEqual(windowFor(app),before,'paint suppression does not change a cached ROI window');
+    app.recomputeMsiAbsScale();
+    await refreshing;
+    assert.equal(environment.repaints,1,'ordinary explicit ROI refresh keeps its repaint behavior');
+}
+
+async function deferredRangeStillSchedulesCompletionPaint() {
+    const {app,context,environment} = fixture(), section = app.project.sections[0];
+    const pending = deferred(), entered = deferred(), callbacks = [];
+    environment.readGrid = () => { entered.resolve(); return pending.promise; };
+    context.setTimeout = callback => { callbacks.push(callback); return callbacks.length; };
+    app.scheduleRoiRangeRepaint = vm.runInContext('({' + appMethod('scheduleRoiRangeRepaint') + '}).scheduleRoiRangeRepaint',context);
+    const refresh = app.refreshRoiDisplayRanges;
+    let refreshing;
+    app.refreshRoiDisplayRanges = function(...args) { return refreshing = refresh.apply(this,args); };
+    app.recomputeMsiAbsScale({paint:false});
+    await entered.promise;
+    assert.equal(environment.repaints,0);
+    assert.equal(callbacks.length,0,'a pending source read cannot publish its range yet');
+    pending.resolve(grid(section));
+    await refreshing;
+    assert.equal(environment.repaints,0,'the deferred refresh itself does not add a second repaint');
+    assert.equal(callbacks.length,1,'a new ROI result still schedules the existing completion repaint');
+    callbacks[0]();
+    assert.equal(environment.repaints,1,'the completion scheduler publishes the newly calculated range');
+    assert.equal(windowFor(app).max,20);
+}
+
 async function separateManualContexts() {
     const A = project('A'), B = project('B',[[30,40]]), f = fixture(A), {app} = f;
     const unchanged = JSON.stringify(A);
@@ -280,6 +318,8 @@ async function main() {
     await negativeRanges();
     await largeVisibleGridKeepsItsSummaries();
     await explicitRetryRecoversSourceFailure();
+    await settingsPaintSkipsCachedRangePass();
+    await deferredRangeStillSchedulesCompletionPaint();
     await separateManualContexts();
     console.log('MSI ROI range lifecycle, negative values and display contexts: PASS');
 }
