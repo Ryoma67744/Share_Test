@@ -75,9 +75,10 @@
       <h1 class="text-xl font-bold">DESI Data Share</h1>
       <p class="text-xs text-gray-500 mt-1">プロジェクト管理</p>
     </div>
-    <div class="flex items-center gap-2">
+    <div class="flex flex-wrap items-center justify-end gap-2">
       <button id="btn-mrm" class="btn" title="MRM 管理ライブラリ (化合物・トランジション・使用履歴)">MRM管理</button>
       <button id="btn-change-master-pw" class="btn" title="アプリ入場 / サーバ一覧取得のパスワードを変更">パスワード変更</button>
+      <button id="local-recovery-button" type="button" class="btn" hidden style="display:none;">回復・設定</button>
       <button id="btn-help" class="btn">Help</button>
     </div>
   </header>
@@ -2252,7 +2253,7 @@ async function init() {
     await requireMasterUnlock();
     if (ProjectNavigation.resumeMasterDestination()) return;
     const recoveryUi = ProjectStoreSafety.mountRecoveryUi(ProjectStorage, {projectUrl:id=>'viewer/index.html?project='+encodeURIComponent(id),onRestored: () => renderList()});
-    window.addEventListener('project-storage-conflict', () => recoveryUi.notify());
+    window.addEventListener('project-storage-conflict', event => recoveryUi.notify(event.detail));
     document.getElementById('btn-new').addEventListener('click', () => runManagerAction(async () => {
         const data = await openNewProjectFormModal();
         if (!data) return;

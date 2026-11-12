@@ -860,6 +860,7 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
             <button id="btn-add-parquet" class="btn" title="TIMS ノンターゲット (parquet) を登録。annotation ごとに切片を自動生成します">+ parquet</button>
             <button id="btn-replace-parquet" class="btn" title="登録済みの parquet を、中身が同じ別ファイル (再パック版など) に差し替えます。切片・ROI・背景除去・表示設定はそのまま残ります">parquet 差し替え</button>
             <button id="btn-delete-project" class="btn danger" title="Delete current project">Delete</button>
+            <button id="local-recovery-button" type="button" class="btn" hidden style="display:none;">回復・設定</button>
             <button id="btn-help" class="btn" title="Open the user guide">Help</button>
         </div>
     </header>
@@ -25276,7 +25277,7 @@ const App = {
         }
 
         const recoveryUi = ProjectStoreSafety.mountRecoveryUi(ProjectStorage, {projectUrl:id=>'index.html?project='+encodeURIComponent(id),onRestored: () => this.refreshProjectPicker()});
-        window.addEventListener('project-storage-conflict', () => recoveryUi.notify());
+        window.addEventListener('project-storage-conflict', event => recoveryUi.notify(event.detail));
 
         // The picker is populated by openProject() below (it ends with
         // refreshProjectPicker so the <select> shows the opened project).

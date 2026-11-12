@@ -780,7 +780,9 @@ When you `Open (master)` a server-only project from another PC / browser profile
 
 ### Choose whether to create recovery drafts
 
-The bottom-right **回復用下書き (count)・設定** button in the manager and master viewer is available even with zero drafts. Select **自動作成する** (create automatically, the default) or **自動作成しない** (do not create). This browser-wide setting applies to all local projects and persists after reload; it is not shared with viewers or other browsers.
+Use **回復・設定** (Recovery and settings) near Help at the top of the manager or master viewer to review and restore drafts or change automatic creation. This entry is available even with zero drafts. Select **自動作成する** (create automatically, the default) or **自動作成しない** (do not create). This browser-wide setting applies to all local projects and persists after reload; it is not shared with viewers or other browsers.
+
+The recovery notification stays hidden during normal use. A dismissible notification appears in the bottom-right corner only for a new recovery item, a save conflict, or a failure to read recovery information. Conflicts with automatic creation off also notify you that the edit was not backed up. Dismissing a notification does not delete drafts; they remain accessible through **回復・設定**. Returning to the tab without reloading does not repeat the same notification, but an updated item or a new save conflict does. Reloading the page notifies you again if unresolved drafts remain.
 
 Normal updates do not create a new draft every time. Recovery preserves conflicting edits and recoverable snapshots from ended tabs. A closed tab's snapshot proven to match a successful save, with no extra unsaved originals, is not listed as a duplicate. Legacy or uncertain snapshots remain available.
 

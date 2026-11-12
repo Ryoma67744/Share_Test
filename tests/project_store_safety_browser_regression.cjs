@@ -5,12 +5,14 @@ const {chromium}=require('playwright');
 const root=path.resolve(__dirname,'..');
 const moduleCode=fs.readFileSync(path.join(root,'project-store-safety.js'),'utf8');
 function wrapper(file){const html=fs.readFileSync(path.join(root,file),'utf8'),start=html.indexOf('const ProjectStorage = (() => {');return html.slice(start,html.indexOf('\n})();',start)+6);}
-const harness=kind=>`<!doctype html><meta charset="utf-8"><body><script src="/safety.js"></script><script>
+const harness=kind=>`<!doctype html><meta charset="utf-8"><body>
+<header><button type="button" id="local-recovery-button" hidden style="display:none">回復・設定</button></header>
+<script src="/safety.js"></script><script>
 const uid=prefix=>prefix+'_'+crypto.randomUUID();
 ${wrapper(kind==='manager'?'index.html':'viewer/index.html')}
 window.storage=ProjectStorage;
 window.recoveryUi=ProjectStoreSafety.mountRecoveryUi(storage);
-window.addEventListener('project-storage-conflict',()=>recoveryUi.notify());
+window.addEventListener('project-storage-conflict',event=>recoveryUi.notify(event.detail));
 </script>`;
 
 // Playwright's injected waitForFunction poll treats an async predicate's Promise
@@ -79,6 +81,145 @@ async function storageDiagnostics(page) {
  });
 }
 
+async function notificationScenario(browser,origin,errors) {
+ const context=await browser.newContext();
+ context.on('page',page=>page.on('pageerror',error=>errors.push(error.message)));
+ try {
+  const manager=await context.newPage(),viewer=await context.newPage();
+  await manager.goto(origin+'/manager');await viewer.goto(origin+'/viewer');
+  const notice=page=>page.locator('#local-recovery-notice');
+  const message=page=>page.locator('#local-recovery-notice-message').textContent();
+  const refresh=page=>page.evaluate(()=>recoveryUi.refresh());
+  const refocus=page=>page.evaluate(async()=>{
+   window.dispatchEvent(new Event('focus'));
+   document.dispatchEvent(new Event('visibilitychange'));
+   await recoveryUi.refresh();
+  });
+  for(const page of [manager,viewer]) {
+   await refresh(page);
+   assert.equal(await notice(page).isVisible(),false,'Normal startup has no floating recovery notice');
+   assert.equal(await page.locator('#local-recovery-button').textContent(),'回復・設定');
+   assert.equal(await page.locator('#local-recovery-button').isVisible(),true,'Settings remain available with no drafts');
+   assert.equal(await page.locator('#local-recovery-button').evaluate(button=>!!button.closest('header')),true);
+   assert.equal(await page.locator('#local-recovery-button').evaluate(button=>getComputedStyle(button).position),'static','The settings entry does not overlay the workspace');
+  }
+
+  // A failed read is actionable, but is not evidence that a recovery exists.
+  await manager.evaluate(async()=>{
+   window.originalListRecoveries=storage.listRecoveries;
+   storage.listRecoveries=async()=>{throw new Error('Synthetic recovery read failure');};
+   await recoveryUi.refresh();
+  });
+  await notice(manager).waitFor({state:'visible'});
+  assert.equal(await notice(manager).getAttribute('role'),'alert');
+  assert.match(await message(manager),/読み込.*Synthetic recovery read failure/);
+  await manager.locator('#local-recovery-dismiss').click();
+  await refocus(manager);
+  assert.equal(await notice(manager).isVisible(),false,'Focus does not repeat a dismissed read failure');
+  await manager.evaluate(async()=>{storage.listRecoveries=originalListRecoveries;await recoveryUi.refresh();});
+  assert.equal(await notice(manager).isVisible(),false,'A successful empty read clears the failure');
+
+  // Use the real two-tab CAS path: a stale save emits a conflict and creates a
+  // draft, while the winning project and its original remain unchanged.
+  await viewer.evaluate(async()=>{
+   await storage.putBlob({id:'notice-original',blob:new Blob(['notice original bytes'])});
+   await storage.putProject({id:'notice-project',displayName:'Initial',sections:[{images:{HE:{blobId:'notice-original'}}}]},{createOnly:true});
+  });
+  await viewer.evaluate(async()=>{window.stale=await storage.getProject('notice-project');});
+  await manager.evaluate(async()=>{const project=await storage.getProject('notice-project');project.displayName='Winner';await storage.putProject(project);});
+  const saveStale=page=>page.evaluate(async()=>{
+   stale.displayName='Uncommitted recovery';
+   try {await storage.putProject(stale);throw new Error('Expected stale save conflict');}
+   catch(error){return {code:error.code,recovered:error.recovered};}
+  });
+  // Hold the first recovery-list response after the write. The conflict notice
+  // must be dismissible before that read finishes, without returning as a new
+  // draft notice when the same saved snapshot finally arrives.
+  await viewer.evaluate(()=>{
+   window.notificationOriginalListRecoveries=storage.listRecoveries;
+   window.recoveryReadStarted=false;
+   const gate=new Promise(resolve=>{window.releaseRecoveryRead=resolve;});
+   storage.listRecoveries=async()=>{
+    const rows=await notificationOriginalListRecoveries();
+    window.recoveryReadStarted=true;await gate;return rows;
+   };
+   window.notificationOriginalNotify=recoveryUi.notify;
+   recoveryUi.notify=error=>(window.conflictRefresh=notificationOriginalNotify(error));
+  });
+  assert.deepEqual(await saveStale(viewer),{code:'LOCAL_PROJECT_CONFLICT',recovered:true});
+  await notice(viewer).waitFor({state:'visible'});
+  await viewer.waitForFunction(()=>recoveryReadStarted);
+  assert.match(await message(viewer),/競合|別のタブ/);
+  assert.equal(await notice(viewer).evaluate(element=>getComputedStyle(element).position),'fixed');
+  await viewer.locator('#local-recovery-dismiss').click();
+  assert.equal(await notice(viewer).isVisible(),false,'An immediate conflict notice can be dismissed while its list read is pending');
+  await viewer.evaluate(async()=>{
+   releaseRecoveryRead();await conflictRefresh;
+   storage.listRecoveries=notificationOriginalListRecoveries;
+   recoveryUi.notify=notificationOriginalNotify;
+  });
+  assert.equal(await notice(viewer).isVisible(),false,'The delayed read must not re-notify the exact conflict draft already dismissed');
+  await refresh(manager);
+  await notice(manager).waitFor({state:'visible'});
+  const first=await manager.evaluate(()=>storage.listRecoveries());assert.equal(first.length,1);
+  await manager.locator('#local-recovery-dismiss').click();
+  await refocus(manager);await refocus(viewer);
+  assert.equal(await notice(manager).isVisible(),false,'Returning to the manager does not repeat an acknowledged draft');
+  assert.equal(await notice(viewer).isVisible(),false,'Returning to the viewer does not repeat an acknowledged conflict');
+  assert.equal((await manager.evaluate(()=>storage.listRecoveries())).length,1,'Dismissing a notification preserves the draft');
+
+  // The same writer replaces the same draft ID. Count-only change detection
+  // would miss the newer edit in the other tab, which receives no conflict event.
+  await viewer.waitForFunction(updatedAt=>Date.now()>Date.parse(updatedAt),first[0].updatedAt);
+  assert.deepEqual(await saveStale(viewer),{code:'LOCAL_PROJECT_CONFLICT',recovered:true});
+  await notice(viewer).waitFor({state:'visible'});
+  assert.match(await message(viewer),/競合|別のタブ/,'A newer conflict with the same draft ID must still notify');
+  const changed=await manager.evaluate(()=>storage.listRecoveries());
+  assert.equal(changed.length,1);assert.equal(changed[0].id,first[0].id);
+  assert.notEqual(changed[0].updatedAt,first[0].updatedAt);
+  await refocus(manager);await notice(manager).waitFor({state:'visible'});
+  await manager.locator('#local-recovery-review').click();
+  await manager.locator('#local-recovery-dialog').waitFor({state:'visible'});
+  await manager.getByRole('button',{name:'別コピーとして復元',exact:true}).waitFor({state:'visible'});
+  assert.equal(await notice(manager).isVisible(),false,'Opening the recovery dialog acknowledges the displayed notice');
+  await manager.getByRole('button',{name:'別コピーとして復元',exact:true}).click();
+  await waitForAsyncCondition(manager,async()=>(await storage.listRecoveries()).length===0);
+  await closeRecovery(manager);await refresh(manager);await refresh(viewer);
+  assert.equal(await notice(manager).isVisible(),false,'Restoring the last draft removes its notice');
+  assert.equal(await notice(viewer).isVisible(),false,'A recovered conflict also clears in the originating tab');
+  assert.equal(await manager.evaluate(async()=>(await storage.getProject('notice-project')).displayName),'Winner');
+  assert.equal(await viewer.evaluate(async()=>(await storage.getBlob('notice-original')).blob.text()),'notice original bytes');
+
+  // Reload rechecks unresolved work; acknowledgement is intentionally only for
+  // this page. Explicit discard is separate from closing the notification.
+  assert.deepEqual(await saveStale(viewer),{code:'LOCAL_PROJECT_CONFLICT',recovered:true});
+  await refresh(manager);await notice(manager).waitFor({state:'visible'});
+  await manager.locator('#local-recovery-dismiss').click();
+  await manager.reload();await notice(manager).waitFor({state:'visible'});
+  await openRecovery(manager);
+  manager.once('dialog',dialog=>dialog.accept());
+  await manager.getByRole('button',{name:'下書き・保持を破棄',exact:true}).click();
+  await waitForAsyncCondition(manager,async()=>(await storage.listRecoveries()).length===0);
+  await closeRecovery(manager);await refresh(manager);await refresh(viewer);
+  assert.equal(await notice(manager).isVisible(),false,'Discarding the last draft removes its notice');
+  assert.equal(await notice(viewer).isVisible(),false,'Discard from another tab resolves its corresponding notice');
+
+  // OFF conflicts have no draft at all, so they must be driven by the conflict
+  // detail rather than the recovery count. Do not claim the edit was backed up.
+  await setRecoveryThroughUi(manager,false);
+  assert.deepEqual(await saveStale(viewer),{code:'LOCAL_PROJECT_CONFLICT',recovered:false});
+  await notice(viewer).waitFor({state:'visible'});
+  assert.match(await message(viewer),/退避.*(?:していません|されていません)/);
+  assert.equal((await viewer.evaluate(()=>storage.listRecoveries())).length,0);
+  await refocus(viewer);
+  assert.equal(await notice(viewer).isVisible(),true,'Refreshing an empty list must not erase an unacknowledged OFF conflict');
+  await viewer.locator('#local-recovery-dismiss').click();await refocus(viewer);
+  assert.equal(await notice(viewer).isVisible(),false);
+  assert.deepEqual(await saveStale(viewer),{code:'LOCAL_PROJECT_CONFLICT',recovered:false});
+  await notice(viewer).waitFor({state:'visible'});
+ } finally {await context.close();}
+}
+
 async function optionalRecoveryScenario(browser,origin,errors) {
  const context=await browser.newContext();
  context.on('page',page=>page.on('pageerror',error=>errors.push(error.message)));
@@ -89,7 +230,7 @@ async function optionalRecoveryScenario(browser,origin,errors) {
   await openRecovery(manager);
   assert.equal(await manager.getByRole('radio',{name:'自動作成する',exact:true}).isChecked(),true);
   assert.deepEqual(await manager.evaluate(()=>storage.listRecoveries()),[],'The settings entry remains available with no drafts');
-  assert.match(await manager.locator('#local-recovery-button').textContent(),/\(0\)/);
+  assert.equal(await manager.locator('#local-recovery-button').textContent(),'回復・設定');
   if(process.env.RECOVERY_SETTINGS_SCREENSHOT){await manager.setViewportSize({width:1366,height:900});await manager.screenshot({path:process.env.RECOVERY_SETTINGS_SCREENSHOT});}
   if(process.env.RECOVERY_SETTINGS_MOBILE_SCREENSHOT){await manager.setViewportSize({width:375,height:812});await manager.screenshot({path:process.env.RECOVERY_SETTINGS_MOBILE_SCREENSHOT});await manager.setViewportSize({width:1366,height:900});}
   // A failed preference write must display the persisted value, not an
@@ -278,10 +419,11 @@ async function main(){
   await a.close();await waitForAsyncCondition(c,async()=> (await storage.listRecoveries()).some(r=>r.kind==='editing-session'));const sessions=await c.evaluate(()=>storage.listRecoveries());const session=sessions.find(r=>r.kind==='editing-session');assert.ok(session);
   await c.evaluate(id=>storage.discardRecovery(id),session.id);assert.equal(await c.evaluate(async()=>(await storage.getBlob('active-original')).blob.text()),'only original','discard retains the restored copy original');
   await context.close();
+  await notificationScenario(browser,origin,errors);
   await optionalRecoveryScenario(browser,origin,errors);
   await db5MigrationScenario(browser,origin,errors);
   assert.deepEqual(errors,[]);
-  console.log('Project store safety browser regression: PASS (DB4/5 to DB6, fenced old tabs, shared recovery preference, OFF conflicts and pins, durable recovery UI, normal-close deduplication)');
+  console.log('Project store safety browser regression: PASS (DB4/5 to DB6, fenced old tabs, shared recovery preference, actionable recovery notifications, OFF conflicts and pins, durable recovery UI, normal-close deduplication)');
  }finally{await browser?.close();await new Promise(r=>server.close(r));}
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});
