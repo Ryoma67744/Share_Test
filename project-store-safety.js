@@ -283,11 +283,12 @@
                     }
                     const recoveryId = 'recovery:' + writerId + ':' + record.id;
                     const previous = await request(tx.objectStore('project_recovery').get(recoveryId));
+                    const recoveryUpdatedAt = now();
                     await request(tx.objectStore('project_recovery').put({id: recoveryId, projectId: record.id,
                         project: record, expectedRevision: expected ?? null, actualRevision,
-                        createdAt: previous ? previous.createdAt : now(), updatedAt: now()}));
+                        createdAt: previous ? previous.createdAt : recoveryUpdatedAt, updatedAt: recoveryUpdatedAt}));
                     failure = conflict('別のタブで更新または削除されています。今回の編集は回復用下書きに保存しました。',
-                        {projectId: record.id, recoveryId, expectedRevision: expected ?? null, actualRevision, recovered: true});
+                        {projectId: record.id, recoveryId, recoveryUpdatedAt, expectedRevision: expected ?? null, actualRevision, recovered: true});
                     return null; // Commit the recovery without touching the authoritative project.
                 }
                 record.storageRevision = actualRevision + 1; record.updatedAt = now();
@@ -596,38 +597,82 @@
             deleteProject, putBlob, renameBlob, deleteBlob, pruneShareOrphans, pinBlobs, releaseBlobPins, putArchiveJob, getArchiveJobs, deleteArchiveJob,
             beginBlobLease,pinBlobLease,getBlobWithLease,finishBlobLease,reclaimInactiveBlobLeases};
     }
-    // Accessible, persistent recovery entry point shared by both pages.
+    // Keep settings in the toolbar; only actionable recovery states float over the page.
     function mountRecoveryUi(storage, options = {}) {
         if (typeof document === 'undefined') return;
         let button = document.getElementById('local-recovery-button');
         if (!button) {
             button = document.createElement('button'); button.id = 'local-recovery-button'; button.type = 'button';
-            button.textContent = '回復用下書き・設定';
-            button.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:99990;padding:9px 14px;background:#fff7ed;border:2px solid #c2410c;border-radius:6px;color:#7c2d12';
-            document.body.appendChild(button);
+            button.className = 'btn';
+            const anchor = document.getElementById('btn-help');
+            if (anchor) anchor.before(button);
+            else (document.querySelector('header') || document.body).appendChild(button);
         }
+        button.hidden = false; button.style.display = '';
+        button.textContent = '回復・設定';
+        button.setAttribute('aria-haspopup', 'dialog');
+        const notice = document.createElement('div'); notice.id = 'local-recovery-notice'; notice.hidden = true;
+        notice.setAttribute('role', 'alert');
+        notice.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:99990;box-sizing:border-box;width:360px;max-width:calc(100vw - 28px);padding:12px 14px;background:#fff7ed;border:1px solid #c2410c;border-radius:6px;color:#7c2d12;font-size:13px;line-height:1.6;overflow-wrap:anywhere';
+        const noticeText = document.createElement('p'); noticeText.id = 'local-recovery-notice-message'; noticeText.style.margin = '0 0 8px';
+        const review = document.createElement('button'); review.id = 'local-recovery-review'; review.type = 'button'; review.className = 'btn'; review.textContent = '確認する'; review.style.marginRight = '8px';
+        const dismiss = document.createElement('button'); dismiss.id = 'local-recovery-dismiss'; dismiss.type = 'button'; dismiss.className = 'btn'; dismiss.textContent = '通知を閉じる';
+        notice.append(noticeText, review, dismiss); document.body.appendChild(notice);
         let settingsUi = null, changing = false, refreshId = 0;
+        let rows = [], pendingConflict = null, readFailure = null, dismissedReadFailure = null, visibleRowKeys = [];
+        // Page-local acknowledgement: focus must not repeatedly interrupt the user.
+        // Reload intentionally checks unresolved drafts again; no recovery data is modified.
+        const acknowledgedRows = new Set();
+        const rowKey = row => JSON.stringify([row.id, row.updatedAt]);
+        const renderNotice = () => {
+            const unseen = rows.filter(row => !acknowledgedRows.has(rowKey(row)));
+            const message = pendingConflict?.message || (readFailure !== dismissedReadFailure ? readFailure : null)
+                || (unseen.length ? '確認が必要な回復用下書きが ' + unseen.length + ' 件あります。内容を確認して復元または破棄できます。' : '');
+            visibleRowKeys = message ? unseen.map(rowKey) : [];
+            notice.hidden = !message;
+            // Avoid re-announcing unchanged text whenever the window regains focus.
+            if (noticeText.textContent !== message) noticeText.textContent = message;
+        };
+        const dismissNotice = () => {
+            visibleRowKeys.forEach(key => acknowledgedRows.add(key));
+            // A conflict is shown immediately, before its list read completes.
+            // Acknowledge that exact saved draft, not a later edit with the same ID.
+            if (pendingConflict?.recoveryKey) acknowledgedRows.add(pendingConflict.recoveryKey);
+            pendingConflict = null; dismissedReadFailure = readFailure;
+            renderNotice();
+        };
+        dismiss.onclick = () => { dismissNotice(); button.focus(); };
+        review.onclick = () => button.click();
         const refresh = async () => {
             const id = ++refreshId;
             try {
-                const [rows, enabled] = await Promise.all([storage.listRecoveries(), storage.getRecoveryEnabled()]);
+                const [recovered, enabled] = await Promise.all([storage.listRecoveries(), storage.getRecoveryEnabled()]);
                 if (id !== refreshId) return;
-                button.hidden = false;
-                button.textContent = '回復用下書き (' + rows.length + ')・設定';
+                rows = recovered; readFailure = null; dismissedReadFailure = null;
+                if (pendingConflict?.recoveryId && !rows.some(row => row.id === pendingConflict.recoveryId)) pendingConflict = null;
+                button.textContent = '回復・設定' + (rows.length ? ' (' + rows.length + ')' : '');
                 button.title = '自動作成: ' + (enabled ? 'ON' : 'OFF');
                 if (settingsUi && !changing) settingsUi.update(enabled);
+                renderNotice();
             } catch (error) {
-                button.hidden = false;
+                if (id !== refreshId) return;
                 button.title = '下書き設定を読み込めません: ' + String(error.message || error);
+                readFailure = button.title;
                 if (settingsUi) settingsUi.status.textContent = button.title;
+                renderNotice();
             }
         };
         button.onclick = async () => {
             if (document.getElementById('local-recovery-dialog')) return;
+            const conflictMessage = pendingConflict?.message;
+            dismissNotice();
             const dialog = document.createElement('dialog'); dialog.id = 'local-recovery-dialog';
             dialog.setAttribute('aria-label', '回復用下書きと設定');
             dialog.style.cssText = 'box-sizing:border-box;width:min(640px,calc(100vw - 32px));max-height:85vh;overflow:auto;padding:24px;border:1px solid #94a3b8;border-radius:8px;background:white;color:#0f172a;line-height:1.7';
             const title = document.createElement('h2'); title.textContent = '回復用下書きと設定'; dialog.appendChild(title);
+            if (conflictMessage) {
+                const warning = document.createElement('p'); warning.textContent = conflictMessage; warning.style.color = '#9a3412'; dialog.appendChild(warning);
+            }
             const fieldset = document.createElement('fieldset');
             fieldset.style.cssText = 'padding:12px 16px;border:1px solid #cbd5e1;border-radius:6px';
             const legend = document.createElement('legend'); legend.textContent = '回復用下書きの自動作成'; fieldset.appendChild(legend);
@@ -670,18 +715,19 @@
             const close = document.createElement('button'); close.type = 'button'; close.textContent = '閉じる'; close.onclick = () => dialog.close();
             dialog.appendChild(close); dialog.addEventListener('close', () => { settingsUi = null; dialog.remove(); button.focus(); });
             document.body.appendChild(dialog); dialog.showModal(); close.focus();
-            let rows;
+            let dialogRows;
             try {
                 const [recovered, enabled] = await Promise.all([storage.listRecoveries(), storage.getRecoveryEnabled()]);
-                rows = recovered;
+                dialogRows = recovered;
                 if (!dialog.isConnected) return;
                 settingsUi.update(enabled);
             } catch (error) {
                 status.textContent = '下書き設定を読み込めません: ' + String(error.message || error);
                 return;
             }
-            if (!rows.length) rowsBox.textContent = '回復用下書きはありません。';
-            for (const row of rows) {
+            if (!dialogRows.length) rowsBox.textContent = '回復用下書きはありません。';
+            for (const row of dialogRows) {
+                acknowledgedRows.add(rowKey(row));
                 const item = document.createElement('p'), label = document.createElement('span'), restore = document.createElement('button');
                 item.style.cssText = 'padding:12px 0;border-top:1px solid #e2e8f0';
                 label.style.cssText = 'display:block;overflow-wrap:anywhere';
@@ -707,11 +753,22 @@
                 restore.style.marginRight = '8px';
                 item.append(label, restore, discard); rowsBox.appendChild(item);
             }
+            await refresh();
         };
         if (typeof window !== 'undefined') window.addEventListener('focus', refresh);
         document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') refresh(); });
         refresh();
-        return {refresh, notify: refresh};
+        return {refresh, notify: error => {
+            if (error) {
+                let message = String(error.message || '別のタブで更新されています。保存内容を確認してください。');
+                if (error.recovered === false) message += ' タブを閉じる前に、未保存の編集内容を確認してください。';
+                const recoveryId = error.recovered === true ? error.recoveryId : null;
+                pendingConflict = {message, recoveryId,
+                    recoveryKey: recoveryId && error.recoveryUpdatedAt ? rowKey({id:recoveryId,updatedAt:error.recoveryUpdatedAt}) : null};
+                renderNotice();
+            }
+            return refresh();
+        }};
     }
     return {VERSION, upgrade, create, collectBlobIds, mountRecoveryUi};
 });

@@ -9,7 +9,9 @@
 
 v5 は `project_recovery`、`blob_pins`、`archive_jobs` を追加します。保存は project と一覧索引を同じ transaction で確定し、保存元の `storageRevision` が一致しないと永続下書きに退避します。削除済み ID を古い編集から復活させません。新規作成・ZIP/サーバ取込は create-only で、ID 衝突時は新しい ID を発行します。
 
-v6 はブラウザー単位の `preferences` を追加します。回復用下書きの自動作成は初期 ON で、管理画面・master ビューアの **回復用下書き (件数)・設定** から変更できます。各保存 transaction が最新の設定を読むため、別タブにも適用されます。OFF では新しい競合下書きと編集セッションの project コピーを作りませんが、CAS による競合拒否と編集中の原本 pin は維持します。既存の下書きは設定変更で削除しません。設定は project や共有・ZIP のデータには含めません。
+v6 はブラウザー単位の `preferences` を追加します。回復用下書きの自動作成は初期 ON で、管理画面・master ビューア上部の **回復・設定** から変更できます。この入口は 0 件でも利用でき、既存の下書きの確認・復元にも使えます。各保存 transaction が最新の設定を読むため、別タブにも適用されます。OFF では新しい競合下書きと編集セッションの project コピーを作りませんが、CAS による競合拒否と編集中の原本 pin は維持します。既存の下書きは設定変更で削除しません。設定は project や共有・ZIP のデータには含めません。
+
+回復 UI は通常時に右下へ表示せず、新たな回復項目・保存競合・回復情報の読み込み失敗がある場合だけ閉じられる通知を表示します。OFF 時の競合も、編集が退避されていないことを通知します。閉じても下書きは削除しません。同一ページ内の focus 等で同じ項目を再通知せず、項目の更新や新たな競合は再通知します。ページ再読み込み時は未解決の下書きを再通知します。この UI の変更は DB バージョン、保存処理、原本の保持・削除条件を変更しません。
 
 終了した編集セッションは Web Lock を取得した状態で確認します。正常保存後の revision が一致し、保持原本も全て保存済み project が参照している場合は重複した回復候補を除去します。OFF で作られたコピーなしのセッションは、他の project・下書き・job 等が参照していない原本だけを解放します。古いセッション、未保存の追加原本、生存状態が不明なセッションはこの重複整理の対象にしません。
 
@@ -26,6 +28,8 @@ DB を旧版に戻したり削除したりしないでください。アプリ�
 Finish saving in old tabs, export important projects with originals, close the old tabs, and then load the new build. The additive v6 upgrade keeps existing project and original records intact. Legacy projects receive a read-only revision-zero token; their first successful save advances the revision atomically. Do not erase browser data when an old fixed-v4/v5 page reports a version error: update/reload the page.
 
 Project saves and summaries commit together using an expected revision. Conflicting edits become durable recovery drafts when automatic recovery is enabled (the default). DB v6 adds a browser-wide preference, read within each save transaction. When disabled, conflicts still fail without overwriting the saved project, but no new recovery snapshot is made. Existing drafts remain available. This preference is not exported or published. Deleted projects cannot be resurrected by stale saves. Creation and import are create-only; an ID collision allocates a fresh local ID. Recovery produces an independent, unlinked copy.
+
+The **回復・設定** (Recovery and settings) entry near Help at the top of the manager and master viewer remains available with zero drafts. The bottom-right notification appears only for a new recovery item, a save conflict (including conflicts with recovery off), or a recovery-information read failure. Dismissing it does not delete drafts. Focus changes on the same page do not repeat an acknowledged item; updated items and new conflicts notify again. Reloading the page notifies again if unresolved drafts remain. This UI change does not change the DB version, save operations, or original-file retention and deletion rules.
 
 Editing-tab pins are created atomically with project reads and retain newly added originals before their project save. Normal switching/closing releases retention; uncertain or abnormal termination leaves a durable snapshot. Web Locks prevent recovery/discard of live sessions. Closed sessions can be restored or explicitly discarded in the manager. There is no expiry-based deletion; without Web Locks, uncertain sessions remain retained. Every original deletion checks projects, recovery drafts, session/job pins and archive staging references.
 

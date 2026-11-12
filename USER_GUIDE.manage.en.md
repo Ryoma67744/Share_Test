@@ -177,7 +177,9 @@ A small **`v:YYYY-MM-DD-rN`** badge is permanently visible in the bottom-right c
 
 ## 11. Save conflicts and recoverable drafts
 
-Use the bottom-right **回復用下書き (count)・設定** button, available even with zero drafts, to choose **自動作成する** (create automatically) or **自動作成しない** (do not create). The default is on. The setting applies to all local projects in this browser, persists after reload, and is read by other tabs on their next save. Turning it off does not delete existing drafts.
+Use **回復・設定** (Recovery and settings) near Help at the top to review and restore drafts or choose **自動作成する** (create automatically) or **自動作成しない** (do not create). This entry is available even with zero drafts. The default is on. The setting applies to all local projects in this browser, persists after reload, and is read by other tabs on their next save. Turning it off does not delete existing drafts.
+
+The recovery notification stays hidden during normal use. A dismissible notification appears in the bottom-right corner only for a new recovery item, a save conflict, or a failure to read recovery information. Conflicts with automatic creation off also notify you that the edit was not backed up. Dismissing a notification does not delete drafts; they remain accessible through **回復・設定**. Returning to the tab without reloading does not repeat the same notification, but an updated item or a new save conflict does. Reloading the page notifies you again if unresolved drafts remain.
 
 When multiple tabs edit the same local project, the first committed version is preserved. An older revision is rejected; when automatic recovery is on, the attempted edit is stored as a recovery draft. With recovery off, the edit remains unsaved and cannot be recovered through this feature after closing the tab. Normal saving, publication and conflict prevention remain enabled. Content is not merged automatically. Use **別コピーとして復元** (restore as a separate copy) to create an independent project without its previous share link or passwords. If storage is full and the draft itself cannot be committed, a save error is shown.
 
