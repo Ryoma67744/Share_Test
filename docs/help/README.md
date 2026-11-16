@@ -35,6 +35,9 @@ synthetic exp fixture and local MRM sample data. No account or real project is
 used. `capture-manifest.json` records viewport, browser version, source version,
 fixture hashes, screenshot hashes, application source hashes and capture scenarios. The source hashes identify the captured working tree even before it has a commit. `--ratio-only` refreshes
 the ratio screen after changes without recapturing the other scenarios.
+`--mrm-only` refreshes MRM management and the .exp editor without opening the
+viewer or rewriting its screenshots. Use a partial capture only when the changed
+application sources affect those scenarios; otherwise run the full capture.
 
 Capture actual working controls and wait for images, computation and transient
 toasts to finish. Review the resulting PNGs. Never substitute a design mock for

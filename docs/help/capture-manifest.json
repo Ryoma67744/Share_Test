@@ -10,7 +10,7 @@
     "app-i18n.js": "886fb10104ceda47849ab33dbddde46f7fd6f21d35b6f77149365e1eefda19b6",
     "app-runtime.js": "59256f2c7e57636e21264ddb635f2372202d564090fa83985da82a437b2b1573",
     "index.html": "187ced8aa7079dda416572355c578747b6784895105a23a9c4c4ed1b50bd9237",
-    "mrm.html": "664f67b5a9a500d30222ee59be356f2581bb3dea93fa720ece9911d09202715a",
+    "mrm.html": "d56182677c7c8058816aff3ff299534f5a194cf386a433f853bba9383159af9e",
     "mrm/exp-core.mjs": "ac827c9beac1614150d82cdf7dff4f065ed506aeb1fe828f09f703c3a9f42009",
     "mrm/exp-editor.css": "491cb6915daa833bae995570340881ca2342587900f769334cba97e41e14cdde",
     "mrm/exp-editor.mjs": "482ac388026e0e8fa22b99e3866c027daea19c800dbfc7308d6cb2632ee94d95",
@@ -53,7 +53,7 @@
     "viewer/tic-core.js": "6a1e5b1b8f291ad3c142fa0fd549cb7b8b202456fa41b53f7ebd4744430dc2b9",
     "viewer/tic-runtime.js": "05954d46dcd09c2a2a821b4c5cc347e0b9a9a481bff3750022a64ac5f84d804a"
   },
-  "captureToolSha256": "a67abe484bd666d9811da455d4f618fc57d074a20266812186579a4310d88b74",
+  "captureToolSha256": "664a7acb729a6e8449cd05c1201433b7710c98145f135e07dca4cd53d39f96ef",
   "generatedBy": "node tools/help-capture.cjs",
   "sourceVersion": "v2026-11-16.1",
   "browser": "151.0.7922.34",

@@ -39,8 +39,9 @@ async function prepare(page){
 }
 async function main(){
   const {server,origin}=await startServer(),data=await fixture();let browser;const captures=[],errors=[],untranslatedReports=[];
-  const onlyRatio=process.argv.includes('--ratio-only'),onlyKmd=process.argv.includes('--kmd-only');
+  const onlyRatio=process.argv.includes('--ratio-only'),onlyKmd=process.argv.includes('--kmd-only'),onlyMrm=process.argv.includes('--mrm-only');
   try{
+    if([onlyRatio,onlyKmd,onlyMrm].filter(Boolean).length>1)throw new Error('Choose at most one capture-only option.');
     browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH||undefined});
     const context=await browser.newContext({viewport,deviceScaleFactor:1});
     await context.route('**/*',route=>route.request().url().startsWith(origin+'/')||/^(blob|data):/.test(route.request().url())?route.continue():route.abort());
@@ -94,6 +95,7 @@ async function main(){
         localized:{en:{path:'docs/help/images/'+id+'-en.png',sha256:sha(english),uiLanguage:'en',statePreserved:true}}});
       console.log('Captured '+id+' (ja/en; editing state preserved)');
     }
+    if(!onlyMrm){
     await page.goto(origin+'/viewer/?project=help-empty');await page.waitForFunction(()=>typeof App!=='undefined'&&App.offline);
     await page.locator('#hidden-import-input').setInputFiles({name:'Help-synthetic.zip',mimeType:'application/zip',buffer:data.buffer});
     await page.getByRole('button',{name:'復元 / Restore',exact:true}).waitFor();if(!onlyRatio&&!onlyKmd)await shot('import','ZIP import confirmation with original numerical sources');
@@ -140,8 +142,9 @@ async function main(){
       await page.locator('#kmd-unit').selectOption('CH2');await shot('kmd','Actual non-target Method table and KMD panel with 12 synthetic masses in two CH2 series');
       captures.at(-1).fixture='offline-smoke ZIP with synthetic non-target metadata';captures.at(-1).compoundMetadataSha256=sha(JSON.stringify(section.originalSeries));
     }
+    }
     if(!onlyRatio&&!onlyKmd){
-      await page.goto(origin+'/');await page.locator('#btn-help').waitFor();await shot('projects','Actual local project manager with imported synthetic project');
+      await page.goto(origin+'/');await page.locator('#btn-help').waitFor();if(!onlyMrm)await shot('projects','Actual local project manager with imported synthetic project');
       await page.evaluate(()=>localStorage.setItem('desi:offlineMrm:v1',JSON.stringify({format:'desi-offline-mrm',version:1,sets:[],template:null,ignored:[],compounds:[{id:'help-compound',name:'Synthetic lactate',polarity:'-',shelf:'main',check_level:'std',tags:['Help sample'],note:'Synthetic demonstration data',transitions:[{id:'help-transition',compound_id:'help-compound',precursor:89,product:43,ce:11,cv:20,usages:[]}]}]})));await page.goto(origin+'/mrm.html');await page.locator('#btn-exp-edit').waitFor();await page.waitForFunction(()=>!document.getElementById('lib').textContent.includes('読み込み中'));await shot('mrm','Actual local MRM management');
       await page.locator('#btn-exp-edit').click();await page.getByLabel('.exp ファイルを選択',{exact:true}).setInputFiles(path.join(root,'tests/fixtures/exp/flat-mrm-selection-synthetic.exp'));await page.getByLabel('1 行目 CE（衝突）',{exact:true}).waitFor();await shot('exp','Actual exp editor with the synthetic supported MRM fixture');
     }

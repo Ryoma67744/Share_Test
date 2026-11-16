@@ -1845,7 +1845,7 @@ async function runPasteImport(rows) {
             fail++;
         }
         const pe = pcard.querySelector('[data-prog]');
-        if (pe) uiBind(pe, uiMsg("{0}{1} / {2}", () => [i, 1, rows.length]));
+        if (pe) uiBind(pe, uiMsg("{0} / {1}", () => [i + 1, rows.length]));
     }
     if (pcard._close) pcard._close(true);
     await loadLibrary();
@@ -2432,7 +2432,7 @@ async function openReconcileModal() {
                 });
                 ok++;
             } catch (e) { console.warn('register measured failed', r.name, e); fail++; }
-            const pe = pcard.querySelector('[data-prog]'); if (pe) uiBind(pe, uiMsg("{0}{1} / {2}", () => [i, 1, sel.length]));
+            const pe = pcard.querySelector('[data-prog]'); if (pe) uiBind(pe, uiMsg("{0} / {1}", () => [i + 1, sel.length]));
         }
         if (pcard._close) pcard._close(true);
         await loadLibrary();

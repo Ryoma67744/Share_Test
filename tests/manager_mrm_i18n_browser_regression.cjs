@@ -23,6 +23,7 @@ async function main(){
   assert.equal(await page.locator('html').getAttribute('lang'),'en');
   assert.equal(await page.locator('#btn-new').innerText(),'+ New project');
   await page.locator('#btn-new').click();
+  await page.waitForFunction(()=>document.activeElement===document.querySelector('#modal-host [name="name"]'));
   await page.locator('#modal-host [name="name"]').fill('編集 <b>保存</b>');
   await page.locator('#modal-host [name="sample_types"]').fill('腎臓, 脳');
   await page.evaluate(()=>AppI18n.setLocale('ja'));
@@ -57,7 +58,11 @@ async function main(){
   await page.evaluate(()=>AppI18n.setLocale('en'));
   assert.match(await page.locator('#lib [data-action="move-shelf"]').innerText(),/Archive/);
   await page.evaluate(()=>{void openCompoundModal(library[0]);});
+  // openModal schedules autofocus. Let it finish before fill() selects a
+  // different field, or its insertText command can land in the first input.
+  await page.waitForFunction(()=>document.activeElement===document.querySelector('#modal-host [name="name"]'));
   await page.locator('#modal-host [name="note"]').fill('日本語の入力を維持');
+  assert.equal(await page.locator('#modal-host [name="note"]').inputValue(),'日本語の入力を維持','The draft exists before changing language');
   await page.evaluate(()=>AppI18n.setLocale('ja'));
   assert.equal(await page.locator('#modal-host [name="note"]').inputValue(),'日本語の入力を維持');
   assert.equal(await page.locator('#modal-host h2').innerText(),'化合物を編集');
@@ -70,8 +75,13 @@ async function main(){
   assert.equal(await page.locator('#modal-host [name="role"] option[value="確認"]').innerText(),'Qualifier');
   await page.locator('#modal-host [data-modal-cancel]').click();
   await page.locator('#btn-import-excel').click();
+  // The grid is populated after openModal captures its initial focus target.
+  await page.waitForFunction(()=>document.activeElement===document.querySelector('#modal-host [data-bulk-tags]'));
   await page.locator('[data-cell="name"]').first().fill('保存');
+  await page.evaluate(()=>{window.bulkLanguageDraft=document.querySelector('[data-cell="name"]');});
+  assert.equal(await page.locator('[data-cell="name"]').first().inputValue(),'保存','The grid draft exists before changing language');
   await page.evaluate(()=>AppI18n.setLocale('ja'));await page.evaluate(()=>AppI18n.setLocale('en'));
+  assert.equal(await page.evaluate(()=>bulkLanguageDraft===document.querySelector('[data-cell="name"]')),true,'Changing language preserves the edited grid node');
   assert.equal(await page.locator('[data-cell="name"]').first().inputValue(),'保存');
   await page.locator('#modal-host [data-modal-cancel]').click();
   assert.deepEqual(await page.evaluate(()=>DesiLocalMrm.exportDocument()),mrmBefore,'Language changes never mutate library data or role values');
