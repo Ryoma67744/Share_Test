@@ -66,6 +66,7 @@ async function main(){
   auth='valid';await page.locator('#modal-host [data-modal-ok]').click();
   await page.waitForFunction(()=>document.querySelector('#modal-host').children.length===0&&typeof _lastListRows!=='undefined');
   await page.locator('#btn-change-master-pw').click();
+  await page.waitForFunction(()=>document.activeElement===document.querySelector('#modal-host [name="cur"]'));
   await page.locator('#modal-host [name="cur"]').fill('fixture-password');
   await page.locator('#modal-host [name="next"]').fill('new-fixture-password');
   await page.locator('#modal-host [name="next2"]').fill('different-fixture-password');
@@ -93,8 +94,10 @@ async function main(){
   library='ok';await page.locator('#btn-reload').click();
   await page.waitForFunction(()=>document.getElementById('lib').textContent.includes('No compounds registered'));
   await page.locator('#btn-add-compound').click();
+  await page.waitForFunction(()=>document.activeElement===document.querySelector('#modal-host [name="name"]'));
   await page.locator('#modal-host [name="name"]').fill('編集');
   await page.locator('#modal-host [name="note"]').fill('保存');
+  assert.equal(await page.locator('#modal-host [name="note"]').inputValue(),'保存','The draft exists before changing language');
   await assertLanguageHasNoDataWrites(page);
   assert.equal(await page.locator('#modal-host [name="name"]').inputValue(),'編集');
   assert.equal(await page.locator('#modal-host [name="note"]').inputValue(),'保存');
