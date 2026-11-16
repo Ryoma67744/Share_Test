@@ -6,6 +6,9 @@
     if (root) root.ProjectNavigation = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function() {
     'use strict';
+// UI-only bindings: parameters keep user data separate from translation keys.
+function uiT(source, params) { const api=globalThis.AppI18n; if(typeof params==='function')params=params(); return api ? api.t(source, params) : String(source).replace(/\{(\w+)\}/g,(token,k)=>params && Object.prototype.hasOwnProperty.call(params,k) ? String(params[k] ?? '') : token); }
+
     const UNLOCK = 'desi:masterUnlocked', PASSWORD = 'desi:masterPw';
     const identifier = value => typeof value === 'string' && value.length > 0 && value.length <= 1024
         && !/[\u0000-\u001f\u007f]/.test(value);
@@ -94,7 +97,7 @@
                 // noopener here would discard the handle needed for this step.
                 child = win.open('about:blank', '_blank');
                 if (!child || child.closed) {
-                    notify('新しいタブを開けませんでした。このサイトのポップアップ設定を確認して、もう一度押してください。');
+                    notify(uiT("新しいタブを開けませんでした。このサイトのポップアップ設定を確認して、もう一度押してください。"));
                     return false;
                 }
                 opened = true;
@@ -106,7 +109,7 @@
                 return true;
             } catch (_) {
                 if (opened) { try { child.close(); } catch (_) {} }
-                notify('新しいタブへの認証引き継ぎに失敗しました。元の画面はそのままです。ブラウザーの保存設定を確認して再試行してください。');
+                notify(uiT("新しいタブへの認証引き継ぎに失敗しました。元の画面はそのままです。ブラウザーの保存設定を確認して再試行してください。"));
                 return false;
             }
         }

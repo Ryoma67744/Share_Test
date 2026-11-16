@@ -4,16 +4,27 @@
     else root.ShareRefresh=api;
 })(typeof globalThis!=='undefined'?globalThis:this,function(){
     'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
     const error=(code,message)=>Object.assign(new Error(message),{code});
-    function assertActive(signal){if(signal?.aborted)throw error('SHARE_REFRESH_CANCELLED','共有版の取得を中断しました。');}
+    function assertActive(signal){if(signal?.aborted)throw error('SHARE_REFRESH_CANCELLED',_uiT("共有版の取得を中断しました。"));}
     async function withDeadline(run,{signal,timeoutMs=45000}={}){
         assertActive(signal);
         const controller=new AbortController();
         let timer, listener;
         const stopped=new Promise((_,reject)=>{
-            listener=()=>{controller.abort();reject(error('SHARE_REFRESH_CANCELLED','共有版の取得を中断しました。'));};
+            listener=()=>{controller.abort();reject(error('SHARE_REFRESH_CANCELLED',_uiT("共有版の取得を中断しました。")));};
             signal?.addEventListener('abort',listener,{once:true});
-            timer=setTimeout(()=>{controller.abort();reject(error('SHARE_REFRESH_TIMEOUT','サーバーの応答を待っています。接続を確認してから再度お試しください。'));},timeoutMs);
+            timer=setTimeout(()=>{controller.abort();reject(error('SHARE_REFRESH_TIMEOUT',_uiT("サーバーの応答を待っています。接続を確認してから再度お試しください。")));},timeoutMs);
         });
         try{return await Promise.race([Promise.resolve().then(()=>run(controller.signal)),stopped]);}
         finally{clearTimeout(timer);signal?.removeEventListener('abort',listener);}
@@ -27,7 +38,7 @@
         const arm=()=>{clearTimeout(timer);timer=setTimeout(cancel,stallMs);};
         try{
             arm();const response=await fetchImpl(url,{signal:controller.signal});
-            if(!response.ok){await response.body?.cancel();throw error('SHARE_SOURCE_FAILED','原本を取得できませんでした (HTTP '+response.status+')。');}
+            if(!response.ok){await response.body?.cancel();throw error('SHARE_SOURCE_FAILED',_uiT("原本を取得できませんでした (HTTP {0})。", {"0":(response.status)}));}
             const total=Number(response.headers.get('content-length'))||0;
             if(!response.body?.getReader)return await response.blob();
             reader=response.body.getReader();const parts=[];
@@ -35,15 +46,15 @@
             return new Blob(parts,{type:response.headers.get('content-type')||'application/octet-stream'});
         }catch(e){
             assertActive(signal);
-            if(controller.signal.aborted)throw error('SHARE_REFRESH_TIMEOUT','原本のダウンロードが停止しました。接続を確認してから再度お試しください。');
+            if(controller.signal.aborted)throw error('SHARE_REFRESH_TIMEOUT',_uiT("原本のダウンロードが停止しました。接続を確認してから再度お試しください。"));
             throw e;
         }finally{clearTimeout(timer);signal?.removeEventListener('abort',cancel);try{await reader?.cancel();}catch(_){} }
     }
     function compare(project,doc){
         const local=project.shareInfo||{},revision=doc?.publish_revision;
-        if(!Number.isSafeInteger(revision)||revision<0)throw error('SHARE_REVISION_MISSING','共有の公開版番号を確認できません。既存プロジェクトは更新していません。');
+        if(!Number.isSafeInteger(revision)||revision<0)throw error('SHARE_REVISION_MISSING',_uiT("共有の公開版番号を確認できません。既存プロジェクトは更新していません。"));
         const slug=doc?.slug||doc?.meta?.project_slug;
-        if(slug&&slug!==local.slug)throw error('SHARE_TARGET_CHANGED','共有先が一致しません。既存プロジェクトは更新していません。');
+        if(slug&&slug!==local.slug)throw error('SHARE_TARGET_CHANGED',_uiT("共有先が一致しません。既存プロジェクトは更新していません。"));
         const remote=doc.sections||[],remoteIds=new Set(remote.map(s=>String(s.meta?.client_id||s.client_id||s.id)));
         const sections=project.sections||[],localIds=new Set(sections.map(s=>String(s.id)));
         const added=remote.filter(s=>!localIds.has(String(s.meta?.client_id||s.client_id||s.id)));

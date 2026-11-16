@@ -5,6 +5,17 @@
   if (root) root.RoiMediaMsi = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function(MsiSmoothing) {
   'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
 
   // This module owns only a comparison viewport. Neither quantitative ROI
   // membership nor the main viewer's image settings are modified here.
@@ -25,7 +36,7 @@
     if (!Array.isArray(m) || m.length !== 3 || !m.every(r=>Array.isArray(r) && r.length === 3 && r.every(Number.isFinite))
         || Math.abs(m[2][0]) > 1e-10 || Math.abs(m[2][1]) > 1e-10 || Math.abs(m[2][2]-1) > 1e-10
         || Math.abs(m[0][0]*m[1][1]-m[0][1]*m[1][0]) < 1e-14) {
-      throw new Error('MSIの表示座標が不正です。');
+      throw new Error(_uiT("MSIの表示座標が不正です。"));
     }
     return m.map(r=>r.slice());
   }
@@ -33,7 +44,7 @@
     const width = Number(source && (source.naturalWidth || source.width));
     const height = Number(source && (source.naturalHeight || source.height));
     if (!(width > 0) || !(height > 0) || !Number.isFinite(width) || !Number.isFinite(height)) {
-      throw new Error('MSI画像を読み込めません。');
+      throw new Error(_uiT("MSI画像を読み込めません。"));
     }
     return {width,height};
   }
@@ -45,7 +56,7 @@
     const size = dimensions(frame && frame.canvas);
     if (!Array.isArray(frame.polygon) || frame.polygon.length < 3
         || !frame.polygon.every(p=>Array.isArray(p) && p.length >= 2 && Number.isFinite(p[0]) && Number.isFinite(p[1]))) {
-      throw new Error('このMSI画像に対応するROI座標を確認できません。');
+      throw new Error(_uiT("このMSI画像に対応するROI座標を確認できません。"));
     }
     const transform = affine(frame.transform);
     const polygon = frame.polygon.map(p=>[p[0]+0.5,p[1]+0.5]);
@@ -53,7 +64,7 @@
     const whole = frame.physicalFrame && frame.physicalFrame.sampleBounds || {x:0,y:0,width:size.width,height:size.height};
     if (nativeBounds.x > size.width || nativeBounds.y > size.height
         || nativeBounds.x+nativeBounds.width < 0 || nativeBounds.y+nativeBounds.height < 0) {
-      throw new Error('ROIがMSI画像の範囲外です。');
+      throw new Error(_uiT("ROIがMSI画像の範囲外です。"));
     }
     // Floor/ceil are image edges, not resampled intensities. Degenerate tiny
     // polygons still produce a positive crop and never request a 0px canvas.
@@ -81,14 +92,14 @@
     const o = options || {}, {width,height} = dimensions(source || (o.numericOnly && o.valueRaster
       ? {width:o.valueRaster.W,height:o.valueRaster.H}:null));
     if (typeof o.evaluateValue !== 'function' || typeof o.evaluateLuminance !== 'function'
-        || !Array.isArray(o.lut) || o.lut.length !== 256) throw new Error('MSIの配色設定が不正です。');
+        || !Array.isArray(o.lut) || o.lut.length !== 256) throw new Error(_uiT("MSIの配色設定が不正です。"));
     const canvas = newCanvas(o.createCanvas,width,height), ctx = canvas.getContext('2d', {willReadFrequently:true});
     ctx.imageSmoothingEnabled = false;
     if(source)ctx.drawImage(source,0,0);
     const pixels = ctx.getImageData(0,0,width,height), d = pixels.data;
     const vr = o.valueRaster, keep = o.keepGrid;
     const useValues = !!(vr && vr.W === width && vr.H === height && vr.values && vr.values.length === width*height);
-    if(o.numericOnly && !useValues)throw new Error('比の元の数値に対応するラスターがありません。');
+    if(o.numericOnly && !useValues)throw new Error(_uiT("比の元の数値に対応するラスターがありません。"));
     const useKeep = !!(keep && keep.W === width && keep.H === height && keep.keep && keep.keep.length === width*height);
     const strength=o.smoothing==='median'?MsiSmoothing.normalizeLevel(o.smoothingStrength):0;
     const valid=strength>0?new Uint8Array(width*height):null;
@@ -104,7 +115,7 @@
         const value = useValues ? vr.values[i/4] : NaN;
         const ev = Number.isFinite(value) ? o.evaluateValue(value,o.window,fallbackMax)
           : o.evaluateLuminance(0.299*d[i]+0.587*d[i+1]+0.114*d[i+2],rawRange,o.window);
-        if (!ev || !Number.isFinite(ev.n)) throw new Error('MSIの強度範囲を確認できません。');
+        if (!ev || !Number.isFinite(ev.n)) throw new Error(_uiT("MSIの強度範囲を確認できません。"));
         const paletteIndex=Math.round(clamp(ev.n,0,1)*255);
         color = o.lut[paletteIndex];
         if(valid) {
@@ -228,7 +239,7 @@
     canvas.className = 'roi-media-msi-canvas';
     canvas.style.cssText = 'display:block;width:100%;height:100%;touch-action:none;cursor:grab;';
     canvas.tabIndex = 0;
-    canvas.setAttribute('role','img'); canvas.setAttribute('aria-label','ROIに対応するMSI画像');
+    canvas.setAttribute('role','img'); _uiAttr(canvas, "aria-label", "ROIに対応するMSI画像");
     host.appendChild(canvas);
     let frame = null, mode = 'crop', margin = 4, outline = true, zoom = 1, panX = 0, panY = 0;
     let disposed = false, drag = null, last = null, observer = null;

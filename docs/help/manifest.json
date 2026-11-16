@@ -1276,6 +1276,9 @@
       "caption": {
         "ja": "プロジェクト管理画面",
         "en": "Project manager"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/projects-en.png"
       }
     },
     {
@@ -1288,6 +1291,9 @@
       "caption": {
         "ja": "切片・分子・ROI の位置を確認",
         "en": "Locate sections, molecules and ROIs"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/viewer-en.png"
       }
     },
     {
@@ -1300,6 +1306,9 @@
       "caption": {
         "ja": "元データを含むプロジェクトの復元確認",
         "en": "Review restoration of a project with source data"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/import-en.png"
       }
     },
     {
@@ -1312,6 +1321,9 @@
       "caption": {
         "ja": "Median の表示専用調整",
         "en": "Display-only Median adjustment"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/display-en.png"
       }
     },
     {
@@ -1324,6 +1336,9 @@
       "caption": {
         "ja": "任意の X / Y を設定",
         "en": "Configure an arbitrary X / Y"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/ratio-en.png"
       }
     },
     {
@@ -1336,6 +1351,9 @@
       "caption": {
         "ja": "対象画像・尺度・対応点を確認",
         "en": "Review images, scale and landmarks"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/align-en.png"
       }
     },
     {
@@ -1348,6 +1366,9 @@
       "caption": {
         "ja": "ROI の表示対象を点検",
         "en": "Inspect the displayed ROI area"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/roi-en.png"
       }
     },
     {
@@ -1360,6 +1381,9 @@
       "caption": {
         "ja": "ROI に関連付ける顕微鏡画像",
         "en": "Microscopy images associated with an ROI"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/microscope-en.png"
       }
     },
     {
@@ -1372,6 +1396,9 @@
       "caption": {
         "ja": "切片・分子を一覧で比較",
         "en": "Compare sections and molecules in a grid"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/preview-en.png"
       }
     },
     {
@@ -1384,6 +1411,9 @@
       "caption": {
         "ja": "レポートの出力条件を確認",
         "en": "Review report export conditions"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/report-en.png"
       }
     },
     {
@@ -1396,6 +1426,9 @@
       "caption": {
         "ja": "バックアップと記録の入口",
         "en": "Backup and note controls"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/save-en.png"
       }
     },
     {
@@ -1408,6 +1441,9 @@
       "caption": {
         "ja": "MRM ライブラリ",
         "en": "MRM library"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/mrm-en.png"
       }
     },
     {
@@ -1420,6 +1456,9 @@
       "caption": {
         "ja": "exp の内容と変更を確認",
         "en": "Review exp content and changes"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/exp-en.png"
       }
     },
     {
@@ -1432,6 +1471,9 @@
       "caption": {
         "ja": "保存した比の画像と表示条件",
         "en": "Saved ratio image and display conditions"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/ratio-image-en.png"
       }
     },
     {
@@ -1444,6 +1486,9 @@
       "caption": {
         "ja": "ANALYSIS の KMD図：単位選択、系列一覧、重ねる、選択解除",
         "en": "ANALYSIS KMD plot: units, series list, overlay and reset"
+      },
+      "localizedPaths": {
+        "en": "docs/help/images/kmd-en.png"
       }
     },
     {

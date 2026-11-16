@@ -1,6 +1,6 @@
 'use strict';
 const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
-const {markdown,replaceSupplement,renderStandalone,scaleText}=require('../tools/help-docs.cjs');
+const {markdown,replaceSupplement,renderStandalone,scaleText,screenshotPath}=require('../tools/help-docs.cjs');
 const {renderGuide}=require('../tools/docs.cjs');
 const root=path.resolve(__dirname,'..'),data=JSON.parse(fs.readFileSync(path.join(root,'docs/help/manifest.json'),'utf8'));
 const capture=JSON.parse(fs.readFileSync(path.join(root,'docs/help/capture-manifest.json'),'utf8'));
@@ -8,6 +8,9 @@ const provenance=JSON.parse(fs.readFileSync(path.join(root,'docs/help/brain-exam
 assert.equal(data.format,1);assert.equal(data.chapters.length,13);assert.equal(new Set(data.chapters.map(c=>c.id)).size,13);
 assert.equal(capture.synthetic,true);assert.match(capture.fixtureSha256,/^[a-f0-9]{64}$/);
 const shots=new Map(data.screenshots.map(s=>[s.id,s]));assert.equal(shots.size,data.screenshots.length);
+assert.equal(screenshotPath({path:'docs/help/images/viewer.png',localizedPaths:{en:'docs/help/images/viewer-en.png'}},'en'),'docs/help/images/viewer-en.png');
+assert.equal(screenshotPath({path:'docs/help/images/brain-viewer.png'},'en'),'docs/help/images/brain-viewer.png');
+assert.throws(()=>screenshotPath({path:'docs/help/images/viewer.png',localizedPaths:{en:'../outside.png'}},'en'),/Unsafe/);
 const examples=new Map((data.examples||[]).map(e=>[e.id,e]));assert.equal(examples.size,5);
 function bilingual(value){assert.equal(typeof value.ja,'string');assert.ok(value.ja.trim());assert.equal(typeof value.en,'string');assert.ok(value.en.trim());}
 function panel(value){
@@ -65,6 +68,14 @@ for(const shot of shots.values()){
   const recorded=measured?assets.get(shot.id):capture.captures.find(item=>item.id===shot.id);assert.ok(recorded,'uncaptured screenshot '+shot.id);
   if(measured){assert.equal(recorded.kind,shot.kind);assert.equal(shot.provenance,'docs/help/brain-example-provenance.json');}
   assert.equal(recorded.path,shot.path);assert.equal(recorded.sha256,crypto.createHash('sha256').update(bytes).digest('hex'),'stale capture metadata '+shot.id);
+  for(const [lang,localizedPath] of Object.entries(shot.localizedPaths||{})){
+    assert.ok(['ja','en'].includes(lang));assert.match(localizedPath,/^docs\/help\/images\/[\w.-]+\.png$/);
+    const localized=recorded.localized?.[lang];assert.ok(localized,'missing localized capture '+shot.id+' '+lang);
+    assert.equal(localized.path,localizedPath);assert.equal(localized.uiLanguage,lang);assert.equal(localized.statePreserved,true);
+    const image=fs.readFileSync(path.join(root,localizedPath));assert.equal(image.subarray(1,4).toString(),'PNG');
+    assert.equal(localized.sha256,crypto.createHash('sha256').update(image).digest('hex'),'stale localized capture '+shot.id);
+    assert.equal(image.readUInt32BE(16),bytes.readUInt32BE(16));assert.equal(image.readUInt32BE(20),bytes.readUInt32BE(20));
+  }
 }
 for(const role of ['manage','master','viewer'])for(const lang of ['ja','en']){
   const file='USER_GUIDE'+(role==='viewer'?'':'.'+role)+(lang==='ja'?'':'.en')+'.md';
@@ -74,7 +85,7 @@ for(const role of ['manage','master','viewer'])for(const lang of ['ja','en']){
   for(const chapter of data.chapters.filter(c=>!c.roles||c.roles.includes(role)))for(const id of chapter.examples||[]){
     const example=examples.get(id),panels=[...example.panels,...(example.choices?.options||[]).map(o=>o.panel)];
     assert.ok(body.includes(example.source[lang]));assert.ok(html.includes('id="example-'+id+'"'));
-    for(const value of panels){assert.ok(body.includes(shots.get(value.image).path),'missing static comparison '+value.image);if(value.scale)assert.ok(body.includes(scaleText(value.scale,lang)));}
+    for(const value of panels){assert.ok(body.includes(screenshotPath(shots.get(value.image),lang)),'missing static comparison '+value.image);if(value.scale)assert.ok(body.includes(scaleText(value.scale,lang)));}
     for(const option of example.choices?.options||[])assert.ok(body.includes(option.body[lang]),'missing static choice explanation');
   }
 }

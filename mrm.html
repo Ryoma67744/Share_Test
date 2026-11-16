@@ -3,13 +3,17 @@
 <head>
 <script src="runtime-config.js"></script>
 <script src="app-runtime.js"></script>
-<link rel="stylesheet" href="help.css?v=2026-11-09.1">
+<script src="app-i18n.js"></script>
+<script src="app-i18n-common.js"></script>
+<script src="app-i18n-storage.js"></script>
+<script src="app-i18n-mrm.js"></script>
+<link rel="stylesheet" href="help.css?v=2026-11-16.1">
 <script src="offline/offline.js"></script>
-<script defer src="help.js?v=2026-11-09.1"></script>
+<script defer src="help.js?v=2026-11-16.1"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
-<title>DESI Data Share — MRM管理</title>
+<title data-i18n="DESI Data Share — MRM管理">DESI Data Share — MRM管理</title>
 <link rel="stylesheet" href="mrm/exp-editor.css">
 <script src="vendor/tailwind.js"></script>
 <!-- defer: built lazily in _client(); XLSX is only used by the Excel
@@ -149,10 +153,11 @@
 <div id="app" class="max-w-7xl mx-auto px-6 py-8">
   <header class="flex items-center justify-between gap-4 mb-4">
     <div>
-      <h1 class="text-xl font-bold">MRM管理</h1>
-      <p class="text-xs text-gray-500 mt-1">測定に使えるMRM (プリカーサー / フラグメント / CE / CV) を化合物・タグ別に登録し、使用したプロジェクト/サンプルへ遡れます</p>
+      <h1 class="text-xl font-bold"><span data-i18n="MRM管理">MRM管理</span></h1>
+      <p class="text-xs text-gray-500 mt-1"><span data-i18n="測定に使えるMRM (プリカーサー / フラグメント / CE / CV) を化合物・タグ別に登録し、使用したプロジェクト/サンプルへ遡れます">測定に使えるMRM (プリカーサー / フラグメント / CE / CV) を化合物・タグ別に登録し、使用したプロジェクト/サンプルへ遡れます</span></p>
     </div>
     <div class="flex items-center gap-2">
+      <button type="button" class="btn" data-i18n-switch>English</button>
       <button id="btn-help" class="btn" onclick="GuidedHelp.open({role:'manage',mode:window.DESI_OFFLINE?'offline':'online',chapter:'mrm'})">Help</button>
       <button id="btn-back" class="btn">← Projects</button>
     </div>
@@ -161,19 +166,19 @@
   <div class="card p-4 mb-4">
     <div class="flex items-center justify-between gap-3 flex-wrap">
       <div class="flex gap-2 flex-wrap">
-        <button id="btn-add-compound" class="btn primary">+ 化合物</button>
-        <button id="btn-import-excel" class="btn" title="表に直接入力、Excel からの貼り付け、または Excel ファイルで MRM をまとめて登録">一括登録</button>
+        <button id="btn-add-compound" class="btn primary"><span data-i18n="+ 化合物">+ 化合物</span></button>
+        <button id="btn-import-excel" class="btn" title="表に直接入力、Excel からの貼り付け、または Excel ファイルで MRM をまとめて登録" data-i18n-title="表に直接入力、Excel からの貼り付け、または Excel ファイルで MRM をまとめて登録"><span data-i18n="一括登録">一括登録</span></button>
         <input id="excel-input" type="file" accept=".xlsx,.xls" style="display:none">
-        <button id="btn-reload" class="btn">再読込</button>
-        <button id="btn-exp-template" class="btn" title="出力用テンプレート .exp を設定/確認">テンプレ設定</button>
-        <button id="btn-exp-edit" class="btn" title="過去の .exp を開き、原本の設定を保持して MRM を編集">.exp を開いて編集</button>
-        <button id="btn-sets" class="btn" title="MRM メソッドセット (保存/読込・プロジェクト履歴から)">メソッドセット</button>
-        <button id="btn-reconcile" class="btn" title="実測PJで測定されているが未登録の化合物を一括で登録/無視">実測棚卸し</button>
-        <button id="btn-exp-export" class="btn" title="チェックしたトランジションを .exp に出力" disabled>選択を.exp出力 (0)</button>
-        <button id="btn-exp-clear" class="btn" title="選択をすべて解除" style="display:none;">選択クリア</button>
+        <button id="btn-reload" class="btn"><span data-i18n="再読込">再読込</span></button>
+        <button id="btn-exp-template" class="btn" title="出力用テンプレート .exp を設定/確認" data-i18n-title="出力用テンプレート .exp を設定/確認"><span data-i18n="テンプレ設定">テンプレ設定</span></button>
+        <button id="btn-exp-edit" class="btn" title="過去の .exp を開き、原本の設定を保持して MRM を編集" data-i18n-title="過去の .exp を開き、原本の設定を保持して MRM を編集"><span data-i18n=".exp を開いて編集">.exp を開いて編集</span></button>
+        <button id="btn-sets" class="btn" title="MRM メソッドセット (保存/読込・プロジェクト履歴から)" data-i18n-title="MRM メソッドセット (保存/読込・プロジェクト履歴から)"><span data-i18n="メソッドセット">メソッドセット</span></button>
+        <button id="btn-reconcile" class="btn" title="実測PJで測定されているが未登録の化合物を一括で登録/無視" data-i18n-title="実測PJで測定されているが未登録の化合物を一括で登録/無視"><span data-i18n="実測棚卸し">実測棚卸し</span></button>
+        <button id="btn-exp-export" class="btn" title="チェックしたトランジションを .exp に出力" data-i18n-title="チェックしたトランジションを .exp に出力" disabled><span data-i18n="選択を.exp出力 (0)">選択を.exp出力 (0)</span></button>
+        <button id="btn-exp-clear" class="btn" title="選択をすべて解除" data-i18n-title="選択をすべて解除" style="display:none;"><span data-i18n="選択クリア">選択クリア</span></button>
       </div>
       <div class="flex-1 min-w-[200px] max-w-md">
-        <input id="search" type="search" placeholder="検索: 化合物名 / タグ / プロジェクト / サンプル"
+        <input id="search" type="search" placeholder="検索: 化合物名 / タグ / プロジェクト / サンプル" data-i18n-placeholder="検索: 化合物名 / タグ / プロジェクト / サンプル"
                style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;">
       </div>
     </div>
@@ -183,10 +188,10 @@
 
   <div class="lib-layout">
     <div id="lib" class="space-y-2">
-      <p class="text-sm text-gray-500 px-1">読み込み中…</p>
+      <p class="text-sm text-gray-500 px-1"><span data-i18n="読み込み中…">読み込み中…</span></p>
     </div>
     <aside id="sel-panel">
-      <div class="sel-head">選択中のMRM一覧 <span id="sel-count" class="muted" style="font-weight:400;">(0)</span></div>
+      <div class="sel-head"><span data-i18n="選択中のMRM一覧">選択中のMRM一覧</span> <span id="sel-count" class="muted" style="font-weight:400;">(0)</span></div>
       <div id="sel-panel-body"></div>
     </aside>
   </div>
@@ -197,6 +202,13 @@
 <script src="offline/local-mrm.js"></script>
 <script>
 'use strict';
+// UI-only bindings: parameters keep user data separate from translation keys.
+function uiT(source, params) { const api=globalThis.AppI18n; if(typeof params==='function')params=params(); return api ? api.t(source, params) : String(source).replace(/\{(\w+)\}/g,(token,k)=>params && Object.prototype.hasOwnProperty.call(params,k) ? String(params[k] ?? '') : token); }
+function uiMsg(source, params) { return {__uiMessage:true,source,params}; }
+function uiBind(element, message) { element.__uiMessageSource=message.source; const api=globalThis.AppI18n; if(api) api.setText(element,message.source,message.params); else element.textContent=uiT(message.source,message.params); return element; }
+function uiAttr(element, name, message) { const api=globalThis.AppI18n; if(api) api.setAttribute(element,name,message.source,message.params); else element.setAttribute(name,uiT(message.source,message.params)); return element; }
+function uiH(source, params, namespace) { const api=globalThis.AppI18n; if(api)return api.html(source,params,namespace); return uiT(source,params).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
 
 // ===========================================================================
 // Minimal Supabase client — MRM library RPCs + the master-pw verifier.
@@ -358,8 +370,8 @@ async function tryServerUnlock(pw) {
 }
 function openMasterUnlockModal() {
     const html = `
-        <h2>パスワードを入力してください</h2>
-        <p style="font-size:12px;color:#475569;margin-top:4px;">MRM管理に入るには admin password が必要です。</p>
+        <h2><span data-i18n="パスワードを入力してください">パスワードを入力してください</span></h2>
+        <p style="font-size:12px;color:#475569;margin-top:4px;"><span data-i18n="MRM管理に入るには admin password が必要です。">MRM管理に入るには admin password が必要です。</span></p>
         <form class="row">
           <label>Password <input type="password" name="pw" autocomplete="current-password" required></label>
           <p class="err" data-err></p>
@@ -377,13 +389,13 @@ function openMasterUnlockModal() {
         setTimeout(() => inp.focus(), 30);
         const tryUnlock = async () => {
             const pw = (inp.value || '').trim();
-            if (!pw) { errEl.textContent = 'パスワードを入力してください'; return; }
-            submit.disabled = true; submit.textContent = '確認中…'; errEl.textContent = '';
+            if (!pw) { uiBind(errEl, uiMsg("パスワードを入力してください")); return; }
+            submit.disabled = true; uiBind(submit, uiMsg("確認中…")); uiBind(errEl, uiMsg(""));
             const server = await tryServerUnlock(pw);
-            submit.disabled = false; submit.textContent = 'Unlock';
+            submit.disabled = false; uiBind(submit, uiMsg("Unlock"));
             if (server.ok) { markMasterUnlocked(pw); back.remove(); resolve(true); }
-            else if (server.transient) { errEl.textContent = 'サーバに接続できません。ネットワーク接続を確認してください'; }
-            else { errEl.textContent = 'パスワードが違います'; inp.select(); }
+            else if (server.transient) { uiBind(errEl, uiMsg("サーバに接続できません。ネットワーク接続を確認してください")); }
+            else { uiBind(errEl, uiMsg("パスワードが違います")); inp.select(); }
         };
         card.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); tryUnlock(); });
     });
@@ -453,8 +465,8 @@ let selectedTransitions = new Set(); // .exp 出力に含める transition id
 // A compound with no shelf recorded is treated as 'main' (that is what the
 // mrm_library.sql backfill sets every pre-existing row to).
 const SHELVES = {
-    main:    { label: '検証済みライブラリ', short: '検証済み',   desc: 'そのまま測定に使えるMRM' },
-    archive: { label: '使用実績アーカイブ', short: 'アーカイブ', desc: '使用歴はあるが未最適化のMRM (要最適化)' },
+    main:    { label: "検証済みライブラリ", short: "検証済み",   desc: "そのまま測定に使えるMRM" },
+    archive: { label: "使用実績アーカイブ", short: "アーカイブ", desc: "使用歴はあるが未最適化のMRM (要最適化)" },
 };
 let currentShelf = 'main';
 function shelfOf(c) { return (c && c.shelf === 'archive') ? 'archive' : 'main'; }
@@ -504,7 +516,7 @@ async function loadLibrary() {
     const host = document.getElementById('lib');
     if (!SupabaseClient.libraryAvailable()) {
         if (window.DESI_OFFLINE === true) {
-            host.innerHTML = '<div class="card p-6 text-center text-sm text-red-600">ローカルMRMの部品を読み込めませんでした。配布ZIPをすべて展開してから起動し直してください。</div>';
+            host.innerHTML = "<div class=\"card p-6 text-center text-sm text-red-600\"><span data-i18n=\"ローカルMRMの部品を読み込めませんでした。配布ZIPをすべて展開してから起動し直してください。\">ローカルMRMの部品を読み込めませんでした。配布ZIPをすべて展開してから起動し直してください。</span></div>";
             return;
         }
         // ★ 「未設定」と「部品を読み込めなかった」は別物。まとめて "未設定" と
@@ -512,14 +524,14 @@ async function loadLibrary() {
         const libMissing = (typeof supabase === 'undefined' || !supabase.createClient);
         host.innerHTML = '<div class="card p-6 text-center text-sm text-red-600">'
             + (libMissing
-                ? 'サーバへ接続する部品を読み込めませんでした。<br>通信環境や広告ブロックをご確認のうえ、ページを再読み込みしてください。'
-                : 'Supabase が未設定です (SUPABASE_URL / ANON_KEY)。')
+                ? "<span data-i18n=\"サーバへ接続する部品を読み込めませんでした。\">サーバへ接続する部品を読み込めませんでした。</span><br><span data-i18n=\"通信環境や広告ブロックをご確認のうえ、ページを再読み込みしてください。\">通信環境や広告ブロックをご確認のうえ、ページを再読み込みしてください。</span>"
+                : uiT("Supabase が未設定です (SUPABASE_URL / ANON_KEY)。"))
             + '</div>';
         return;
     }
     const pw = _readCachedMasterPw();
-    if (!pw) { host.innerHTML = '<div class="card p-6 text-center text-sm text-gray-500">認証が切れました。再読込してください。</div>'; return; }
-    host.innerHTML = '<p class="text-sm text-gray-500 px-1">読み込み中…</p>';
+    if (!pw) { host.innerHTML = "<div class=\"card p-6 text-center text-sm text-gray-500\"><span data-i18n=\"認証が切れました。再読込してください。\">認証が切れました。再読込してください。</span></div>"; return; }
+    host.innerHTML = "<p class=\"text-sm text-gray-500 px-1\"><span data-i18n=\"読み込み中…\">読み込み中…</span></p>";
     try {
         const rows = await SupabaseClient.listMrmLibrary(pw);
         library = Array.isArray(rows) ? rows : [];
@@ -528,19 +540,19 @@ async function loadLibrary() {
     } catch (e) {
         console.warn('list_mrm_library failed', e);
         const msg = String((e && (e.message || e.details)) || '');
-        host.innerHTML = '<div class="card p-6 text-center text-sm text-red-600">取得に失敗しました'
-            + (/unauthorized|28000/i.test(msg) ? ' (master password 違い?)' : ': ' + safe(msg)) + '</div>';
+        host.innerHTML = "<div class=\"card p-6 text-center text-sm text-red-600\"><span data-i18n=\"取得に失敗しました\">取得に失敗しました</span>"
+            + (/unauthorized|28000/i.test(msg) ? uiT(" (master password 違い?)") : ': ' + safe(msg)) + '</div>';
     }
 }
 
 function usagesHtml(tr) {
     const us = tr.usages || [];
-    if (!us.length) return '<div class="usage-list muted">使用履歴なし</div>';
+    if (!us.length) return "<div class=\"usage-list muted\"><span data-i18n=\"使用履歴なし\">使用履歴なし</span></div>";
     const items = us.map(u => {
         const projectId = window.DESI_OFFLINE === true ? u.project_local_id : u.project_slug;
         const proj = projectId
             ? '<a data-action="open-usage" data-slug="' + safe(projectId) + '">' + safe(u.project_name || projectId) + ' ↗</a>'
-            : '<span>' + safe(u.project_name || '(プロジェクト名なし)') + '</span>';
+            : '<span>' + safe(u.project_name || uiT("(プロジェクト名なし)")) + '</span>';
         const stxt = (u.sample_types && u.sample_types.length) ? u.sample_types.join(', ') : (u.sample_name || '');
         const sample = stxt ? ' / ' + safe(stxt) : '';
         const date = u.created_at ? String(u.created_at).slice(0, 10) : '';
@@ -552,31 +564,31 @@ function usagesHtml(tr) {
 
 function transitionsHtml(c) {
     const trs = c.transitions || [];
-    if (!trs.length) return '<p class="text-xs muted">トランジション未登録</p>';
+    if (!trs.length) return "<p class=\"text-xs muted\"><span data-i18n=\"トランジション未登録\">トランジション未登録</span></p>";
     const rows = trs.map(tr => {
-        const star = tr.is_recommended ? '<span class="star" title="推奨">★</span>' : '';
+        const star = tr.is_recommended ? "<span class=\"star\" title=\"推奨\" data-i18n-title=\"推奨\">★</span>" : '';
         const note = tr.intensity_note ? safe(tr.intensity_note) : '<span class="muted">—</span>';
         const checked = selectedTransitions.has(tr.id) ? ' checked' : '';
         return ''
             + '<tr>'
-            + '<td><input type="checkbox" class="tr-select" data-tid="' + safe(tr.id) + '" title=".exp 出力に含める"' + checked + '></td>'
+            + '<td><input type="checkbox" class="tr-select" data-tid="' + safe(tr.id) + "\" title=\".exp 出力に含める\" data-i18n-title=\".exp 出力に含める\"" + checked + '></td>'
             + '<td>' + fmtNum(tr.precursor) + '</td>'
             + '<td>' + fmtNum(tr.product) + '</td>'
             + '<td>' + fmtNum(tr.ce) + '</td>'
             + '<td>' + fmtNum(tr.cv) + '</td>'
-            + '<td class="l">' + safe(tr.role || '') + ' ' + star + '</td>'
+            + '<td class="l">' + (tr.role === '定量' || tr.role === '確認' ? uiH(tr.role, undefined, 'mrm-role') : safe(tr.role || '')) + ' ' + star + '</td>'
             + '<td class="l">' + note + '</td>'
             + '<td class="l" style="white-space:nowrap;">'
-            +   '<button class="btn mini" data-action="add-usage" data-tid="' + safe(tr.id) + '" title="使用履歴を手動追加">+履歴</button> '
-            +   '<button class="btn mini" data-action="edit-transition" data-tid="' + safe(tr.id) + '">編集</button> '
-            +   '<button class="btn mini danger" data-action="del-transition" data-tid="' + safe(tr.id) + '">削除</button>'
+            +   '<button class="btn mini" data-action="add-usage" data-tid="' + safe(tr.id) + "\" title=\"使用履歴を手動追加\" data-i18n-title=\"使用履歴を手動追加\"><span data-i18n=\"+履歴\">+履歴</span></button> "
+            +   '<button class="btn mini" data-action="edit-transition" data-tid="' + safe(tr.id) + "\"><span data-i18n=\"編集\">編集</span></button> "
+            +   '<button class="btn mini danger" data-action="del-transition" data-tid="' + safe(tr.id) + "\"><span data-i18n=\"削除\">削除</span></button>"
             + '</td>'
             + '</tr>'
             + '<tr><td colspan="8" class="l" style="padding-top:0;">' + usagesHtml(tr) + '</td></tr>';
     }).join('');
     return ''
         + '<table class="tr-table">'
-        + '<thead><tr><th title=".exp 出力に含める">☑</th><th>Precursor</th><th>Fragment</th><th>CE</th><th>CV</th><th class="l">Role</th><th class="l">強度メモ</th><th class="l"></th></tr></thead>'
+        + "<thead><tr><th title=\".exp 出力に含める\" data-i18n-title=\".exp 出力に含める\">☑</th><th>Precursor</th><th>Fragment</th><th>CE</th><th>CV</th><th class=\"l\">Role</th><th class=\"l\"><span data-i18n=\"強度メモ\">強度メモ</span></th><th class=\"l\"></th></tr></thead>"
         + '<tbody>' + rows + '</tbody></table>';
 }
 
@@ -693,8 +705,8 @@ function renderShelfTabs() {
     bar.innerHTML = ['main', 'archive'].map(s => {
         const on = (currentShelf === s) ? ' on' : '';
         const kind = (s === 'archive') ? ' archive' : '';
-        return '<span class="shelf-tab' + on + kind + '" data-shelf="' + s + '" title="' + safe(SHELVES[s].desc) + '">'
-            + safe(SHELVES[s].label) + ' <span class="n">(' + shelfCount(s) + ')</span></span>';
+        return '<span class="shelf-tab' + on + kind + '" data-shelf="' + s + '" title="' + safe(uiT(SHELVES[s].desc)) + '" data-i18n-title="' + safe(SHELVES[s].desc) + '">'
+            + uiH(SHELVES[s].label) + ' <span class="n">(' + shelfCount(s) + ')</span></span>';
     }).join('');
 }
 
@@ -706,20 +718,20 @@ function renderFilterBar() {
     const polBtn = (val, label) => '<span class="fchip' + (filterPolarity === val ? ' on' : '') + '" data-filter="pol" data-val="' + safe(val) + '">' + safe(label) + '</span>';
     const tagBtn = (t) => '<span class="fchip' + (selectedTags.has(t) ? ' on' : '') + '" data-filter="tag" data-val="' + safe(t) + '">' + safe(t) + '</span>';
     const stBtn = (t) => '<span class="fchip' + (selectedSampleTypes.has(t) ? ' on' : '') + '" data-filter="stype" data-val="' + safe(t) + '">' + safe(t) + '</span>';
-    let html = '<div class="filter-group"><span class="flabel">極性</span>' + polBtn('', 'All') + polBtn('+', '+') + polBtn('-', '−') + '</div>';
-    if (tags.length) html += '<div class="filter-group"><span class="flabel">分類</span>' + tags.map(tagBtn).join('') + '</div>';
-    if (stypes.length) html += '<div class="filter-group"><span class="flabel">サンプル種</span>' + stypes.map(stBtn).join('') + '</div>';
+    let html = "<div class=\"filter-group\"><span class=\"flabel\"><span data-i18n=\"極性\">極性</span></span>" + polBtn('', 'All') + polBtn('+', '+') + polBtn('-', '−') + '</div>';
+    if (tags.length) html += "<div class=\"filter-group\"><span class=\"flabel\"><span data-i18n=\"分類\">分類</span></span>" + tags.map(tagBtn).join('') + '</div>';
+    if (stypes.length) html += "<div class=\"filter-group\"><span class=\"flabel\"><span data-i18n=\"サンプル種\">サンプル種</span></span>" + stypes.map(stBtn).join('') + '</div>';
     if (filterPolarity || selectedTags.size || selectedSampleTypes.size)
-        html += '<span class="fchip" data-filter="clear" style="border-style:dashed;">クリア</span>';
+        html += "<span class=\"fchip\" data-filter=\"clear\" style=\"border-style:dashed;\"><span data-i18n=\"クリア\">クリア</span></span>";
     bar.innerHTML = html;
 }
 
 // Per-compound validation-status badge (std-verified / literature-only / unchecked).
 function checkBadge(c) {
     const lv = c && c.check_level;
-    if (lv === 'std') return '<span class="check-badge std" title="標準品で確認済み">標準品✓</span>';
-    if (lv === 'lit') return '<span class="check-badge lit" title="文献のみ">文献</span>';
-    return '<span class="check-badge unchecked" title="未確認 (標準品/文献の確認レベル未設定)">未確認</span>';
+    if (lv === 'std') return "<span class=\"check-badge std\" title=\"標準品で確認済み\" data-i18n-title=\"標準品で確認済み\"><span data-i18n=\"標準品✓\">標準品✓</span></span>";
+    if (lv === 'lit') return "<span class=\"check-badge lit\" title=\"文献のみ\" data-i18n-title=\"文献のみ\"><span data-i18n=\"文献\">文献</span></span>";
+    return "<span class=\"check-badge unchecked\" title=\"未確認 (標準品/文献の確認レベル未設定)\" data-i18n-title=\"未確認 (標準品/文献の確認レベル未設定)\"><span data-i18n=\"未確認\">未確認</span></span>";
 }
 
 function compoundActions(c) {
@@ -727,14 +739,14 @@ function compoundActions(c) {
     // step; main → archive demotes something that turned out to need work.
     const toArchive = shelfOf(c) === 'main';
     const moveBtn = '<button class="btn mini" data-action="move-shelf" data-id="' + safe(c.id) + '"'
-        + ' title="' + (toArchive ? '使用実績アーカイブへ移す (検証済みライブラリから外す)' : '検証済みライブラリへ移す (そのまま使えるMRMとして扱う)') + '">'
-        + (toArchive ? '→ アーカイブ' : '↑ 本登録へ昇格') + '</button> ';
+        + ' title="' + safe(uiT(toArchive ? '使用実績アーカイブへ移す (検証済みライブラリから外す)' : '検証済みライブラリへ移す (そのまま使えるMRMとして扱う)')) + '" data-i18n-title="' + safe(toArchive ? '使用実績アーカイブへ移す (検証済みライブラリから外す)' : '検証済みライブラリへ移す (そのまま使えるMRMとして扱う)') + '">'
+        + (toArchive ? uiH("→ アーカイブ") : uiH("↑ 本登録へ昇格")) + '</button> ';
     return ''
-        + '<button class="btn mini" data-action="show-projects" data-cname="' + safe(c.name) + '" title="この化合物を測定したプロジェクトを表示">📁 測定PJ</button> '
+        + '<button class="btn mini" data-action="show-projects" data-cname="' + safe(c.name) + "\" title=\"この化合物を測定したプロジェクトを表示\" data-i18n-title=\"この化合物を測定したプロジェクトを表示\"><span data-i18n=\"📁 測定PJ\">📁 測定PJ</span></button> "
         + moveBtn
-        + '<button class="btn mini" data-action="add-transition" data-id="' + safe(c.id) + '">+ トランジション</button> '
-        + '<button class="btn mini" data-action="edit-compound" data-id="' + safe(c.id) + '">編集</button> '
-        + '<button class="btn mini danger" data-action="del-compound" data-id="' + safe(c.id) + '">削除</button>';
+        + '<button class="btn mini" data-action="add-transition" data-id="' + safe(c.id) + "\"><span data-i18n=\"+ トランジション\">+ トランジション</span></button> "
+        + '<button class="btn mini" data-action="edit-compound" data-id="' + safe(c.id) + "\"><span data-i18n=\"編集\">編集</span></button> "
+        + '<button class="btn mini danger" data-action="del-compound" data-id="' + safe(c.id) + "\"><span data-i18n=\"削除\">削除</span></button>";
 }
 function compoundBody(c) {
     return (c.note ? '<p class="text-xs text-gray-600 mb-1 whitespace-pre-line">' + safe(c.note) + '</p>' : '') + transitionsHtml(c);
@@ -759,9 +771,9 @@ function memberHtml(c) {
 
 function unitHtml(u) {
     const serialBadge = (u.serial_no != null) ? '<span class="serial-badge">#' + safe(u.serial_no) + '</span>' : '';
-    const tagChips = (u.tags || []).map(t => '<span class="chip">' + safe(t) + '</span>').join('') || '<span class="chip gray">未分類</span>';
+    const tagChips = (u.tags || []).map(t => '<span class="chip">' + safe(t) + '</span>').join('') || "<span class=\"chip gray\"><span data-i18n=\"未分類\">未分類</span></span>";
     const countLbl = '<span class="text-xs muted">' + u.nTr + ' transition' + (u.nTr === 1 ? '' : 's')
-        + (u.members.length > 1 ? ' ・ ' + u.members.length + ' 名称' : '') + '</span>';
+        + (u.members.length > 1 ? uiH(" ・ ") + u.members.length + uiH(" 名称") : '') + '</span>';
     // Single-name compound: surface the action buttons in the (always-visible)
     // summary so editing/renaming needs no expand. Clicks on buttons inside a
     // <summary> are stopped from toggling the <details> in bindLibraryEvents.
@@ -773,7 +785,7 @@ function unitHtml(u) {
         // the detail row. Shares data-tid with the level-2 .tr-select so the two
         // stay in sync (see bindLibraryEvents).
         const quickSel = (Array.isArray(c.transitions) && c.transitions.length === 1)
-            ? '<input type="checkbox" class="tr-quick-select" data-tid="' + safe(c.transitions[0].id) + '" title=".exp 出力に含める (1 transition)" style="margin-right:6px;vertical-align:middle;cursor:pointer;"' + (selectedTransitions.has(c.transitions[0].id) ? ' checked' : '') + '>'
+            ? '<input type="checkbox" class="tr-quick-select" data-tid="' + safe(c.transitions[0].id) + "\" title=\".exp 出力に含める (1 transition)\" data-i18n-title=\".exp 出力に含める (1 transition)\" style=\"margin-right:6px;vertical-align:middle;cursor:pointer;\"" + (selectedTransitions.has(c.transitions[0].id) ? ' checked' : '') + '>'
             : '';
         return ''
             + '<details class="cpd">'
@@ -813,15 +825,15 @@ function renderLibrary() {
     // A short standing reminder of what the archive shelf means — it is the one
     // place a CE/CV must not be trusted without re-checking.
     const note = (currentShelf === 'archive')
-        ? '<p class="shelf-note archive">使用歴はあるが最適化していないMRMです。CE/CV はそのまま信頼せず、検証後は「本登録へ昇格」で検証済みライブラリへ移してください。</p>'
+        ? "<p class=\"shelf-note archive\"><span data-i18n=\"使用歴はあるが最適化していないMRMです。CE/CV はそのまま信頼せず、検証後は「本登録へ昇格」で検証済みライブラリへ移してください。\">使用歴はあるが最適化していないMRMです。CE/CV はそのまま信頼せず、検証後は「本登録へ昇格」で検証済みライブラリへ移してください。</span></p>"
         : '';
     if (!units.length) {
         let msg;
-        if (shelfTotal) msg = '条件に一致する化合物がありません。';
+        if (shelfTotal) msg = uiH("条件に一致する化合物がありません。");
         else if (currentShelf === 'archive') msg = window.DESI_OFFLINE === true
-            ? 'アーカイブはまだ空です。「+ 化合物」または「一括登録」で登録先を使用実績アーカイブにして登録できます。'
-            : 'アーカイブはまだ空です。「実測棚卸し」から、過去に測定したが未登録の化合物をまとめて登録できます。';
-        else msg = 'まだ登録がありません。「+ 化合物」で追加するか、結果画面の Method 表から登録してください。';
+            ? uiH("アーカイブはまだ空です。「+ 化合物」または「一括登録」で登録先を使用実績アーカイブにして登録できます。")
+            : uiH("アーカイブはまだ空です。「実測棚卸し」から、過去に測定したが未登録の化合物をまとめて登録できます。");
+        else msg = uiH("まだ登録がありません。「+ 化合物」で追加するか、結果画面の Method 表から登録してください。");
         host.innerHTML = note + '<div class="card p-6 text-center text-sm text-gray-500">' + msg + '</div>';
         return;
     }
@@ -849,7 +861,7 @@ function renderLibrary() {
         const open = (anyFilter || !collapsed.has(_collapseKey(t))) ? ' open' : '';
         const list = open ? groups.get(t).map(unitHtml).join('') : '';
         return '<details class="tag-group" data-tag="' + safe(t) + '"' + open + '>'
-            + '<summary>' + safe(t) + ' <span class="muted" style="font-weight:400;">(' + groups.get(t).length + ')</span></summary>'
+            + '<summary>' + (t === UNTAGGED ? uiH('未分類') : safe(t)) + ' <span class="muted" style="font-weight:400;">(' + groups.get(t).length + ')</span></summary>'
             + '<div class="tag-group-body"' + (open ? '' : ' data-lazy="1"') + '>' + list + '</div>'
             + '</details>';
     }).join('');
@@ -888,10 +900,10 @@ async function openCompoundModal(existing) {
     // tab you are looking at, which is where you would expect it to appear.
     const shelfSel = existing ? shelfOf(c) : currentShelf;
     const html = `
-        <h2>${existing ? '化合物を編集' : '化合物を追加'}</h2>
+        <h2>${uiH(existing ? "化合物を編集" : "化合物を追加")}</h2>
         <form class="row">
-          <label>化合物名 <input type="text" name="name" required value="${safe(c.name || '')}"></label>
-          <label>タグ (カンマ/スペース区切り。例: 神経伝達物質, アミノ酸)
+          <label><span data-i18n="化合物名">化合物名</span> <input type="text" name="name" required value="${safe(c.name || '')}"></label>
+          <label><span data-i18n="タグ (カンマ/スペース区切り。例: 神経伝達物質, アミノ酸)">タグ (カンマ/スペース区切り。例: 神経伝達物質, アミノ酸)</span>
             <input type="text" name="tags" value="${safe((c.tags || []).join(', '))}"></label>
           <label>Polarity
             <select name="polarity">
@@ -899,20 +911,20 @@ async function openCompoundModal(existing) {
               <option value="+" ${c.polarity === '+' ? 'selected' : ''}>+ (positive)</option>
               <option value="-" ${c.polarity === '-' ? 'selected' : ''}>- (negative)</option>
             </select></label>
-          <label>通し番号 (同じ番号の化合物は1つに統合表示。空欄なら自動採番)
+          <label><span data-i18n="通し番号 (同じ番号の化合物は1つに統合表示。空欄なら自動採番)">通し番号 (同じ番号の化合物は1つに統合表示。空欄なら自動採番)</span>
             <input type="number" step="1" name="serial_no" value="${c.serial_no != null ? c.serial_no : ''}"></label>
-          <label>確認レベル
+          <label><span data-i18n="確認レベル">確認レベル</span>
             <select name="check_level">
-              <option value="unchecked" ${(!c.check_level || c.check_level === 'unchecked') ? 'selected' : ''}>未確認</option>
-              <option value="std" ${c.check_level === 'std' ? 'selected' : ''}>標準品確認済み</option>
-              <option value="lit" ${c.check_level === 'lit' ? 'selected' : ''}>文献のみ</option>
+              <option value="unchecked" ${(!c.check_level || c.check_level === 'unchecked') ? 'selected' : ''} data-i18n="未確認">未確認</option>
+              <option value="std" ${c.check_level === 'std' ? 'selected' : ''} data-i18n="標準品確認済み">標準品確認済み</option>
+              <option value="lit" ${c.check_level === 'lit' ? 'selected' : ''} data-i18n="文献のみ">文献のみ</option>
             </select></label>
-          <label>登録先 (一覧のどちらに置くか。確認レベルとは独立です)
+          <label><span data-i18n="登録先 (一覧のどちらに置くか。確認レベルとは独立です)">登録先 (一覧のどちらに置くか。確認レベルとは独立です)</span>
             <select name="shelf">
-              <option value="main" ${shelfSel === 'main' ? 'selected' : ''}>検証済みライブラリ — そのまま使えるMRM</option>
-              <option value="archive" ${shelfSel === 'archive' ? 'selected' : ''}>使用実績アーカイブ — 使用歴はあるが未最適化</option>
+              <option value="main" ${shelfSel === 'main' ? 'selected' : ''} data-i18n="検証済みライブラリ — そのまま使えるMRM">検証済みライブラリ — そのまま使えるMRM</option>
+              <option value="archive" ${shelfSel === 'archive' ? 'selected' : ''} data-i18n="使用実績アーカイブ — 使用歴はあるが未最適化">使用実績アーカイブ — 使用歴はあるが未最適化</option>
             </select></label>
-          <label>メモ <textarea name="note">${safe(c.note || '')}</textarea></label>
+          <label><span data-i18n="メモ">メモ</span> <textarea name="note">${safe(c.note || '')}</textarea></label>
           <p class="err" data-err></p>
           <div class="actions">
             <button type="button" class="btn" data-modal-cancel>Cancel</button>
@@ -923,7 +935,7 @@ async function openCompoundModal(existing) {
     const card = openModal._card;
     card._collect = () => {
         const name = (card.querySelector('[name="name"]').value || '').trim();
-        if (!name) { card.querySelector('[data-err]').textContent = '化合物名は必須'; return null; }
+        if (!name) { uiBind(card.querySelector('[data-err]'), uiMsg("化合物名は必須")); return null; }
         const sv = (card.querySelector('[name="serial_no"]').value || '').trim();
         return {
             name,
@@ -942,7 +954,7 @@ async function openTransitionModal(existing) {
     const t = existing || {};
     const numVal = (v) => (v == null ? '' : v);
     const html = `
-        <h2>${existing ? 'トランジションを編集' : 'トランジションを追加'}</h2>
+        <h2>${uiH(existing ? "トランジションを編集" : "トランジションを追加")}</h2>
         <form class="row">
           <div class="inline">
             <label>Precursor <input type="number" step="any" name="precursor" value="${numVal(t.precursor)}"></label>
@@ -956,15 +968,15 @@ async function openTransitionModal(existing) {
             <label>Role
               <select name="role">
                 <option value="">—</option>
-                <option value="定量" ${t.role === '定量' ? 'selected' : ''}>定量</option>
-                <option value="確認" ${t.role === '確認' ? 'selected' : ''}>確認</option>
+                <option value="定量" ${t.role === '定量' ? 'selected' : ''} data-i18n="定量" data-i18n-namespace="mrm-role">定量</option>
+                <option value="確認" ${t.role === '確認' ? 'selected' : ''} data-i18n="確認" data-i18n-namespace="mrm-role">確認</option>
               </select></label>
             <label style="flex:0 0 auto;align-self:end;white-space:nowrap;">
-              <input type="checkbox" name="is_recommended" ${t.is_recommended ? 'checked' : ''} style="width:auto;"> 推奨 ★</label>
+              <input type="checkbox" name="is_recommended" ${t.is_recommended ? 'checked' : ''} style="width:auto;"> <span data-i18n="推奨 ★">推奨 ★</span></label>
           </div>
-          <label>強度メモ (例: 強いが非特異 / 特異的だが弱い)
+          <label><span data-i18n="強度メモ (例: 強いが非特異 / 特異的だが弱い)">強度メモ (例: 強いが非特異 / 特異的だが弱い)</span>
             <input type="text" name="intensity_note" value="${safe(t.intensity_note || '')}"></label>
-          <label>メモ <textarea name="note">${safe(t.note || '')}</textarea></label>
+          <label><span data-i18n="メモ">メモ</span> <textarea name="note">${safe(t.note || '')}</textarea></label>
           <p class="err" data-err></p>
           <div class="actions">
             <button type="button" class="btn" data-modal-cancel>Cancel</button>
@@ -986,13 +998,13 @@ async function openTransitionModal(existing) {
 
 async function openUsageModal() {
     const html = `
-        <h2>使用履歴を追加</h2>
+        <h2><span data-i18n="使用履歴を追加">使用履歴を追加</span></h2>
         <form class="row">
-          <label>プロジェクト名 <input type="text" name="project_name"></label>
-          <label>サンプル種 (脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可) <input type="text" name="sample_types"></label>
-          <label ${window.DESI_OFFLINE === true ? 'style="display:none"' : ''}>プロジェクト slug (任意。入力すると遡りリンクが有効になります)
+          <label><span data-i18n="プロジェクト名">プロジェクト名</span> <input type="text" name="project_name"></label>
+          <label><span data-i18n="サンプル種 (脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可)">サンプル種 (脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可)</span> <input type="text" name="sample_types"></label>
+          <label ${window.DESI_OFFLINE === true ? 'style="display:none"' : ''}><span data-i18n="プロジェクト slug (任意。入力すると遡りリンクが有効になります)">プロジェクト slug (任意。入力すると遡りリンクが有効になります)</span>
             <input type="text" name="project_slug"></label>
-          ${window.DESI_OFFLINE === true ? '<p class="muted" style="font-size:11px;">プロジェクト画面の「選択を管理へ登録」から登録した履歴には、ローカルのプロジェクトへのリンクが付きます。</p>' : ''}
+          ${window.DESI_OFFLINE === true ? "<p class=\"muted\" style=\"font-size:11px;\"><span data-i18n=\"プロジェクト画面の「選択を管理へ登録」から登録した履歴には、ローカルのプロジェクトへのリンクが付きます。\">プロジェクト画面の「選択を管理へ登録」から登録した履歴には、ローカルのプロジェクトへのリンクが付きます。</span></p>" : ''}
           <p class="err" data-err></p>
           <div class="actions">
             <button type="button" class="btn" data-modal-cancel>Cancel</button>
@@ -1014,8 +1026,8 @@ async function openUsageModal() {
 // ===========================================================================
 function reportError(e, fallback) {
     const msg = String((e && (e.message || e.details)) || '');
-    if (/unauthorized|28000/i.test(msg)) alert('Master password が違います (再読込で再認証)');
-    else alert((fallback || '失敗') + ': ' + msg);
+    if (/unauthorized|28000/i.test(msg)) alert(uiT("Master password が違います (再読込で再認証)"));
+    else alert((fallback || uiT("失敗")) + ': ' + msg);
     console.warn(e);
 }
 
@@ -1023,14 +1035,14 @@ async function addCompound() {
     const data = await openCompoundModal(null);
     if (!data) return;
     try { await SupabaseClient.upsertCompound(_readCachedMasterPw(), data.name, data.tags, data.polarity, data.note, data.serial_no, data.check_level, data.shelf); await loadLibrary(); }
-    catch (e) { reportError(e, '化合物の保存'); }
+    catch (e) { reportError(e, uiT("化合物の保存")); }
 }
 async function editCompound(id) {
     const c = findCompound(id); if (!c) return;
     const data = await openCompoundModal(c);
     if (!data) return;
     try { await SupabaseClient.updateCompound(_readCachedMasterPw(), id, data.name, data.tags, data.polarity, data.note, data.serial_no, data.check_level, data.shelf); await loadLibrary(); }
-    catch (e) { reportError(e, '化合物の更新'); }
+    catch (e) { reportError(e, uiT("化合物の更新")); }
 }
 // Move a compound to the other shelf. Only `shelf` changes — tags, transitions
 // and usage history all travel with it. Everything else is passed through
@@ -1039,46 +1051,46 @@ async function moveCompoundShelf(id) {
     const c = findCompound(id); if (!c) return;
     const from = shelfOf(c), to = otherShelf(from);
     const msg = (to === 'archive')
-        ? '"' + c.name + '" を 使用実績アーカイブ へ移します。\n検証済みライブラリの一覧からは外れます (登録内容は保持されます)。'
-        : '"' + c.name + '" を 検証済みライブラリ へ移します。\nそのまま測定に使えるMRMとして扱われ、AIコネクタからも参照されるようになります。';
+        ? '"' + c.name + uiT("\" を 使用実績アーカイブ へ移します。\n検証済みライブラリの一覧からは外れます (登録内容は保持されます)。")
+        : '"' + c.name + uiT("\" を 検証済みライブラリ へ移します。\nそのまま測定に使えるMRMとして扱われ、AIコネクタからも参照されるようになります。");
     if (!confirm(msg)) return;
     try {
         await SupabaseClient.updateCompound(_readCachedMasterPw(), id, c.name, c.tags || [],
             c.polarity, c.note, c.serial_no, c.check_level, to);
         await loadLibrary();
-    } catch (e) { reportError(e, '棚の移動'); }
+    } catch (e) { reportError(e, uiT("棚の移動")); }
 }
 async function delCompound(id) {
     const c = findCompound(id); if (!c) return;
-    if (!confirm('"' + c.name + '" とそのトランジション・使用履歴をすべて削除します。よろしいですか?')) return;
+    if (!confirm('"' + c.name + uiT("\" とそのトランジション・使用履歴をすべて削除します。よろしいですか?"))) return;
     try { await SupabaseClient.deleteCompound(_readCachedMasterPw(), id); await loadLibrary(); }
-    catch (e) { reportError(e, '化合物の削除'); }
+    catch (e) { reportError(e, uiT("化合物の削除")); }
 }
 async function addTransition(compoundId) {
     const data = await openTransitionModal(null);
     if (!data) return;
     data.compound_id = compoundId;
     try { await SupabaseClient.upsertTransition(_readCachedMasterPw(), data); await loadLibrary(); }
-    catch (e) { reportError(e, 'トランジションの追加'); }
+    catch (e) { reportError(e, uiT("トランジションの追加")); }
 }
 async function editTransition(tid) {
     const found = findTransition(tid); if (!found) return;
     const data = await openTransitionModal(found.transition);
     if (!data) return;
     try { await SupabaseClient.updateTransition(_readCachedMasterPw(), tid, data); await loadLibrary(); }
-    catch (e) { reportError(e, 'トランジションの更新'); }
+    catch (e) { reportError(e, uiT("トランジションの更新")); }
 }
 async function delTransition(tid) {
-    if (!confirm('このトランジションと使用履歴を削除します。よろしいですか?')) return;
+    if (!confirm(uiT("このトランジションと使用履歴を削除します。よろしいですか?"))) return;
     try { await SupabaseClient.deleteTransition(_readCachedMasterPw(), tid); await loadLibrary(); }
-    catch (e) { reportError(e, 'トランジションの削除'); }
+    catch (e) { reportError(e, uiT("トランジションの削除")); }
 }
 async function addUsage(tid) {
     const data = await openUsageModal();
     if (!data) return;
     data.transition_id = tid; data.source = 'manual';
     try { await SupabaseClient.recordUsage(_readCachedMasterPw(), data); await loadLibrary(); }
-    catch (e) { reportError(e, '使用履歴の追加'); }
+    catch (e) { reportError(e, uiT("使用履歴の追加")); }
 }
 function openUsageLink(slug) {
     if (!slug) return;
@@ -1135,23 +1147,23 @@ function _positionProjPopover(anchorEl) {
 }
 function _renderProjPopover(anchorEl, name, state) {
     const pop = _ensureProjPopover();
-    let inner = '<div class="pp-head">' + safe(name) + ' を測定したプロジェクト</div>';
+    let inner = '<div class="pp-head">' + safe(name) + " <span data-i18n=\"を測定したプロジェクト\">を測定したプロジェクト</span></div>";
     if (state === 'loading') {
-        inner += '<div class="pp-body pp-muted">検索中…</div>';
+        inner += "<div class=\"pp-body pp-muted\"><span data-i18n=\"検索中…\">検索中…</span></div>";
     } else if (state && state.error) {
-        inner += '<div class="pp-body err">検索に失敗しました</div>';
+        inner += "<div class=\"pp-body err\"><span data-i18n=\"検索に失敗しました\">検索に失敗しました</span></div>";
     } else {
         const rows = (state && state.rows) || [];
         if (!rows.length) {
-            inner += '<div class="pp-body pp-muted">測定プロジェクトなし</div>';
+            inner += "<div class=\"pp-body pp-muted\"><span data-i18n=\"測定プロジェクトなし\">測定プロジェクトなし</span></div>";
         } else {
             inner += '<ul class="pp-list">' + rows.map(p => {
                 const label = safe(p.display_name || p.slug || '');
                 const name = p.slug
-                    ? '<a class="pp-link" data-slug="' + safe(p.slug) + '" title="このプロジェクトを開く">' + label + ' ↗</a>'
+                    ? '<a class="pp-link" data-slug="' + safe(p.slug) + "\" title=\"このプロジェクトを開く\" data-i18n-title=\"このプロジェクトを開く\">" + label + ' ↗</a>'
                     : '<span>' + label + '</span>';
                 const badge = '<span class="pp-badge ' + (p.is_public ? 'pub' : 'prv') + '">'
-                    + (window.DESI_OFFLINE === true ? 'ローカル' : (p.is_public ? '公開' : '非公開')) + '</span>';
+                    + (window.DESI_OFFLINE === true ? uiH("ローカル") : (p.is_public ? uiH("公開") : uiH("非公開"))) + '</span>';
                 return '<li>' + name + badge + '</li>';
             }).join('') + '</ul>';
         }
@@ -1294,15 +1306,15 @@ function _parseSheetBlocks(aoa, sheetName) {
 // CV and CE are both small integers, so a swapped pair produces a library that
 // looks plausible and is silently wrong. Hence the explicit column labels.
 const PASTE_COLS = [
-    { key: 'name',        label: '化合物名',    kind: 'text',   width: '16%' },
+    { key: 'name',        label: "化合物名",    kind: 'text',   width: '16%' },
     { key: 'precursor',   label: 'Precursor',   kind: 'num',    width: '9%'  },
     { key: 'product',     label: 'Product',     kind: 'num',    width: '9%'  },
-    { key: 'cv',          label: 'CV (コーン)', kind: 'num',    width: '9%'  },
-    { key: 'ce',          label: 'CE (衝突)',   kind: 'num',    width: '9%'  },
-    { key: 'tags',        label: 'タグ (分類)', kind: 'text',   width: '18%' },
-    { key: 'polarity',    label: '極性',        kind: 'select', width: '10%' },
-    { key: 'check_level', label: '確認レベル',  kind: 'select', width: '10%' },
-    { key: 'shelf',       label: '登録先',      kind: 'select', width: '10%' },
+    { key: 'cv',          label: "CV (コーン)", kind: 'num',    width: '9%'  },
+    { key: 'ce',          label: "CE (衝突)",   kind: 'num',    width: '9%'  },
+    { key: 'tags',        label: "タグ (分類)", kind: 'text',   width: '18%' },
+    { key: 'polarity',    label: "極性",        kind: 'select', width: '10%' },
+    { key: 'check_level', label: "確認レベル",  kind: 'select', width: '10%' },
+    { key: 'shelf',       label: "登録先",      kind: 'select', width: '10%' },
 ];
 // Only the text/number columns take part in a spill — a <select> cannot hold
 // arbitrary pasted text. 'tags' therefore sits before the selects, so pasting
@@ -1312,19 +1324,19 @@ const PASTE_MIN_ROWS = 4;
 
 const PASTE_SELECT_OPTS = {
     polarity: [
-        { v: '',  t: '— 自動' },
+        { v: '',  t: "— 自動" },
         { v: '+', t: '+' },
         { v: '-', t: '−' },
     ],
     check_level: [
-        { v: '',          t: '変更しない' },
-        { v: 'std',       t: '標準品✓' },
-        { v: 'lit',       t: '文献のみ' },
-        { v: 'unchecked', t: '未確認' },
+        { v: '',          t: "変更しない" },
+        { v: 'std',       t: "標準品✓" },
+        { v: 'lit',       t: "文献のみ" },
+        { v: 'unchecked', t: "未確認" },
     ],
     shelf: [
-        { v: 'main',    t: '検証済み' },
-        { v: 'archive', t: 'アーカイブ' },
+        { v: 'main',    t: "検証済み" },
+        { v: 'archive', t: "アーカイブ" },
     ],
 };
 
@@ -1383,7 +1395,7 @@ function parsePastedGrid(text) {
 }
 
 function parseMrmWorkbook(buf) {
-    if (typeof XLSX === 'undefined') throw new Error('SheetJS (XLSX) が読み込まれていません');
+    if (typeof XLSX === 'undefined') throw new Error(uiT("SheetJS (XLSX) が読み込まれていません"));
     const wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
     const blocks = [];
     for (const sheetName of wb.SheetNames) {
@@ -1400,9 +1412,9 @@ async function importMrmFromExcel(file) {
     try {
         const buf = await file.arrayBuffer();
         blocks = parseMrmWorkbook(buf);
-    } catch (e) { reportError(e, 'Excel の解析'); return; }
+    } catch (e) { reportError(e, uiT("Excel の解析")); return; }
     if (!blocks.length) {
-        alert('「CompoundName」ヘッダを含むブロックが見つかりませんでした。ヘッダ行に CompoundName / Precursor / Product / CV / CE があるか確認してください。');
+        alert(uiT("「CompoundName」ヘッダを含むブロックが見つかりませんでした。ヘッダ行に CompoundName / Precursor / Product / CV / CE があるか確認してください。"));
         return;
     }
     const opts = await openImportPreviewModal(blocks);
@@ -1421,7 +1433,7 @@ function openImportPreviewModal(blocks) {
             + '<td style="text-align:center;"><input type="checkbox" data-imp-include data-i="' + i + '" checked></td>'
             + '<td><input type="text" data-imp-tag data-i="' + i + '" value="' + safe(b.category) + '" style="width:100%;padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;"></td>'
             + '<td><select data-imp-pol data-i="' + i + '" style="padding:2px 4px;border:1px solid #cbd5e1;border-radius:3px;">'
-            +   '<option value=""' + (pol === '' ? ' selected' : '') + '>— (名前から推定)</option>'
+            +   '<option value=""' + (pol === '' ? ' selected' : '') + "><span data-i18n=\"— (名前から推定)\">— (名前から推定)</span></option>"
             +   '<option value="+"' + (pol === '+' ? ' selected' : '') + '>+</option>'
             +   '<option value="-"' + (pol === '-' ? ' selected' : '') + '>−</option>'
             + '</select></td>'
@@ -1431,34 +1443,34 @@ function openImportPreviewModal(blocks) {
             + '</tr>';
     }).join('');
     const html = `
-        <h2>Excel から MRM を取り込み</h2>
-        <p class="muted" style="font-size:12px;margin:0 0 8px;">${blocks.length} ブロック / ${totalC} 化合物 / ${totalT} トランジションを検出しました。カテゴリはタグとして登録されます。極性「—」は化合物名 (NEG/POS) から推定します。既存の同名化合物・同一トランジションは上書き/スキップされます。<br>「登録先」は<b>新規に作られる化合物にのみ</b>適用されます。既に登録済みの化合物は現在の棚から動きません。</p>
+        <h2><span data-i18n="Excel から MRM を取り込み">Excel から MRM を取り込み</span></h2>
+        <p class="muted" style="font-size:12px;margin:0 0 8px;">${blocks.length} <span data-i18n="ブロック /">ブロック /</span> ${totalC} <span data-i18n="化合物 /">化合物 /</span> ${totalT} <span data-i18n="トランジションを検出しました。カテゴリはタグとして登録されます。極性「—」は化合物名 (NEG/POS) から推定します。既存の同名化合物・同一トランジションは上書き/スキップされます。">トランジションを検出しました。カテゴリはタグとして登録されます。極性「—」は化合物名 (NEG/POS) から推定します。既存の同名化合物・同一トランジションは上書き/スキップされます。</span><br><span data-i18n="「登録先」は">「登録先」は</span><b><span data-i18n="新規に作られる化合物にのみ">新規に作られる化合物にのみ</span></b><span data-i18n="適用されます。既に登録済みの化合物は現在の棚から動きません。">適用されます。既に登録済みの化合物は現在の棚から動きません。</span></p>
         <div style="max-height:50vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">
         <table style="width:100%;border-collapse:collapse;font-size:13px;">
           <thead><tr style="text-align:left;background:#f8fafc;position:sticky;top:0;">
-            <th style="padding:4px 6px;">取込</th><th style="padding:4px 6px;">タグ(カテゴリ)</th><th style="padding:4px 6px;">極性</th>
-            <th style="padding:4px 6px;text-align:right;">化合物</th><th style="padding:4px 6px;text-align:right;">遷移</th><th style="padding:4px 6px;">例</th>
+            <th style="padding:4px 6px;"><span data-i18n="取込">取込</span></th><th style="padding:4px 6px;"><span data-i18n="タグ(カテゴリ)">タグ(カテゴリ)</span></th><th style="padding:4px 6px;"><span data-i18n="極性">極性</span></th>
+            <th style="padding:4px 6px;text-align:right;"><span data-i18n="化合物">化合物</span></th><th style="padding:4px 6px;text-align:right;"><span data-i18n="遷移">遷移</span></th><th style="padding:4px 6px;"><span data-i18n="例">例</span></th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
         </div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">
-          <label style="font-size:11px;color:#475569;">登録先<br>
+          <label style="font-size:11px;color:#475569;"><span data-i18n="登録先">登録先</span><br>
             <select data-imp-shelf style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;">
-              <option value="main">検証済みライブラリ — そのまま使えるMRM</option>
-              <option value="archive">使用実績アーカイブ — 使用歴はあるが未最適化</option>
+              <option value="main" data-i18n="検証済みライブラリ — そのまま使えるMRM">検証済みライブラリ — そのまま使えるMRM</option>
+              <option value="archive" data-i18n="使用実績アーカイブ — 使用歴はあるが未最適化">使用実績アーカイブ — 使用歴はあるが未最適化</option>
             </select></label>
-          <label style="font-size:11px;color:#475569;">確認レベル<br>
+          <label style="font-size:11px;color:#475569;"><span data-i18n="確認レベル">確認レベル</span><br>
             <select data-imp-level style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;">
-              <option value="unchecked">未確認</option>
-              <option value="std">標準品確認済み</option>
-              <option value="lit">文献のみ</option>
+              <option value="unchecked" data-i18n="未確認">未確認</option>
+              <option value="std" data-i18n="標準品確認済み">標準品確認済み</option>
+              <option value="lit" data-i18n="文献のみ">文献のみ</option>
             </select></label>
         </div>
         <p class="err" data-err></p>
         <div class="actions">
           <button type="button" class="btn" data-modal-cancel>Cancel</button>
-          <button type="button" class="btn primary" data-modal-ok>取り込み実行</button>
+          <button type="button" class="btn primary" data-modal-ok><span data-i18n="取り込み実行">取り込み実行</span></button>
         </div>`;
     const p = openModal(html);
     const card = openModal._card;
@@ -1476,7 +1488,7 @@ function openImportPreviewModal(blocks) {
             }));
             out.push({ tag: tag, compounds: compounds });
         }
-        if (!out.length) { card.querySelector('[data-err]').textContent = '取り込むブロックが選択されていません'; return null; }
+        if (!out.length) { uiBind(card.querySelector('[data-err]'), uiMsg("取り込むブロックが選択されていません")); return null; }
         return {
             groups: out,
             shelf: card.querySelector('[data-imp-shelf]').value || 'main',
@@ -1500,7 +1512,7 @@ async function runMrmImport(groups, shelf, checkLevel) {
     // is passed null — see supabase/mrm_library.sql.)
     const known = new Set((library || []).map(c => String(c.name || '').trim()));
     let done = 0, okC = 0, okT = 0, fail = 0;
-    openModal('<h2>取り込み中…</h2><p class="muted" data-prog>0 / ' + total + '</p>');
+    openModal("<h2><span data-i18n=\"取り込み中…\">取り込み中…</span></h2><p class=\"muted\" data-prog>0 / " + total + '</p>');
     const progCard = openModal._card;
     const progEl = progCard && progCard.querySelector('[data-prog]');
     for (const g of groups) {
@@ -1521,13 +1533,13 @@ async function runMrmImport(groups, shelf, checkLevel) {
                 }
             } catch (e) { fail++; console.warn('compound import failed', c.name, e); }
             done++;
-            if (progEl) progEl.textContent = done + ' / ' + total;
+            if (progEl) uiBind(progEl, uiMsg("{0} / {1}", () => [done, total]));
         }
     }
     if (progCard && progCard._close) progCard._close(true);
     await loadLibrary();
-    alert((SHELVES[shelf] || SHELVES.main).label + 'へ取り込み完了: 化合物 ' + okC + ' 件 / トランジション ' + okT + ' 件'
-        + (fail ? '（失敗 ' + fail + ' 件、詳細はブラウザのコンソール）' : ''));
+    alert(uiT((SHELVES[shelf] || SHELVES.main).label) + uiT("へ取り込み完了: 化合物 ") + okC + uiT(" 件 / トランジション ") + okT + uiT(" 件")
+        + (fail ? uiT("（失敗 ") + fail + uiT(" 件、詳細はブラウザのコンソール）") : ''));
 }
 
 // ---- Bulk import dialog (editable grid) -----------------------------------
@@ -1537,7 +1549,7 @@ function _pasteCellHtml(col) {
     if (col.kind === 'select') {
         return '<select' + at + '>'
             + PASTE_SELECT_OPTS[col.key].map(o =>
-                '<option value="' + safe(o.v) + '">' + safe(o.t) + '</option>').join('')
+                '<option value="' + safe(o.v) + '" data-i18n="' + safe(o.t) + '">' + safe(uiT(o.t)) + '</option>').join('')
             + '</select>';
     }
     return '<input type="text"' + at + (col.key === 'tags' ? ' list="paste-tag-list"' : '')
@@ -1548,14 +1560,14 @@ function _pasteRowHtml() {
     return '<tr>'
         + '<td data-prow-n class="pgrid-n"></td>'
         + PASTE_COLS.map(c => '<td>' + _pasteCellHtml(c) + '</td>').join('')
-        + '<td><button type="button" class="btn mini" data-prow-del title="この行を削除">✕</button></td>'
+        + "<td><button type=\"button\" class=\"btn mini\" data-prow-del title=\"この行を削除\" data-i18n-title=\"この行を削除\">✕</button></td>"
         + '</tr>';
 }
 
 function _pasteRenumber(tbody) {
     Array.from(tbody.children).forEach((tr, i) => {
         const c = tr.querySelector('[data-prow-n]');
-        if (c) c.textContent = String(i + 1);
+        if (c) uiBind(c, uiMsg("{0}", () => [String(i + 1)]));
     });
 }
 
@@ -1612,10 +1624,7 @@ function _pasteRefresh(card) {
     });
     const sum = card.querySelector('[data-paste-summary]');
     if (sum) {
-        sum.textContent = nT
-            ? (names.size + ' 化合物 / ' + nT + ' トランジション'
-               + (bad ? '  ・ 赤い行 ' + bad + ' 件は化合物名か m/z が無いため登録されません' : ''))
-            : (bad ? '登録できる行がありません。化合物名と m/z (Precursor か Product) を入れてください。' : '');
+        uiBind(sum, nT ? uiMsg("{0} 化合物 / {1} トランジション{2}", () => [names.size, nT, bad ? uiT("  ・ 赤い行 ") + bad + uiT(" 件は化合物名か m/z が無いため登録されません") : '']) : bad ? uiMsg("登録できる行がありません。化合物名と m/z (Precursor か Product) を入れてください。") : uiMsg(""));
     }
     card._pasteRows = rows;
     return rows;
@@ -1656,23 +1665,23 @@ function _pasteSpill(card, targetEl, text) {
 function openBulkImportModal() {
     const tagOpts = allLibraryTags().map(t => '<option value="' + safe(t) + '"></option>').join('');
     const bulkSel = (key, keepLabel) => '<select data-bulk-' + key + '>'
-        + '<option value="__keep__">' + safe(keepLabel) + '</option>'
+        + '<option value="__keep__" data-i18n="' + safe(keepLabel) + '">' + safe(uiT(keepLabel)) + '</option>'
         + PASTE_SELECT_OPTS[key].map(o =>
-            '<option value="' + safe(o.v) + '">' + safe(o.t) + '</option>').join('')
+            '<option value="' + safe(o.v) + '" data-i18n="' + safe(o.t) + '">' + safe(uiT(o.t)) + '</option>').join('')
         + '</select>';
     const html = `
-      <h2>MRM を一括登録</h2>
+      <h2><span data-i18n="MRM を一括登録">MRM を一括登録</span></h2>
       <div class="shelf-tabs" style="margin-top:4px;">
-        <span class="shelf-tab on" data-bulk-tab="grid">表に入力 / 貼り付け</span>
-        <span class="shelf-tab" data-bulk-tab="excel">Excel ファイル</span>
+        <span class="shelf-tab on" data-bulk-tab="grid"><span data-i18n="表に入力 / 貼り付け">表に入力 / 貼り付け</span></span>
+        <span class="shelf-tab" data-bulk-tab="excel"><span data-i18n="Excel ファイル">Excel ファイル</span></span>
       </div>
       <div data-bulk-panel="grid">
-        <p class="muted" style="font-size:12px;margin:10px 0 6px;">セルに直接入力するか、Excel で範囲を選んでコピーし、貼り付けたい先頭のセルに貼り付けてください。<b>複数セルはそのまま右下へ流し込まれます</b>（行は自動で足ります）。<br><b style="color:#b45309;">CV はコーン電圧、CE は衝突エネルギー</b>です。1 行目にヘッダ行ごと貼り付けた場合は、列名から対応を自動判別します（CE と CV が逆順でも正しく入ります）。<br>タグはカンマ区切りで複数指定できます。極性の <b>「— 自動」</b> は化合物名の <code>NEG</code> / <code>POS</code> から判定します。</p>
+        <p class="muted" style="font-size:12px;margin:10px 0 6px;"><span data-i18n="セルに直接入力するか、Excel で範囲を選んでコピーし、貼り付けたい先頭のセルに貼り付けてください。">セルに直接入力するか、Excel で範囲を選んでコピーし、貼り付けたい先頭のセルに貼り付けてください。</span><b><span data-i18n="複数セルはそのまま右下へ流し込まれます">複数セルはそのまま右下へ流し込まれます</span></b><span data-i18n="（行は自動で足ります）。">（行は自動で足ります）。</span><br><b style="color:#b45309;"><span data-i18n="CV はコーン電圧、CE は衝突エネルギー">CV はコーン電圧、CE は衝突エネルギー</span></b><span data-i18n="です。1 行目にヘッダ行ごと貼り付けた場合は、列名から対応を自動判別します（CE と CV が逆順でも正しく入ります）。">です。1 行目にヘッダ行ごと貼り付けた場合は、列名から対応を自動判別します（CE と CV が逆順でも正しく入ります）。</span><br><span data-i18n="タグはカンマ区切りで複数指定できます。極性の">タグはカンマ区切りで複数指定できます。極性の</span> <b><span data-i18n="「— 自動」">「— 自動」</span></b> <span data-i18n="は化合物名の">は化合物名の</span> <code>NEG</code> / <code>POS</code> <span data-i18n="から判定します。">から判定します。</span></p>
         <div style="max-height:44vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">
           <table class="pgrid">
             <thead><tr>
               <th class="pgrid-n"></th>
-              ${PASTE_COLS.map(c => '<th style="width:' + c.width + ';">' + safe(c.label) + '</th>').join('')}
+              ${PASTE_COLS.map(c => '<th style="width:' + c.width + ';">' + uiH(c.label) + '</th>').join('')}
               <th style="width:32px;"></th>
             </tr></thead>
             <tbody data-pgrid-body></tbody>
@@ -1680,28 +1689,28 @@ function openBulkImportModal() {
         </div>
         <datalist id="paste-tag-list">${tagOpts}</datalist>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;">
-          <button type="button" class="btn mini" data-prow-add>+ 行を追加</button>
-          <button type="button" class="btn mini" data-prow-clear>すべて消す</button>
+          <button type="button" class="btn mini" data-prow-add><span data-i18n="+ 行を追加">+ 行を追加</span></button>
+          <button type="button" class="btn mini" data-prow-clear><span data-i18n="すべて消す">すべて消す</span></button>
           <span class="muted" data-paste-summary style="font-size:12px;margin-left:4px;"></span>
         </div>
         <div class="pgrid-bulk">
-          <span class="muted" style="font-size:11px;">一括設定</span>
-          <input type="text" data-bulk-tags list="paste-tag-list" placeholder="タグ (カンマ区切り)" style="flex:1 1 150px;min-width:120px;">
-          ${bulkSel('polarity', '極性: そのまま')}
-          ${bulkSel('check_level', '確認レベル: そのまま')}
-          ${bulkSel('shelf', '登録先: そのまま')}
-          <button type="button" class="btn mini" data-bulk-apply>全行に適用</button>
+          <span class="muted" style="font-size:11px;"><span data-i18n="一括設定">一括設定</span></span>
+          <input type="text" data-bulk-tags list="paste-tag-list" placeholder="タグ (カンマ区切り)" data-i18n-placeholder="タグ (カンマ区切り)" style="flex:1 1 150px;min-width:120px;">
+          ${bulkSel('polarity', "極性: そのまま")}
+          ${bulkSel('check_level', "確認レベル: そのまま")}
+          ${bulkSel('shelf', "登録先: そのまま")}
+          <button type="button" class="btn mini" data-bulk-apply><span data-i18n="全行に適用">全行に適用</span></button>
         </div>
-        <p class="muted" style="font-size:11px;margin:6px 2px 0;">既に登録済みの化合物はタグが<b>追記</b>され、★推奨・役割・強度メモはそのまま残ります。同じ内容を入れ直しても重複しません。<b>登録先</b>は新規に作られる化合物にのみ適用され、確認レベルは「変更しない」なら既存の値を保ちます。</p>
+        <p class="muted" style="font-size:11px;margin:6px 2px 0;"><span data-i18n="既に登録済みの化合物はタグが">既に登録済みの化合物はタグが</span><b><span data-i18n="追記">追記</span></b><span data-i18n="され、★推奨・役割・強度メモはそのまま残ります。同じ内容を入れ直しても重複しません。">され、★推奨・役割・強度メモはそのまま残ります。同じ内容を入れ直しても重複しません。</span><b><span data-i18n="登録先">登録先</span></b><span data-i18n="は新規に作られる化合物にのみ適用され、確認レベルは「変更しない」なら既存の値を保ちます。">は新規に作られる化合物にのみ適用され、確認レベルは「変更しない」なら既存の値を保ちます。</span></p>
       </div>
       <div data-bulk-panel="excel" style="display:none;">
-        <p class="muted" style="font-size:12px;margin:10px 0;">既存の MRM リスト (.xlsx / .xls) をシートごと解析して取り込みます。カテゴリ見出しがタグになり、複数のブロックが縦横に並んでいてもまとめて検出します。</p>
-        <button type="button" class="btn primary" data-bulk-file>ファイルを選択…</button>
+        <p class="muted" style="font-size:12px;margin:10px 0;"><span data-i18n="既存の MRM リスト (.xlsx / .xls) をシートごと解析して取り込みます。カテゴリ見出しがタグになり、複数のブロックが縦横に並んでいてもまとめて検出します。">既存の MRM リスト (.xlsx / .xls) をシートごと解析して取り込みます。カテゴリ見出しがタグになり、複数のブロックが縦横に並んでいてもまとめて検出します。</span></p>
+        <button type="button" class="btn primary" data-bulk-file><span data-i18n="ファイルを選択…">ファイルを選択…</span></button>
       </div>
       <p class="err" data-err></p>
       <div class="actions">
         <button type="button" class="btn" data-modal-cancel>Cancel</button>
-        <button type="button" class="btn primary" data-modal-ok>登録する</button>
+        <button type="button" class="btn primary" data-modal-ok><span data-i18n="登録する">登録する</span></button>
       </div>`;
     const p = openModal(html);
     const card = openModal._card;
@@ -1792,7 +1801,7 @@ function openBulkImportModal() {
         const err = card.querySelector('[data-err]');
         const rows = _pasteRefresh(card).filter(r => r.valid);
         if (!rows.length) {
-            if (err) err.textContent = '登録できる行がありません。化合物名と m/z (Precursor か Product) を入れてください。';
+            if (err) uiBind(err, uiMsg("登録できる行がありません。化合物名と m/z (Precursor か Product) を入れてください。"));
             return null;
         }
         return rows;
@@ -1816,7 +1825,7 @@ async function startBulkImport() {
 // annotations alone — and does it in one RPC per row instead of two.
 async function runPasteImport(rows) {
     const pw = _readCachedMasterPw();
-    openModal('<h2>登録中…</h2><p data-prog style="font-size:12px;color:#475569;">0 / ' + rows.length + '</p>');
+    openModal("<h2><span data-i18n=\"登録中…\">登録中…</span></h2><p data-prog style=\"font-size:12px;color:#475569;\">0 / " + rows.length + '</p>');
     const pcard = openModal._card;
     const okBy = { main: 0, archive: 0 };
     let fail = 0, firstErr = null;
@@ -1836,19 +1845,19 @@ async function runPasteImport(rows) {
             fail++;
         }
         const pe = pcard.querySelector('[data-prog]');
-        if (pe) pe.textContent = (i + 1) + ' / ' + rows.length;
+        if (pe) uiBind(pe, uiMsg("{0}{1} / {2}", () => [i, 1, rows.length]));
     }
     if (pcard._close) pcard._close(true);
     await loadLibrary();
     const ok = okBy.main + okBy.archive;
     // Nothing landed at all — almost always a stale master password, so surface
     // the real reason instead of a bare "0 件" that looks like a no-op.
-    if (!ok && firstErr) { reportError(firstErr, 'MRM の一括登録'); return; }
+    if (!ok && firstErr) { reportError(firstErr, uiT("MRM の一括登録")); return; }
     const parts = [];
-    if (okBy.main) parts.push(SHELVES.main.label + ' ' + okBy.main + ' 件');
-    if (okBy.archive) parts.push(SHELVES.archive.label + ' ' + okBy.archive + ' 件');
-    alert('登録完了: ' + parts.join(' / ')
-        + (fail ? '（失敗 ' + fail + ' 件、詳細はブラウザのコンソール）' : ''));
+    if (okBy.main) parts.push(uiT(SHELVES.main.label) + ' ' + okBy.main + uiT(" 件"));
+    if (okBy.archive) parts.push(uiT(SHELVES.archive.label) + ' ' + okBy.archive + uiT(" 件"));
+    alert(uiT("登録完了: ") + parts.join(' / ')
+        + (fail ? uiT("（失敗 ") + fail + uiT(" 件、詳細はブラウザのコンソール）") : ''));
 }
 
 // ===========================================================================
@@ -1859,7 +1868,7 @@ function updateExportBar() {
     const n = selectedTransitions.size;
     const btn = document.getElementById('btn-exp-export');
     const clr = document.getElementById('btn-exp-clear');
-    if (btn) { btn.textContent = '選択を.exp出力 (' + n + ')'; btn.disabled = n === 0; }
+    if (btn) { uiBind(btn, uiMsg("選択を.exp出力 ({0})", () => [n])); btn.disabled = n === 0; }
     if (clr) clr.style.display = n ? '' : 'none';
 }
 function clearSelection() {
@@ -1896,9 +1905,9 @@ function renderSelectedPanel() {
             if (selectedTransitions.has(tr.id)) items.push({ c, tr });
         }
     }
-    if (cnt) cnt.textContent = '(' + items.length + ')';
+    if (cnt) uiBind(cnt, uiMsg("({0})", () => [items.length]));
     if (!items.length) {
-        body.innerHTML = '<p class="muted" style="font-size:11px;padding:6px 4px;">チェックしたMRMがここに一覧表示されます（.exp の出力順）。</p>';
+        body.innerHTML = "<p class=\"muted\" style=\"font-size:11px;padding:6px 4px;\"><span data-i18n=\"チェックしたMRMがここに一覧表示されます（.exp の出力順）。\">チェックしたMRMがここに一覧表示されます（.exp の出力順）。</span></p>";
         return;
     }
     body.innerHTML = items.map((it, idx) => {
@@ -1908,11 +1917,11 @@ function renderSelectedPanel() {
             + '<span class="sel-ch">' + (idx + 1) + '</span>'
             + '<div class="sel-main">'
             +   '<div class="sel-name">' + safe(it.c.name)
-            +     (shelfOf(it.c) === 'archive' ? '<span class="arch-badge" title="使用実績アーカイブ (未最適化)">未最適化</span>' : '')
+            +     (shelfOf(it.c) === 'archive' ? "<span class=\"arch-badge\" title=\"使用実績アーカイブ (未最適化)\" data-i18n-title=\"使用実績アーカイブ (未最適化)\"><span data-i18n=\"未最適化\">未最適化</span></span>" : '')
             +   '</div>'
             +   '<div class="sel-mz muted">' + pre + ' → ' + pro + '  CE' + ce + ' / CV' + cv + '</div>'
             + '</div>'
-            + '<button class="sel-x" data-action="unselect" data-tid="' + safe(it.tr.id) + '" title="選択解除">×</button>'
+            + '<button class="sel-x" data-action="unselect" data-tid="' + safe(it.tr.id) + "\" title=\"選択解除\" data-i18n-title=\"選択解除\">×</button>"
             + '</div>';
     }).join('');
 }
@@ -1962,7 +1971,7 @@ function _isChannelEntryKey(k) {
 }
 
 function buildExp(templateText, rows) {
-    if (!rows.length) throw new Error('トランジションが選択されていません');
+    if (!rows.length) throw new Error(uiT("トランジションが選択されていません"));
     const crlf = /\r\n/.test(templateText);
     const lines = templateText.replace(/\r\n/g, '\n').split('\n');
     const n = rows.length;
@@ -2048,19 +2057,19 @@ function buildExp(templateText, rows) {
 
 // Shared .exp build + download for a list of {name,precursor,product,cv,ce}.
 async function exportExpRows(rows, baseName) {
-    if (!rows || !rows.length) { alert('出力するトランジションがありません'); return; }
+    if (!rows || !rows.length) { alert(uiT("出力するトランジションがありません")); return; }
     const pw = _readCachedMasterPw();
-    if (!pw) { alert('認証が切れました。再読込してください。'); return; }
+    if (!pw) { alert(uiT("認証が切れました。再読込してください。")); return; }
     let template;
     try { template = await SupabaseClient.getExpTemplate(pw); }
-    catch (e) { reportError(e, 'テンプレ取得'); return; }
+    catch (e) { reportError(e, uiT("テンプレ取得")); return; }
     if (!template || !template.trim()) {
-        alert('テンプレートが未設定です。「テンプレ設定」で .exp テンプレートを保存してください。');
+        alert(uiT("テンプレートが未設定です。「テンプレ設定」で .exp テンプレートを保存してください。"));
         return;
     }
     let text;
     try { text = buildExp(template, rows); }
-    catch (e) { alert('.exp 生成に失敗しました: ' + (e.message || e)); console.warn(e); return; }
+    catch (e) { alert(uiT(".exp 生成に失敗しました: ") + (e.message || e)); console.warn(e); return; }
     const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     const base = (baseName || 'DESI_MRM').replace(/[^\w\-]+/g, '_') || 'DESI_MRM';
     downloadAsFile(new Blob([text], { type: 'text/plain' }), base + '_' + stamp + '_' + rows.length + 'ch.exp');
@@ -2068,14 +2077,14 @@ async function exportExpRows(rows, baseName) {
 
 async function exportSelectedExp() {
     const rows = collectSelectedRows();
-    if (!rows.length) { alert('出力するトランジションをチェックしてください'); return; }
+    if (!rows.length) { alert(uiT("出力するトランジションをチェックしてください")); return; }
     // Archived channels carry CE/CV that was never optimised. Exporting them is
     // allowed (that is how you go and test them) but never silently.
     const arch = rows.filter(r => r.shelf === 'archive');
     if (arch.length) {
-        const names = arch.slice(0, 8).map(r => '・' + r.name).join('\n') + (arch.length > 8 ? '\n…' : '');
-        if (!confirm('使用実績アーカイブ (未最適化) のMRMが ' + arch.length + ' 件含まれます。\n'
-            + 'CE/CV は最適化されていない値です。\n\n' + names + '\n\nこのまま .exp に出力しますか?')) return;
+        const names = arch.slice(0, 8).map(r => uiT("・") + r.name).join('\n') + (arch.length > 8 ? '\n…' : '');
+        if (!confirm(uiT("使用実績アーカイブ (未最適化) のMRMが ") + arch.length + uiT(" 件含まれます。\n")
+            + uiT("CE/CV は最適化されていない値です。\n\n") + names + uiT("\n\nこのまま .exp に出力しますか?"))) return;
     }
     await exportExpRows(rows, 'DESI_MRM');
 }
@@ -2162,7 +2171,7 @@ function rowsFromSet(set) {
 
 async function openSetsModal() {
     const pw = _readCachedMasterPw();
-    if (!pw) { alert('認証が切れました。再読込してください。'); return; }
+    if (!pw) { alert(uiT("認証が切れました。再読込してください。")); return; }
     await loadSets();
     const projects = projectsFromUsages();
     const setRows = (mrmSets || []).map(s => {
@@ -2174,39 +2183,39 @@ async function openSetsModal() {
         return '<div style="display:flex;align-items:center;gap:6px;border:1px solid #e5e7eb;border-radius:6px;padding:6px 8px;margin-bottom:6px;">'
             + '<div style="flex:1;min-width:0;"><div style="font-weight:600;">' + safe(s.name) + owner + '</div>'
             +   '<div class="muted" style="font-size:11px;">' + sub + '</div></div>'
-            + '<button class="btn mini" data-set-load="' + safe(s.id) + '">選択に展開</button>'
-            + '<button class="btn mini" data-set-exp="' + safe(s.id) + '" title="このセットを直接 .exp 出力">.exp</button>'
-            + '<button class="btn mini danger" data-set-del="' + safe(s.id) + '">削除</button>'
+            + '<button class="btn mini" data-set-load="' + safe(s.id) + "\"><span data-i18n=\"選択に展開\">選択に展開</span></button>"
+            + '<button class="btn mini" data-set-exp="' + safe(s.id) + "\" title=\"このセットを直接 .exp 出力\" data-i18n-title=\"このセットを直接 .exp 出力\">.exp</button>"
+            + '<button class="btn mini danger" data-set-del="' + safe(s.id) + "\"><span data-i18n=\"削除\">削除</span></button>"
             + '</div>';
-    }).join('') || '<p class="muted" style="font-size:12px;">保存済みセットはありません。</p>';
-    const projectOpts = ['<option value="">— プロジェクトを選択 —</option>']
+    }).join('') || "<p class=\"muted\" style=\"font-size:12px;\"><span data-i18n=\"保存済みセットはありません。\">保存済みセットはありません。</span></p>";
+    const projectOpts = ["<option value=\"\" data-i18n=\"— プロジェクトを選択 —\">— プロジェクトを選択 —</option>"]
         .concat(projects.map(p => '<option value="' + safe(p.slug) + '">' + safe(p.name) + '</option>')).join('');
     const selCount = selectedTransitions.size;
     const html = `
-        <h2>MRM メソッドセット</h2>
+        <h2><span data-i18n="MRM メソッドセット">MRM メソッドセット</span></h2>
         <div style="display:flex;flex-direction:column;gap:14px;">
           <section>
-            <h3 style="font-size:13px;font-weight:700;margin:0 0 6px;">保存済みセット</h3>
+            <h3 style="font-size:13px;font-weight:700;margin:0 0 6px;"><span data-i18n="保存済みセット">保存済みセット</span></h3>
             <div style="max-height:32vh;overflow:auto;">${setRows}</div>
           </section>
           <section style="border-top:1px solid #e5e7eb;padding-top:10px;">
-            <h3 style="font-size:13px;font-weight:700;margin:0 0 6px;">プロジェクト履歴から選択</h3>
-            <p class="muted" style="font-size:11px;margin:0 0 6px;">選んだプロジェクトで使った全トランジションを「選択中のMRM一覧」に展開します。そのまま .exp 出力、または編集後に出力・セット保存できます。</p>
+            <h3 style="font-size:13px;font-weight:700;margin:0 0 6px;"><span data-i18n="プロジェクト履歴から選択">プロジェクト履歴から選択</span></h3>
+            <p class="muted" style="font-size:11px;margin:0 0 6px;"><span data-i18n="選んだプロジェクトで使った全トランジションを「選択中のMRM一覧」に展開します。そのまま .exp 出力、または編集後に出力・セット保存できます。">選んだプロジェクトで使った全トランジションを「選択中のMRM一覧」に展開します。そのまま .exp 出力、または編集後に出力・セット保存できます。</span></p>
             <div style="display:flex;gap:6px;">
               <select data-from-project style="flex:1;padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;">${projectOpts}</select>
-              <button type="button" class="btn" data-apply-project>選択に展開</button>
+              <button type="button" class="btn" data-apply-project><span data-i18n="選択に展開">選択に展開</span></button>
             </div>
           </section>
           <section style="border-top:1px solid #e5e7eb;padding-top:10px;">
-            <h3 style="font-size:13px;font-weight:700;margin:0 0 6px;">現在の選択をセットとして保存 <span class="muted" style="font-weight:400;">(${selCount} ch)</span></h3>
+            <h3 style="font-size:13px;font-weight:700;margin:0 0 6px;"><span data-i18n="現在の選択をセットとして保存">現在の選択をセットとして保存</span> <span class="muted" style="font-weight:400;">(${selCount} ch)</span></h3>
             <div style="display:flex;flex-direction:column;gap:6px;">
-              <input type="text" data-set-name placeholder="セット名 (例: A先生セット)" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;">
-              <input type="text" data-set-owner placeholder="作成者/担当 (任意, 例: A先生)" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;">
-              <button type="button" class="btn primary" data-save-set ${selCount ? '' : 'disabled'}>選択 ${selCount} ch をセット保存</button>
+              <input type="text" data-set-name placeholder="セット名 (例: A先生セット)" data-i18n-placeholder="セット名 (例: A先生セット)" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;">
+              <input type="text" data-set-owner placeholder="作成者/担当 (任意, 例: A先生)" data-i18n-placeholder="作成者/担当 (任意, 例: A先生)" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;">
+              <button type="button" class="btn primary" data-save-set ${selCount ? '' : 'disabled'}><span data-i18n="選択">選択</span> ${selCount} <span data-i18n="ch をセット保存">ch をセット保存</span></button>
             </div>
           </section>
           <p class="err" data-err></p>
-          <div class="actions"><button type="button" class="btn" data-modal-cancel>閉じる</button></div>
+          <div class="actions"><button type="button" class="btn" data-modal-cancel><span data-i18n="閉じる">閉じる</span></button></div>
         </div>`;
     const p = openModal(html);
     const card = openModal._card;
@@ -2223,59 +2232,60 @@ async function openSetsModal() {
             const s = findSet(loadId); if (!s) return;
             const r = applySetToSelection(s);
             if (card._close) card._close(null);
-            let msg = '「' + s.name + '」を選択に展開しました: ' + r.matched + ' ch';
-            if (r.missing) msg += '（ライブラリに無い ' + r.missing + ' ch は除外。[.exp] ボタンで直接出力は可能）';
+            let msg = '「' + s.name + uiT("」を選択に展開しました: ") + r.matched + ' ch';
+            if (r.missing) msg += uiT("（ライブラリに無い ") + r.missing + uiT(" ch は除外。[.exp] ボタンで直接出力は可能）");
             alert(msg);
         } else if (expId) {
             const s = findSet(expId); if (!s) return;
             await exportExpRows(rowsFromSet(s), s.name);
         } else if (delId) {
             const s = findSet(delId); if (!s) return;
-            if (!confirm('「' + s.name + '」を削除しますか?')) return;
+            if (!confirm('「' + s.name + uiT("」を削除しますか?"))) return;
             try { await SupabaseClient.deleteMrmSet(pw, delId); if (card._close) card._close(null); openSetsModal(); }
-            catch (e) { reportError(e, 'セット削除'); }
+            catch (e) { reportError(e, uiT("セット削除")); }
         }
     });
     card.querySelector('[data-apply-project]').addEventListener('click', () => {
         const slug = card.querySelector('[data-from-project]').value;
-        if (!slug) { errEl.textContent = 'プロジェクトを選択してください'; return; }
+        if (!slug) { uiBind(errEl, uiMsg("プロジェクトを選択してください")); return; }
         const n = selectByProject(slug);
         if (card._close) card._close(null);
-        alert('プロジェクト「' + slug + '」で使った ' + n + ' ch を選択に展開しました。');
+        alert(uiT("プロジェクト「") + slug + uiT("」で使った ") + n + uiT(" ch を選択に展開しました。"));
     });
     card.querySelector('[data-save-set]').addEventListener('click', async () => {
         const name = (card.querySelector('[data-set-name]').value || '').trim();
-        if (!name) { errEl.textContent = 'セット名は必須です'; return; }
+        if (!name) { uiBind(errEl, uiMsg("セット名は必須です")); return; }
         const owner = (card.querySelector('[data-set-owner]').value || '').trim() || null;
         const items = collectSelectedItems();
-        if (!items.length) { errEl.textContent = '選択が空です'; return; }
+        if (!items.length) { uiBind(errEl, uiMsg("選択が空です")); return; }
         try {
             await SupabaseClient.upsertMrmSet(pw, { id: null, name, owner, items });
             if (card._close) card._close(null);
-            alert('セット「' + name + '」を保存しました (' + items.length + ' ch)。');
-        } catch (e) { reportError(e, 'セット保存'); }
+            alert(uiT("セット「") + name + uiT("」を保存しました (") + items.length + ' ch)。');
+        } catch (e) { reportError(e, uiT("セット保存")); }
     });
     return p;
 }
 
 async function openTemplateModal() {
     const pw = _readCachedMasterPw();
-    if (!pw) { alert('認証が切れました。再読込してください。'); return; }
+    if (!pw) { alert(uiT("認証が切れました。再読込してください。")); return; }
     let current = '';
     try { current = (await SupabaseClient.getExpTemplate(pw)) || ''; } catch (e) { /* ignore */ }
     const html = `
-        <h2>出力テンプレート .exp</h2>
+        <h2><span data-i18n="出力テンプレート .exp">出力テンプレート .exp</span></h2>
         <p style="font-size:11px;color:#475569;margin-bottom:6px;">
-          機器固定のテンプレート .exp を1本保存します（出力時に MRM/SIR の可変部だけ差し替え）。
-          ファイル選択で読み込むか、本文に貼り付けて保存してください。${current ? '<br><b>保存済み（' + current.length + ' 文字）</b>。再保存で上書きします。' : '<br><b>未保存</b>。'}
+          <span data-i18n="機器固定のテンプレート .exp を1本保存します（出力時に MRM/SIR の可変部だけ差し替え）。
+          ファイル選択で読み込むか、本文に貼り付けて保存してください。">機器固定のテンプレート .exp を1本保存します（出力時に MRM/SIR の可変部だけ差し替え）。
+          ファイル選択で読み込むか、本文に貼り付けて保存してください。</span>${current ? "<br><b><span data-i18n=\"保存済み（\">保存済み（</span>" + current.length + " <span data-i18n=\"文字）\">文字）</span></b><span data-i18n=\"。再保存で上書きします。\">。再保存で上書きします。</span>" : "<br><b><span data-i18n=\"未保存\">未保存</span></b>。"}
         </p>
         <form class="row">
-          <label>テンプレ .exp を選択 <input type="file" name="file" accept=".exp,.txt,text/plain"></label>
-          <label>テンプレ本文 <textarea name="content" rows="8" style="font-family:ui-monospace,monospace;">${safe(current)}</textarea></label>
+          <label><span data-i18n="テンプレ .exp を選択">テンプレ .exp を選択</span> <input type="file" name="file" accept=".exp,.txt,text/plain"></label>
+          <label><span data-i18n="テンプレ本文">テンプレ本文</span> <textarea name="content" rows="8" style="font-family:ui-monospace,monospace;">${safe(current)}</textarea></label>
           <p class="err" data-err></p>
           <div class="actions">
             <button type="button" class="btn" data-modal-cancel>Cancel</button>
-            <button type="submit" class="btn primary" data-modal-ok>保存</button>
+            <button type="submit" class="btn primary" data-modal-ok><span data-i18n="保存">保存</span></button>
           </div>
         </form>`;
     const p = openModal(html);
@@ -2284,17 +2294,17 @@ async function openTemplateModal() {
     const ta = card.querySelector('[name="content"]');
     fileInp.addEventListener('change', async () => {
         const f = fileInp.files && fileInp.files[0];
-        if (f) { try { ta.value = await readFileAsText(f); } catch (e) { card.querySelector('[data-err]').textContent = '読込失敗: ' + (e.message || e); } }
+        if (f) { try { ta.value = await readFileAsText(f); } catch (e) { uiBind(card.querySelector('[data-err]'), uiMsg("読込失敗: {0}", () => [e.message || e])); } }
     });
     card._collect = () => {
         const content = ta.value || '';
-        if (!content.trim()) { card.querySelector('[data-err]').textContent = 'テンプレ本文が空です'; return null; }
+        if (!content.trim()) { uiBind(card.querySelector('[data-err]'), uiMsg("テンプレ本文が空です")); return null; }
         return { content };
     };
     const res = await p;
     if (!res) return;
-    try { await SupabaseClient.setExpTemplate(pw, res.content); alert('テンプレートを保存しました'); }
-    catch (e) { reportError(e, 'テンプレ保存'); }
+    try { await SupabaseClient.setExpTemplate(pw, res.content); alert(uiT("テンプレートを保存しました")); }
+    catch (e) { reportError(e, uiT("テンプレ保存")); }
 }
 
 // ===========================================================================
@@ -2304,11 +2314,11 @@ async function openTemplateModal() {
 async function openReconcileModal() {
     if (!_readCachedMasterPw()) { const ok = await openMasterUnlockModal(); if (!ok) return; }
     const shell = ''
-        + '<h2>実測棚卸し</h2>'
-        + '<p style="font-size:11px;color:#475569;margin:2px 0 8px;">実測PJで測定された化合物のうち MRM管理に未登録のものを、一括で「登録」または「無視(登録しない)」にできます。名前以外(Precursor 等)は分かる範囲での自動補完です。登録後に編集で補えます。<br>登録先は既定で <b>使用実績アーカイブ</b> です (ここに出るものは測定実績はあるが未最適化のため)。検証済みライブラリには影響しません。既に登録済みの化合物は、再登録しても現在の棚から動きません。</p>'
-        + '<div data-reconcile-body><div class="muted" style="padding:12px;">読み込み中…</div></div>'
+        + "<h2><span data-i18n=\"実測棚卸し\">実測棚卸し</span></h2>"
+        + "<p style=\"font-size:11px;color:#475569;margin:2px 0 8px;\"><span data-i18n=\"実測PJで測定された化合物のうち MRM管理に未登録のものを、一括で「登録」または「無視(登録しない)」にできます。名前以外(Precursor 等)は分かる範囲での自動補完です。登録後に編集で補えます。\">実測PJで測定された化合物のうち MRM管理に未登録のものを、一括で「登録」または「無視(登録しない)」にできます。名前以外(Precursor 等)は分かる範囲での自動補完です。登録後に編集で補えます。</span><br><span data-i18n=\"登録先は既定で\">登録先は既定で</span> <b><span data-i18n=\"使用実績アーカイブ\">使用実績アーカイブ</span></b> <span data-i18n=\"です (ここに出るものは測定実績はあるが未最適化のため)。検証済みライブラリには影響しません。既に登録済みの化合物は、再登録しても現在の棚から動きません。\">です (ここに出るものは測定実績はあるが未最適化のため)。検証済みライブラリには影響しません。既に登録済みの化合物は、再登録しても現在の棚から動きません。</span></p>"
+        + "<div data-reconcile-body><div class=\"muted\" style=\"padding:12px;\"><span data-i18n=\"読み込み中…\">読み込み中…</span></div></div>"
         + '<div class="modal-actions" style="display:flex;gap:6px;justify-content:flex-end;margin-top:12px;">'
-        +   '<button type="button" class="btn" data-modal-cancel>閉じる</button>'
+        +   "<button type=\"button\" class=\"btn\" data-modal-cancel><span data-i18n=\"閉じる\">閉じる</span></button>"
         + '</div>';
     openModal(shell);
     const card = openModal._card;
@@ -2321,12 +2331,12 @@ async function openReconcileModal() {
     const fmt = (v) => (v == null || v === '') ? '—' : safe(String(v));
 
     async function reload() {
-        body().innerHTML = '<div class="muted" style="padding:12px;">読み込み中…</div>';
+        body().innerHTML = "<div class=\"muted\" style=\"padding:12px;\"><span data-i18n=\"読み込み中…\">読み込み中…</span></div>";
         try {
             const rows = await SupabaseClient.listMeasuredCompounds(_readCachedMasterPw());
             allRows = Array.isArray(rows) ? rows : [];
         } catch (e) {
-            body().innerHTML = '<div class="err" style="padding:12px;">取得に失敗しました: ' + safe(String((e && (e.message || e.details)) || e)) + '</div>';
+            body().innerHTML = "<div class=\"err\" style=\"padding:12px;\"><span data-i18n=\"取得に失敗しました:\">取得に失敗しました:</span> " + safe(String((e && (e.message || e.details)) || e)) + '</div>';
             return;
         }
         render();
@@ -2341,12 +2351,12 @@ async function openReconcileModal() {
         const rows = allRows.filter(r => r.status === view);
         let inner = ''
             + '<div style="display:flex;gap:6px;margin-bottom:8px;align-items:center;flex-wrap:wrap;">'
-            +   '<button type="button" class="btn mini' + (view === 'new' ? ' primary' : '') + '" data-view="new">未処理 (' + c.n + ')</button>'
-            +   '<button type="button" class="btn mini' + (view === 'ignored' ? ' primary' : '') + '" data-view="ignored">無視済み (' + c.ig + ')</button>'
-            +   '<span class="muted" style="font-size:11px;">登録済み ' + c.rg + '</span>'
+            +   '<button type="button" class="btn mini' + (view === 'new' ? ' primary' : '') + "\" data-view=\"new\"><span data-i18n=\"未処理 (\">未処理 (</span>" + c.n + ')</button>'
+            +   '<button type="button" class="btn mini' + (view === 'ignored' ? ' primary' : '') + "\" data-view=\"ignored\"><span data-i18n=\"無視済み (\">無視済み (</span>" + c.ig + ')</button>'
+            +   "<span class=\"muted\" style=\"font-size:11px;\"><span data-i18n=\"登録済み\">登録済み</span> " + c.rg + '</span>'
             + '</div>';
         if (!rows.length) {
-            inner += '<div class="muted" style="padding:12px;">' + (view === 'new' ? '未登録の実測化合物はありません。' : '無視済みの化合物はありません。') + '</div>';
+            inner += '<div class="muted" style="padding:12px;">' + (view === 'new' ? uiH("未登録の実測化合物はありません。") : uiH("無視済みの化合物はありません。")) + '</div>';
             body().innerHTML = inner;
             return;
         }
@@ -2361,22 +2371,22 @@ async function openReconcileModal() {
                 + '<td>' + fmt(r.cv) + '</td>'
                 + '<td>' + fmt(r.polarity) + '</td>'
                 + '<td>' + safe(String(r.n_projects)) + '</td>'
-                + '<td><button type="button" class="btn mini" data-rc-preview data-i="' + i + '" title="測定像をビューアでプレビュー (背景に重ね／強度レンジ／透明度)">🔬 表示</button></td>'
+                + '<td><button type="button" class="btn mini" data-rc-preview data-i="' + i + "\" title=\"測定像をビューアでプレビュー (背景に重ね／強度レンジ／透明度)\" data-i18n-title=\"測定像をビューアでプレビュー (背景に重ね／強度レンジ／透明度)\"><span data-i18n=\"🔬 表示\">🔬 表示</span></button></td>"
                 + '</tr>'
             ).join('');
             inner += '<div style="max-height:44vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">'
                 + '<table class="tr-table" style="width:100%;">'
-                + '<thead><tr><th><input type="checkbox" data-rc-all title="全選択"></th><th class="l">化合物名</th><th>Precursor</th><th>Fragment</th><th>CE</th><th>CV</th><th>極性</th><th>PJ数</th><th>測定像</th></tr></thead>'
+                + "<thead><tr><th><input type=\"checkbox\" data-rc-all title=\"全選択\" data-i18n-title=\"全選択\"></th><th class=\"l\"><span data-i18n=\"化合物名\">化合物名</span></th><th>Precursor</th><th>Fragment</th><th>CE</th><th>CV</th><th><span data-i18n=\"極性\">極性</span></th><th><span data-i18n=\"PJ数\">PJ数</span></th><th><span data-i18n=\"測定像\">測定像</span></th></tr></thead>"
                 + '<tbody>' + trows + '</tbody></table></div>';
             inner += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:10px;">'
-                + '<label style="font-size:11px;color:#475569;">タグ (任意・一括適用)<br><input type="text" data-rc-tags placeholder="例: アミノ酸" style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;"></label>'
-                + '<label style="font-size:11px;color:#475569;">確認レベル<br><select data-rc-level style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;"><option value="unchecked">未確認</option><option value="std">標準品確認済み</option><option value="lit">文献のみ</option></select></label>'
+                + "<label style=\"font-size:11px;color:#475569;\"><span data-i18n=\"タグ (任意・一括適用)\">タグ (任意・一括適用)</span><br><input type=\"text\" data-rc-tags placeholder=\"例: アミノ酸\" data-i18n-placeholder=\"例: アミノ酸\" style=\"padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;\"></label>"
+                + "<label style=\"font-size:11px;color:#475569;\"><span data-i18n=\"確認レベル\">確認レベル</span><br><select data-rc-level style=\"padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;\"><option value=\"unchecked\" data-i18n=\"未確認\">未確認</option><option value=\"std\" data-i18n=\"標準品確認済み\">標準品確認済み</option><option value=\"lit\" data-i18n=\"文献のみ\">文献のみ</option></select></label>"
                 // Defaults to the archive: everything listed here was measured
                 // but never optimised, which is exactly what that shelf holds.
-                + '<label style="font-size:11px;color:#475569;">登録先<br><select data-rc-shelf style="padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;"><option value="archive">使用実績アーカイブ</option><option value="main">検証済みライブラリ</option></select></label>'
+                + "<label style=\"font-size:11px;color:#475569;\"><span data-i18n=\"登録先\">登録先</span><br><select data-rc-shelf style=\"padding:4px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:13px;background:#fff;\"><option value=\"archive\" data-i18n=\"使用実績アーカイブ\">使用実績アーカイブ</option><option value=\"main\" data-i18n=\"検証済みライブラリ\">検証済みライブラリ</option></select></label>"
                 + '<span style="flex:1"></span>'
-                + '<button type="button" class="btn" data-rc-ignore>選択を無視</button>'
-                + '<button type="button" class="btn primary" data-rc-register>選択を登録</button>'
+                + "<button type=\"button\" class=\"btn\" data-rc-ignore><span data-i18n=\"選択を無視\">選択を無視</span></button>"
+                + "<button type=\"button\" class=\"btn primary\" data-rc-register><span data-i18n=\"選択を登録\">選択を登録</span></button>"
                 + '</div>';
         } else {
             const trows = rows.map((r, i) =>
@@ -2384,9 +2394,9 @@ async function openReconcileModal() {
             ).join('');
             inner += '<div style="max-height:48vh;overflow:auto;border:1px solid #e5e7eb;border-radius:6px;">'
                 + '<table class="tr-table" style="width:100%;">'
-                + '<thead><tr><th><input type="checkbox" data-rc-all title="全選択"></th><th class="l">化合物名</th><th>PJ数</th></tr></thead>'
+                + "<thead><tr><th><input type=\"checkbox\" data-rc-all title=\"全選択\" data-i18n-title=\"全選択\"></th><th class=\"l\"><span data-i18n=\"化合物名\">化合物名</span></th><th><span data-i18n=\"PJ数\">PJ数</span></th></tr></thead>"
                 + '<tbody>' + trows + '</tbody></table></div>';
-            inner += '<div style="display:flex;justify-content:flex-end;margin-top:10px;"><button type="button" class="btn" data-rc-unignore>選択を無視解除</button></div>';
+            inner += "<div style=\"display:flex;justify-content:flex-end;margin-top:10px;\"><button type=\"button\" class=\"btn\" data-rc-unignore><span data-i18n=\"選択を無視解除\">選択を無視解除</span></button></div>";
         }
         body().innerHTML = inner;
     }
@@ -2401,7 +2411,7 @@ async function openReconcileModal() {
     }
     async function doRegister() {
         const sel = selectedRows();
-        if (!sel.length) { alert('登録する行を選択してください'); return; }
+        if (!sel.length) { alert(uiT("登録する行を選択してください")); return; }
         const tagsEl = body().querySelector('[data-rc-tags]');
         const lvEl = body().querySelector('[data-rc-level]');
         const shEl = body().querySelector('[data-rc-shelf]');
@@ -2409,7 +2419,7 @@ async function openReconcileModal() {
         const level = (lvEl && lvEl.value) || 'unchecked';
         const shelf = (shEl && shEl.value) || 'archive';
         const pw = _readCachedMasterPw();
-        openModal('<h2>登録中…</h2><p data-prog style="font-size:12px;color:#475569;">0 / ' + sel.length + '</p>');
+        openModal("<h2><span data-i18n=\"登録中…\">登録中…</span></h2><p data-prog style=\"font-size:12px;color:#475569;\">0 / " + sel.length + '</p>');
         const pcard = openModal._card;
         let ok = 0, fail = 0;
         for (let i = 0; i < sel.length; i++) {
@@ -2422,24 +2432,24 @@ async function openReconcileModal() {
                 });
                 ok++;
             } catch (e) { console.warn('register measured failed', r.name, e); fail++; }
-            const pe = pcard.querySelector('[data-prog]'); if (pe) pe.textContent = (i + 1) + ' / ' + sel.length;
+            const pe = pcard.querySelector('[data-prog]'); if (pe) uiBind(pe, uiMsg("{0}{1} / {2}", () => [i, 1, sel.length]));
         }
         if (pcard._close) pcard._close(true);
         await loadLibrary();
         await reload();
-        alert(SHELVES[shelf].label + 'へ登録: ' + ok + ' 件' + (fail ? ' / 失敗 ' + fail + ' 件' : ''));
+        alert(uiT(SHELVES[shelf].label) + uiT("へ登録: ") + ok + uiT(" 件") + (fail ? uiT(" / 失敗 ") + fail + uiT(" 件") : ''));
     }
     async function doIgnore() {
         const sel = selectedRows();
-        if (!sel.length) { alert('無視する行を選択してください'); return; }
-        if (!confirm(sel.length + ' 件を「登録しない(無視)」にします。よろしいですか?')) return;
+        if (!sel.length) { alert(uiT("無視する行を選択してください")); return; }
+        if (!confirm(sel.length + uiT(" 件を「登録しない(無視)」にします。よろしいですか?"))) return;
         const pw = _readCachedMasterPw();
         for (const r of sel) { try { await SupabaseClient.ignoreMeasuredCompound(pw, r.name); } catch (e) { console.warn(e); } }
         await reload();
     }
     async function doUnignore() {
         const sel = selectedRows();
-        if (!sel.length) { alert('解除する行を選択してください'); return; }
+        if (!sel.length) { alert(uiT("解除する行を選択してください")); return; }
         const pw = _readCachedMasterPw();
         for (const r of sel) { try { await SupabaseClient.unignoreMeasuredCompound(pw, r.name); } catch (e) { console.warn(e); } }
         await reload();
@@ -2505,7 +2515,7 @@ function pendingNamesForProject(slug, siblings, row) {
 }
 function openMeasuredPreview(row, siblings) {
     const projects = (Array.isArray(row && row.projects) ? row.projects : []).filter(p => p && p.slug);
-    if (!projects.length) { alert('プレビューできる測定プロジェクトが見つかりません'); return; }
+    if (!projects.length) { alert(uiT("プレビューできる測定プロジェクトが見つかりません")); return; }
     const back = document.createElement('div');
     back.className = 'modal-backdrop';
     back.style.zIndex = '80';   // above the reconcile modal (.modal-backdrop z-index:60)
@@ -2514,23 +2524,23 @@ function openMeasuredPreview(row, siblings) {
     const nPending = (slug) => pendingNamesForProject(slug, siblings, row).length;
     const projLabel = (p) => {
         const n = nPending(p.slug);
-        return (p.display_name || p.slug) + (n ? ' — 他に未評価 ' + n + ' 件' : '');
+        return (p.display_name || p.slug) + (n ? uiT(" — 他に未評価 ") + n + uiT(" 件") : '');
     };
     const optsHtml = projects.map(p =>
         '<option value="' + safe(p.slug) + '">' + safe(projLabel(p)) + '</option>').join('');
     back.innerHTML =
         '<div class="modal-card" style="width:96vw;max-width:1200px;height:92vh;max-height:92vh;display:flex;flex-direction:column;padding:12px 14px;">'
         + '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">'
-        +   '<h2 style="margin:0;font-size:14px;font-weight:600;">測定像プレビュー: ' + safe(row.name || '') + '</h2>'
+        +   "<h2 style=\"margin:0;font-size:14px;font-weight:600;\"><span data-i18n=\"測定像プレビュー:\">測定像プレビュー:</span> " + safe(row.name || '') + '</h2>'
         +   (projects.length > 1
-                ? '<label style="font-size:11px;color:#475569;">測定PJ <select data-mp-proj style="padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;background:#fff;">' + optsHtml + '</select></label>'
+                ? "<label style=\"font-size:11px;color:#475569;\"><span data-i18n=\"測定PJ\">測定PJ</span> <select data-mp-proj style=\"padding:3px 6px;border:1px solid #cbd5e1;border-radius:4px;font-size:12px;background:#fff;\">" + optsHtml + '</select></label>'
                 : '<span class="muted" style="font-size:11px;">' + safe(projLabel(projects[0])) + '</span>')
         +   '<span data-mp-hint class="muted" style="font-size:11px;"></span>'
         +   '<span style="flex:1"></span>'
-        +   '<span class="muted" style="font-size:11px;">重ね合わせ・強度レンジ・透明度はビューア内で調整 (ROI/グラフは非表示)</span>'
-        +   '<button type="button" class="btn" data-mp-close>閉じる</button>'
+        +   "<span class=\"muted\" style=\"font-size:11px;\"><span data-i18n=\"重ね合わせ・強度レンジ・透明度はビューア内で調整 (ROI/グラフは非表示)\">重ね合わせ・強度レンジ・透明度はビューア内で調整 (ROI/グラフは非表示)</span></span>"
+        +   "<button type=\"button\" class=\"btn\" data-mp-close><span data-i18n=\"閉じる\">閉じる</span></button>"
         + '</div>'
-        + '<iframe data-mp-frame title="測定像プレビュー" style="flex:1;width:100%;border:1px solid #e5e7eb;border-radius:6px;background:#000;"></iframe>'
+        + "<iframe data-mp-frame title=\"測定像プレビュー\" data-i18n-title=\"測定像プレビュー\" style=\"flex:1;width:100%;border:1px solid #e5e7eb;border-radius:6px;background:#000;\"></iframe>"
         + '</div>';
     document.body.appendChild(back);
     const frame = back.querySelector('[data-mp-frame]');
@@ -2540,9 +2550,7 @@ function openMeasuredPreview(row, siblings) {
         const pending = pendingNamesForProject(slug, siblings, row);
         // Re-read on every switch: the pending set is per project.
         if (hint) {
-            hint.textContent = pending.length
-                ? '（オレンジ = 評価対象 / 薄オレンジ = この測定PJで一緒に評価できる ' + pending.length + ' 件）'
-                : '（Method表のオレンジの行が評価対象です）';
+            uiBind(hint, pending.length ? uiMsg("（オレンジ = 評価対象 / 薄オレンジ = この測定PJで一緒に評価できる {0} 件）", () => [pending.length]) : uiMsg("（Method表のオレンジの行が評価対象です）"));
         }
         frame.src = measuredPreviewUrl(slug, row.name, pending);
     };
@@ -2660,14 +2668,14 @@ function bindFilterBar() {
 function expEditorServices() {
     const requirePassword = () => {
         const pw = _readCachedMasterPw();
-        if (!pw) throw new Error('認証が切れました。MRM 管理画面を再読み込みしてください。');
+        if (!pw) throw new Error(uiT("認証が切れました。MRM 管理画面を再読み込みしてください。"));
         return pw;
     };
     const callExpRpc = async (fn) => {
         try { return await fn(); }
         catch (e) {
             if (/PGRST202|could not find.*function|function.*does not exist/i.test(String(e && (e.code || '') + ' ' + (e.message || e)))) {
-                throw new Error('保存・登録用の DB 更新が必要です。管理者が supabase/mrm_exp_import.sql を適用してください。.exp 編集とローカル保存は利用できます。');
+                throw new Error(uiT("保存・登録用の DB 更新が必要です。管理者が supabase/mrm_exp_import.sql を適用してください。.exp 編集とローカル保存は利用できます。"));
             }
             throw e;
         }
@@ -2705,10 +2713,10 @@ async function init() {
         document.getElementById('btn-reconcile').hidden = true;
         const note = document.createElement('p');
         note.className = 'text-xs text-gray-500 mt-2';
-        note.textContent = 'オフライン版: MRM・使用履歴・メソッドセット・.exp テンプレートはこのブラウザーに保存します。実測棚卸し（クラウド全体の検索）は対象外です。測定 PJ はこの PC で管理へ登録した履歴を表示します。';
+        uiBind(note, uiMsg("オフライン版: MRM・使用履歴・メソッドセット・.exp テンプレートはこのブラウザーに保存します。実測棚卸し（クラウド全体の検索）は対象外です。測定 PJ はこの PC で管理へ登録した履歴を表示します。"));
         document.querySelector('header').after(note);
         const toolbar = document.getElementById('btn-reload').parentElement;
-        const exportBtn = document.createElement('button'); exportBtn.className = 'btn'; exportBtn.textContent = 'MRM バックアップ';
+        const exportBtn = document.createElement('button'); exportBtn.className = 'btn'; uiBind(exportBtn, uiMsg("MRM バックアップ"));
         exportBtn.addEventListener('click', () => {
             try {
                 const doc = window.DesiLocalMrm.exportDocument();
@@ -2716,20 +2724,20 @@ async function init() {
                 const url = URL.createObjectURL(blob); const a = document.createElement('a');
                 a.href = url; a.download = 'DESI_MRM_backup_' + new Date().toISOString().slice(0, 10) + '.json';
                 a.click(); setTimeout(() => URL.revokeObjectURL(url), 10000);
-            } catch (e) { alert('MRM バックアップ失敗: ' + e.message); }
+            } catch (e) { alert(uiT("MRM バックアップ失敗: ") + e.message); }
         });
-        const restoreBtn = document.createElement('button'); restoreBtn.className = 'btn'; restoreBtn.textContent = 'MRM 復元';
+        const restoreBtn = document.createElement('button'); restoreBtn.className = 'btn'; uiBind(restoreBtn, uiMsg("MRM 復元"));
         const input = document.createElement('input'); input.type = 'file'; input.accept = '.json,application/json'; input.hidden = true;
         restoreBtn.addEventListener('click', () => input.click());
         input.addEventListener('change', async () => {
             const file = input.files[0]; input.value = ''; if (!file) return;
             try {
                 const doc = window.DesiLocalMrm.validate(JSON.parse(await file.text()));
-                if (!confirm('現在の MRM 全体をバックアップ（化合物 ' + doc.compounds.length + ' 件）で置き換えます。先に現在の MRM バックアップを保存してください。復元しますか?')) return;
+                if (!confirm(uiT("現在の MRM 全体をバックアップ（化合物 ") + doc.compounds.length + uiT(" 件）で置き換えます。先に現在の MRM バックアップを保存してください。復元しますか?"))) return;
                 await window.DesiLocalMrm.importDocument(doc);
                 _projCache.clear(); clearSelection(); await loadLibrary();
-                alert('MRM を復元しました');
-            } catch (e) { alert('MRM 復元失敗: ' + e.message); }
+                alert(uiT("MRM を復元しました"));
+            } catch (e) { alert(uiT("MRM 復元失敗: ") + e.message); }
         });
         toolbar.append(exportBtn, restoreBtn, input);
     }
@@ -2756,10 +2764,10 @@ async function init() {
             if (window.DESI_OFFLINE === true && !editor.dialog.querySelector('.exp-offline-note')) {
                 const note = document.createElement('p');
                 note.className = 'exp-help exp-offline-note';
-                note.textContent = 'オフライン版: .exp の編集、ローカルライブラリからの置換、.exp と作業ファイルの保存・復元を利用できます。この画面からのライブラリ登録とクラウドへのメソッド保存・読込は利用できません。';
+                uiBind(note, uiMsg("オフライン版: .exp の編集、ローカルライブラリからの置換、.exp と作業ファイルの保存・復元を利用できます。この画面からのライブラリ登録とクラウドへのメソッド保存・読込は利用できません。"));
                 editor.dialog.querySelector('.exp-head').after(note);
             }
-        } catch (e) { reportError(e, '.exp 編集'); }
+        } catch (e) { reportError(e, uiT(".exp 編集")); }
     });
     document.getElementById('btn-sets').addEventListener('click', () => openSetsModal());
     document.getElementById('btn-reconcile').addEventListener('click', () => openReconcileModal());
@@ -2792,6 +2800,6 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(e => { consol
      hard reload (Ctrl/Cmd-Shift-R). -->
 <div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;"></div>
 <script src="version.js"></script>
-<script>(function(){var _b=document.getElementById('buildTag'); if(_b) _b.textContent=(window.APP_VERSION||'');})();</script>
+<script>(function(){var _b=document.getElementById('buildTag'); if(_b) uiBind(_b, uiMsg("{0}", () => [window.APP_VERSION||'']));})();</script>
 </body>
 </html>

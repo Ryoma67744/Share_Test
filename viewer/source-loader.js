@@ -5,8 +5,19 @@
     if (root) root.SourceLoader = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function() {
     'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
     const failure = (code, message, cause) => Object.assign(new Error(message), {code}, cause ? {cause} : {});
-    const cancelled = () => Object.assign(failure('SOURCE_CANCELLED', '原本の読み込みを中断しました。'), {name:'AbortError'});
+    const cancelled = () => Object.assign(failure('SOURCE_CANCELLED', _uiT("原本の読み込みを中断しました。")), {name:'AbortError'});
     const active = current => {try {return !current || current() !== false;} catch (_) {return false;}};
     const hasBlob = record => !!record?.blob && typeof record.blob.arrayBuffer === 'function';
     function waitWithSignal(promise, signal) {
@@ -46,7 +57,7 @@
             };
         }
         function identityError() {
-            return failure('SOURCE_IDENTITY_CHANGED', '原本の参照が読み込み開始時から変わりました。');
+            return failure('SOURCE_IDENTITY_CHANGED', _uiT("原本の参照が読み込み開始時から変わりました。"));
         }
         function lookup(entry, descriptor) {
             const bound = bindings.get(entry);
@@ -118,7 +129,7 @@
             let record = await read(handle.id);
             check(job);
             if (hasBlob(record)) return record;
-            if (!handle.url || !options.fetchBlob) throw failure('SOURCE_UNAVAILABLE', 'この原本の取得先がありません。');
+            if (!handle.url || !options.fetchBlob) throw failure('SOURCE_UNAVAILABLE', _uiT("この原本の取得先がありません。"));
             let blob;
             try {
                 blob = await waitWithSignal(options.fetchBlob(handle.url, {signal:job.controller.signal}), job.controller.signal);
@@ -127,10 +138,10 @@
                 const status = Number(cause?.status || cause?.response?.status || /\bHTTP\s+(\d{3})\b/i.exec(cause?.message || '')?.[1]) || null;
                 const missing = status === 404 || status === 410;
                 throw Object.assign(failure(missing ? 'SOURCE_MISSING' : 'SOURCE_FETCH_FAILED',
-                    missing ? '共有原本が見つかりません。公開元で再公開してください。' : (cause?.message || '原本を取得できませんでした。'), cause), {status});
+                    missing ? _uiT("共有原本が見つかりません。公開元で再公開してください。") : (cause?.message || _uiT("原本を取得できませんでした。")), cause), {status});
             }
             check(job);
-            if (!blob || typeof blob.arrayBuffer !== 'function') throw failure('SOURCE_FETCH_FAILED', '原本の応答を読み取れませんでした。');
+            if (!blob || typeof blob.arrayBuffer !== 'function') throw failure('SOURCE_FETCH_FAILED', _uiT("原本の応答を読み取れませんでした。"));
             let collision = false;
             try {
                 await storage.putBlob({id:handle.id, blob, mime:handle.mime || blob.type || 'application/octet-stream',
@@ -140,13 +151,13 @@
                 // An explicit original operation can have stored this same ID
                 // while our fetch was running. Never overwrite the first bytes.
                 if (cause?.code === 'BLOB_ID_EXISTS') collision = true;
-                else throw failure('SOURCE_STORAGE_FAILED', cause?.message || '原本を保存できませんでした。', cause);
+                else throw failure('SOURCE_STORAGE_FAILED', cause?.message || _uiT("原本を保存できませんでした。"), cause);
             }
             check(job);
             record = await read(handle.id);
             check(job);
             if (!hasBlob(record) || (!collision && record.blob.size !== blob.size)) {
-                throw failure('SOURCE_STORAGE_VERIFY_FAILED', '原本を保存できませんでした。保存容量を確認してください。');
+                throw failure('SOURCE_STORAGE_VERIFY_FAILED', _uiT("原本を保存できませんでした。保存容量を確認してください。"));
             }
             return record;
         }

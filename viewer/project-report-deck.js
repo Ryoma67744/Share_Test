@@ -5,6 +5,17 @@
     root.ProjectReportDeck = api;
 })(typeof globalThis === 'object' ? globalThis : this, function (root) {
     'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
     const REPORT_REVISION = 'ppt-20261110-1';
     const WIDTH = 13.333333, HEIGHT = 7.5;
     const FONT = 'Yu Gothic';
@@ -26,10 +37,11 @@
     function text(slide, value, box, options) {
         slide.addText(string(value), Object.assign({ ...box, fontFace: FONT, fontSize: 16,
             color: 'FFFFFF', margin: 0, breakLine: false, valign: 'mid',
-            fit: 'shrink', lang: 'ja-JP', paraSpaceAfterPt: 0 }, options));
+            fit: 'shrink', lang: slide._uiLanguage || 'ja-JP', paraSpaceAfterPt: 0 }, options));
     }
     function base(pptx, report, title, light) {
         const slide = pptx.addSlide();
+        slide._uiLanguage = report.locale === "en" ? "en-US" : "ja-JP";
         slide.background = { color: light ? 'FFFFFF' : '000000' };
         text(slide, title, { x: 0.35, y: 0.24, w: 12.63, h: 0.46 },
             { fontSize: 25, bold: true, color: light ? '17223B' : 'FFFFFF' });
@@ -96,10 +108,10 @@
     }
     function outputGroupLabel(report) {
         const group = report.outputGroup;
+        const reportText = (source,params) => globalThis.AppI18n?.tFor ? globalThis.AppI18n.tFor(report.locale || 'ja',source,params) : _uiT(source,params);
         if (!group) return '';
-        if (group.kind === 'independent') return (group.name === '独立' ? '' : group.name + ' | ')
-            + '独立・この切片の自動Range';
-        return group.name + ' | 共通自動Range';
+        if (group.kind === 'independent') return reportText("{0}独立・この切片の自動Range", {"0":(group.name === '独立' ? '' : group.name + ' | ')});
+        return reportText("{0} | 共通自動Range", {"0":(group.name)});
     }
     // The explicit plan is the authoritative export boundary. Do not restore
     // an excluded section from a molecule entry, a reference, or a Ratio ROI.
@@ -234,7 +246,7 @@
         let page = 0;
         for (const {sections: sectionPage, blocks} of planMatrices(report.molecules, sections)) {
             await checkpoint();
-            const slide = pptx.addSlide(); slide.background = {color: '000000'};
+            const slide = pptx.addSlide(); slide._uiLanguage = report.locale === 'en' ? 'en-US' : 'ja-JP'; slide.background = {color: '000000'};
             const blockWidth = (WIDTH - 0.16) / blocks.length;
             const hasReference = sectionPage.some(section => !!section.referenceImage);
             const maxRows = Math.max(...blocks.map(block => block.length));
@@ -302,7 +314,7 @@
             for (let index = 0; index < pages.length; index++) {
                 await checkpoint();
                 const sectionPage = pages[index];
-                const slide = pptx.addSlide(); slide.background = {color: 'FFFFFF'};
+                const slide = pptx.addSlide(); slide._uiLanguage = report.locale === 'en' ? 'en-US' : 'ja-JP'; slide.background = {color: 'FFFFFF'};
                 const headerOffset = report.outputGroup ? 0.24 : 0;
                 if (report.outputGroup) text(slide, outputGroupLabel(report),
                     {x:0.12,y:0.04,w:13.0,h:0.18},{fontSize:10,bold:true,color:'333333'});
@@ -326,7 +338,7 @@
                     colW: [headerWidth, ...sectionPage.map(() => dataWidth)], rowH: ratio?[0.48,0.24,0.24,0.24,0.24]:[0.63, 0.36, 0.36],
                     h: ratio?1.44:1.35, autoPage: false, border: {type: 'solid', color: 'FFFFFF', pt: 1},
                     margin: [2, 5, 2, 5], fontFace: FONT, fontSize: 13, color: '000000',
-                    align: 'center', valign: 'middle', lang: 'ja-JP'});
+                    align: 'center', valign: 'middle', lang: slide._uiLanguage || 'ja-JP'});
                 const cellW = 11.83 / sectionPage.length;
                 const style=molecule.displayStyle || report.displayStyle;
                 const ranges=sectionPage.map(section=>entryFor(molecule,section).displayWindow).filter(Boolean);
@@ -404,11 +416,11 @@
         if (!root.PptxGenJS) throw new Error('PptxGenJS is not loaded');
         const type = options.type || 'blob';
         if (!['blob', 'nodebuffer', 'uint8array'].includes(type)) throw new Error('Unsupported report output type');
-        const report = { ...input, projectName: string(input.projectName) };
+        const report = { ...input, locale: input.locale || options.locale || globalThis.AppI18n?.getLocale() || 'ja', projectName: string(input.projectName) };
         const pptx = new root.PptxGenJS();
         function assertCurrent() {
             if (options.signal && options.signal.aborted) {
-                const error = new Error('PPT レポートの作成を中止しました。'); error.name = 'AbortError'; throw error;
+                const error = new Error(_uiT("PPT レポートの作成を中止しました。")); error.name = 'AbortError'; throw error;
             }
             if (typeof options.assertCurrent === 'function') options.assertCurrent();
         }
@@ -419,8 +431,8 @@
             await new Promise(resolve => setTimeout(resolve, 0));
             assertCurrent();
             if (typeof options.onProgress === 'function') options.onProgress({ phase,
-                index: pptx._slides.length, message: phase === 'write' ? 'PowerPoint ファイルを保存用にまとめています…'
-                    : 'PowerPoint を作成中：' + (pptx._slides.length + 1) + ' ページ' });
+                index: pptx._slides.length, message: phase === 'write' ? _uiT("PowerPoint ファイルを保存用にまとめています…")
+                    : _uiT("PowerPoint を作成中：{0} ページ", {"0":(pptx._slides.length + 1)}) });
             assertCurrent();
         }
         await checkpoint();
@@ -428,8 +440,8 @@
         pptx.layout = 'DESI_REPORT';
         pptx.author = 'Share_Test'; pptx.subject = 'Registered project MSI report';
         pptx.title = report.projectName + ' — DESI MSI report';
-        pptx.company = 'Share_Test'; pptx.lang = 'ja-JP';
-        pptx.theme = { headFontFace: FONT, bodyFontFace: FONT, lang: 'ja-JP' };
+        pptx.company = 'Share_Test'; pptx.lang = report.locale === 'en' ? 'en-US' : 'ja-JP';
+        pptx.theme = { headFontFace: FONT, bodyFontFace: FONT, lang: pptx.lang };
         const scopes = outputReports(report);
         for (const scope of scopes) {
             const sections = (scope.outputGroup ? scope.sections : sectionsFor(scope)).filter(section =>

@@ -1,5 +1,16 @@
 (function(root){
   'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
 
   // Seaborn's colorblind palette; fixed values require no runtime library.
   // https://github.com/mwaskom/seaborn/blob/v0.13.2/seaborn/palettes.py
@@ -122,8 +133,8 @@
     title.id = 'fixed-colors-title';
     const dismiss = element('button','fixed-colors-close','×');
     dismiss.type = 'button';
-    dismiss.title = '閉じる';
-    dismiss.setAttribute('aria-label','色選択を閉じる');
+    _uiAttr(dismiss, "title", "閉じる");
+    _uiAttr(dismiss, "aria-label", "色選択を閉じる");
     dismiss.addEventListener('click', event=>{ event.preventDefault(); event.stopPropagation(); close(); });
     header.append(title,dismiss);
     const current = element('div','fixed-colors-current');
@@ -133,17 +144,17 @@
     current.append(swatch,currentText);
     const grid = element('div','fixed-colors-grid');
     grid.setAttribute('role','group');
-    grid.setAttribute('aria-label','固定10色');
+    _uiAttr(grid, "aria-label", "固定10色");
     const options = colors.map((color,index)=>{
       const button = element('button','fixed-colors-option');
       button.type = 'button';
-      button.title = `${color.name} (${color.hex})`;
-      button.setAttribute('aria-label',`${color.name} ${color.hex}`);
+      _uiAttr(button, "title", color.name + " ({0})", {0:color.hex});
+      _uiAttr(button, "aria-label", color.name + " {0}", {0:color.hex});
       const chip = element('span','fixed-colors-swatch');
       chip.style.backgroundColor = color.hex;
       chip.setAttribute('aria-hidden','true');
       chip.appendChild(element('span','fixed-colors-check','✓'));
-      button.append(chip,element('span','fixed-colors-name',color.name));
+      button.append(chip,_uiText(element('span','fixed-colors-name'),color.name));
       button.addEventListener('click',event=>select(color.hex,event));
       button.addEventListener('keydown',event=>{
         const delta = {ArrowLeft:-1,ArrowRight:1,ArrowUp:-5,ArrowDown:5}[event.key];
@@ -155,9 +166,9 @@
       grid.appendChild(button);
       return button;
     });
-    const clear = element('button','fixed-colors-clear','色なし');
+    const clear = _uiText(element('button', 'fixed-colors-clear', ''), "色なし");
     clear.type = 'button';
-    clear.setAttribute('aria-label','色なし（色の設定を解除）');
+    _uiAttr(clear, "aria-label", "色なし（色の設定を解除）");
     clear.addEventListener('click',event=>select(null,event));
     const note = element('div','fixed-colors-note');
     panel.append(header,current,grid,clear,note);
@@ -167,6 +178,12 @@
     parts = {title,dismiss,currentText,swatch,options,clear,note};
     doc.body.appendChild(panel);
   }
+  if (root.AppI18n) root.AppI18n.onChange(() => {
+    if (!active || !parts) return;
+    const hex = normalizedHex(active.value), selected = colors.findIndex(color => color.hex === hex);
+    const currentName = selected >= 0 ? _uiT(colors[selected].name) + ' (' + hex + ')' : hex ? _uiT('カスタム ({0})',{0:hex}) : active.value ? _uiT('カスタム（現在の色を保持）') : _uiT('色なし');
+    _uiText(parts.currentText,'現在の色：{0}',{0:currentName});
+  });
   function position(anchor){
     const rect = anchor.getBoundingClientRect();
     const viewWidth = root.innerWidth || root.document.documentElement.clientWidth;
@@ -193,15 +210,19 @@
     active.anchor.setAttribute('aria-controls',panel.id);
     const hex = normalizedHex(options.value);
     const selected = colors.findIndex(color=>color.hex === hex);
-    const currentName = selected >= 0 ? `${colors[selected].name} (${hex})` : hex ? `カスタム (${hex})` : options.value ? 'カスタム（現在の色を保持）' : '色なし';
-    parts.title.textContent = options.title || '色を選択';
-    parts.currentText.textContent = `現在の色：${currentName}`;
+    const currentName = selected >= 0 ? `${_uiT(colors[selected].name)} (${hex})` : hex ? _uiT("カスタム ({0})", {"0":(hex)}) : options.value ? _uiT("カスタム（現在の色を保持）") : _uiT("色なし");
+    if (options.titleSource || !options.title) _uiText(parts.title, options.titleSource || "色を選択");
+    else { root.AppI18n?.clearBinding(parts.title); parts.title.textContent = options.title; }
+    _uiText(parts.currentText, "現在の色：{0}", {"0":(currentName)});
     parts.swatch.classList.toggle('is-clear', !options.value);
     parts.swatch.style.backgroundColor = hex || '';
     parts.clear.hidden = !options.allowClear;
     parts.clear.setAttribute('aria-pressed',String(!options.value));
-    parts.note.textContent = options.note || '';
-    parts.note.hidden = !options.note;
+    if (Array.isArray(options.noteSources) && root.AppI18n) {
+      const sources = options.noteSources.slice();
+      _uiText(parts.note, '{value}', () => ({value:sources.map(source => _uiT(source)).join('')}));
+    } else { root.AppI18n?.clearBinding(parts.note); parts.note.textContent = options.note || ''; }
+    parts.note.hidden = !options.note && !(options.noteSources && options.noteSources.length);
     parts.options.forEach((button,i)=>{
       button.setAttribute('aria-pressed',String(i === selected));
       button.tabIndex = i === (selected >= 0 ? selected : 0) ? 0 : -1;

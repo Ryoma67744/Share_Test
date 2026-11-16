@@ -5,6 +5,17 @@
     else root.MsiAlignmentWorkspace = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
 
     const finite = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
     const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
@@ -100,7 +111,7 @@
         saveAttr(card, 'class'); saveAttr(card, 'role'); saveAttr(card, 'aria-modal'); saveAttr(card, 'aria-label');
         card.classList.add('msi-alignment-workspace');
         card.setAttribute('role', 'dialog'); card.setAttribute('aria-modal', 'true');
-        card.setAttribute('aria-label', 'HE/IF と MSI の位置合わせ');
+        _uiAttr(card, "aria-label", "HE/IF と MSI の位置合わせ");
         if (back) { saveAttr(back, 'class'); back.classList.add('msi-alignment-backdrop'); }
 
         // Inert every sibling along the modal's ancestor path. Never inert an
@@ -118,12 +129,12 @@
 
         const header = create('header', 'msi-align-header');
         const toolbar = create('div', 'msi-align-toolbar');
-        toolbar.setAttribute('role', 'toolbar'); toolbar.setAttribute('aria-label', '対応点と表示の操作');
+        toolbar.setAttribute('role', 'toolbar'); _uiAttr(toolbar, "aria-label", "対応点と表示の操作");
         const stage = create('main', 'msi-align-stage');
         const split = create('div', 'msi-align-split');
         const footer = create('footer', 'msi-align-footer');
         const details = create('details', 'msi-align-details');
-        details.appendChild(create('summary', '', '詳細設定・対応点一覧'));
+        details.appendChild(_uiText(create('summary', '', ''), "詳細設定・対応点一覧"));
         const detailsBody = create('div', 'msi-align-details-body'); details.appendChild(detailsBody);
         for (const node of [header, toolbar, stage, footer]) { card.appendChild(node); newNodes.push(node); }
         stage.appendChild(split); footer.appendChild(details);
@@ -134,7 +145,7 @@
         else if (title) relocate(title, header);
         const intro = Array.from(card.children).find(node => node.tagName === 'P');
         if (intro) relocate(intro, detailsBody);
-        const hint = create('span', 'msi-align-hint', '分子を切り替えて対応点を追加できます。画像をドラッグで移動、ホイールで拡大。');
+        const hint = _uiText(create('span', 'msi-align-hint', ''), "分子を切り替えて対応点を追加できます。画像をドラッグで移動、ホイールで拡大。");
         header.appendChild(hint);
 
         const landmark = q('[data-pick="he"]');
@@ -148,28 +159,28 @@
             if (fieldset !== landmarkFieldset) relocate(fieldset, detailsBody);
         }
         const save = q('[data-save]'), cancel = q('[data-modal-cancel]'), applyAll = q('[data-apply-all]'), applyGroup = q('[data-apply-group]');
-        const status = create('span', 'msi-align-footer-status', '表示の拡大・移動で対応点の座標は変わりません。');
+        const status = _uiText(create('span', 'msi-align-footer-status', ''), "表示の拡大・移動で対応点の座標は変わりません。");
         footer.appendChild(status);
         for (const node of [applyGroup, applyAll, cancel, save]) relocate(node, footer);
 
         const viewControls = create('div', 'msi-align-view-controls');
-        const splitButton = button('左右比較'), overlayButton = button('重ね合わせ');
+        const splitButton = _uiText(button(''), "左右比較"), overlayButton = _uiText(button(''), "重ね合わせ");
         splitButton.setAttribute('aria-pressed', 'true'); overlayButton.setAttribute('aria-pressed', 'false');
         viewControls.appendChild(splitButton); viewControls.appendChild(overlayButton);
-        const fitButton = button('全体表示', '左右の画像をそれぞれ画面内に収める');
+        const fitButton = _uiAttr(_uiAttr(_uiText(button('', _uiT("左右の画像をそれぞれ画面内に収める")), "全体表示"), "title", "左右の画像をそれぞれ画面内に収める"), "aria-label", "左右の画像をそれぞれ画面内に収める");
         viewControls.appendChild(fitButton);
         const syncLabel = create('label', 'msi-align-sync');
         const syncInput = create('input'); syncInput.type = 'checkbox';
-        syncLabel.appendChild(syncInput); syncLabel.appendChild(doc.createTextNode('左右の表示を同期'));
+        syncLabel.appendChild(syncInput); syncLabel.appendChild(_uiTextNode(doc, "左右の表示を同期"));
         viewControls.appendChild(syncLabel);
         toolbar.appendChild(viewControls);
 
         const compositeWrap = create('div', 'msi-align-composite');
-        const compositeCanvas = create('canvas'); compositeCanvas.setAttribute('aria-label', 'HE/IF と MSI の重ね合わせ');
+        const compositeCanvas = create('canvas'); _uiAttr(compositeCanvas, "aria-label", "HE/IF と MSI の重ね合わせ");
         compositeWrap.appendChild(compositeCanvas); stage.appendChild(compositeWrap);
-        const opacityLabel = create('label', 'msi-align-opacity', 'MSI の濃さ');
+        const opacityLabel = _uiText(create('label', 'msi-align-opacity', ''), "MSI の濃さ");
         const opacityInput = create('input'); opacityInput.type = 'range'; opacityInput.min = '0'; opacityInput.max = '1';
-        opacityInput.step = '0.01'; opacityInput.value = '0.5'; opacityInput.setAttribute('aria-label', 'MSI の濃さ');
+        opacityInput.step = '0.01'; opacityInput.value = '0.5'; _uiAttr(opacityInput, "aria-label", "MSI の濃さ");
         opacityLabel.appendChild(opacityInput); viewControls.appendChild(opacityLabel);
         const compositeMessage = create('span', 'msi-align-composite-message', '');
         compositeWrap.appendChild(compositeMessage);
@@ -179,9 +190,9 @@
             const pane = create('section', 'msi-align-pane');
             const heading = create('div', 'msi-align-pane-header');
             const name = create('strong', '', label); heading.appendChild(name);
-            const zoomOut = button('−', label + ' を縮小'), zoomIn = button('＋', label + ' を拡大');
-            zoomOut.setAttribute('aria-label', label + ' を縮小'); zoomIn.setAttribute('aria-label', label + ' を拡大');
-            const fit = button('全体');
+            const zoomOut = _uiAttr(_uiAttr(button('−', _uiT("{0} を縮小", {"0":(label)})), "title", "{0} を縮小", {"0":(label)}), "aria-label", "{0} を縮小", {"0":(label)}), zoomIn = _uiAttr(_uiAttr(button('＋', _uiT("{0} を拡大", {"0":(label)})), "title", "{0} を拡大", {"0":(label)}), "aria-label", "{0} を拡大", {"0":(label)});
+            _uiAttr(zoomOut, "aria-label", "{0} を縮小", {"0":(label)}); _uiAttr(zoomIn, "aria-label", "{0} を拡大", {"0":(label)});
+            const fit = _uiText(button(''), "全体");
             heading.appendChild(zoomOut); heading.appendChild(zoomIn); heading.appendChild(fit);
             pane.appendChild(heading);
             saveAttr(wrap, 'class'); saveAttr(wrap, 'style');
@@ -199,7 +210,7 @@
             }
             saveAttr(wrap, 'tabindex'); saveAttr(wrap, 'aria-label');
             wrap.tabIndex = 0;
-            wrap.setAttribute('aria-label', label + '画像。ドラッグで移動、ホイールまたは拡大縮小ボタンで表示変更');
+            _uiAttr(wrap, "aria-label", "{0}画像。ドラッグで移動、ホイールまたは拡大縮小ボタンで表示変更", {"0":(label)});
             const data = { side, wrap, content, source, svg, view: null, width: 0, height: 0,
                 viewportWidth: 0, viewportHeight: 0, suppressedUntil: 0, drag: null };
             panes[side] = data;
@@ -377,7 +388,7 @@
                 } catch (error) {
                     if (!isCurrent()) return;
                     compositeCanvas.width = width; compositeCanvas.height = height;
-                    compositeMessage.textContent = '重ね合わせを表示できません。左右比較で画像の読み込みを確認してください。';
+                    _uiText(compositeMessage, "重ね合わせを表示できません。左右比較で画像の読み込みを確認してください。");
                     if (typeof options.onCompositeError === 'function') options.onCompositeError(error);
                 }
             });

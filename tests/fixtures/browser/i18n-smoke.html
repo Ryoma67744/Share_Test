@@ -1,0 +1,10 @@
+<!doctype html><html lang="ja"><meta charset="utf-8"><title>Language regression fixture</title>
+<script src="../../../app-i18n.js"></script><script src="../../../app-i18n-common.js"></script>
+<script>AppI18n.register('fixture',{'化合物 {name} を開く':'Open compound {name}','定量':'Quantifier','未保存のメモ':'Unsaved note'});</script>
+<select data-i18n-switch aria-label="Language / 言語"><option value="ja">日本語</option><option value="en">English</option></select>
+<button id="save"><b id="icon">✓</b><span data-i18n="保存">保存</span></button>
+<label><span data-i18n="名前">名前</span><input id="name" value="保存" data-i18n-placeholder="検索" placeholder="検索"></label>
+<textarea id="note">未保存のメモ</textarea><p id="project-name">保存</p><div id="editable" contenteditable="true">保存</div>
+<select id="role"><option value="定量" data-i18n="定量">定量</option><option value="original">Original</option></select>
+<div id="dynamic"></div><p id="bound"></p><script>let clicks=0;document.querySelector('#save').onclick=()=>clicks++;AppI18n.setText(document.querySelector('#bound'),'化合物 {name} を開く',{name:'保存'});</script>
+</html>

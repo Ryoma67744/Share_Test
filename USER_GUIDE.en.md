@@ -626,7 +626,7 @@ Glutamate: re-rendered from the registered source
 
 **Source and settings**: 261030_Hirabayashi_13C_Brain / Ctrl(+/+)_13C_A. These images are re-rendered from the same registered source section. Registered pixel size: 30 × 30 µm.
 
-![Actual non-target table and KMD panel showing 12 synthetic molecules in two CH₂ series](docs/help/images/kmd.png)
+![Actual non-target table and KMD panel showing 12 synthetic molecules in two CH₂ series](docs/help/images/kmd-en.png)
 
 ANALYSIS KMD plot: units, series list, overlay and reset
 
@@ -835,7 +835,7 @@ Use Align to register matching tissue positions and inspect their overlay.
 3. **Use landmarks or automatic alignment** — Landmarks pair corresponding positions in the two images. Review silhouette-based automatic alignment visually before accepting it.
 4. **Review the overlay and save** — Use the overlay and MSI opacity to inspect registration. Save accepts the change; Cancel discards the current adjustment.
 
-![HE and MSI Align dialog](docs/help/images/align.png)
+![HE and MSI Align dialog](docs/help/images/align-en.png)
 
 Review images, scale and landmarks
 
@@ -908,7 +908,7 @@ Attach microscopy images to an ROI and inspect them alongside MSI.
 3. **Compare with MSI** — Zoom into the microscopy image and compare it with ROI MSI. Check the selected molecule or ratio and display settings.
 4. **Organise and save** — Organise image order and descriptions; confirm before deletion. When sharing, check that the published or exported result contains the images.
 
-![ROI microscopy image manager](docs/help/images/microscope.png)
+![ROI microscopy image manager](docs/help/images/microscope-en.png)
 
 Microscopy images associated with an ROI
 
@@ -929,11 +929,11 @@ Compare images in a grid, create multicolour molecule overlays and produce PPT r
 3. **Overlay molecules** — Assign colours to multiple molecules in an overlay. Review brightness normalisation before comparing distributions. Multicolour ratio overlays are not supported.
 4. **Create a PPT report** — PPT reports initially include every section independently. Choose output sections and assign comparisons to named groups. Each group shares an automatic Range per strictly matched molecule; independent sections use their own automatic Range. Viewer Same/Individual and manual Range do not determine report windows. Add, rename or delete groups, assign checked rows in bulk, or reset all assignments to independent. Unregistered molecules are omitted; registered load failures remain visible. Check group labels and raw ranges in the exported slides.
 
-![Preview image grid](docs/help/images/preview.png)
+![Preview image grid](docs/help/images/preview-en.png)
 
 Compare sections and molecules in a grid
 
-![PPT report export settings](docs/help/images/report.png)
+![PPT report export settings](docs/help/images/report-en.png)
 
 Review report export conditions
 
@@ -960,7 +960,7 @@ Choose browser saving, file backup or server publication according to your needs
 3. **Restore with Import** — Import the saved ZIP, review its contents and confirm restoration. A compatible app on another computer can restore it.
 4. **Review and publish** — Authors use Publish to share after Preview. Verify completion and Sync status, then share the URL and required password.
 
-![Viewer saving, ZIP and Memo controls](docs/help/images/save.png)
+![Viewer saving, ZIP and Memo controls](docs/help/images/save-en.png)
 
 Backup and note controls
 
@@ -989,7 +989,7 @@ Diagnose display issues, missing sources, storage problems, sharing and offline 
 3. **Check storage and permissions** — Read storage conflict, capacity and shared-lock messages. Preserve unsaved work with ZIP or recovery drafts before reloading.
 4. **Retry with the recorded conditions** — In the Method table, ↑ / ↓ moves between molecules. During ROI drawing, Enter finishes and Esc cancels. For support, record build version, action, input format and error text.
 
-![Projects list with creation and MRM management controls](docs/help/images/projects.png)
+![Projects list with creation and MRM management controls](docs/help/images/projects-en.png)
 
 Project manager
 

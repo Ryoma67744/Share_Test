@@ -1,3 +1,6 @@
+
+// UI-only bindings: parameters keep user data separate from translation keys.
+function uiT(source, params) { const api=globalThis.AppI18n; if(typeof params==='function')params=params(); return api ? api.t(source, params) : String(source).replace(/\{(\w+)\}/g,(token,k)=>params && Object.prototype.hasOwnProperty.call(params,k) ? String(params[k] ?? '') : token); }
 /**
  * Lossless editor for the single, flat MRM layout emitted by mrm.html.
  * This is deliberately not a general MassLynx method converter. Multiple
@@ -44,10 +47,14 @@ const fieldKeys = {
   ce: i => ['CollisionEnergy(eV)_' + i],
 };
 
+function uiWarning(warnings, source, params) {
+  if (!warnings.uiMessages) Object.defineProperty(warnings, 'uiMessages', {value:[]});
+  warnings.uiMessages.push({source,params}); warnings.push(uiT(source,params));
+}
 function fail(code, message) { throw new ExpError(code, message); }
 function originalOf(doc) {
   const original = originals.get(doc);
-  if (!original) fail('DOCUMENT', 'この文書は parseExp で読み込まれた文書ではありません。');
+  if (!original) fail('DOCUMENT', uiT("この文書は parseExp で読み込まれた文書ではありません。"));
   return original;
 }
 function freeze(value) {
@@ -60,28 +67,28 @@ function freeze(value) {
 function copyBytes(input) {
   const bytes = input instanceof Uint8Array ? new Uint8Array(input) :
     input instanceof ArrayBuffer ? new Uint8Array(input.slice(0)) : null;
-  if (!bytes) fail('INPUT', '.exp は ArrayBuffer または Uint8Array で指定してください。');
-  if (!bytes.length) fail('EMPTY', 'ファイルが空です。');
-  if (bytes.length > MAX_EXP_BYTES) fail('SIZE', '.exp の上限は 1 MiB です。');
+  if (!bytes) fail('INPUT', uiT(".exp は ArrayBuffer または Uint8Array で指定してください。"));
+  if (!bytes.length) fail('EMPTY', uiT("ファイルが空です。"));
+  if (bytes.length > MAX_EXP_BYTES) fail('SIZE', uiT(".exp の上限は 1 MiB です。"));
   return bytes;
 }
 function detectEncoding(bytes, requested) {
-  if (!SUPPORTED_ENCODINGS.includes(requested)) fail('ENCODING', '未対応の文字コードです。');
+  if (!SUPPORTED_ENCODINGS.includes(requested)) fail('ENCODING', uiT("未対応の文字コードです。"));
   let bomEncoding = null, bomLength = 0;
   if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) { bomEncoding = 'utf-8'; bomLength = 3; }
   else if (bytes[0] === 0xff && bytes[1] === 0xfe) { bomEncoding = 'utf-16le'; bomLength = 2; }
   else if (bytes[0] === 0xfe && bytes[1] === 0xff) { bomEncoding = 'utf-16be'; bomLength = 2; }
-  if (bomEncoding && requested !== 'auto' && requested !== bomEncoding) fail('ENCODING', 'BOM と指定した文字コードが一致しません。');
+  if (bomEncoding && requested !== 'auto' && requested !== bomEncoding) fail('ENCODING', uiT("BOM と指定した文字コードが一致しません。"));
   const encoding = bomEncoding || (requested === 'auto' ? 'utf-8' : requested);
-  if (encoding.startsWith('utf-16') && (bytes.length - bomLength) % 2) fail('ENCODING', 'UTF-16 のバイト数が不正です。');
+  if (encoding.startsWith('utf-16') && (bytes.length - bomLength) % 2) fail('ENCODING', uiT("UTF-16 のバイト数が不正です。"));
   let decoder;
   try {
     decoder = new TextDecoder(encoding, { fatal: true, ignoreBOM: true });
     decoder.decode(bytes.subarray(bomLength));
   } catch {
     fail('ENCODING', requested === 'auto'
-      ? 'UTF-8 として読み取れません。文字コードを Shift_JIS または Windows-1252 などに指定してください。'
-      : '指定した文字コードで読み取れません。');
+      ? uiT("UTF-8 として読み取れません。文字コードを Shift_JIS または Windows-1252 などに指定してください。")
+      : uiT("指定した文字コードで読み取れません。"));
   }
   return { encoding, bomLength, decoder };
 }
@@ -94,7 +101,7 @@ function readLines(bytes, encoding, bomLength, decoder) {
   const lines = [];
   let start = bomLength;
   while (start < bytes.length) {
-    if (lines.length >= MAX_EXP_LINES) fail('SIZE', '.exp の行数が上限 50,000 行を超えています。');
+    if (lines.length >= MAX_EXP_LINES) fail('SIZE', uiT(".exp の行数が上限 50,000 行を超えています。"));
     let end = start;
     while (end < bytes.length && unit(end) !== 10 && unit(end) !== 13) end += step;
     let eolEnd = end;
@@ -105,7 +112,7 @@ function readLines(bytes, encoding, bomLength, decoder) {
     let comma = start;
     while (comma < end && unit(comma) !== 44) comma += step;
     const text = decoder.decode(bytes.subarray(start, end));
-    if (text.includes('\0')) fail('BINARY', 'NUL を含むファイルは対応していません。文字コードを確認してください。');
+    if (text.includes('\0')) fail('BINARY', uiT("NUL を含むファイルは対応していません。文字コードを確認してください。"));
     const hasComma = comma < end;
     const key = hasComma ? decoder.decode(bytes.subarray(start, comma)).trim() : text.trim();
     lines.push({ start, end, eolEnd, key, text, keyEnd: comma, valueStart: hasComma ? comma + step : end,
@@ -138,12 +145,12 @@ function canonicalNumber(value) {
 }
 function requireNumber(line, key, positive = false) {
   const value = finiteNumber(line.value);
-  if (value === null || (positive && value <= 0)) fail('VALUE', `${key} の数値が不正です。`);
+  if (value === null || (positive && value <= 0)) fail('VALUE', uiT("{0} の数値が不正です。", () => [key]));
   return value;
 }
 function requireLine(map, key) {
   const line = map.get(key);
-  if (!line || line.value === null) fail('MISSING_KEY', `必須項目 ${key} がありません。`);
+  if (!line || line.value === null) fail('MISSING_KEY', uiT("必須項目 {0} がありません。", () => [key]));
   return line;
 }
 function sameValue(a, b, field) { return field === 'name' ? a === b : canonicalNumber(a) === canonicalNumber(b); }
@@ -155,10 +162,10 @@ function findPolarity(lines, warnings) {
     const raw = line.value.trim().toLowerCase();
     if (['+', 'positive', 'pos', 'es+', 'esi+'].includes(raw)) found.add('positive');
     else if (['-', 'negative', 'neg', 'es-', 'esi-'].includes(raw)) found.add('negative');
-    else warnings.push(`極性の値「${line.value}」を判定できません。`);
+    else uiWarning(warnings, "極性の値「{0}」を判定できません。", () => [line.value]);
   }
-  if (found.size > 1) fail('POLARITY', '複数の異なる極性があり、単一 Function として扱えません。');
-  if (!found.size) warnings.push('極性はファイルから確定できません。ライブラリとの照合時に確認してください。');
+  if (found.size > 1) fail('POLARITY', uiT("複数の異なる極性があり、単一 Function として扱えません。"));
+  if (!found.size) uiWarning(warnings, "極性はファイルから確定できません。ライブラリとの照合時に確認してください。");
   return [...found][0] || null;
 }
 
@@ -172,35 +179,35 @@ export function parseExp(input, options = {}) {
     const isKnown = ['NumSIRMasses', 'NoOfChannels', 'FunctionScanTime(sec)'].includes(line.key)
       || /^(?:NumFunctions|NoOfFunctions|NumberOfFunctions|FunctionCount|FunctionType|ScanType|FunctionNumber|FunctionIndex)$/i.test(line.key)
       || indexedPatterns.some(pattern => pattern.test(line.key));
-    if (isKnown && map.has(line.key)) fail('DUPLICATE_KEY', `${line.key} が複数あります。複数 Function または重複した項目は未対応です。`);
+    if (isKnown && map.has(line.key)) fail('DUPLICATE_KEY', uiT("{0} が複数あります。複数 Function または重複した項目は未対応です。", () => [line.key]));
     if (isKnown) map.set(line.key, line);
     if (/^(?:NumFunctions|NoOfFunctions|NumberOfFunctions|FunctionCount)$/i.test(line.key)) {
-      if (finiteNumber(line.value) !== 1) fail('FUNCTIONS', '複数 Function または不明な Function 数は未対応です。');
+      if (finiteNumber(line.value) !== 1) fail('FUNCTIONS', uiT("複数 Function または不明な Function 数は未対応です。"));
     }
     // Reject explicit function boundaries beyond 1 even if another function
     // contains a scan instead of MRM and therefore has no duplicate MRM keys.
     const fn = line.text.match(/^\s*\[?Function[\s_]*(\d+)(?:\]|:|,|\s|$)/i);
-    if (fn && Number(fn[1]) !== 1) fail('FUNCTIONS', '複数 Function の .exp は未対応です。');
-    if (/^(?:FunctionNumber|FunctionIndex)$/i.test(line.key) && finiteNumber(line.value) !== 1) fail('FUNCTIONS', '単一の Function 1 のみ対応しています。');
+    if (fn && Number(fn[1]) !== 1) fail('FUNCTIONS', uiT("複数 Function の .exp は未対応です。"));
+    if (/^(?:FunctionNumber|FunctionIndex)$/i.test(line.key) && finiteNumber(line.value) !== 1) fail('FUNCTIONS', uiT("単一の Function 1 のみ対応しています。"));
     if (/^(?:FunctionType|ScanType)$/i.test(line.key) && !/^(?:MRM|SRM)$/i.test((line.value || '').trim())) {
-      fail('FUNCTION_TYPE', 'この Function 種別は未対応です。MRM/SRM と明示された形式のみ編集できます。');
+      fail('FUNCTION_TYPE', uiT("この Function 種別は未対応です。MRM/SRM と明示された形式のみ編集できます。"));
     }
     if (/(?:UseSampleList|UseSLMasses|SLAuto|UseAsLockMass)/i.test(line.key)) {
       if (line.value === null || !/^(?:0+(?:\.0*)?|false|no|off)$/i.test(line.value.trim())) {
-        fail('DEPENDENT_VALUE', `${line.key} が有効または不明です。サンプルリスト参照・LockMass の値は安全に編集できません。`);
+        fail('DEPENDENT_VALUE', uiT("{0} が有効または不明です。サンプルリスト参照・LockMass の値は安全に編集できません。", () => [line.key]));
       }
     }
   }
   const count = requireNumber(requireLine(map, 'NoOfChannels'), 'NoOfChannels', true);
   const sirCount = requireNumber(requireLine(map, 'NumSIRMasses'), 'NumSIRMasses', true);
-  if (!Number.isInteger(count) || count !== sirCount || count > MAX_EXP_CHANNELS) fail('COUNT', 'チャンネル数が不正または NumSIRMasses と一致しません。');
+  if (!Number.isInteger(count) || count !== sirCount || count > MAX_EXP_CHANNELS) fail('COUNT', uiT("チャンネル数が不正または NumSIRMasses と一致しません。"));
   for (const line of lines) {
     for (const pattern of indexedPatterns) {
       const match = line.key.match(pattern);
       if (!match) continue;
       const index = Number(match[2]);
       if (!Number.isInteger(index) || index < 1 || index > count || String(index) !== match[2]) {
-        fail('CHANNEL_INDEX', `${line.key} の番号がチャンネル数と整合しません。`);
+        fail('CHANNEL_INDEX', uiT("{0} の番号がチャンネル数と整合しません。", () => [line.key]));
       }
       break;
     }
@@ -213,13 +220,13 @@ export function parseExp(input, options = {}) {
       const values = keys.map(key => {
         const line = requireLine(map, key);
         if (field === 'name') {
-          if (forbiddenText.test(line.value) || line.value.length > 1024) fail('VALUE', `${key} が長すぎるか、制御文字が含まれています。`);
+          if (forbiddenText.test(line.value) || line.value.length > 1024) fail('VALUE', uiT("{0} が長すぎるか、制御文字が含まれています。", () => [key]));
           return line.value;
         }
         requireNumber(line, key, field === 'precursor' || field === 'product');
         return line.value.trim();
       });
-      if (values.some(value => !sameValue(value, values[0], field))) fail('MASS_MISMATCH', `${keys.join(' / ')} の値が一致しません。`);
+      if (values.some(value => !sameValue(value, values[0], field))) fail('MASS_MISMATCH', uiT("{0} の値が一致しません。", () => [keys.join(' / ')]));
       row[field] = values[0];
     }
     const optional = key => map.get(key)?.value ?? null;
@@ -232,19 +239,19 @@ export function parseExp(input, options = {}) {
     for (const [sir, mrm] of [['sirDwell', 'dwell'], ['sirDelay', 'delay'], ['sirAutoDwell', 'autoDwell']]) {
       if (row.details[sir] !== null && row.details[mrm] !== null && row.details[sir].trim() !== row.details[mrm].trim()
           && (finiteNumber(row.details[sir]) === null || canonicalNumber(row.details[sir]) !== canonicalNumber(row.details[mrm]))) {
-        fail('SETTING_MISMATCH', `チャンネル ${i} の SIR と MRM の ${mrm} が一致しません。`);
+        fail('SETTING_MISMATCH', uiT("チャンネル {0} の SIR と MRM の {1} が一致しません。", () => [i, mrm]));
       }
     }
     rows.push(row);
   }
   const polarity = findPolarity(lines, warnings);
   if (lines.some(line => line.key === 'FunctionTypes')) {
-    warnings.push('この形式の部分出力では、元のFunctionScanTime・InterScan・Dwell・Delayを保持します。測定時間を再計算しないため、出力後はMassLynxで時間設定を確認してください。');
+    uiWarning(warnings, "この形式の部分出力では、元のFunctionScanTime・InterScan・Dwell・Delayを保持します。測定時間を再計算しないため、出力後はMassLynxで時間設定を確認してください。");
   }
-  warnings.push('実ファイル・対象 MassLynx での互換性確認が必要です。任意の行追加・削除・並べ替えには対応していません。チェックした行だけの出力は、既知の項目と固定Dwellの時間設定を検証できる形式に限ります。');
+  uiWarning(warnings, "実ファイル・対象 MassLynx での互換性確認が必要です。任意の行追加・削除・並べ替えには対応していません。チェックした行だけの出力は、既知の項目と固定Dwellの時間設定を検証できる形式に限ります。");
   const doc = freeze({ version: 1, parserVersion: PARSER_VERSION, profile: 'flat-mrm-v1', filename, encoding,
     bom: bomLength > 0, byteLength: bytes.length, rows, polarity, warnings,
-    capabilities: { editValues: true, structural: false, selectedExport: 'validated-profile', reason: '任意の行追加・削除・並べ替えは未対応です。選択した行だけの出力は、既知の項目・固定Dwell・形式ごとの時間設定を検証できる場合に利用できます。' },
+    capabilities: { editValues: true, structural: false, selectedExport: 'validated-profile', reason: uiT("任意の行追加・削除・並べ替えは未対応です。選択した行だけの出力は、既知の項目・固定Dwell・形式ごとの時間設定を検証できる場合に利用できます。") },
   });
   originals.set(doc, { bytes, encoding, bomLength, map, lines });
   return doc;
@@ -288,7 +295,7 @@ function legacyCodec(encoding) {
 }
 
 function encodeValue(text, encoding) {
-  if (hasUnpairedSurrogate(text)) fail('ENCODING_VALUE', '不正な Unicode 文字が含まれています。');
+  if (hasUnpairedSurrogate(text)) fail('ENCODING_VALUE', uiT("不正な Unicode 文字が含まれています。"));
   if (encoding === 'utf-8') return new TextEncoder().encode(text);
   if (encoding.startsWith('utf-16')) {
     const out = new Uint8Array(text.length * 2), little = encoding === 'utf-16le';
@@ -303,7 +310,7 @@ function encodeValue(text, encoding) {
   let length = 0;
   for (const char of text) {
     const chunk = codec.get(char);
-    if (!chunk) fail('ENCODING_VALUE', `文字「${char}」は元の文字コード ${encoding} で保存できません。`);
+    if (!chunk) fail('ENCODING_VALUE', uiT("文字「{0}」は元の文字コード {1} で保存できません。", () => [char, encoding]));
     chunks.push(chunk); length += chunk.length;
   }
   const out = new Uint8Array(length);
@@ -316,27 +323,27 @@ export function validateEdits(doc, rows) {
   const original = originalOf(doc), errors = [];
   let changedCells = 0;
   if (!Array.isArray(rows) || rows.length !== doc.rows.length) {
-    return { valid: false, errors: [{ rowId: null, field: null, message: '行の追加・削除は未対応です。' }], changedCells };
+    return { valid: false, errors: [{ rowId: null, field: null, message: uiT("行の追加・削除は未対応です。") }], changedCells };
   }
   for (let index = 0; index < rows.length; index++) {
     const row = rows[index];
     const base = doc.rows[index];
     if (!row || typeof row !== 'object' || row.id !== base.id) {
-      errors.push({ rowId: base.id, field: null, message: '行の入れ替えまたは識別子の変更は未対応です。' });
+      errors.push({ rowId: base.id, field: null, message: uiT("行の入れ替えまたは識別子の変更は未対応です。") });
       continue;
     }
     for (const field of fields) {
       const value = row[field];
       let message = null;
       if (field === 'name') {
-        if (typeof value !== 'string') message = '化合物名は文字列で指定してください。';
-        else if (value.length > 1024) message = '化合物名は 1,024 文字以内で指定してください。';
-        else if (forbiddenText.test(value)) message = '化合物名に改行・制御文字は使用できません。';
-        else if (hasUnpairedSurrogate(value)) message = '化合物名に不正な Unicode 文字が含まれています。';
+        if (typeof value !== 'string') message = uiT("化合物名は文字列で指定してください。");
+        else if (value.length > 1024) message = uiT("化合物名は 1,024 文字以内で指定してください。");
+        else if (forbiddenText.test(value)) message = uiT("化合物名に改行・制御文字は使用できません。");
+        else if (hasUnpairedSurrogate(value)) message = uiT("化合物名に不正な Unicode 文字が含まれています。");
       } else {
         const number = finiteNumber(value);
-        if (number === null) message = '有限の数値を入力してください。空欄は使用できません。';
-        else if ((field === 'precursor' || field === 'product') && number <= 0) message = '質量は 0 より大きい数値を入力してください。';
+        if (number === null) message = uiT("有限の数値を入力してください。空欄は使用できません。");
+        else if ((field === 'precursor' || field === 'product') && number <= 0) message = uiT("質量は 0 より大きい数値を入力してください。");
       }
       if (!message && !sameValue(value, base[field], field)) {
         try { encodeValue(field === 'name' ? value : String(value).trim(), original.encoding); }
@@ -370,11 +377,11 @@ function patchesFor(doc, rows) {
 }
 function applyPatches(bytes, patches) {
   const length = patches.reduce((n, patch) => n + patch.bytes.length - (patch.end - patch.start), bytes.length);
-  if (length > MAX_EXP_BYTES) fail('SIZE', '編集後の .exp が 1 MiB を超えます。');
+  if (length > MAX_EXP_BYTES) fail('SIZE', uiT("編集後の .exp が 1 MiB を超えます。"));
   const out = new Uint8Array(length);
   let inputOffset = 0, outputOffset = 0;
   for (const patch of patches) {
-    if (patch.start < inputOffset || patch.end < patch.start) fail('PATCH', '編集位置が重複しています。');
+    if (patch.start < inputOffset || patch.end < patch.start) fail('PATCH', uiT("編集位置が重複しています。"));
     out.set(bytes.subarray(inputOffset, patch.start), outputOffset);
     outputOffset += patch.start - inputOffset;
     out.set(patch.bytes, outputOffset);
@@ -387,15 +394,15 @@ function applyPatches(bytes, patches) {
 
 export function verifyExport(doc, output, rows) {
   const original = originalOf(doc), validation = validateEdits(doc, rows);
-  if (!validation.valid) throw new ExpError('EDITS', '入力内容を修正してください。', validation.errors);
+  if (!validation.valid) throw new ExpError('EDITS', uiT("入力内容を修正してください。"), validation.errors);
   const bytes = copyBytes(output), expected = applyPatches(original.bytes, patchesFor(doc, rows));
   if (bytes.length !== expected.length || bytes.some((value, i) => value !== expected[i])) {
-    fail('EXPORT_CHANGED', '編集対象以外のバイト列が変更されています。');
+    fail('EXPORT_CHANGED', uiT("編集対象以外のバイト列が変更されています。"));
   }
   const parsed = parseExp(bytes, { filename: doc.filename, encoding: doc.encoding });
   for (let i = 0; i < rows.length; i++) {
     for (const field of fields) if (!sameValue(parsed.rows[i][field], rows[i][field], field)) {
-      fail('EXPORT_VALUE', `出力したチャンネル ${i + 1} の ${field} が編集内容と一致しません。`);
+      fail('EXPORT_VALUE', uiT("出力したチャンネル {0} の {1} が編集内容と一致しません。", () => [i + 1, field]));
     }
   }
   return { valid: true, changedCells: validation.changedCells };
@@ -403,7 +410,7 @@ export function verifyExport(doc, output, rows) {
 
 export function writeEditedExp(doc, rows) {
   const original = originalOf(doc), validation = validateEdits(doc, rows);
-  if (!validation.valid) throw new ExpError('EDITS', '入力内容を修正してください。', validation.errors);
+  if (!validation.valid) throw new ExpError('EDITS', uiT("入力内容を修正してください。"), validation.errors);
   const output = applyPatches(original.bytes, patchesFor(doc, rows));
   verifyExport(doc, output, rows);
   return output;
@@ -446,31 +453,31 @@ function massLynxSelectionLayout(doc) {
   for (const line of original.lines) {
     if (!line.text.trim() || /^\s*(?:;|#|\/\/)/.test(line.text)) continue;
     if (selectionGeneralHeader.test(line.key) && (line.value === null || !line.value.trim())) {
-      if (section !== null) fail('SELECTION_PROFILE', 'GENERAL INFORMATION はファイル冒頭に1回だけ必要です。');
+      if (section !== null) fail('SELECTION_PROFILE', uiT("GENERAL INFORMATION はファイル冒頭に1回だけ必要です。"));
       section = 'general'; continue;
     }
     if (line.value === null && selectionFunctionMarker.test(line.text.trim())) {
-      if (section !== 'general') fail('SELECTION_PROFILE', 'GENERAL INFORMATION の後に FUNCTION 1 が1回だけ必要です。');
+      if (section !== 'general') fail('SELECTION_PROFILE', uiT("GENERAL INFORMATION の後に FUNCTION 1 が1回だけ必要です。"));
       section = 'function'; continue;
     }
     const allowed = section === 'general'
       ? massLynxGeneralKeys.has(line.key) || massLynxGeneralIndexed.test(line.key)
       : section === 'function' && (massLynxFunctionKeys.has(line.key) || indexedKey(line.key));
-    if (!allowed || line.value === null) fail('SELECTION_PROFILE', `項目「${line.key}」はこのセクションの選択出力に対応していません。`);
-    if (map.has(line.key)) fail('SELECTION_PROFILE', `項目「${line.key}」が重複しています。`);
+    if (!allowed || line.value === null) fail('SELECTION_PROFILE', uiT("項目「{0}」はこのセクションの選択出力に対応していません。", () => [line.key]));
+    if (map.has(line.key)) fail('SELECTION_PROFILE', uiT("項目「{0}」が重複しています。", () => [line.key]));
     map.set(line.key, line);
   }
-  if (section !== 'function') fail('SELECTION_PROFILE', 'FUNCTION 1 がありません。');
+  if (section !== 'function') fail('SELECTION_PROFILE', uiT("FUNCTION 1 がありません。"));
   const expect = (key, value) => {
     const line = requireLine(map, key);
     if (typeof value === 'number' ? canonicalNumber(line.value) !== canonicalNumber(value) : line.value.trim() !== value) {
-      fail('SELECTION_PROFILE', `${key} が対応する値 ${value} ではないため、選択行だけの出力には対応していません。`);
+      fail('SELECTION_PROFILE', uiT("{0} が対応する値 {1} ではないため、選択行だけの出力には対応していません。", () => [key, value]));
     }
   };
   expect('VersionNumber', 1); expect('NumberOfFunctions', 1); expect('NumFunctions', 1);
   expect('FunctionTypes', 'MRM'); expect('FunctionType', 'MRM');
   const polarity = requireLine(map, 'FunctionPolarity').value.trim().toLowerCase();
-  if (!['positive', 'negative'].includes(polarity)) fail('SELECTION_PROFILE', 'FunctionPolarity を確認できません。');
+  if (!['positive', 'negative'].includes(polarity)) fail('SELECTION_PROFILE', uiT("FunctionPolarity を確認できません。"));
   expect('PositivePolarity', polarity === 'positive' ? 1 : 0);
   // These features can refer to channel indices; absent/active/unknown states
   // are not silently carried into a document with different channel numbers.
@@ -478,11 +485,11 @@ function massLynxSelectionLayout(doc) {
   expect('MassesVSorted', 0); expect('ExperimentVSorted', 0); expect('ReferenceFrequency', 0);
   for (const key of ['FractionLowMassIndex', 'FractionHighMassIndex']) {
     const values = requireLine(map, key).value.split(',');
-    if (values.length !== 32 || values.some(value => canonicalNumber(value) !== '0')) fail('SELECTION_PROFILE', `${key} が無効な32項目の配列ではありません。`);
+    if (values.length !== 32 || values.some(value => canonicalNumber(value) !== '0')) fail('SELECTION_PROFILE', uiT("{0} が無効な32項目の配列ではありません。", () => [key]));
   }
   expect('ExperimentExtension', 'TIMED_EVENTS_EXTENSION');
   if (requireLine(map, 'ExperimentExtensionData').value.split(',').map(value => value.trim()).join(',') !== inactiveTimedEvents) {
-    fail('SELECTION_PROFILE', 'このタイムイベント設定の選択出力には対応していません。');
+    fail('SELECTION_PROFILE', uiT("このタイムイベント設定の選択出力には対応していません。"));
   }
   timingDecimal(requireLine(map, 'FunctionInterScanTime(sec)').value, 'FunctionInterScanTime(sec)');
   const channelFields = new Map();
@@ -491,7 +498,7 @@ function massLynxSelectionLayout(doc) {
     if (entry) channelFields.set(entry.index, (channelFields.get(entry.index) || 0) + 1);
   }
   for (const row of doc.rows) if (channelFields.get(row.channel) !== indexedPatterns.length) {
-    fail('SELECTION_PROFILE', `チャンネル ${row.channel} の設定が不足しています。`);
+    fail('SELECTION_PROFILE', uiT("チャンネル {0} の設定が不足しています。", () => [row.channel]));
   }
 }
 const MAX_TIMING_SCALE = 128;
@@ -505,15 +512,15 @@ function indexedKey(key) {
 function timingDecimal(raw, key, positive = false) {
   const number = finiteNumber(raw);
   if (number === null || number < 0 || (positive && number <= 0)) {
-    fail('SELECTION_TIMING', `${key} は${positive ? '正の' : '0以上の'}固定時間である必要があります。`);
+    fail('SELECTION_TIMING', uiT("{0} は{1}固定時間である必要があります。", () => [key, positive ? uiT("正の") : uiT("0以上の")]));
   }
   const match = String(raw).trim().match(/^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/);
   const exponent = BigInt(match[4] || '0');
   if (exponent > BigInt(MAX_TIMING_SCALE) || exponent < -BigInt(MAX_TIMING_SCALE)) {
-    fail('SELECTION_TIMING', `${key} の時間表記が検証可能な精度を超えています。`);
+    fail('SELECTION_TIMING', uiT("{0} の時間表記が検証可能な精度を超えています。", () => [key]));
   }
   let scale = (match[3] || '').length - Number(exponent);
-  if (Math.abs(scale) > MAX_TIMING_SCALE) fail('SELECTION_TIMING', `${key} の時間表記が検証可能な精度を超えています。`);
+  if (Math.abs(scale) > MAX_TIMING_SCALE) fail('SELECTION_TIMING', uiT("{0} の時間表記が検証可能な精度を超えています。", () => [key]));
   let units = BigInt((match[2] || '') + (match[3] || ''));
   if (scale < 0) { units *= 10n ** BigInt(-scale); scale = 0; }
   while (scale && units % 10n === 0n) { units /= 10n; scale--; }
@@ -541,35 +548,35 @@ function selectionTiming(doc) {
     if (!line.text.trim() || /^\s*(?:;|#|\/\/)/.test(line.text)) continue;
     if (line.value === null && selectionFunctionMarker.test(line.text.trim())) continue;
     if (selectionGeneralHeader.test(line.key) && (line.value === null || !line.value.trim())) {
-      if (seen.has('general information')) fail('SELECTION_PROFILE', 'GENERAL INFORMATION が複数あるため、選択行だけの出力には対応していません。');
+      if (seen.has('general information')) fail('SELECTION_PROFILE', uiT("GENERAL INFORMATION が複数あるため、選択行だけの出力には対応していません。"));
       seen.add('general information');
       continue;
     }
     if (indexedKey(line.key)) continue;
     if (line.value === null || (!['NumSIRMasses', 'NoOfChannels', 'FunctionScanTime(sec)'].includes(line.key) && !selectionScalars.test(line.key))) {
-      fail('SELECTION_PROFILE', `項目「${line.key}」のチャンネル依存を確認できないため、選択行だけの出力には対応していません。`);
+      fail('SELECTION_PROFILE', uiT("項目「{0}」のチャンネル依存を確認できないため、選択行だけの出力には対応していません。", () => [line.key]));
     }
     const identity = line.key.toLowerCase();
-    if (seen.has(identity)) fail('SELECTION_PROFILE', `項目「${line.key}」が重複しているため、選択行だけの出力には対応していません。`);
+    if (seen.has(identity)) fail('SELECTION_PROFILE', uiT("項目「{0}」が重複しているため、選択行だけの出力には対応していません。", () => [line.key]));
     seen.add(identity);
   }
   const timings = doc.rows.map(row => {
     const i = row.channel;
     for (const key of [`SIRAutoDwell${i}`, `AutoDwell_${i}`]) {
       if (canonicalNumber(requireLine(original.map, key).value) !== '0') {
-        fail('SELECTION_TIMING', `${key} が明示的な0ではありません。選択行だけの出力は固定Dwellに限ります。`);
+        fail('SELECTION_TIMING', uiT("{0} が明示的な0ではありません。選択行だけの出力は固定Dwellに限ります。", () => [key]));
       }
     }
     const dwell = timingDecimal(requireLine(original.map, `Dwell(s)_${i}`).value, `Dwell(s)_${i}`, true);
     const sirDwell = timingDecimal(requireLine(original.map, `SIRDwellTime${i}`).value, `SIRDwellTime${i}`, true);
     const delay = timingDecimal(requireLine(original.map, `InterChannelDelay(s)_${i}`).value, `InterChannelDelay(s)_${i}`);
     const sirDelay = timingDecimal(requireLine(original.map, `SIRDelay${i}`).value, `SIRDelay${i}`);
-    if (!equalTimings(dwell, sirDwell) || !equalTimings(delay, sirDelay)) fail('SELECTION_TIMING', `チャンネル ${i} のSIRとMRMの時間設定が一致しません。`);
+    if (!equalTimings(dwell, sirDwell) || !equalTimings(delay, sirDelay)) fail('SELECTION_TIMING', uiT("チャンネル {0} のSIRとMRMの時間設定が一致しません。", () => [i]));
     return addTimings([dwell, delay]);
   });
   const scan = timingDecimal(requireLine(original.map, 'FunctionScanTime(sec)').value, 'FunctionScanTime(sec)', true);
   if (!preserveSource && !equalTimings(scan, addTimings(timings))) {
-    fail('SELECTION_TIMING', 'FunctionScanTime(sec) が全チャンネルのDwellとDelayの合計に一致しません。時間設定の意味を確定できないため、選択行だけの出力には対応していません。');
+    fail('SELECTION_TIMING', uiT("FunctionScanTime(sec) が全チャンネルのDwellとDelayの合計に一致しません。時間設定の意味を確定できないため、選択行だけの出力には対応していません。"));
   }
   return { channels: timings, preserveSource };
 }
@@ -577,21 +584,21 @@ function selectedContext(doc, rows, selectedIds) {
   originalOf(doc);
   const errors = [], known = new Set(doc.rows.map(row => row.id)), selected = new Set();
   const error = message => errors.push({ rowId: null, field: null, message });
-  if (!Array.isArray(selectedIds)) error('選択行の識別子は配列で指定してください。');
+  if (!Array.isArray(selectedIds)) error(uiT("選択行の識別子は配列で指定してください。"));
   else for (const id of selectedIds) {
-    if (typeof id !== 'string' || !known.has(id)) error('不明な行が選択されています。ファイルを読み直してください。');
-    else if (selected.has(id)) error('同じ行が重複して選択されています。');
+    if (typeof id !== 'string' || !known.has(id)) error(uiT("不明な行が選択されています。ファイルを読み直してください。"));
+    else if (selected.has(id)) error(uiT("同じ行が重複して選択されています。"));
     else selected.add(id);
   }
-  if (!selected.size) error('出力するMRMを1行以上チェックしてください。');
+  if (!selected.size) error(uiT("出力するMRMを1行以上チェックしてください。"));
   const selectedCount = selected.size, excludedCount = doc.rows.length - selectedCount;
   let effectiveRows = [], changedCells = 0, timings = null;
-  if (!Array.isArray(rows) || rows.length !== doc.rows.length) error('行の追加・削除は未対応です。チェックで出力対象を選択してください。');
+  if (!Array.isArray(rows) || rows.length !== doc.rows.length) error(uiT("行の追加・削除は未対応です。チェックで出力対象を選択してください。"));
   else {
     effectiveRows = doc.rows.map((base, index) => {
       const row = rows[index];
       if (!row || typeof row !== 'object' || row.id !== base.id) {
-        errors.push({ rowId: base.id, field: null, message: '行の入れ替えまたは識別子の変更は未対応です。' });
+        errors.push({ rowId: base.id, field: null, message: uiT("行の入れ替えまたは識別子の変更は未対応です。") });
         return base;
       }
       return selected.has(base.id) ? row : base;
@@ -648,14 +655,14 @@ function selectedPatches(doc, context) {
 }
 function verifySelectedOutput(doc, output, context) {
   const original = originalOf(doc), expected = applyPatches(original.bytes, selectedPatches(doc, context));
-  if (output.length !== expected.length || output.some((value, i) => value !== expected[i])) fail('EXPORT_CHANGED', '選択出力の対象以外のバイト列が変更されています。');
+  if (output.length !== expected.length || output.some((value, i) => value !== expected[i])) fail('EXPORT_CHANGED', uiT("選択出力の対象以外のバイト列が変更されています。"));
   const parsed = parseExp(output, { filename: doc.filename, encoding: doc.encoding });
   const kept = context.effectiveRows.filter(row => context.selected.has(row.id));
-  if (parsed.rows.length !== kept.length) fail('EXPORT_VALUE', '出力したチャンネル数が選択数と一致しません。');
+  if (parsed.rows.length !== kept.length) fail('EXPORT_VALUE', uiT("出力したチャンネル数が選択数と一致しません。"));
   kept.forEach((row, index) => {
-    for (const field of fields) if (!sameValue(parsed.rows[index][field], row[field], field)) fail('EXPORT_VALUE', `出力したチャンネル ${index + 1} の ${field} が選択内容と一致しません。`);
+    for (const field of fields) if (!sameValue(parsed.rows[index][field], row[field], field)) fail('EXPORT_VALUE', uiT("出力したチャンネル {0} の {1} が選択内容と一致しません。", () => [index + 1, field]));
     const base = doc.rows.find(item => item.id === row.id);
-    for (const key of Object.keys(base.details)) if (parsed.rows[index].details[key] !== base.details[key]) fail('EXPORT_VALUE', `出力したチャンネル ${index + 1} の ${key} が原本と一致しません。`);
+    for (const key of Object.keys(base.details)) if (parsed.rows[index].details[key] !== base.details[key]) fail('EXPORT_VALUE', uiT("出力したチャンネル {0} の {1} が原本と一致しません。", () => [index + 1, key]));
   });
   // A generated subset must also satisfy the same timing/profile invariant.
   selectionTiming(parsed);
@@ -664,7 +671,7 @@ function verifySelectedOutput(doc, output, context) {
 /** Export checked rows in source order; leave the original and draft intact. */
 export function writeSelectedExp(doc, rows, selectedIds) {
   const context = selectedContext(doc, rows, selectedIds);
-  if (!context.valid) throw new ExpError('SELECTION', '選択したMRMを出力できません。', context.errors);
+  if (!context.valid) throw new ExpError('SELECTION', uiT("選択したMRMを出力できません。"), context.errors);
   if (!context.excludedCount) return writeEditedExp(doc, rows);
   const output = applyPatches(originalOf(doc).bytes, selectedPatches(doc, context));
   verifySelectedOutput(doc, output, context);
@@ -679,13 +686,13 @@ function toBase64(bytes) {
 function fromBase64(value) {
   if (typeof value !== 'string' || value.length > 4 * Math.ceil(MAX_EXP_BYTES / 3)
       || !value.length || value.length % 4 || /[^A-Za-z0-9+/=]/.test(value)) {
-    fail('SNAPSHOT', '保存データの原本が不正または上限を超えています。');
+    fail('SNAPSHOT', uiT("保存データの原本が不正または上限を超えています。"));
   }
   const padding = value.indexOf('=');
-  if (padding !== -1 && !/^={1,2}$/.test(value.slice(padding))) fail('SNAPSHOT', '保存データの Base64 が不正です。');
+  if (padding !== -1 && !/^={1,2}$/.test(value.slice(padding))) fail('SNAPSHOT', uiT("保存データの Base64 が不正です。"));
   let binary;
-  try { binary = atob(value); } catch { fail('SNAPSHOT', '保存データの原本が不正です。'); }
-  if (btoa(binary) !== value) fail('SNAPSHOT', '保存データの Base64 が不正です。');
+  try { binary = atob(value); } catch { fail('SNAPSHOT', uiT("保存データの原本が不正です。")); }
+  if (btoa(binary) !== value) fail('SNAPSHOT', uiT("保存データの Base64 が不正です。"));
   return Uint8Array.from(binary, char => char.charCodeAt(0));
 }
 function snapshotRows(rows) {
@@ -693,7 +700,7 @@ function snapshotRows(rows) {
 }
 export function serializeDocument(doc, rows) {
   const original = originalOf(doc), validation = validateEdits(doc, rows);
-  if (!validation.valid) throw new ExpError('EDITS', '入力内容を修正してから保存してください。', validation.errors);
+  if (!validation.valid) throw new ExpError('EDITS', uiT("入力内容を修正してから保存してください。"), validation.errors);
   return { version: 1, parserVersion: PARSER_VERSION, profile: doc.profile,
     filename: doc.filename, encoding: doc.encoding, originalBase64: toBase64(original.bytes), rows: snapshotRows(rows) };
 }
@@ -702,11 +709,11 @@ export function restoreDocument(payload) {
       || payload.profile !== 'flat-mrm-v1' || typeof payload.filename !== 'string' || payload.filename.length > 4096
       || !SUPPORTED_ENCODINGS.includes(payload.encoding) || payload.encoding === 'auto'
       || !Array.isArray(payload.rows) || payload.rows.length > MAX_EXP_CHANNELS) {
-    fail('SNAPSHOT', '保存データの形式またはバージョンが未対応です。');
+    fail('SNAPSHOT', uiT("保存データの形式またはバージョンが未対応です。"));
   }
   const doc = parseExp(fromBase64(payload.originalBase64), { filename: payload.filename, encoding: payload.encoding });
   const validation = validateEdits(doc, payload.rows);
-  if (!validation.valid) throw new ExpError('SNAPSHOT', '保存データの編集内容が不正です。', validation.errors);
+  if (!validation.valid) throw new ExpError('SNAPSHOT', uiT("保存データの編集内容が不正です。"), validation.errors);
   const rows = createDraft(doc);
   rows.forEach((row, index) => { for (const field of fields) row[field] = payload.rows[index][field]; });
   return { document: doc, rows };

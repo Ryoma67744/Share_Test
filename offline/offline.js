@@ -9,7 +9,7 @@
       return u.origin === location.origin || u.protocol === 'blob:' || u.protocol === 'data:';
     } catch { return false; }
   };
-  const error = () => new Error('オフライン版では外部通信を使用できません。元ファイルをPCから取り込んでください。');
+  const error = () => new Error(window.AppI18n ? AppI18n.t('オフライン版では外部通信を使用できません。元ファイルをPCから取り込んでください。') : 'オフライン版では外部通信を使用できません。元ファイルをPCから取り込んでください。');
   const realFetch = window.fetch.bind(window);
   window.fetch = (url, options) => sameOrigin(url) ? realFetch(url, options) : Promise.reject(error());
   const open = XMLHttpRequest.prototype.open;
@@ -27,7 +27,7 @@
     const a = e.target.closest && e.target.closest('a[href]');
     if (a && !sameOrigin(a.href)) {
       e.preventDefault();
-      alert('これは外部サイトへのリンクです。オフライン版では開きません。');
+      alert(window.AppI18n ? AppI18n.t('これは外部サイトへのリンクです。オフライン版では開きません。') : 'これは外部サイトへのリンクです。オフライン版では開きません。');
     }
   }, true);
   window.addEventListener('DOMContentLoaded', () => {

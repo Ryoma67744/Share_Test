@@ -105,6 +105,16 @@ jobs:
         run: node tests/msi_ratio_outputs_browser_regression.cjs
       - name: Guided Help navigation and packaged screenshots
         run: node tests/help_browser_regression.cjs
+      - name: Application language and preserved editor state
+        run: node tests/app_i18n_browser_regression.cjs
+      - name: Viewer language and preserved open editors
+        run: node tests/viewer_i18n_browser_regression.cjs
+      - name: Online and offline language with identical source data and CSV
+        run: node tests/app_language_data_browser_regression.cjs
+      - name: Manager and MRM language with preserved data and exports
+        run: node tests/manager_mrm_i18n_browser_regression.cjs
+      - name: Online manager and MRM language with isolated network fixtures
+        run: node tests/manager_mrm_online_i18n_browser_regression.cjs
       - name: Local persistence and recovery across browser tabs
         run: node tests/project_store_safety_browser_regression.cjs
       - name: Atomic shared-version replacement and preserved local copies

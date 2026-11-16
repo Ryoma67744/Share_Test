@@ -36,7 +36,8 @@
   async function open(options={}) {
     close();
     const prior=document.activeElement, standalone=!!options.container;
-    let lang=options.lang==='en'?'en':options.lang==='ja'?'ja':remembered('lang','ja');
+    if(global.AppI18n && ['ja','en'].includes(options.lang)) global.AppI18n.setLocale(options.lang);
+    let lang=global.AppI18n?global.AppI18n.getLocale():(options.lang==='en'?'en':options.lang==='ja'?'ja':remembered('lang','ja'));
     if(!['ja','en'].includes(lang))lang='ja';
     let role=['manage','master','viewer','admin'].includes(options.role)?options.role:(options.audience==='manage'?'manage':options.audience==='viewer'?'viewer':'master');
     const locked=role==='viewer'||role==='admin', mode=options.mode==='offline'||(!options.mode&&global.DESI_OFFLINE)?'offline':'online';
@@ -46,7 +47,8 @@
     const shell=node('div',{class:'gh-shell'});host.append(shell);
     const oldOverflow=document.body.style.overflow;
     if(standalone)options.container.replaceChildren(host);else{document.body.append(host);document.body.style.overflow='hidden';}
-    const state={close(){document.removeEventListener('keydown',key,true);host.remove();if(!standalone)document.body.style.overflow=oldOverflow;if(prior&&prior.isConnected)prior.focus();if(active===state)active=null;}};active=state;
+    let unsubscribeLanguage=()=>{};
+    const state={close(){unsubscribeLanguage();document.removeEventListener('keydown',key,true);host.remove();if(!standalone)document.body.style.overflow=oldOverflow;if(prior&&prior.isConnected)prior.focus();if(active===state)active=null;}};active=state;
     function key(e){if(!host.isConnected)return;if(e.key==='Escape'&&!standalone){e.preventDefault();e.stopImmediatePropagation();close();}if(e.key==='Tab'&&!standalone){const items=[...host.querySelectorAll('button,input,select,a[href],[tabindex="0"]')].filter(el=>!el.disabled&&el.getClientRects().length);const first=items[0],last=items.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last&&last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first&&first.focus();}}}
     document.addEventListener('keydown',key,true);
     function available(){return data.chapters.filter(c=>!c.roles||c.roles.includes(role));}
@@ -71,8 +73,9 @@
     function picture(id, printAll, className) {
       const shot = data.screenshots.find(item => item.id === id);
       if (!shot) return null;
-      const a = node('a', {class:className || 'gh-image-link', href:asset(shot.path), target:'_blank', rel:'noopener', 'aria-label':words[lang].image + ': ' + tx(shot.alt,lang)});
-      a.append(node('img', {src:asset(shot.path), alt:tx(shot.alt,lang), loading:printAll?'eager':'lazy', width:String(shot.width || 1440), height:String(shot.height || 900)}));
+      const path = shot.localizedPaths?.[lang] || shot.path;
+      const a = node('a', {class:className || 'gh-image-link', href:asset(path), target:'_blank', rel:'noopener', 'aria-label':words[lang].image + ': ' + tx(shot.alt,lang)});
+      a.append(node('img', {src:asset(path), alt:tx(shot.alt,lang), loading:printAll?'eager':'lazy', width:String(shot.width || 1440), height:String(shot.height || 900)}));
       return a;
     }
     function examplePanel(panel, printAll) {
@@ -147,11 +150,11 @@
     function render(){
       if(!host.isConnected)return;const w=words[lang], chapters=available();
       if(!chapters.some(c=>c.id===chapter))chapter=chapters[0].id;
-      shell.replaceChildren();host.lang=lang;
+      shell.replaceChildren();host.lang=lang;if(!standalone)host.setAttribute('aria-label',w.title);
       const top=node('header',{class:'gh-top'});top.append(node('strong',{},'SHARE_TEST'),node('span',{class:'gh-title'},w.title));
       const badge=node('span',{class:'gh-context'},w[mode]+' · '+w[role]);top.append(badge);
       const select=node('select',{'aria-label':w.role});for(const value of locked?[role]:['manage','master','viewer','admin'])select.append(node('option',{value,...(value===role?{selected:''}:{})},w[value]));select.disabled=locked;select.onchange=()=>{role=select.value;render();};top.append(select);
-      const language=node('button',{type:'button',class:'gh-language','aria-label':lang==='ja'?'Switch to English':'日本語に切り替え'},lang==='ja'?'EN':'日本語');language.onclick=()=>{lang=lang==='ja'?'en':'ja';remember('lang',lang);render();};top.append(language);
+      const language=node('button',{type:'button',class:'gh-language','aria-label':lang==='ja'?'Switch to English':'日本語に切り替え'},lang==='ja'?'EN':'日本語');language.onclick=()=>{const next=lang==='ja'?'en':'ja';if(global.AppI18n)global.AppI18n.setLocale(next);else{lang=next;remember('lang',lang);render();}shell.querySelector('.gh-language')?.focus();};top.append(language);
       const print=node('button',{type:'button'},w.print);print.onclick=()=>{const region=node('div',{class:'gh-print'});for(const c of chapters){const article=node('article');content(c,article,true);region.append(article);}host.append(region);Promise.all([...region.querySelectorAll('img')].map(img=>img.decode().catch(()=>{}))).then(()=>{global.print();region.remove();});};top.append(print);
       if(!standalone){const b=node('button',{type:'button',class:'gh-close','aria-label':w.close},'×');b.onclick=close;top.append(b);}shell.append(top);
       const grid=node('div',{class:'gh-grid'}),aside=node('aside',{class:'gh-sidebar'});const label=node('label',{class:'gh-search-label'},w.search);const input=node('input',{type:'search',value:search,placeholder:w.search,'aria-label':w.search});label.append(input);aside.append(label);
@@ -160,6 +163,15 @@
       input.oninput=()=>{search=input.value;const start=input.selectionStart;render();const next=shell.querySelector('input');next.focus();try{next.setSelectionRange(start,start);}catch{}};
       const main=node('main',{class:'gh-main',tabindex:'0'});content(chapters.find(c=>c.id===chapter),main);const footer=node('footer',{class:'gh-footer'});const index=chapters.findIndex(c=>c.id===chapter);for(const [offset,label] of [[-1,w.previous],[1,w.next]]){const b=node('button',{type:'button',...(chapters[index+offset]?{}:{disabled:''})},label);b.onclick=()=>chapters[index+offset]&&go(chapters[index+offset].id);footer.append(b);}const link=node('a',{href:new URL(guidePath(role,lang),base).href},w.detail);link.onclick=e=>{e.preventDefault();void detailed(main);};footer.append(link);main.append(footer);grid.append(main);shell.append(grid);
     }
+    if(global.AppI18n)unsubscribeLanguage=global.AppI18n.onChange(next=>{
+      lang=next;remember('lang',lang);
+      if(!data||!host.isConnected)return;
+      const input=shell.querySelector('input[type="search"]'), focused=input===document.activeElement;
+      const selection=focused?[input.selectionStart,input.selectionEnd]:null;
+      const main=shell.querySelector('.gh-main'), scroll=main?main.scrollTop:0;
+      render();const updated=shell.querySelector('.gh-main');if(updated)updated.scrollTop=scroll;
+      if(focused){const nextInput=shell.querySelector('input[type="search"]');nextInput?.focus();try{nextInput?.setSelectionRange(...selection);}catch{}}
+    });
     shell.append(node('p',{class:'gh-loading'},lang==='ja'?'ガイドを読み込み中…':'Loading guide…'));
     try{data=await load();if(active!==state)return;render();shell.querySelector('input')?.focus();}catch(e){shell.replaceChildren(node('p',{role:'alert'},words[lang].error));const b=node('button',{type:'button'},words[lang].close);b.onclick=close;shell.append(b);console.error(e);}
     return state;

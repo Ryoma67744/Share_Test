@@ -6,10 +6,16 @@ coverage and screenshots. Shared viewer / administrator audiences omit author
 management, import and MRM chapters. Shared ratio edits are personal overrides.
 Offline mode retains all local functionality and explicitly excludes publication.
 
-The current app uses mixed Japanese / English labels. Both Help languages use
-the same actual UI screenshots; captions and alternative text are translated.
-Do not translate a screenshot by drawing fake controls over it. When the app UI
-itself gains a locale switch, add separate locale captures in the manifest.
+The application has a shared Japanese / English language preference. Synthetic
+UI screenshots are captured in both languages; `localizedPaths.en` selects the
+English capture, including in generated guides and the offline distribution.
+Captions and alternative text are translated. Do not translate screenshots by
+drawing fake controls over them. Measured `brain-*` figures retain their original
+captures and provenance; their surrounding explanation is translated.
+
+During each synthetic capture, the tool switches to English and back to Japanese
+without reloading. It checks that form values, control identity and the project
+remain unchanged. Each language's image hash is recorded in the capture manifest.
 
 Run from the repository root after installing `tests` development dependencies:
 

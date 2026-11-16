@@ -22,9 +22,10 @@ function stageBrowserSmoke(sourceRoot = ROOT) {
     for (const name of ['index.html','mrm.html','version.js','runtime-config.js','app-runtime.js','project-store-safety.js','project-navigation.js',
       'offline/offline.js','offline/local-mrm.js','help.js','help.css','help.html']) copy(name);
     const help=JSON.parse(fs.readFileSync(path.join(sourceRoot,'docs/help/manifest.json'),'utf8'));
-    for(const name of ['docs/help/manifest.json','docs/help/capture-manifest.json',...help.screenshots.map(shot=>shot.path)]) copy(name);
+    for(const name of ['docs/help/manifest.json','docs/help/capture-manifest.json',...help.screenshots.flatMap(shot=>[shot.path,...Object.values(shot.localizedPaths||{})])]) copy(name);
     for (const item of fs.readdirSync(sourceRoot,{withFileTypes:true})) {
       if (item.isFile() && /^(?:OFFLINE_GUIDE|USER_GUIDE(?:\.[a-z]+)*)\.md$/.test(item.name)) copy(item.name);
+      if (item.isFile() && /^app-i18n(?:-[a-z0-9-]+)?\.js$/.test(item.name)) copy(item.name);
     }
     for (const dir of ['viewer','vendor','mrm']) {
       for (const item of fs.readdirSync(path.join(sourceRoot,dir),{withFileTypes:true})) {

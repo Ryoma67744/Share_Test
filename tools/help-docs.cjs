@@ -17,6 +17,11 @@ function screenshot(data,id){
   if(!/^docs\/help\/images\/[\w.-]+\.png$/.test(shot.path))throw new Error('Unsafe screenshot path');
   return shot;
 }
+function screenshotPath(shot,lang){
+  const value=shot.localizedPaths?.[lang]||shot.path;
+  if(!/^docs\/help\/images\/[\w.-]+\.png$/.test(value))throw new Error('Unsafe localized screenshot path');
+  return value;
+}
 function chapterExamples(data,chapter){
   return (chapter.examples||[]).map(id=>{
     const example=(data.examples||[]).find(e=>e.id===id);
@@ -37,7 +42,7 @@ function contextLabel(data,id,lang){
 function markdownPanel(data,panel,lang){
   const shot=screenshot(data,panel.image),lines=['**'+t(panel.title,lang)+'**',''];
   if(panel.subtitle)lines.push(t(panel.subtitle,lang),'');
-  lines.push('!['+t(shot.alt,lang)+']('+shot.path+')','',t(shot.caption,lang),'');
+  lines.push('!['+t(shot.alt,lang)+']('+screenshotPath(shot,lang)+')','',t(shot.caption,lang),'');
   if(panel.scale)lines.push('**'+scaleText(panel.scale,lang)+'**','');
   if(panel.footnote)lines.push(t(panel.footnote,lang),'');
   return lines;
@@ -62,7 +67,7 @@ function markdownExample(data,example,lang){
   if(example.contextImage){
     const shot=screenshot(data,example.contextImage);
     lines.push('**'+contextLabel(data,example.contextImage,lang)+'**','',
-      '!['+t(shot.alt,lang)+']('+shot.path+')','',t(shot.caption,lang),'');
+      '!['+t(shot.alt,lang)+']('+screenshotPath(shot,lang)+')','',t(shot.caption,lang),'');
   }
   if(example.source)lines.push('**'+(lang==='ja'?'出典・条件':'Source and settings')+'**: '+t(example.source,lang),'');
   return lines;
@@ -77,13 +82,13 @@ function markdown(root,role,lang,mode='online'){
     c.steps.forEach((s,i)=>lines.push((i+1)+'. **'+t(s.title,lang)+'** — '+t(s.body,lang)));
     lines.push('');
     for(const example of chapterExamples(data,c))lines.push(...markdownExample(data,example,lang));
-    for(const id of c.screenshots){const shot=screenshot(data,id);lines.push('!['+t(shot.alt,lang)+']('+shot.path+')','',t(shot.caption,lang),'');}
+    for(const id of c.screenshots){const shot=screenshot(data,id);lines.push('!['+t(shot.alt,lang)+']('+screenshotPath(shot,lang)+')','',t(shot.caption,lang),'');}
     for(const name of ['statistics','save']){lines.push('**'+(name==='statistics'?(lang==='ja'?'集計への影響':'Effect on results'):(lang==='ja'?'保存と共有':'Save and share'))+'**','');for(const p of c[name])lines.push(t(p,lang),'');}
   }
   lines.push(END,'');return lines.join('\n');
 }
 function htmlFigure(root,data,id,lang,body='',className='help-screenshot'){
-  const shot=screenshot(data,id),image=fs.readFileSync(path.join(root,shot.path)).toString('base64');
+  const shot=screenshot(data,id),image=fs.readFileSync(path.join(root,screenshotPath(shot,lang))).toString('base64');
   return '<figure class="'+className+'"><img alt="'+escape(t(shot.alt,lang))+'" src="data:image/png;base64,'+image+'">'
     +'<figcaption>'+escape(t(shot.caption,lang))+'</figcaption>'+body+'</figure>';
 }
@@ -144,4 +149,4 @@ function renderStandalone(root=ROOT,role='master',lang='ja',mode='offline'){
   return out.join('\n');
 }
 if(require.main===module){update();console.log('Updated six guides and OFFLINE_GUIDE from docs/help/manifest.json');}
-module.exports={manifest,markdown,replaceSupplement,renderStandalone,update,introduction,scaleText,chapterExamples};
+module.exports={manifest,markdown,replaceSupplement,renderStandalone,update,introduction,scaleText,chapterExamples,screenshotPath};
