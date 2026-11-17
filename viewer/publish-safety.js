@@ -121,7 +121,10 @@
      }
      asset.assign.push(assign);
    };
-   const sections=(snapshot.sections||[]).map(section=>{
+   // Array order is the visible section order. Legacy saved projects can have
+   // duplicate/missing ordinals after delete + add; normalize only this immutable
+   // publish document, retaining IDs, names, originals and ROI references.
+   const sections=(snapshot.sections||[]).map((section,index)=>{
      const storage={images:{},msiSeries:{},msiFiles:{}};
      for(const [key,entry]of Object.entries(section.images||{}))add(entry,section.displayName+' / '+key,ref=>{storage.images[key]={...ref,filename:entry.filename||ref.filename,alignmentImageReference:hooks.imageIdentity(entry)};});
      for(const [key,entry]of Object.entries(section.msiSeries||{}))add(entry,section.displayName+' / '+key,ref=>{
@@ -131,7 +134,7 @@
        const out={...entry,...ref,filename:entry.filename||ref.filename};delete out.sourceUrl;delete out.storagePath;storage.msiFiles[key]=out;
      });
      const meta={...(section.meta||{}),overlays:(snapshot.overlays||[]).filter(o=>!hooks.viewerOverlay(o))};delete meta.__alignMaster;
-     return {id:section.id,ordinal:section.ordinal||0,displayName:section.displayName||'Section',meta,storagePaths:storage};
+     return {id:section.id,ordinal:index+1,displayName:section.displayName||'Section',meta,storagePaths:storage};
    });
    const photoItems=[];
    for(const item of media.items){const out=hooks.publicPhoto(item,null);photoItems.push(out);add(item,_uiT("ROI写真 / {0}", {"0":(item.filename)}),ref=>{out.storagePath=ref.path;out.mime=ref.mime||item.mime;});}
