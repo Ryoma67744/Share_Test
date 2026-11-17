@@ -1972,7 +1972,7 @@ function testShareRoiDeleteAsksUnderTheLock() {
   assert.match(fn, /if \(!confirm\(msg\)\) \{ this\._releaseRoiLock\(\); return; \}/,
     'キャンセルしたらロックを返すこと (握ったままだと他の人が編集できなくなる)');
   // master 側は従来どおり (ロックの話は出さない)。
-  assert.match(fn, /\} else if \(!confirm\('ROI 「' \+ label \+ '」 を削除しますか\?'\)\) \{/,
+  assert.match(fn, /\} else if \(!confirm\(\(globalThis\.AppI18n \? AppI18n\.t\("ROI 「\{0\}」 を削除しますか\?", \[\(label\)\]\)/,
     'master 側の確認が消えている');
 }
 
@@ -2558,7 +2558,7 @@ function testWorkerAssetsFollowApplicationBase() {
     }
   }
   const scriptSources = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(scriptSources.slice(0, 10), ['../runtime-config.js', '../app-runtime.js', '../project-store-safety.js', '../project-navigation.js', 'share-refresh.js', 'source-loader.js', 'msi-display-settings.js', 'msi-display-geometry.js', 'msi-spatial-groups.js', '../offline/offline.js']);
+  assert.deepEqual(scriptSources.slice(0, 15), ['../runtime-config.js', '../app-runtime.js', '../app-i18n.js', '../app-i18n-common.js', '../app-i18n-storage.js', '../app-i18n-viewer.js', '../app-i18n-viewer-modules.js', '../project-store-safety.js', '../project-navigation.js', 'share-refresh.js', 'source-loader.js', 'msi-display-settings.js', 'msi-display-geometry.js', 'msi-spatial-groups.js', '../offline/offline.js']);
   assert.ok(scriptSources.includes('../vendor/supabase.min.js'));
   assert.ok(!scriptSources.some(src => src.startsWith('/') || /^https?:/.test(src)), 'viewer assets must work under a project Pages path');
   assert.doesNotMatch(html, /window\.SUPABASE_(?:URL|ANON_KEY)\s*=/, 'shared runtime owns cloud configuration');

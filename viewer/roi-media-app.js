@@ -5,6 +5,17 @@
     else root.RoiMediaApp = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, MsiSmoothing) {
     'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
     const MAX_BYTES = 500 * 1024 * 1024;
     const MAX_PIXELS = 64 * 1024 * 1024;
     const MAX_DIMENSION = 16384;
@@ -13,16 +24,16 @@
 
     function checkDimensions(width, height) {
         if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1)
-            throw new Error('画像の寸法を確認できませんでした。PNG・JPEG・単一画像のTIFFを選択してください。');
+            throw new Error(_uiT("画像の寸法を確認できませんでした。PNG・JPEG・単一画像のTIFFを選択してください。"));
         if (width > MAX_DIMENSION || height > MAX_DIMENSION || width * height > MAX_PIXELS)
-            throw new Error('画像が大きすぎます。長辺16,384 px以下、約6,710万画素以下の対象視野を別ファイルとして用意してください。原本は変更しません。');
+            throw new Error(_uiT("画像が大きすぎます。長辺16,384 px以下、約6,710万画素以下の対象視野を別ファイルとして用意してください。原本は変更しません。"));
     }
 
     // Read dimensions before allocating a full decoded image. In particular,
     // a tiny compressed TIFF can otherwise allocate gigabytes of RGBA memory.
     async function inspectImage(blob) {
-        if (!blob || typeof blob.slice !== 'function' || !(blob.size > 0)) throw new Error('空の画像ファイルです。');
-        if (blob.size > MAX_BYTES) throw new Error('画像ファイルは500 MiB以下にしてください。');
+        if (!blob || typeof blob.slice !== 'function' || !(blob.size > 0)) throw new Error(_uiT("空の画像ファイルです。"));
+        if (blob.size > MAX_BYTES) throw new Error(_uiT("画像ファイルは500 MiB以下にしてください。"));
         const header = new Uint8Array(await blob.slice(0, Math.min(blob.size, 2 * 1024 * 1024)).arrayBuffer());
         const view = new DataView(header.buffer, header.byteOffset, header.byteLength);
         let width, height, mime;
@@ -47,27 +58,27 @@
             mime = 'image/jpeg';
         } else if (header.length >= 8 && ((header[0] === 73 && header[1] === 73) || (header[0] === 77 && header[1] === 77))) {
             const little = header[0] === 73;
-            if (view.getUint16(2, little) !== 42) throw new Error('このTIFF形式には対応していません。単一画像のPNG・JPEG・標準TIFFを用意してください。');
+            if (view.getUint16(2, little) !== 42) throw new Error(_uiT("このTIFF形式には対応していません。単一画像のPNG・JPEG・標準TIFFを用意してください。"));
             const offset = view.getUint32(4, little);
-            if (offset < 8 || offset + 2 > blob.size) throw new Error('TIFFの画像情報が壊れています。');
+            if (offset < 8 || offset + 2 > blob.size) throw new Error(_uiT("TIFFの画像情報が壊れています。"));
             const countView = new DataView(await blob.slice(offset, offset + 2).arrayBuffer());
             const count = countView.getUint16(0, little);
             const end = offset + 2 + count * 12 + 4;
-            if (!count || count > 4096 || end > blob.size) throw new Error('TIFFの画像情報を読み取れません。');
+            if (!count || count > 4096 || end > blob.size) throw new Error(_uiT("TIFFの画像情報を読み取れません。"));
             const entries = new DataView(await blob.slice(offset + 2, end).arrayBuffer());
             if (entries.getUint32(count * 12, little) !== 0)
-                throw new Error('複数ページのTIFFです。登録する視野・チャンネルを単一画像として書き出してください。');
+                throw new Error(_uiT("複数ページのTIFFです。登録する視野・チャンネルを単一画像として書き出してください。"));
             for (let i = 0; i < count; i++) {
                 const at = i * 12, tag = entries.getUint16(at, little), type = entries.getUint16(at + 2, little);
                 const n = entries.getUint32(at + 4, little);
-                if (tag === 330 && n > 0) throw new Error('階層・複数画像を含むTIFFです。対象視野を単一画像として書き出してください。');
+                if (tag === 330 && n > 0) throw new Error(_uiT("階層・複数画像を含むTIFFです。対象視野を単一画像として書き出してください。"));
                 if ((tag === 256 || tag === 257) && n === 1 && (type === 3 || type === 4)) {
                     const value = type === 3 ? entries.getUint16(at + 8, little) : entries.getUint32(at + 8, little);
                     if (tag === 256) width = value; else height = value;
                 }
             }
             mime = 'image/tiff';
-        } else throw new Error('PNG・JPEG・単一画像のTIFFを選択してください。');
+        } else throw new Error(_uiT("PNG・JPEG・単一画像のTIFFを選択してください。"));
         checkDimensions(width, height);
         return { width, height, mime, byteSize:blob.size };
     }
@@ -78,7 +89,7 @@
             const image = await root.createImageBitmap(blob);
             try { checkDimensions(image.width, image.height); }
             catch (error) { image.close(); throw error; }
-            return { image, width:image.width, height:image.height, mime:info.mime, dispose:() => image.close(), status:'原解像度の画像' };
+            return { image, width:image.width, height:image.height, mime:info.mime, dispose:() => image.close(), status:_uiT("原解像度の画像"), statusI18n:["原解像度の画像"] };
         }
         let url, isObjectUrl = false;
         if (info.mime === 'image/tiff') url = await decodeImageBlobToDataUrl(blob, info.mime);
@@ -87,12 +98,13 @@
             const image = await new Promise((resolve,reject) => {
                 const img = new Image();
                 img.onload = () => resolve(img);
-                img.onerror = () => reject(new Error('画像を表示できません。ファイルの形式を確認してください。'));
+                img.onerror = () => reject(new Error(_uiT("画像を表示できません。ファイルの形式を確認してください。")));
                 img.src = url;
             });
             checkDimensions(image.naturalWidth, image.naturalHeight);
             return { image, width:image.naturalWidth, height:image.naturalHeight, mime:info.mime,
-                status:info.mime === 'image/tiff' ? '原解像度・8bit RGB表示（TIFF原本を保持）' : '原解像度の画像',
+                status:info.mime === 'image/tiff' ? _uiT("原解像度・8bit RGB表示（TIFF原本を保持）") : _uiT("原解像度の画像"),
+                statusI18n:[info.mime === 'image/tiff' ? "原解像度・8bit RGB表示（TIFF原本を保持）" : "原解像度の画像"],
                 dispose:() => { image.src = ''; if (isObjectUrl) URL.revokeObjectURL(url); } };
         } catch (error) { if (isObjectUrl) URL.revokeObjectURL(url); throw error; }
     }
@@ -103,7 +115,7 @@
     }
     function sectionFor(project, sectionId) {
         const section = (project.sections || []).find(s => s.id === sectionId);
-        if (!section) throw new Error('対象の切片が見つかりません。');
+        if (!section) throw new Error(_uiT("対象の切片が見つかりません。"));
         return section;
     }
     function getService() {
@@ -119,18 +131,18 @@
                 return refs.size === 1 ? [...refs][0] : '';
             },
             save:async (project,registry) => {
-                if (App.project !== project) throw new Error('プロジェクトが切り替わったため保存を中止しました。');
+                if (App.project !== project) throw new Error(_uiT("プロジェクトが切り替わったため保存を中止しました。"));
                 App.queueSave(0);
                 if (await App._flushSave() === false) return false;
                 const saved = await ProjectStorage.getProject(project.id);
                 if (!saved || JSON.stringify(RoiMediaModel.getRegistry(saved)) !== JSON.stringify(registry))
-                    throw new Error('画像の登録情報を保存先から確認できませんでした。');
+                    throw new Error(_uiT("画像の登録情報を保存先から確認できませんでした。"));
                 return true;
             },
             onRollback:async project => {
                 if (App.project !== project) return;
                 App.queueSave(0);
-                if (await App._flushSave() === false) throw new Error('画像情報の復元を保存できませんでした。保存を再試行してください。');
+                if (await App._flushSave() === false) throw new Error(_uiT("画像情報の復元を保存できませんでした。保存を再試行してください。"));
             },
             onChange:() => { if (typeof populateRoiList === 'function') populateRoiList(); },
         });
@@ -142,16 +154,16 @@
     }
     function compatibility(roi, section, key) {
         const ent = (section.msiSeries || {})[sourceKeyFor(section,key)];
-        if (!ent) return 'この切片には対象のMSIがありません。';
+        if (!ent) return _uiT("この切片には対象のMSIがありません。");
         const meta = msiRoiGeometryMeta(roi,section);
-        if (meta && !msiValidRoiGeometry(meta)) return 'ROIの座標情報を確認できません。';
+        if (meta && !msiValidRoiGeometry(meta)) return _uiT("ROIの座標情報を確認できません。");
         if (meta && meta.version === 'msi-group-v1') {
             const geometry = msiLayerSourceGeometry(section,sourceKeyFor(section,key)) || ent.sourceGeometry;
             if (!root.MsiSpatialGroups || !root.MsiSpatialGroups.roiCompatible(meta,geometry,section,ent))
-                return 'このMSIがROIの共通座標に対応することを確認できません。主画面でMSIを読み込んでください。';
-        } else if (meta && meta.sourceRef !== msiSourceReference(ent)) return 'ROIを作成した測定ソースと異なります。';
+                return _uiT("このMSIがROIの共通座標に対応することを確認できません。主画面でMSIを読み込んでください。");
+        } else if (meta && meta.sourceRef !== msiSourceReference(ent)) return _uiT("ROIを作成した測定ソースと異なります。");
         if (!meta && new Set(Object.values(section.msiSeries || {}).map(msiSourceReference)).size > 1)
-            return '旧ROIの測定ソースを一意に確認できません。';
+            return _uiT("旧ROIの測定ソースを一意に確認できません。");
         return '';
     }
 
@@ -196,7 +208,7 @@
         }
         const assertRatio=(section,key)=>{
             if(typeof App.ratioSignature!=='function' || App.ratioSignature(section,key)!==ratioIdentities.get(section.id+'|'+key))
-                throw new Error('比の定義または測定ソースが変更されました。比較画面を開き直してください。');
+                throw new Error(_uiT("比の定義または測定ソースが変更されました。比較画面を開き直してください。"));
         };
         for (const section of project.sections || []) {
             if (!App._organInScope(section)) continue;
@@ -214,11 +226,11 @@
             if (otsuOn) masks.set(section.id, copy(section.meta && section.meta.otsu));
         }
         const valid = () => current(project,roi);
-        const assertValid = () => { if (!valid()) throw new Error('対象のROIまたはプロジェクトが変更されました。'); };
+        const assertValid = () => { if (!valid()) throw new Error(_uiT("対象のROIまたはプロジェクトが変更されました。")); };
         const photoCompatibility = (r,section,key) => {
             const reason = compatibility(r,section,key);
             if (reason || !selectedPhoto) return reason;
-            if (!selectedPhoto.sourceRef) return '写真登録時のMSI測定ソースを確認できません。写真を再登録すると現在の対応先を記録できます。';
+            if (!selectedPhoto.sourceRef) return _uiT("写真登録時のMSI測定ソースを確認できません。写真を再登録すると現在の対応先を記録できます。");
             const sourceKey=sourceKeyFor(section,key),ent=section.msiSeries[sourceKey];
             if (selectedPhoto.sourceRef !== msiSourceReference(ent)) {
                 const saved=RoiMediaModel.snapshotMatches(selectedPhoto,r,section)
@@ -228,7 +240,7 @@
                 if (!saved || saved.sourceRef!==selectedPhoto.sourceRef || !currentMeta
                     || saved.groupId!==currentMeta.groupId || saved.frameKey!==currentMeta.frameKey
                     || !root.MsiSpatialGroups || !root.MsiSpatialGroups.roiCompatible(saved,geometry,section,ent))
-                    return '写真登録時とはMSI測定ソースが異なります。対応を確認してから写真を再登録してください。';
+                    return _uiT("写真登録時とはMSI測定ソースが異なります。対応を確認してから写真を再登録してください。");
             }
             return '';
         };
@@ -238,24 +250,28 @@
             let blob = rec && rec.blob;
             if (!blob && item.storagePath) {
                 const url = SupabaseClient.publicUrl('atlases',item.storagePath);
-                if (!url) throw new Error('写真の保存先に接続できません。');
+                if (!url) throw new Error(_uiT("写真の保存先に接続できません。"));
                 const response = await fetch(url);
-                if (!response.ok) throw new Error('写真を取得できませんでした（HTTP '+response.status+'）。');
+                if (!response.ok) throw new Error(_uiT("写真を取得できませんでした（HTTP {0}）。", {"0":(response.status)}));
                 const size = Number(response.headers.get('content-length'));
-                if (size > MAX_BYTES) throw new Error('共有写真の容量が上限を超えています。');
+                if (size > MAX_BYTES) throw new Error(_uiT("共有写真の容量が上限を超えています。"));
                 blob = await response.blob();
             }
-            if (!blob) throw new Error('写真の原本が見つかりません。再登録するか、写真を含むZIPを読み込んでください。');
+            if (!blob) throw new Error(_uiT("写真の原本が見つかりません。再登録するか、写真を含むZIPを読み込んでください。"));
             assertValid();
             const decoded = await decodePhoto(blob);
-            if (!valid()) { decoded.dispose(); throw new Error('画像の表示対象が変更されました。'); }
+            if (!valid()) { decoded.dispose(); throw new Error(_uiT("画像の表示対象が変更されました。")); }
             const section = (project.sections || []).find(s => RoiMediaModel.sectionKey(project,s) === item.sectionId);
-            if (section && !RoiMediaModel.snapshotMatches(item,roi,section) && !commonizedPhotoGeometry(item,roi,section))
-                decoded.status += ' ／ 写真登録後にROI形状・座標が変更されています';
+            if (section && !RoiMediaModel.snapshotMatches(item,roi,section) && !commonizedPhotoGeometry(item,roi,section)) {
+                decoded.status += _uiT(" ／ 写真登録後にROI形状・座標が変更されています");
+                decoded.statusI18n.push(" ／ 写真登録後にROI形状・座標が変更されています");
+            }
             if (section) {
                 const sources = new Set(Object.values(section.msiSeries || {}).map(msiSourceReference));
-                if (!item.sourceRef || !sources.has(item.sourceRef))
-                    decoded.status += ' ／ 写真と現在のMSI測定ソースの対応を確認できません';
+                if (!item.sourceRef || !sources.has(item.sourceRef)) {
+                    decoded.status += _uiT(" ／ 写真と現在のMSI測定ソースの対応を確認できません");
+                    decoded.statusI18n.push(" ／ 写真と現在のMSI測定ソースの対応を確認できません");
+                }
             }
             return decoded;
         };
@@ -276,7 +292,7 @@
                     const key='MSI_RATIO_'+def.id,reason=photoCompatibility(r,section,key);
                     items.push({key,label:formatDisplayName(key),disabled:!!reason,reason});
                 }
-                return { items, notice:items.some(x => !x.disabled) ? '' : (items[0] && items[0].reason || 'このROIの座標に対応するMSIがありません。写真は閲覧できます。') };
+                return { items, notice:items.some(x => !x.disabled) ? '' : (items[0] && items[0].reason || _uiT("このROIの座標に対応するMSIがありません。写真は閲覧できます。")) };
             },
             preferredCompound:(p,r,id) => !photoCompatibility(r,sectionFor(p,id),focus) ? focus : null,
             loadPhoto:photo,
@@ -299,14 +315,14 @@
                     if (thumbnails.size > 64) thumbnails.delete(thumbnails.keys().next().value);
                 }
                 const image = await thumbnails.get(key);
-                return {image,width:144,height:88,status:'プレビュー'};
+                return {image,width:144,height:88,status:_uiT("プレビュー")};
             },
             loadMsi:async (p,r,id,key) => {
                 assertValid();
                 const section = sectionFor(p,id), panel = App.panels.get(id);
                 const reason = photoCompatibility(r,section,key);
                 if (reason) throw new Error(reason);
-                if (!panel || panel._destroyed) throw new Error('切片のMSIを読み込めません。');
+                if (!panel || panel._destroyed) throw new Error(_uiT("切片のMSIを読み込めません。"));
                 const ratio=/^MSI_RATIO_/.test(key) && !section.msiSeries[key],sourceKey=sourceKeyFor(section,key);
                 const ent = section.msiSeries[sourceKey], identity = ratio ? App.ratioSignature(section,key):panel._msiLoadIdentity(key);
                 let resolved=null;
@@ -314,24 +330,24 @@
                     assertRatio(section,key);
                     resolved=await App.resolveRatio(section,key);
                     assertRatio(section,key);
-                    if(!resolved || !resolved.raster)throw new Error(resolved && resolved.reason || '比の元データを読み込めませんでした。');
+                    if(!resolved || !resolved.raster)throw new Error(resolved && resolved.reason || _uiT("比の元データを読み込めませんでした。"));
                     if(resolved.status==='empty' || resolved.statistics && resolved.statistics.nValid===0)
-                        throw new Error(resolved.reason || '有効な比がありません。分母下限と元の値を確認してください。');
+                        throw new Error(resolved.reason || _uiT("有効な比がありません。分母下限と元の値を確認してください。"));
                     if(resolved.assertCurrent)resolved.assertCurrent();
-                    if((resolved.frameSourceKey || resolved.sourceKey)!==sourceKey)throw new Error('比の座標フレームが変更されました。');
+                    if((resolved.frameSourceKey || resolved.sourceKey)!==sourceKey)throw new Error(_uiT("比の座標フレームが変更されました。"));
                     const roiMeta=msiRoiGeometryMeta(r,section);
                     if(roiMeta&&roiMeta.version==='msi-group-v1') {
                         const stats=(resolved.roiStats||[]).find(item=>item.roiId===r.id);
-                        if(!stats||stats.status!=='ready')throw new Error('比のX/YがROIの共通座標に対応することを確認できません。');
+                        if(!stats||stats.status!=='ready')throw new Error(_uiT("比のX/YがROIの共通座標に対応することを確認できません。"));
                     }
-                } else if (!await panel.ensureMsiLayerLoaded(key)) throw new Error('MSIの元データを読み込めませんでした。');
+                } else if (!await panel.ensureMsiLayerLoaded(key)) throw new Error(_uiT("MSIの元データを読み込めませんでした。"));
                 assertValid();
                 const changedPhotoReason = photoCompatibility(r,section,key);
                 if (changedPhotoReason) throw new Error(changedPhotoReason);
                 if (section.msiSeries[sourceKey] !== ent || identity !== (ratio?App.ratioSignature(section,key):panel._msiLoadIdentity(key)))
-                    throw new Error('MSIの測定ソースが変更されました。比較画面を開き直してください。');
+                    throw new Error(_uiT("MSIの測定ソースが変更されました。比較画面を開き直してください。"));
                 const polygon = roiPolygonForDisplay(r,section,sourceKey,(r.polysBySection || {})[id]);
-                if (!polygon || polygon.length < 3) throw new Error('ROIとMSIの対応座標を確認できません。');
+                if (!polygon || polygon.length < 3) throw new Error(_uiT("ROIとMSIの対応座標を確認できません。"));
                 const cacheKey = id+'|'+key;
                 if (!windows.has(cacheKey)) {
                     if(ratio) {
@@ -398,10 +414,10 @@
                     physicalFrame,drawingRects,smoothing:frameSmoothing,smoothingStrength:frameStrength,linearStrength:frameLinear,
                     roiColor:'rgb('+c.slice(0,3).join(',')+')',background:'rgb('+frameBackground.join(',')+')',pixelPitch:pitch,
                     status:formatDisplayName(key)+' ／ '
-                        +(style?style.colormap:colormapName)+' ／ '+(ratio?'比 ':'強度 ')+win.min+'–'+win.max
+                        +(style?style.colormap:colormapName)+' ／ '+(ratio?_uiT("比 "):_uiT("強度 "))+win.min+'–'+win.max
                         +(frameSmoothing==='linear'?' ／ Linear '+frameLinear+'/10':frameSmoothing==='median'?' ／ Median '+frameStrength+'/10':'')
-                        +(otsuOn && (!ratio || resolved.keepGrid)?' ／ Otsu表示':'')
-                        +(otsuOn && ratio && !resolved.keepGrid?' ／ '+(resolved.otsuReason || '比に対応するTIC背景maskがありません'):'') };
+                        +(otsuOn && (!ratio || resolved.keepGrid)?_uiT(" ／ Otsu表示"):'')
+                        +(otsuOn && ratio && !resolved.keepGrid?' ／ '+(resolved.otsuReason || _uiT("比に対応するTIC背景maskがありません")):'') };
             },
             add:(p,r,id,files) => getService().add(p,r,sectionFor(p,id),files),
             replace:(p,r,id,item,file) => getService().replace(p,r,sectionFor(p,id),item,file),
@@ -416,7 +432,7 @@
         try {
             RoiMediaModel.getRegistry(project); // Fail visibly on unknown data contracts.
             const adapter = createAdapter(project,roi);
-            if (!adapter.sections(project,roi).length) throw new Error('先に対象切片へROIを描いてください。');
+            if (!adapter.sections(project,roi).length) throw new Error(_uiT("先に対象切片へROIを描いてください。"));
             if (RoiMediaViewer.open({project,roi,adapter}) !== false) active = {project,roi,signature:''};
         } catch (error) { showToast(error.message || String(error),8000); }
     }

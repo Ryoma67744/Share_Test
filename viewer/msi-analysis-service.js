@@ -5,7 +5,7 @@
     if(root)root.MsiAnalysisService=api;
 })(typeof globalThis!=='undefined'?globalThis:this,function(){
     'use strict';
-    const failure=(message,code,name)=>Object.assign(new Error(message),{code,...(name?{name}:{})});
+    const failure=(message,code,name)=>Object.assign(new Error(globalThis.AppI18n ? globalThis.AppI18n.t(message) : message),{code,...(name?{name}:{})});
     const cancelled=()=>failure('Analysis request cancelled','ANALYSIS_CANCELLED','AbortError');
     const expired=()=>failure('Analysis source handle expired; reload the original source','ANALYSIS_HANDLE_EXPIRED');
     function create(options={}){

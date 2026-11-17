@@ -1,6 +1,9 @@
 /* Local MRM backend. Enabled only by the packaged loopback server. */
 (function (root) {
     'use strict';
+// UI-only bindings: parameters keep user data separate from translation keys.
+function uiT(source, params) { const api=globalThis.AppI18n; if(typeof params==='function')params=params(); return api ? api.t(source, params) : String(source).replace(/\{(\w+)\}/g,(token,k)=>params && Object.prototype.hasOwnProperty.call(params,k) ? String(params[k] ?? '') : token); }
+
     if (root.DESI_OFFLINE !== true) return;
     const KEY = 'desi:offlineMrm:v1';
     const copy = value => JSON.parse(JSON.stringify(value));
@@ -10,23 +13,23 @@
     function validate(doc) {
         if (!doc || doc.format !== 'desi-offline-mrm' || doc.version !== 1 || !Array.isArray(doc.compounds)
             || !Array.isArray(doc.sets) || !Array.isArray(doc.ignored) || (doc.template != null && typeof doc.template !== 'string')) {
-            throw new Error('MRM バックアップの形式が違います');
+            throw new Error(uiT("MRM バックアップの形式が違います"));
         }
         const cids = new Set(), tids = new Set(), names = new Set(), sids = new Set();
         for (const c of doc.compounds) {
             if (!c || typeof c.id !== 'string' || !c.id || cids.has(c.id) || typeof c.name !== 'string' || !c.name.trim()
-                || names.has(c.name) || !Array.isArray(c.tags) || c.tags.some(tag => typeof tag !== 'string') || !Array.isArray(c.transitions)) throw new Error('化合物データが不正です');
+                || names.has(c.name) || !Array.isArray(c.tags) || c.tags.some(tag => typeof tag !== 'string') || !Array.isArray(c.transitions)) throw new Error(uiT("化合物データが不正です"));
             cids.add(c.id); names.add(c.name);
             for (const t of c.transitions) {
-                if (!t || typeof t.id !== 'string' || !t.id || tids.has(t.id) || t.compound_id !== c.id || !Array.isArray(t.usages)) throw new Error('トランジションデータが不正です');
-                for (const k of ['precursor', 'product', 'ce', 'cv']) if (t[k] != null && (typeof t[k] !== 'number' || !Number.isFinite(t[k]))) throw new Error('MRM 数値が不正です');
-                for (const u of t.usages) if (!u || typeof u.id !== 'string' || !Array.isArray(u.sample_types) || u.sample_types.some(s => typeof s !== 'string')) throw new Error('使用履歴が不正です');
+                if (!t || typeof t.id !== 'string' || !t.id || tids.has(t.id) || t.compound_id !== c.id || !Array.isArray(t.usages)) throw new Error(uiT("トランジションデータが不正です"));
+                for (const k of ['precursor', 'product', 'ce', 'cv']) if (t[k] != null && (typeof t[k] !== 'number' || !Number.isFinite(t[k]))) throw new Error(uiT("MRM 数値が不正です"));
+                for (const u of t.usages) if (!u || typeof u.id !== 'string' || !Array.isArray(u.sample_types) || u.sample_types.some(s => typeof s !== 'string')) throw new Error(uiT("使用履歴が不正です"));
                 tids.add(t.id);
             }
         }
         for (const s of doc.sets) {
-            if (!s || typeof s.id !== 'string' || !s.id || sids.has(s.id) || typeof s.name !== 'string' || !s.name.trim() || !Array.isArray(s.items)) throw new Error('メソッドセットが不正です');
-            if (s.items.some(i => !i || typeof i !== 'object')) throw new Error('メソッド項目が不正です');
+            if (!s || typeof s.id !== 'string' || !s.id || sids.has(s.id) || typeof s.name !== 'string' || !s.name.trim() || !Array.isArray(s.items)) throw new Error(uiT("メソッドセットが不正です"));
+            if (s.items.some(i => !i || typeof i !== 'object')) throw new Error(uiT("メソッド項目が不正です"));
             sids.add(s.id);
         }
         return doc;
@@ -35,13 +38,13 @@
     function save(doc) { root.localStorage.setItem(KEY, JSON.stringify(validate(doc))); }
     function number(value) {
         if (value === '' || value == null) return null;
-        const n = Number(value); if (!Number.isFinite(n)) throw new Error('MRM 数値が不正です'); return n;
+        const n = Number(value); if (!Number.isFinite(n)) throw new Error(uiT("MRM 数値が不正です")); return n;
     }
     function compound(doc, a, update, merge) {
-        const name = String(a._name || '').trim(); if (!name) throw new Error('化合物名が必要です');
+        const name = String(a._name || '').trim(); if (!name) throw new Error(uiT("化合物名が必要です"));
         let c = update ? doc.compounds.find(c => c.id === a._id) : doc.compounds.find(c => c.name === name);
-        if (update && !c) throw new Error('化合物が見つかりません');
-        if (doc.compounds.some(x => x !== c && x.name === name)) throw new Error('同名の化合物が存在します');
+        if (update && !c) throw new Error(uiT("化合物が見つかりません"));
+        if (doc.compounds.some(x => x !== c && x.name === name)) throw new Error(uiT("同名の化合物が存在します"));
         const existed = !!c;
         if (!c) {
             c = { id: uuid(), name, tags: [], polarity: null, note: null, serial_no: Math.max(0, ...doc.compounds.map(x => Number(x.serial_no) || 0)) + 1,
@@ -59,17 +62,17 @@
     }
     function findTransition(doc, id) {
         for (const c of doc.compounds) { const t = c.transitions.find(t => t.id === id); if (t) return { c, t }; }
-        throw new Error('トランジションが見つかりません');
+        throw new Error(uiT("トランジションが見つかりません"));
     }
     function transition(doc, a, update, preserve) {
         const values = {}; for (const k of ['precursor', 'product', 'ce', 'cv']) values[k] = number(a['_' + k]);
         let c, t;
         if (update) ({ c, t } = findTransition(doc, a._id));
         else {
-            c = doc.compounds.find(c => c.id === a._compound_id); if (!c) throw new Error('化合物が見つかりません');
+            c = doc.compounds.find(c => c.id === a._compound_id); if (!c) throw new Error(uiT("化合物が見つかりません"));
             t = c.transitions.find(t => Object.keys(values).every(k => t[k] === values[k]));
         }
-        if (c.transitions.some(x => x !== t && Object.keys(values).every(k => x[k] === values[k]))) throw new Error('同じトランジションが存在します');
+        if (c.transitions.some(x => x !== t && Object.keys(values).every(k => x[k] === values[k]))) throw new Error(uiT("同じトランジションが存在します"));
         if (!t) { t = { id: uuid(), compound_id: c.id, usages: [], created_at: now(), is_recommended: false }; c.transitions.push(t); }
         Object.assign(t, values);
         t.role = preserve ? (t.role || a._role || null) : (a._role || null);
@@ -101,7 +104,7 @@
         case 'record_usage': return usage(doc, a).id;
         case 'register_from_result': return register(doc, a);
         case 'register_from_result_batch': {
-            if (!Array.isArray(a._rows)) throw new Error('MRM rows が不正です');
+            if (!Array.isArray(a._rows)) throw new Error(uiT("MRM rows が不正です"));
             const results = [];
             for (const row of a._rows) {
                 const args = {}; for (const [k, v] of Object.entries(row)) args['_' + k] = v;
@@ -123,9 +126,9 @@
         case 'set_exp_template': doc.template = a._content || null; return null;
         case 'list_mrm_sets': return doc.sets;
         case 'upsert_mrm_set': {
-            const name = String(a._name || '').trim(); if (!name) throw new Error('セット名が必要です');
+            const name = String(a._name || '').trim(); if (!name) throw new Error(uiT("セット名が必要です"));
             let s = a._id ? doc.sets.find(s => s.id === a._id) : null;
-            if (a._id && !s) throw new Error('セットが見つかりません');
+            if (a._id && !s) throw new Error(uiT("セットが見つかりません"));
             if (!s) { s = { id: uuid(), created_at: now() }; doc.sets.push(s); }
             Object.assign(s, { name, owner: a._owner || null, description: a._description || null, source_project_slug: null, updated_at: now(),
                 items: (a._items || []).map((item, i) => Object.assign({}, item, { id: uuid(), position: i + 1 })) });
@@ -140,7 +143,7 @@
             }
             return [...hits.values()];
         }
-        default: throw new Error('ローカル MRM 未対応操作: ' + name);
+        default: throw new Error(uiT("ローカル MRM 未対応操作: ") + name);
         }
     }
     const reads = new Set(['verify_master_pw', 'list_mrm_library', 'get_exp_template', 'list_mrm_sets', 'search_projects_by_compound_master']);

@@ -3,12 +3,16 @@
 <head>
 <script src="runtime-config.js"></script>
 <script src="app-runtime.js"></script>
-<link rel="stylesheet" href="help.css?v=2026-11-09.1">
+<script src="app-i18n.js"></script>
+<script src="app-i18n-common.js"></script>
+<script src="app-i18n-storage.js"></script>
+<script src="app-i18n-manage.js"></script>
+<link rel="stylesheet" href="help.css?v=2026-11-16.1">
 <script src="project-store-safety.js"></script>
 <script src="project-navigation.js"></script>
 <script src="viewer/msi-display-settings.js"></script>
 <script src="offline/offline.js"></script>
-<script defer src="help.js?v=2026-11-09.1"></script>
+<script defer src="help.js?v=2026-11-16.1"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
@@ -73,12 +77,13 @@
   <header class="flex items-center justify-between gap-4 mb-6">
     <div>
       <h1 class="text-xl font-bold">DESI Data Share</h1>
-      <p class="text-xs text-gray-500 mt-1">プロジェクト管理</p>
+      <p class="text-xs text-gray-500 mt-1"><span data-i18n="プロジェクト管理">プロジェクト管理</span></p>
     </div>
     <div class="flex flex-wrap items-center justify-end gap-2">
-      <button id="btn-mrm" class="btn" title="MRM 管理ライブラリ (化合物・トランジション・使用履歴)">MRM管理</button>
-      <button id="btn-change-master-pw" class="btn" title="アプリ入場 / サーバ一覧取得のパスワードを変更">パスワード変更</button>
-      <button id="local-recovery-button" type="button" class="btn" hidden style="display:none;">回復・設定</button>
+      <button id="btn-mrm" class="btn" title="MRM 管理ライブラリ (化合物・トランジション・使用履歴)" data-i18n-title="MRM 管理ライブラリ (化合物・トランジション・使用履歴)"><span data-i18n="MRM管理">MRM管理</span></button>
+      <button id="btn-change-master-pw" class="btn" title="アプリ入場 / サーバ一覧取得のパスワードを変更" data-i18n-title="アプリ入場 / サーバ一覧取得のパスワードを変更"><span data-i18n="パスワード変更">パスワード変更</span></button>
+      <button id="local-recovery-button" type="button" class="btn" hidden style="display:none;"><span data-i18n="回復・設定">回復・設定</span></button>
+      <button type="button" class="btn" data-i18n-switch>English</button>
       <button id="btn-help" class="btn">Help</button>
     </div>
   </header>
@@ -86,29 +91,29 @@
   <div class="card p-4 mb-4">
     <div class="flex items-center justify-between gap-3 flex-wrap">
       <div class="flex gap-2">
-        <button id="btn-new" class="btn primary">+ 新規プロジェクト</button>
-        <button id="btn-new-folder" class="btn" title="プロジェクトをまとめるフォルダ (サブプロジェクト階層) を作成">+ フォルダ</button>
-        <button id="btn-refresh-server" class="btn">サーバから一覧取得</button>
+        <button id="btn-new" class="btn primary"><span data-i18n="+ 新規プロジェクト">+ 新規プロジェクト</span></button>
+        <button id="btn-new-folder" class="btn" title="プロジェクトをまとめるフォルダ (サブプロジェクト階層) を作成" data-i18n-title="プロジェクトをまとめるフォルダ (サブプロジェクト階層) を作成"><span data-i18n="+ フォルダ">+ フォルダ</span></button>
+        <button id="btn-refresh-server" class="btn"><span data-i18n="サーバから一覧取得">サーバから一覧取得</span></button>
       </div>
-      <div id="storage-description" class="text-xs text-gray-500">ローカル (このブラウザ) と、サーバ (Supabase) の両方から一覧表示します</div>
+      <div id="storage-description" class="text-xs text-gray-500"><span data-i18n="ローカル (このブラウザ) と、サーバ (Supabase) の両方から一覧表示します">ローカル (このブラウザ) と、サーバ (Supabase) の両方から一覧表示します</span></div>
     </div>
-    <p id="sharing-description" class="text-xs text-gray-600 mt-2">データはこのブラウザに保存され、同じ Google アカウントでも他のPCへ自動同期されません。別のPCで使うには公開し、受け取るPCで共有版を取り込んでください。一覧取得だけではローカルの内容は更新されません。</p>
+    <p id="sharing-description" class="text-xs text-gray-600 mt-2"><span data-i18n="データはこのブラウザに保存され、同じ Google アカウントでも他のPCへ自動同期されません。別のPCで使うには公開し、受け取るPCで共有版を取り込んでください。一覧取得だけではローカルの内容は更新されません。">データはこのブラウザに保存され、同じ Google アカウントでも他のPCへ自動同期されません。別のPCで使うには公開し、受け取るPCで共有版を取り込んでください。一覧取得だけではローカルの内容は更新されません。</span></p>
     <div class="flex items-center gap-2 flex-wrap mt-3">
-      <input id="proj-search" type="search" placeholder="プロジェクトを検索 (名前・装置・サンプル種・メモ・slug)"
+      <input id="proj-search" type="search" placeholder="プロジェクトを検索 (名前・装置・サンプル種・メモ・slug)" data-i18n-placeholder="プロジェクトを検索 (名前・装置・サンプル種・メモ・slug)"
              class="flex-1 min-w-[220px] text-sm border border-gray-300 rounded px-3 py-1.5" />
-      <button id="proj-search-clear" class="btn" title="検索をクリア">クリア</button>
-      <label class="text-xs text-gray-600 flex items-center gap-1">並べ替え
+      <button id="proj-search-clear" class="btn" title="検索をクリア" data-i18n-title="検索をクリア"><span data-i18n="クリア">クリア</span></button>
+      <label class="text-xs text-gray-600 flex items-center gap-1"><span data-i18n="並べ替え">並べ替え</span>
         <select id="proj-sort" class="text-sm border border-gray-300 rounded px-2 py-1.5">
-          <option value="date_desc">実験日 (新しい順)</option>
-          <option value="date_asc">実験日 (古い順)</option>
-          <option value="name">名前 (A→Z)</option>
+          <option value="date_desc" data-i18n="実験日 (新しい順)">実験日 (新しい順)</option>
+          <option value="date_asc" data-i18n="実験日 (古い順)">実験日 (古い順)</option>
+          <option value="name" data-i18n="名前 (A→Z)">名前 (A→Z)</option>
         </select>
       </label>
     </div>
   </div>
 
   <div id="list" class="space-y-2">
-    <p class="text-sm text-gray-500 px-1">読み込み中…</p>
+    <p class="text-sm text-gray-500 px-1"><span data-i18n="読み込み中…">読み込み中…</span></p>
   </div>
 </div>
 
@@ -117,6 +122,13 @@
 
 <script>
 'use strict';
+// UI-only bindings: parameters keep user data separate from translation keys.
+function uiT(source, params) { const api=globalThis.AppI18n; if(typeof params==='function')params=params(); return api ? api.t(source, params) : String(source).replace(/\{(\w+)\}/g,(token,k)=>params && Object.prototype.hasOwnProperty.call(params,k) ? String(params[k] ?? '') : token); }
+function uiMsg(source, params) { return {__uiMessage:true,source,params}; }
+function uiBind(element, message) { element.__uiMessageSource=message.source; const api=globalThis.AppI18n; if(api) api.setText(element,message.source,message.params); else element.textContent=uiT(message.source,message.params); return element; }
+function uiAttr(element, name, message) { const api=globalThis.AppI18n; if(api) api.setAttribute(element,name,message.source,message.params); else element.setAttribute(name,uiT(message.source,message.params)); return element; }
+function uiH(source, params) { const api=globalThis.AppI18n; if(api)return api.html(source,params); return uiT(source,params).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
 
 // ===========================================================================
 // IndexedDB helpers — minimal subset of viewer/index.html's ProjectStorage.
@@ -169,7 +181,7 @@ const ProjectStorage = (() => {
             const req = indexedDB.open(DB_NAME, DB_VERSION);
             req.onupgradeneeded = () => { ProjectStoreSafety.upgrade(req.result); };
             req.onblocked = () => {
-                try { alert('別のタブでこのアプリが開いています。\nそのタブを閉じるか再読み込みしてください (データベースの更新待ちです)。'); } catch (e) {}
+                try { alert(uiT("別のタブでこのアプリが開いています。\nそのタブを閉じるか再読み込みしてください (データベースの更新待ちです)。")); } catch (e) {}
             };
             req.onsuccess = () => {
                 // Do not block another tab's upgrade; re-open on next use.
@@ -339,7 +351,7 @@ const SupabaseClient = (() => {
         // headers). Wrapping fetch lets us reuse the same publish_session
         // token across many path deletions.
         async deleteStorageObject(bucket, path, publishToken) {
-            if (window.DESI_OFFLINE === true) throw new Error('オフライン版ではクラウド操作は使用できません');
+            if (window.DESI_OFFLINE === true) throw new Error(uiT("オフライン版ではクラウド操作は使用できません"));
             if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) throw new Error('supabase_not_configured');
             const url = window.SUPABASE_URL.replace(/\/+$/, '') + '/storage/v1/object/'
                       + encodeURIComponent(bucket) + '/' + path.split('/').map(encodeURIComponent).join('/');
@@ -362,23 +374,23 @@ const SupabaseClient = (() => {
 // are swept too without requiring a database migration.
 function scopedProjectStoragePath(path, slug) {
     if (typeof path !== 'string' || !path || /[:?#\\\u0000-\u001f\u007f]/.test(path)) {
-        throw new Error('保存先パスが不正なため削除を中止しました');
+        throw new Error(uiT("保存先パスが不正なため削除を中止しました"));
     }
     const parts = path.split('/');
     if (parts.some(part => {
         let decoded;
         try { decoded = decodeURIComponent(part); } catch (_) { return true; }
         return !decoded || decoded === '.' || decoded === '..' || /[/\\\u0000-\u001f\u007f]/.test(decoded);
-    })) throw new Error('保存先パスが不正なため削除を中止しました');
+    })) throw new Error(uiT("保存先パスが不正なため削除を中止しました"));
     return parts.length >= 2 && parts[0] === slug;
 }
 
 function collectServerProjectStoragePaths(doc, slug) {
     if (!doc || typeof doc !== 'object' || !Array.isArray(doc.sections)) {
-        throw new Error('画像の保存先を確認できないため削除を中止しました');
+        throw new Error(uiT("画像の保存先を確認できないため削除を中止しました"));
     }
     const docSlug = (doc.meta && doc.meta.project_slug) || doc.slug;
-    if (docSlug && docSlug !== slug) throw new Error('対象プロジェクトが一致しないため削除を中止しました');
+    if (docSlug && docSlug !== slug) throw new Error(uiT("対象プロジェクトが一致しないため削除を中止しました"));
     const paths = new Set(), retained = new Set();
     const add = path => (scopedProjectStoragePath(path, slug) ? paths : retained).add(path);
     for (const section of doc.sections) {
@@ -390,10 +402,10 @@ function collectServerProjectStoragePaths(doc, slug) {
     const media = doc.meta && doc.meta.project_meta && doc.meta.project_meta.roiMedia;
     if (media != null) {
         if (media.version !== 1 || !Array.isArray(media.items)) {
-            throw new Error('ROI写真の保存形式を確認できないため削除を中止しました');
+            throw new Error(uiT("ROI写真の保存形式を確認できないため削除を中止しました"));
         }
         for (const item of media.items) {
-            if (!item || !item.storagePath) throw new Error('ROI写真の原本参照が不足しているため削除を中止しました');
+            if (!item || !item.storagePath) throw new Error(uiT("ROI写真の原本参照が不足しているため削除を中止しました"));
             add(item.storagePath);
         }
     }
@@ -402,7 +414,7 @@ function collectServerProjectStoragePaths(doc, slug) {
 
 async function deleteServerProjectWithMedia(masterPw, slug) {
     if (typeof slug !== 'string' || !slug || /[/\\\u0000-\u001f\u007f]/.test(slug)) {
-        throw new Error('対象プロジェクトが不正です');
+        throw new Error(uiT("対象プロジェクトが不正です"));
     }
     let registry;
     try {
@@ -411,10 +423,10 @@ async function deleteServerProjectWithMedia(masterPw, slug) {
         if (!session || !session.token) throw new Error('read token unavailable');
         registry = collectServerProjectStoragePaths(await SupabaseClient.fetchProjectDoc(session.token), slug);
     } catch (e) {
-        throw new Error('登録画像の保存先を確認できないため、プロジェクトは削除していません: ' + (e.message || e));
+        throw new Error(uiT("登録画像の保存先を確認できないため、プロジェクトは削除していません: ") + (e.message || e));
     }
     const result = await SupabaseClient.deleteProjectDoc(masterPw, slug);
-    if (!result || result.ok !== true) throw new Error('プロジェクトの削除に失敗しました: ' + JSON.stringify(result));
+    if (!result || result.ok !== true) throw new Error(uiT("プロジェクトの削除に失敗しました: ") + JSON.stringify(result));
     let deleted = 0, failed = 0;
     for (const path of (Array.isArray(result.paths) ? result.paths : [])) {
         try {
@@ -500,9 +512,9 @@ async function tryServerUnlock(pw) {
 
 function openMasterUnlockModal() {
     const html = `
-        <h2>パスワードを入力してください</h2>
+        <h2><span data-i18n="パスワードを入力してください">パスワードを入力してください</span></h2>
         <p style="font-size:12px;color:#475569;margin-top:4px;">
-          DESI Data Share の管理画面に入るには admin password が必要です。
+          <span data-i18n="DESI Data Share の管理画面に入るには admin password が必要です。">DESI Data Share の管理画面に入るには admin password が必要です。</span>
         </p>
         <form class="row">
           <label>Password
@@ -530,19 +542,19 @@ function openMasterUnlockModal() {
         setTimeout(() => inp.focus(), 30);
         const tryUnlock = async () => {
             const pw = (inp.value || '').trim();
-            if (!pw) { errEl.textContent = 'パスワードを入力してください'; return; }
-            submit.disabled = true; submit.textContent = '確認中…';
-            errEl.textContent = '';
+            if (!pw) { uiBind(errEl, uiMsg("パスワードを入力してください")); return; }
+            submit.disabled = true; uiBind(submit, uiMsg("確認中…"));
+            uiBind(errEl, uiMsg(""));
             const server = await tryServerUnlock(pw);
-            submit.disabled = false; submit.textContent = 'Unlock';
+            submit.disabled = false; uiBind(submit, uiMsg("Unlock"));
             if (server.ok) {
                 markMasterUnlocked(pw);
                 back.remove();
                 resolve(true);
             } else if (server.transient) {
-                errEl.textContent = 'サーバに接続できません。ネットワーク接続を確認してください';
+                uiBind(errEl, uiMsg("サーバに接続できません。ネットワーク接続を確認してください"));
             } else {
-                errEl.textContent = 'パスワードが違います';
+                uiBind(errEl, uiMsg("パスワードが違います"));
                 inp.select();
             }
         };
@@ -564,30 +576,30 @@ function openMasterUnlockModal() {
 // The per-project 🔑 button and viewer passwords are intentionally left alone.
 function openPasswordChangeModal() {
     const html = `
-        <h2>パスワードの変更</h2>
+        <h2><span data-i18n="パスワードの変更">パスワードの変更</span></h2>
         <form class="row">
-          <label>変更する対象
+          <label><span data-i18n="変更する対象">変更する対象</span>
             <select name="target">
-              <option value="app">アプリ（プロジェクト一覧）に入るパスワード</option>
-              <option value="listfetch">サーバから一覧取得のパスワード（全プロジェクト共通）</option>
+              <option value="app" data-i18n="アプリ（プロジェクト一覧）に入るパスワード">アプリ（プロジェクト一覧）に入るパスワード</option>
+              <option value="listfetch" data-i18n="サーバから一覧取得のパスワード（全プロジェクト共通）">サーバから一覧取得のパスワード（全プロジェクト共通）</option>
             </select>
           </label>
           <p style="font-size:12px;color:#475569;margin-top:-2px;" data-hint></p>
           <div data-group="app">
-            <label>現在のパスワード
+            <label><span data-i18n="現在のパスワード">現在のパスワード</span>
               <input type="password" name="cur" autocomplete="current-password">
             </label>
           </div>
-          <label>新しいパスワード
+          <label><span data-i18n="新しいパスワード">新しいパスワード</span>
             <input type="password" name="next" autocomplete="new-password" required>
           </label>
-          <label>新しいパスワード (確認)
+          <label><span data-i18n="新しいパスワード (確認)">新しいパスワード (確認)</span>
             <input type="password" name="next2" autocomplete="new-password" required>
           </label>
           <p class="err" data-err></p>
           <div class="actions">
-            <button type="button" class="btn" data-modal-cancel>キャンセル</button>
-            <button type="submit" class="btn primary" data-modal-ok>変更する</button>
+            <button type="button" class="btn" data-modal-cancel><span data-i18n="キャンセル">キャンセル</span></button>
+            <button type="submit" class="btn primary" data-modal-ok><span data-i18n="変更する">変更する</span></button>
           </div>
         </form>`;
     return new Promise((resolve) => {
@@ -611,15 +623,15 @@ function openPasswordChangeModal() {
         card.querySelector('[data-modal-cancel]').addEventListener('click', () => close(false));
         back.addEventListener('click', (e) => { if (e.target === back) close(false); });
         const syncTarget = () => {
-            errEl.textContent = ''; errEl.style.color = '';
+            uiBind(errEl, uiMsg("")); errEl.style.color = '';
             if (targetEl.value === 'app') {
                 appGroup.style.display = '';
                 curEl.required = true;
-                hintEl.textContent = '現在のパスワードで認証してから、新しいパスワード (8 文字以上) を設定します。全プロジェクト共通の「アプリ入場」パスワードが更新されます。';
+                uiBind(hintEl, uiMsg("現在のパスワードで認証してから、新しいパスワード (8 文字以上) を設定します。全プロジェクト共通の「アプリ入場」パスワードが更新されます。"));
             } else {
                 appGroup.style.display = 'none';
                 curEl.required = false;
-                hintEl.textContent = 'マスターパスワードで認可し、全プロジェクトの「サーバから一覧取得」用パスワード (admin, 8 文字以上) を一括で新しい値に統一します。';
+                uiBind(hintEl, uiMsg("マスターパスワードで認可し、全プロジェクトの「サーバから一覧取得」用パスワード (admin, 8 文字以上) を一括で新しい値に統一します。"));
             }
         };
         targetEl.addEventListener('change', syncTarget);
@@ -630,57 +642,57 @@ function openPasswordChangeModal() {
             const target = targetEl.value;
             const next = (nextEl.value || '').trim();
             const next2 = (next2El.value || '').trim();
-            if (!next) { errEl.textContent = '新しいパスワードを入力してください'; return; }
-            if (next !== next2) { errEl.textContent = '新しいパスワード (確認) が一致しません'; return; }
-            if (!SupabaseClient.configured()) { errEl.textContent = 'Supabase が未設定のため変更できません'; return; }
+            if (!next) { uiBind(errEl, uiMsg("新しいパスワードを入力してください")); return; }
+            if (next !== next2) { uiBind(errEl, uiMsg("新しいパスワード (確認) が一致しません")); return; }
+            if (!SupabaseClient.configured()) { uiBind(errEl, uiMsg("Supabase が未設定のため変更できません")); return; }
 
             if (target === 'app') {
                 const cur = (curEl.value || '').trim();
-                if (!cur) { errEl.textContent = '現在のパスワードを入力してください'; return; }
-                if (next.length < 8) { errEl.textContent = '新しいパスワードは 8 文字以上にしてください'; return; }
-                if (next === cur) { errEl.textContent = '新しいパスワードが現在と同じです'; return; }
-                submit.disabled = true; submit.textContent = '変更中…'; errEl.textContent = '';
+                if (!cur) { uiBind(errEl, uiMsg("現在のパスワードを入力してください")); return; }
+                if (next.length < 8) { uiBind(errEl, uiMsg("新しいパスワードは 8 文字以上にしてください")); return; }
+                if (next === cur) { uiBind(errEl, uiMsg("新しいパスワードが現在と同じです")); return; }
+                submit.disabled = true; uiBind(submit, uiMsg("変更中…")); uiBind(errEl, uiMsg(""));
                 try {
                     await SupabaseClient.changeMasterPw(cur, next);
                     markMasterUnlocked(next);   // keep the unlocked session valid
                     errEl.style.color = '#16a34a';
-                    errEl.textContent = 'アプリ入場パスワードを変更しました';
+                    uiBind(errEl, uiMsg("アプリ入場パスワードを変更しました"));
                     setTimeout(() => close(true), 900);
                 } catch (e) {
-                    submit.disabled = false; submit.textContent = '変更する';
+                    submit.disabled = false; uiBind(submit, uiMsg("変更する"));
                     const code = e && e.code, msg = (e && e.message) || '';
-                    if (code === '28P01' || /invalid current/i.test(msg)) { errEl.textContent = '現在のパスワードが違います'; curEl.select(); }
-                    else if (/at least 8|8 characters/i.test(msg)) errEl.textContent = '新しいパスワードは 8 文字以上にしてください';
-                    else { console.warn('change_master_password failed:', e); errEl.textContent = 'サーバに接続できませんでした (ネットワークを確認してください)'; }
+                    if (code === '28P01' || /invalid current/i.test(msg)) { uiBind(errEl, uiMsg("現在のパスワードが違います")); curEl.select(); }
+                    else if (/at least 8|8 characters/i.test(msg)) uiBind(errEl, uiMsg("新しいパスワードは 8 文字以上にしてください"));
+                    else { console.warn('change_master_password failed:', e); uiBind(errEl, uiMsg("サーバに接続できませんでした (ネットワークを確認してください)")); }
                 }
                 return;
             }
 
             // target === 'listfetch' — bulk admin password across all projects
-            if (next.length < 8) { errEl.textContent = '新しいパスワードは 8 文字以上にしてください'; return; }
+            if (next.length < 8) { uiBind(errEl, uiMsg("新しいパスワードは 8 文字以上にしてください")); return; }
             // High blast radius: this rewrites EVERY project's admin credential
             // at once. Require an explicit confirmation.
-            if (!confirm('全プロジェクトの「サーバから一覧取得」用パスワード(admin)を一括で変更します。\nこれ以降、他のPC/セッションでの一覧取得と master 取り込みには新しいパスワードが必要になります。\n続けますか?')) {
+            if (!confirm(uiT("全プロジェクトの「サーバから一覧取得」用パスワード(admin)を一括で変更します。\nこれ以降、他のPC/セッションでの一覧取得と master 取り込みには新しいパスワードが必要になります。\n続けますか?"))) {
                 return;
             }
             let masterPw = readCachedMasterPw();
             if (!masterPw) {
-                masterPw = (prompt('Master password を入力してください') || '').trim();
+                masterPw = (prompt(uiT("Master password を入力してください")) || '').trim();
                 if (!masterPw) return;
             }
-            submit.disabled = true; submit.textContent = '変更中…'; errEl.textContent = '';
+            submit.disabled = true; uiBind(submit, uiMsg("変更中…")); uiBind(errEl, uiMsg(""));
             try {
                 const n = await SupabaseClient.setAllAdminPw(masterPw, next);
                 saveCachedOwnerPw(next);   // 以後の「サーバから一覧取得」を新pwに追従
                 errEl.style.color = '#16a34a';
-                errEl.textContent = '一覧取得パスワードを変更しました' + (typeof n === 'number' ? '（' + n + ' 件のプロジェクト）' : '');
+                uiBind(errEl, uiMsg("一覧取得パスワードを変更しました{0}", () => [typeof n === 'number' ? '（' + n + uiT(" 件のプロジェクト）") : '']));
                 setTimeout(() => close(true), 1100);
             } catch (e) {
-                submit.disabled = false; submit.textContent = '変更する';
+                submit.disabled = false; uiBind(submit, uiMsg("変更する"));
                 const code = e && e.code, msg = (e && e.message) || '';
-                if (code === '28P01' || /invalid master/i.test(msg)) errEl.textContent = 'マスターパスワードが違います（再ログインが必要な場合があります）';
-                else if (/at least \d/i.test(msg)) errEl.textContent = '新しいパスワードは 8 文字以上にしてください';
-                else { console.warn('set_all_admin_passwords_master failed:', e); errEl.textContent = 'サーバに接続できませんでした (ネットワークを確認してください)'; }
+                if (code === '28P01' || /invalid master/i.test(msg)) uiBind(errEl, uiMsg("マスターパスワードが違います（再ログインが必要な場合があります）"));
+                else if (/at least \d/i.test(msg)) uiBind(errEl, uiMsg("新しいパスワードは 8 文字以上にしてください"));
+                else { console.warn('set_all_admin_passwords_master failed:', e); uiBind(errEl, uiMsg("サーバに接続できませんでした (ネットワークを確認してください)")); }
             }
         };
         card.querySelector('form').addEventListener('submit', (e) => { e.preventDefault(); doChange(); });
@@ -693,28 +705,29 @@ function openPasswordChangeModal() {
 function openChangeProjectPwModal(slug, name) {
     const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
     const html = `
-        <h2>プロジェクトのパスワード変更</h2>
+        <h2><span data-i18n="プロジェクトのパスワード変更">プロジェクトのパスワード変更</span></h2>
         <p style="font-size:12px;color:#475569;margin-top:4px;">
-          <strong>${esc(name || slug)}</strong> の viewer / admin パスワードを変更します
-          （マスターパスワードで認証。再 Publish は不要です）。
+          <strong>${esc(name || slug)}</strong> <span data-i18n="の viewer / admin パスワードを変更します
+          （マスターパスワードで認証。再 Publish は不要です）。">の viewer / admin パスワードを変更します
+          （マスターパスワードで認証。再 Publish は不要です）。</span>
         </p>
         <form class="row">
-          <label>対象ロール
+          <label><span data-i18n="対象ロール">対象ロール</span>
             <select name="role">
-              <option value="viewer">viewer（閲覧者に渡す合鍵）</option>
-              <option value="admin">admin（管理者ビュー用）</option>
+              <option value="viewer" data-i18n="viewer（閲覧者に渡す合鍵）">viewer（閲覧者に渡す合鍵）</option>
+              <option value="admin" data-i18n="admin（管理者ビュー用）">admin（管理者ビュー用）</option>
             </select>
           </label>
-          <label>新しいパスワード（4 文字以上）
+          <label><span data-i18n="新しいパスワード（4 文字以上）">新しいパスワード（4 文字以上）</span>
             <input type="password" name="pw" autocomplete="new-password" required>
           </label>
-          <label>新しいパスワード（確認）
+          <label><span data-i18n="新しいパスワード（確認）">新しいパスワード（確認）</span>
             <input type="password" name="pw2" autocomplete="new-password" required>
           </label>
           <p class="err" data-err></p>
           <div class="actions">
-            <button type="button" class="btn" data-modal-cancel>キャンセル</button>
-            <button type="submit" class="btn primary" data-modal-ok>変更する</button>
+            <button type="button" class="btn" data-modal-cancel><span data-i18n="キャンセル">キャンセル</span></button>
+            <button type="submit" class="btn primary" data-modal-ok><span data-i18n="変更する">変更する</span></button>
           </div>
         </form>`;
     return new Promise((resolve) => {
@@ -736,34 +749,34 @@ function openChangeProjectPwModal(slug, name) {
             const pw = (pwEl.value || '').trim();
             const pw2 = (pw2El.value || '').trim();
             errEl.style.color = '';
-            if (!pw) { errEl.textContent = 'パスワードを入力してください'; return; }
-            if (pw.length < 4) { errEl.textContent = 'パスワードは 4 文字以上にしてください'; return; }
-            if (pw !== pw2) { errEl.textContent = 'パスワード（確認）が一致しません'; return; }
-            if (!SupabaseClient.configured()) { errEl.textContent = 'Supabase が未設定のため変更できません'; return; }
+            if (!pw) { uiBind(errEl, uiMsg("パスワードを入力してください")); return; }
+            if (pw.length < 4) { uiBind(errEl, uiMsg("パスワードは 4 文字以上にしてください")); return; }
+            if (pw !== pw2) { uiBind(errEl, uiMsg("パスワード（確認）が一致しません")); return; }
+            if (!SupabaseClient.configured()) { uiBind(errEl, uiMsg("Supabase が未設定のため変更できません")); return; }
             let masterPw = readCachedMasterPw();
             if (!masterPw) {
-                masterPw = (prompt('Master password を入力してください') || '').trim();
+                masterPw = (prompt(uiT("Master password を入力してください")) || '').trim();
                 if (!masterPw) return;
             }
-            submit.disabled = true; submit.textContent = '変更中…'; errEl.textContent = '';
+            submit.disabled = true; uiBind(submit, uiMsg("変更中…")); uiBind(errEl, uiMsg(""));
             try {
                 await SupabaseClient.setProjectPasswordMaster(masterPw, slug, role, pw);
                 errEl.style.color = '#16a34a';
-                errEl.textContent = (role === 'admin' ? 'admin' : 'viewer') + ' パスワードを変更しました';
+                uiBind(errEl, uiMsg("{0} パスワードを変更しました", () => [role === 'admin' ? 'admin' : 'viewer']));
                 setTimeout(() => close(true), 900);
             } catch (e) {
-                submit.disabled = false; submit.textContent = '変更する';
+                submit.disabled = false; uiBind(submit, uiMsg("変更する"));
                 const code = e && e.code;
                 const msg = (e && e.message) || '';
                 if (code === '28P01' || /invalid master/i.test(msg)) {
-                    errEl.textContent = 'マスターパスワードが違います（再ログインが必要な場合があります）';
+                    uiBind(errEl, uiMsg("マスターパスワードが違います（再ログインが必要な場合があります）"));
                 } else if (/project not found/i.test(msg)) {
-                    errEl.textContent = 'プロジェクトが見つかりません（未 Publish の可能性）';
+                    uiBind(errEl, uiMsg("プロジェクトが見つかりません（未 Publish の可能性）"));
                 } else if (/at least 4/i.test(msg)) {
-                    errEl.textContent = 'パスワードは 4 文字以上にしてください';
+                    uiBind(errEl, uiMsg("パスワードは 4 文字以上にしてください"));
                 } else {
                     console.warn('set_project_password_master failed:', e);
-                    errEl.textContent = 'サーバに接続できませんでした（ネットワークを確認してください）';
+                    uiBind(errEl, uiMsg("サーバに接続できませんでした（ネットワークを確認してください）"));
                 }
             }
         };
@@ -831,7 +844,7 @@ function showToast(msg, ms) {
     const host = document.getElementById('toast-host');
     if (!host) { console.log('toast:', msg); return; }
     const el = document.createElement('div');
-    el.textContent = String(msg == null ? '' : msg);
+    uiBind(el, uiMsg("{0}", () => [String(msg == null ? '' : msg)]));
     el.style.cssText = 'pointer-events:auto;max-width:80vw;background:#1e293b;color:#fff;font-size:13px;line-height:1.5;padding:8px 14px;border-radius:6px;box-shadow:0 4px 14px rgba(0,0,0,.25);opacity:0;transition:opacity .2s;white-space:pre-line;';
     host.appendChild(el);
     requestAnimationFrame(() => { el.style.opacity = '1'; });
@@ -853,7 +866,7 @@ function readCachedMasterPw() {
 async function _ensureMasterPwForTree() {
     let pw = readCachedMasterPw();
     if (pw) return pw;
-    pw = (prompt('Master password を入力してください') || '').trim();
+    pw = (prompt(uiT("Master password を入力してください")) || '').trim();
     if (pw) { try { sessionStorage.setItem('desi:masterPw', JSON.stringify({ pw, expiresAt: Date.now() + 12*3600*1000 })); } catch (e) {} }
     return pw;
 }
@@ -862,7 +875,7 @@ async function loadWorkspaceTree() {
     if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
         const raw = localStorage.getItem('desi:offlineWorkspaceTree:v1');
         workspaceTree = raw ? JSON.parse(raw) : _emptyTree();
-        if (!workspaceTree || !Array.isArray(workspaceTree.children)) throw new Error('ローカルのフォルダ情報が不正です');
+        if (!workspaceTree || !Array.isArray(workspaceTree.children)) throw new Error(uiT("ローカルのフォルダ情報が不正です"));
         _treeLoaded = true; _treeDirty = false; return;
     }
     if (!SupabaseClient.configured()) { _ensureTree(); _treeLoaded = true; return; }   // no server → nothing to clobber
@@ -892,7 +905,7 @@ async function _persistTreeAndRender() {
         try { localStorage.setItem('desi:offlineWorkspaceTree:v1', JSON.stringify(workspaceTree)); _treeDirty = false; }
         catch (e) {
             await loadWorkspaceTree(); await renderList();
-            alert('フォルダ構成を保存できませんでした: ' + (e.message || e));
+            alert(uiT("フォルダ構成を保存できませんでした: ") + (e.message || e));
         }
         return;
     }
@@ -900,15 +913,15 @@ async function _persistTreeAndRender() {
     // get_workspace_tree failure would otherwise overwrite the real hierarchy
     // with an empty/near-empty one on the next folder op.
     if (!_treeLoaded) {
-        alert('フォルダ情報をサーバから取得できていないため、保存を中止しました。\nマスターパスワードを入力してページを再読み込みしてから操作してください（既存のフォルダ構成を誤って消さないための保護です）。');
+        alert(uiT("フォルダ情報をサーバから取得できていないため、保存を中止しました。\nマスターパスワードを入力してページを再読み込みしてから操作してください（既存のフォルダ構成を誤って消さないための保護です）。"));
         return;
     }
     const pw = await _ensureMasterPwForTree();
-    if (!pw) { alert('Master password が無いためフォルダ構成を保存できませんでした'); return; }
+    if (!pw) { alert(uiT("Master password が無いためフォルダ構成を保存できませんでした")); return; }
     try { await SupabaseClient.setWorkspaceTree(pw, workspaceTree); _treeDirty = false; }
     catch (e) {
         console.warn('set_workspace_tree failed', e);
-        alert('フォルダ構成の保存に失敗しました: ' + ((e && (e.message || e.details)) || e));
+        alert(uiT("フォルダ構成の保存に失敗しました: ") + ((e && (e.message || e.details)) || e));
         // Roll back the optimistic in-memory mutation to the authoritative
         // server tree so a later successful op doesn't persist a diverged state.
         try { await loadWorkspaceTree(); await renderList(); } catch (e2) { console.warn('tree rollback failed', e2); }
@@ -924,7 +937,7 @@ async function saveTreeQuiet() {
     if (typeof window !== 'undefined' && window.DESI_OFFLINE === true) {
         if (_treeDirty && _treeLoaded && !_treePersisting) {
             try { localStorage.setItem('desi:offlineWorkspaceTree:v1', JSON.stringify(workspaceTree)); _treeDirty = false; }
-            catch (e) { console.error('ローカルのフォルダ保存失敗', e); showToast('フォルダ情報を保存できませんでした。ブラウザーの空き容量を確認してください。', 6000); }
+            catch (e) { console.error(uiT("ローカルのフォルダ保存失敗"), e); showToast(uiT("フォルダ情報を保存できませんでした。ブラウザーの空き容量を確認してください。"), 6000); }
         }
         return;
     }
@@ -941,7 +954,7 @@ async function saveTreeQuiet() {
         _treeDirty = false;
         if (healed) {
             _treeHealed = Math.max(0, _treeHealed - healed);
-            showToast('フォルダ位置 ' + healed + ' 件を共有ツリーに保存しました。\n他の PC でも同じフォルダの中に出ます（再読み込みが必要です）。', 6000);
+            showToast(uiT("フォルダ位置 ") + healed + uiT(" 件を共有ツリーに保存しました。\n他の PC でも同じフォルダの中に出ます（再読み込みが必要です）。"), 6000);
         }
     })();
     try { await _treeSavePromise; }
@@ -1027,7 +1040,7 @@ function _sharedFoldersContainingProject(slug, localId) {
     return out;
 }
 function _flattenFolders() {
-    const out = [{ id: null, label: '（ルート）' }];
+    const out = [{ id: null, label: uiT("（ルート）") }];
     const walk = (nodes, prefix) => {
         for (const n of nodes) if (n.type === 'folder') {
             out.push({ id: n.id, label: prefix + n.name });
@@ -1043,9 +1056,9 @@ async function pickFolderModal(excludeIds) {
     const folders = _flattenFolders().filter(f => !(excludeIds && excludeIds.has(f.id)));
     const btns = folders.map(f =>
         '<button type="button" class="btn" data-pick="' + safe(f.id || '') + '" style="display:block;width:100%;text-align:left;margin-bottom:4px;">'
-        + safe(f.label) + '</button>').join('');
-    const html = '<h2>移動先フォルダを選択</h2><div style="max-height:50vh;overflow:auto;">' + btns
-        + '</div><div class="actions" style="margin-top:8px;"><button type="button" class="btn" data-modal-cancel>キャンセル</button></div>';
+        + (f.id === null ? uiH('（ルート）') : safe(f.label)) + '</button>').join('');
+    const html = "<h2><span data-i18n=\"移動先フォルダを選択\">移動先フォルダを選択</span></h2><div style=\"max-height:50vh;overflow:auto;\">" + btns
+        + "</div><div class=\"actions\" style=\"margin-top:8px;\"><button type=\"button\" class=\"btn\" data-modal-cancel><span data-i18n=\"キャンセル\">キャンセル</span></button></div>";
     const p = openModal(html);
     const card = openModal._card;
     card.querySelectorAll('[data-pick]').forEach(b => b.addEventListener('click', () => {
@@ -1056,7 +1069,7 @@ async function pickFolderModal(excludeIds) {
 }
 
 async function treeCreateFolder(parentId) {
-    const name = (prompt('フォルダ名', '新しいフォルダ') || '').trim();
+    const name = (prompt(uiT("フォルダ名"), uiT("新しいフォルダ")) || '').trim();
     if (!name) return;
     _ensureTree();
     _treeChildrenOf(parentId).push({ type: 'folder', id: 'f_' + Math.random().toString(36).slice(2, 9) + Date.now().toString(36), name, children: [] });
@@ -1065,14 +1078,14 @@ async function treeCreateFolder(parentId) {
 async function treeRenameFolder(id) {
     _ensureTree();
     const f = _treeFolderById(id); if (!f) return;
-    const name = (prompt('フォルダ名を変更', f.name) || '').trim();
+    const name = (prompt(uiT("フォルダ名を変更"), f.name) || '').trim();
     if (!name || name === f.name) return;
     f.name = name; await persistTreeAndRender();
 }
 async function treeDeleteFolder(id) {
     _ensureTree();
     const f = _treeFolderById(id); if (!f) return;
-    if (!confirm('フォルダ「' + f.name + '」を削除しますか?\n中のプロジェクト/サブフォルダは1つ上の階層へ移動します（プロジェクト自体は削除されません）。')) return;
+    if (!confirm(uiT("フォルダ「") + f.name + uiT("」を削除しますか?\n中のプロジェクト/サブフォルダは1つ上の階層へ移動します（プロジェクト自体は削除されません）。"))) return;
     const parentArr = _treeParentArrayOf(id);
     const idx = parentArr.indexOf(f);
     if (idx >= 0) parentArr.splice(idx, 1, ...(f.children || []));
@@ -1282,26 +1295,26 @@ async function openFolderShareModal(folderId) {
     const countText = (incSub) => {
         const { total, withSlug, foreign } = computeCounts(incSub);
         const unpublished = total - withSlug - foreign;
-        return '配下の<b>公開済み</b>プロジェクト ' + withSlug + ' 件を一覧にします。'
-            + (unpublished ? '<br><span style="color:#b45309;">未公開の ' + unpublished + ' 件は含まれません（先に各プロジェクトを Publish してください）。</span>' : '')
-            + (foreign ? '<br><span style="color:#b91c1c;">この PC では解決できない ' + foreign + ' 件があります（公開済みでも一覧から抜け落ちます）。そのプロジェクトを登録した PC で一度この管理画面を開くと直ります。</span>' : '');
+        return "<span data-i18n=\"配下の\">配下の</span><b><span data-i18n=\"公開済み\">公開済み</span></b><span data-i18n=\"プロジェクト\">プロジェクト</span> " + withSlug + uiH(" 件を一覧にします。")
+            + (unpublished ? "<br><span style=\"color:#b45309;\"><span data-i18n=\"未公開の\">未公開の</span> " + unpublished + " <span data-i18n=\"件は含まれません（先に各プロジェクトを Publish してください）。\">件は含まれません（先に各プロジェクトを Publish してください）。</span></span>" : '')
+            + (foreign ? "<br><span style=\"color:#b91c1c;\"><span data-i18n=\"この PC では解決できない\">この PC では解決できない</span> " + foreign + " <span data-i18n=\"件があります（公開済みでも一覧から抜け落ちます）。そのプロジェクトを登録した PC で一度この管理画面を開くと直ります。\">件があります（公開済みでも一覧から抜け落ちます）。そのプロジェクトを登録した PC で一度この管理画面を開くと直ります。</span></span>" : '');
     };
     const cur = node.shareSlug || '';
     const folderUrl = (s) => location.origin + location.pathname.replace(/[^/]+$/, '') + 'viewer/index.html#folder=' + encodeURIComponent(s);
     const defaultSlug = cur || ('folder-' + (((node.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)) || 'x') + '-' + Math.random().toString(36).slice(2, 6));
     const html = `
-        <h2>フォルダを共有: ${safe(node.name)}</h2>
-        ${cur ? '<div style="font-size:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;padding:8px;margin-bottom:8px;">共有中（' + (node.shareIsPublic ? 'public' : 'パスワード保護') + '）<br><span style="word-break:break-all;">' + safe(folderUrl(cur)) + '</span><div style="margin-top:6px;display:flex;gap:6px;"><button type="button" class="btn" data-copy>URLコピー</button><button type="button" class="btn danger" data-unshare>共有解除</button></div></div>' : ''}
+        <h2><span data-i18n="フォルダを共有:">フォルダを共有:</span> ${safe(node.name)}</h2>
+        ${cur ? "<div style=\"font-size:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;padding:8px;margin-bottom:8px;\"><span data-i18n=\"共有中（\">共有中（</span>" + (node.shareIsPublic ? 'public' : uiH("パスワード保護")) + '）<br><span style="word-break:break-all;">' + safe(folderUrl(cur)) + "</span><div style=\"margin-top:6px;display:flex;gap:6px;\"><button type=\"button\" class=\"btn\" data-copy><span data-i18n=\"URLコピー\">URLコピー</span></button><button type=\"button\" class=\"btn danger\" data-unshare><span data-i18n=\"共有解除\">共有解除</span></button></div></div>" : ''}
         <p data-count style="font-size:12px;color:#475569;margin:0 0 8px;"></p>
         <form class="row" style="display:flex;flex-direction:column;gap:8px;">
-          <label style="font-size:13px;">共有 slug<br><input type="text" name="slug" value="${safe(defaultSlug)}" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
-          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="includesub" ${includeSub ? 'checked' : ''}> サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）</label>
-          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="pwprotect" ${cur && !node.shareIsPublic ? 'checked' : ''}> パスワードで保護する（オフ＝public）</label>
-          <label style="font-size:13px;" data-pw-row><input type="password" name="password" placeholder="フォルダ パスワード (4文字以上)" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
+          <label style="font-size:13px;"><span data-i18n="共有 slug">共有 slug</span><br><input type="text" name="slug" value="${safe(defaultSlug)}" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
+          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="includesub" ${includeSub ? 'checked' : ''}> <span data-i18n="サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）">サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）</span></label>
+          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="pwprotect" ${cur && !node.shareIsPublic ? 'checked' : ''}> <span data-i18n="パスワードで保護する（オフ＝public）">パスワードで保護する（オフ＝public）</span></label>
+          <label style="font-size:13px;" data-pw-row><input type="password" name="password" placeholder="フォルダ パスワード (4文字以上)" data-i18n-placeholder="フォルダ パスワード (4文字以上)" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
           <p class="err" data-err style="color:#b91c1c;font-size:12px;"></p>
           <div class="actions" style="display:flex;gap:6px;justify-content:flex-end;">
-            <button type="button" class="btn" data-modal-cancel>閉じる</button>
-            <button type="submit" class="btn primary" data-modal-ok>${cur ? '再共有 (更新)' : '共有する'}</button>
+            <button type="button" class="btn" data-modal-cancel><span data-i18n="閉じる">閉じる</span></button>
+            <button type="submit" class="btn primary" data-modal-ok>${cur ? uiH("再共有 (更新)") : uiH("共有する")}</button>
           </div>
         </form>`;
     const p = openModal(html);
@@ -1316,47 +1329,47 @@ async function openFolderShareModal(folderId) {
     const syncCount = () => { if (countEl) countEl.innerHTML = countText(incSubEl.checked); };
     syncCount(); incSubEl.addEventListener('change', syncCount);
     const copyBtn = card.querySelector('[data-copy]');
-    if (copyBtn) copyBtn.addEventListener('click', async () => { try { await navigator.clipboard.writeText(folderUrl(cur)); copyBtn.textContent = 'Copied ✓'; } catch (e) {} });
+    if (copyBtn) copyBtn.addEventListener('click', async () => { try { await navigator.clipboard.writeText(folderUrl(cur)); uiBind(copyBtn, uiMsg("Copied ✓")); } catch (e) {} });
     const unshareBtn = card.querySelector('[data-unshare]');
     if (unshareBtn) unshareBtn.addEventListener('click', async () => {
-        if (!confirm('フォルダ「' + node.name + '」の共有を解除しますか?')) return;
+        if (!confirm(uiT("フォルダ「") + node.name + uiT("」の共有を解除しますか?"))) return;
         const pw = await _ensureMasterPwForTree(); if (!pw) return;
         try { await SupabaseClient.deleteFolderShare(pw, cur); } catch (e) { console.warn('delete_folder_share failed', e); }
         delete node.shareSlug; delete node.shareIsPublic;
         if (card._close) card._close(null);
         await persistTreeAndRender();
-        alert('共有を解除しました。');
+        alert(uiT("共有を解除しました。"));
     });
     card._collect = () => {
         const slug = (card.querySelector('[name="slug"]').value || '').trim();
-        if (!slug) { errEl.textContent = 'slug は必須です'; return null; }
+        if (!slug) { uiBind(errEl, uiMsg("slug は必須です")); return null; }
         const isPublic = !pwProtect.checked;
         const password = (card.querySelector('[name="password"]').value || '').trim();
-        if (!isPublic && password.length < 4) { errEl.textContent = 'パスワードは4文字以上'; return null; }
+        if (!isPublic && password.length < 4) { uiBind(errEl, uiMsg("パスワードは4文字以上")); return null; }
         return { slug, isPublic, password, includeSubfolders: incSubEl.checked };
     };
     const res = await p;
     if (!res) return;
     const pw = await _ensureMasterPwForTree();
-    if (!pw) { alert('Master password が必要です'); return; }
+    if (!pw) { alert(uiT("Master password が必要です")); return; }
     const stats = { unpublished: 0, foreign: 0 };
     const indexDoc = _buildFolderIndexDoc(node, resolveProject, res.includeSubfolders, stats);
     if (stats.foreign && !confirm(
-            'この PC では ' + stats.foreign + ' 件のプロジェクトを解決できません。\n'
-            + 'このまま共有すると、公開済みでもその ' + stats.foreign + ' 件は受け手の一覧から抜け落ちます。\n\n'
-            + 'それらを登録した PC で一度この管理画面を開くと解決できるようになります。\n\n'
-            + 'それでも共有しますか?')) return;
+            uiT("この PC では ") + stats.foreign + uiT(" 件のプロジェクトを解決できません。\n")
+            + uiT("このまま共有すると、公開済みでもその ") + stats.foreign + uiT(" 件は受け手の一覧から抜け落ちます。\n\n")
+            + uiT("それらを登録した PC で一度この管理画面を開くと解決できるようになります。\n\n")
+            + uiT("それでも共有しますか?"))) return;
     try {
         await SupabaseClient.publishFolderShare(pw, res.slug, node.name, indexDoc, res.isPublic, res.isPublic ? null : res.password);
         node.shareSlug = res.slug; node.shareIsPublic = res.isPublic; node.shareIncludeSubfolders = res.includeSubfolders;
         await persistTreeAndRender();
         const url = folderUrl(res.slug);
         try { await navigator.clipboard.writeText(url); } catch (e) {}
-        alert('共有しました（URL をコピーしました）:\n' + url);
+        alert(uiT("共有しました（URL をコピーしました）:\n") + url);
     } catch (e) {
         const msg = String((e && (e.message || e.details)) || '');
-        if (/unauthorized|28000/i.test(msg)) alert('Master password が違います');
-        else alert('共有に失敗しました: ' + msg);
+        if (/unauthorized|28000/i.test(msg)) alert(uiT("Master password が違います"));
+        else alert(uiT("共有に失敗しました: ") + msg);
     }
 }
 
@@ -1401,18 +1414,18 @@ function openModal(html) {
 async function openNewProjectFormModal() {
     const safe = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
     const html = `
-        <h2>新規プロジェクト</h2>
+        <h2><span data-i18n="新規プロジェクト">新規プロジェクト</span></h2>
         <form class="row">
-          <label>プロジェクト名 <span style="color:#b91c1c;">*</span>
+          <label><span data-i18n="プロジェクト名">プロジェクト名</span> <span style="color:#b91c1c;">*</span>
             <input type="text" name="name" required>
           </label>
-          <label>実験日時 <span style="color:#b91c1c;">*</span>
+          <label><span data-i18n="実験日時">実験日時</span> <span style="color:#b91c1c;">*</span>
             <input type="date" name="experiment_date" required>
           </label>
-          <label>サンプル種 <span style="color:#b91c1c;">*</span> (脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可)
-            <input type="text" name="sample_types" placeholder="例: 脳, 肝臓">
+          <label><span data-i18n="サンプル種">サンプル種</span> <span style="color:#b91c1c;">*</span> <span data-i18n="(脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可)">(脳/肝臓/腎臓/胎児 等。カンマ/スペースで複数可)</span>
+            <input type="text" name="sample_types" placeholder="例: 脳, 肝臓" data-i18n-placeholder="例: 脳, 肝臓">
           </label>
-          <label>装置 <span style="color:#b91c1c;">*</span>
+          <label><span data-i18n="装置">装置</span> <span style="color:#b91c1c;">*</span>
             <select name="machine">
               <option value="DESI">DESI</option>
               <option value="TIMS">TIMS</option>
@@ -1427,7 +1440,7 @@ async function openNewProjectFormModal() {
             <input type="text" name="google_keep" placeholder="https://keep.google.com/...">
           </label>
           <label>Memo
-            <textarea name="free_note" rows="3" placeholder="自由記述"></textarea>
+            <textarea name="free_note" rows="3" placeholder="自由記述" data-i18n-placeholder="自由記述"></textarea>
           </label>
           <p class="err" data-err></p>
           <div class="actions">
@@ -1448,10 +1461,10 @@ async function openNewProjectFormModal() {
         const experimentDate = card.querySelector('[name="experiment_date"]').value || '';
         const machine = machineSel.value || '';
         const sampleTypes = parseList(card.querySelector('[name="sample_types"]').value);
-        if (!name) { errEl.textContent = 'プロジェクト名は必須'; return null; }
-        if (!experimentDate) { errEl.textContent = '実験日時は必須'; return null; }
-        if (!machine) { errEl.textContent = '装置は必須'; return null; }
-        if (!sampleTypes.length) { errEl.textContent = 'サンプル種を1つ以上入力してください'; return null; }
+        if (!name) { uiBind(errEl, uiMsg("プロジェクト名は必須")); return null; }
+        if (!experimentDate) { uiBind(errEl, uiMsg("実験日時は必須")); return null; }
+        if (!machine) { uiBind(errEl, uiMsg("装置は必須")); return null; }
+        if (!sampleTypes.length) { uiBind(errEl, uiMsg("サンプル種を1つ以上入力してください")); return null; }
         return {
             name,
             experimentDate,
@@ -1540,11 +1553,11 @@ function _isMissingRpc(e) {
 // 呼び出し側が黙って諦めるしかなくなる。
 function serverUnavailableReason() {
     if (!window.SUPABASE_URL || !window.SUPABASE_ANON_KEY) {
-        return 'このページはサーバ機能なしで動いています (接続先が未設定)';
+        return uiT("このページはサーバ機能なしで動いています (接続先が未設定)");
     }
     if (typeof supabase === 'undefined' || !supabase.createClient) {
-        return 'サーバへ接続する部品を読み込めませんでした。'
-             + '通信環境や広告ブロックをご確認のうえ、ページを再読み込みしてください';
+        return uiT("サーバへ接続する部品を読み込めませんでした。")
+             + uiT("通信環境や広告ブロックをご確認のうえ、ページを再読み込みしてください");
     }
     return null;   // 使える
 }
@@ -1569,7 +1582,7 @@ async function fetchServerProjectList(forcePrompt) {
     for (let attempt = 0; attempt < 2 && !missingV2; attempt++) {
         let masterPw = readCachedMasterPw();
         if (!masterPw || attempt > 0) {
-            masterPw = (prompt('サーバから一覧取得: master password を入力してください') || '').trim();
+            masterPw = (prompt(uiT("サーバから一覧取得: master password を入力してください")) || '').trim();
             // 入力をやめたら v2 を諦めて旧経路へ落ちる。ここで return すると、
             // SQL 未適用のサーバでは admin パスワード経路に到達できなくなる。
             if (!masterPw) { missingV2 = true; break; }
@@ -1583,7 +1596,7 @@ async function fetchServerProjectList(forcePrompt) {
             // ★ 0 件でも黙って返さない。旧経路 (下) には案内があるのに、こちらだけ
             //   無言だった。押しても画面が何も変わらないので「反応しない」に見える。
             if (!list.length && forcePrompt) {
-                showToast('サーバに公開済みのプロジェクトはありませんでした', 3600);
+                showToast(uiT("サーバに公開済みのプロジェクトはありませんでした"), 3600);
             }
             return list;
         } catch (e) {
@@ -1597,23 +1610,23 @@ async function fetchServerProjectList(forcePrompt) {
             if (/unauthorized|28000/i.test(msg)) {
                 // Wrong master password. Drop the cache so the next loop asks.
                 try { sessionStorage.removeItem('desi:masterPw'); } catch (e2) {}
-                if (attempt === 0) { showToast('Master password が違います', 2500); continue; }
-                showToast('Master password が違います', 3600);
+                if (attempt === 0) { showToast(uiT("Master password が違います"), 2500); continue; }
+                showToast(uiT("Master password が違います"), 3600);
                 return null;
             }
             console.warn('list_projects_v2 failed', e);
-            showToast('サーバ一覧の取得に失敗しました', 3600);
+            showToast(uiT("サーバ一覧の取得に失敗しました"), 3600);
             return null;
         }
     }
     // ---- legacy path: per-project admin password (one bcrypt per project) ----
     let pw = forcePrompt ? '' : readCachedOwnerPw();
     if (!pw) {
-        pw = (prompt('サーバから一覧取得: admin password を入力してください') || '').trim();
+        pw = (prompt(uiT("サーバから一覧取得: admin password を入力してください")) || '').trim();
         // ★ 入力をやめたときも一言出す。ここを無言で返していたので、
         //   ブラウザがダイアログを抑止している端末では**押しても永久に無反応**
         //   ("このページでこれ以上ダイアログを表示しない" は、そのタブでは戻せない)。
-        if (!pw) { if (forcePrompt) showToast('パスワードが入力されなかったので中止しました', 2800); return null; }
+        if (!pw) { if (forcePrompt) showToast(uiT("パスワードが入力されなかったので中止しました"), 2800); return null; }
     }
     try {
         const rows = await SupabaseClient.listProjects(pw);
@@ -1624,7 +1637,7 @@ async function fetchServerProjectList(forcePrompt) {
             // do NOT cache a pw that returned nothing (would keep the silent
             // auto-pull empty forever).
             if (forcePrompt) {
-                showToast('サーバから 0 件でした。admin パスワードが違うか、まだ Publish 済みプロジェクトがありません。\n(正しい値かご確認ください)', 4200);
+                showToast(uiT("サーバから 0 件でした。admin パスワードが違うか、まだ Publish 済みプロジェクトがありません。\n(正しい値かご確認ください)"), 4200);
             }
             return list;
         }
@@ -1632,7 +1645,7 @@ async function fetchServerProjectList(forcePrompt) {
         return list;
     } catch (e) {
         console.warn('list_projects failed', e);
-        showToast('サーバ一覧の取得に失敗しました (パスワード違い?)', 3600);
+        showToast(uiT("サーバ一覧の取得に失敗しました (パスワード違い?)"), 3600);
         return null;
     }
 }
@@ -1678,13 +1691,13 @@ function rowHtml(r) {
     const badge = r.kind === 'server-only'
         ? '<span class="badge server">Server only</span>'
         : (r.kind === 'local+server' ? '<span class="badge both">Local + Server</span>'
-            : canCheckShare ? '<span class="badge local">このPC／共有URLあり</span>'
-            : '<span class="badge local">' + (window.DESI_OFFLINE === true ? 'このPCのみ' : 'このPCのみ／未公開') + '</span>');
+            : canCheckShare ? "<span class=\"badge local\"><span data-i18n=\"このPC／共有URLあり\">このPC／共有URLあり</span></span>"
+            : '<span class="badge local">' + (window.DESI_OFFLINE === true ? uiH("このPCのみ") : uiH("このPCのみ／未公開")) + '</span>');
     // ローカル記録に切片が 1 つも無い = 開いても「レイヤーがありません」にしか
     // ならない。作っただけのプロジェクトを「データが消えた」と誤解しないよう、
     // 一覧の時点で分かるようにする。
     const emptyBadge = (r.local && r.local.sectionCount === 0)
-        ? '<span class="badge empty" title="このローカル記録には切片がありません（作成しただけの状態）">空</span>'
+        ? "<span class=\"badge empty\" title=\"このローカル記録には切片がありません（作成しただけの状態）\" data-i18n-title=\"このローカル記録には切片がありません（作成しただけの状態）\"><span data-i18n=\"空\">空</span></span>"
         : '';
     const localId = r.local ? r.local.id : '';
     return `
@@ -1696,21 +1709,21 @@ function rowHtml(r) {
             </div>
             <div class="flex gap-2 flex-wrap">
               ${r.local
-                  ? '<button type="button" class="btn primary" data-action="open-local" title="新しいタブで開きます">Open</button>'
-                  : '<button type="button" class="btn primary" data-action="open-server" title="サーバから取り込み、新しいタブの master mode で開きます (master password 要)">Open (master)</button>'}
-              ${canCheckShare ? '<button type="button" class="btn" data-action="refresh-share" title="新しいタブで共有版の更新を確認します。ローカルの編集は保持します">共有の最新版を確認</button>' : ''}
-              ${(!r.local && slug) ? '<a class="btn" data-action="open-share" href="' + safe(ProjectNavigation.shareUrl(slug)) + '" target="_blank" rel="noopener" title="閲覧専用 share view を新しいタブで開きます">Share view</a>' : ''}
-              ${window.DESI_OFFLINE === true ? '' : (url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? '<button type="button" class="btn" disabled title="Publish to share してから URL を取得してください">URL なし</button>' : ''))}
+                  ? "<button type=\"button\" class=\"btn primary\" data-action=\"open-local\" title=\"新しいタブで開きます\" data-i18n-title=\"新しいタブで開きます\">Open</button>"
+                  : "<button type=\"button\" class=\"btn primary\" data-action=\"open-server\" title=\"サーバから取り込み、新しいタブの master mode で開きます (master password 要)\" data-i18n-title=\"サーバから取り込み、新しいタブの master mode で開きます (master password 要)\">Open (master)</button>"}
+              ${canCheckShare ? "<button type=\"button\" class=\"btn\" data-action=\"refresh-share\" title=\"新しいタブで共有版の更新を確認します。ローカルの編集は保持します\" data-i18n-title=\"新しいタブで共有版の更新を確認します。ローカルの編集は保持します\"><span data-i18n=\"共有の最新版を確認\">共有の最新版を確認</span></button>" : ''}
+              ${(!r.local && slug) ? '<a class="btn" data-action="open-share" href="' + safe(ProjectNavigation.shareUrl(slug)) + "\" target=\"_blank\" rel=\"noopener\" title=\"閲覧専用 share view を新しいタブで開きます\" data-i18n-title=\"閲覧専用 share view を新しいタブで開きます\">Share view</a>" : ''}
+              ${window.DESI_OFFLINE === true ? '' : (url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? "<button type=\"button\" class=\"btn\" disabled title=\"Publish to share してから URL を取得してください\" data-i18n-title=\"Publish to share してから URL を取得してください\"><span data-i18n=\"URL なし\">URL なし</span></button>" : ''))}
               ${r.local ? '<button type="button" class="btn danger" data-action="delete-local">Delete</button>' : ''}
-              ${(!r.local && slug) ? '<button type="button" class="btn danger" data-action="delete-server" title="サーバから完全に削除 (master password 要)">Delete</button>' : ''}
-              ${slug ? '<button type="button" class="btn" data-action="change-pw" title="viewer / admin パスワードを変更 (master password 要)">🔑 パスワード</button>' : ''}
-              <button type="button" class="btn" data-action="rename" title="プロジェクト名を変更">改名</button>
-              <button type="button" class="btn" data-action="move" title="フォルダへ移動 (サブプロジェクト階層)">📁 移動</button>
+              ${(!r.local && slug) ? "<button type=\"button\" class=\"btn danger\" data-action=\"delete-server\" title=\"サーバから完全に削除 (master password 要)\" data-i18n-title=\"サーバから完全に削除 (master password 要)\">Delete</button>" : ''}
+              ${slug ? "<button type=\"button\" class=\"btn\" data-action=\"change-pw\" title=\"viewer / admin パスワードを変更 (master password 要)\" data-i18n-title=\"viewer / admin パスワードを変更 (master password 要)\"><span data-i18n=\"🔑 パスワード\">🔑 パスワード</span></button>" : ''}
+              <button type="button" class="btn" data-action="rename" title="プロジェクト名を変更" data-i18n-title="プロジェクト名を変更"><span data-i18n="改名">改名</span></button>
+              <button type="button" class="btn" data-action="move" title="フォルダへ移動 (サブプロジェクト階層)" data-i18n-title="フォルダへ移動 (サブプロジェクト階層)"><span data-i18n="📁 移動">📁 移動</span></button>
             </div>
           </div>
           <div class="text-xs text-gray-600 mt-2">
-            実験日: ${safe(date)} ・ 装置: ${safe(machine)}${matrix ? ' / Matrix: ' + safe(matrix) : ''}${stypes.length ? ' ・ サンプル種: ' + safe(stypes.join(', ')) : ''}
-            ${gk && window.DESI_OFFLINE !== true ? ' ・ <a class="text-blue-600 hover:underline" href="' + safe(gk) + '" target="_blank" rel="noopener">Google Keep ↗</a>' : ''}
+            <span data-i18n="実験日:">実験日:</span> ${safe(date)} <span data-i18n="・ 装置:">・ 装置:</span> ${safe(machine)}${matrix ? ' / Matrix: ' + safe(matrix) : ''}${stypes.length ? uiH(" ・ サンプル種: ") + safe(stypes.join(', ')) : ''}
+            ${gk && window.DESI_OFFLINE !== true ? " <span data-i18n=\"・\">・</span> a class=\"text-blue-600 hover:underline\" href=\"" + safe(gk) + '" target="_blank" rel="noopener">Google Keep ↗</a>' : ''}
           </div>
           ${note ? '<div class="text-xs text-gray-500 mt-1 whitespace-pre-line">' + safe(note) + '</div>' : ''}
         </div>`;
@@ -1771,7 +1784,7 @@ async function renderList(options = {}) {
     if (!rows.length && !(workspaceTree.children && workspaceTree.children.length)) {
         list.innerHTML = `
             <div class="card p-6 text-center text-sm text-gray-500">
-              プロジェクトがまだありません。<br>${window.DESI_OFFLINE === true ? '「+ 新規プロジェクト」で作成してください。既存 ZIP はプロジェクトを開き、Import ZIP から読み込めます。' : '「+ 新規プロジェクト」で作成するか、「サーバから一覧取得」で過去のプロジェクトを呼び出してください。'}
+              <span data-i18n="プロジェクトがまだありません。">プロジェクトがまだありません。</span><br>${window.DESI_OFFLINE === true ? uiH("「+ 新規プロジェクト」で作成してください。既存 ZIP はプロジェクトを開き、Import ZIP から読み込めます。") : uiH("「+ 新規プロジェクト」で作成するか、「サーバから一覧取得」で過去のプロジェクトを呼び出してください。")}
             </div>`;
         return;
     }
@@ -1833,14 +1846,14 @@ async function renderList(options = {}) {
     const folderHead = (n, depth) => {
         const isCol = !_openFolders.has(n.id);
         return '<div class="folder-head" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:' + (depth ? '6px 0 2px' : '12px 0 2px') + ';">'
-            + '<button class="btn" style="padding:0 7px;" data-folder-toggle="' + safe(n.id) + '" title="開閉">' + (isCol ? '▶' : '▼') + '</button>'
+            + '<button class="btn" style="padding:0 7px;" data-folder-toggle="' + safe(n.id) + "\" title=\"開閉\" data-i18n-title=\"開閉\">" + (isCol ? '▶' : '▼') + '</button>'
             + '<span style="font-weight:700;">📁 ' + safe(n.name) + '</span>'
-            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-add-project="' + safe(n.id) + '" title="このフォルダに新規プロジェクト">＋プロジェクト</button>'
-            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-add="' + safe(n.id) + '" title="サブフォルダ追加">＋サブ</button>'
-            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-rename="' + safe(n.id) + '" title="名前変更">改名</button>'
-            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-move="' + safe(n.id) + '" title="このフォルダを移動">移動</button>'
-            + '<button class="btn danger" style="font-size:11px;padding:2px 6px;" data-folder-del="' + safe(n.id) + '" title="削除">削除</button>'
-            + (window.DESI_OFFLINE === true ? '' : '<button class="btn" style="font-size:11px;padding:2px 6px;' + (n.shareSlug ? 'background:#ecfdf5;border-color:#a7f3d0;' : '') + '" data-folder-share="' + safe(n.id) + '" title="このフォルダを共有 (受け手向けインデックス)">' + (n.shareSlug ? '共有中' : '共有') + '</button>')
+            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-add-project="' + safe(n.id) + "\" title=\"このフォルダに新規プロジェクト\" data-i18n-title=\"このフォルダに新規プロジェクト\"><span data-i18n=\"＋プロジェクト\">＋プロジェクト</span></button>"
+            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-add="' + safe(n.id) + "\" title=\"サブフォルダ追加\" data-i18n-title=\"サブフォルダ追加\"><span data-i18n=\"＋サブ\">＋サブ</span></button>"
+            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-rename="' + safe(n.id) + "\" title=\"名前変更\" data-i18n-title=\"名前変更\"><span data-i18n=\"改名\">改名</span></button>"
+            + '<button class="btn" style="font-size:11px;padding:2px 6px;" data-folder-move="' + safe(n.id) + "\" title=\"このフォルダを移動\" data-i18n-title=\"このフォルダを移動\"><span data-i18n=\"移動\">移動</span></button>"
+            + '<button class="btn danger" style="font-size:11px;padding:2px 6px;" data-folder-del="' + safe(n.id) + "\" title=\"削除\" data-i18n-title=\"削除\"><span data-i18n=\"削除\">削除</span></button>"
+            + (window.DESI_OFFLINE === true ? '' : '<button class="btn" style="font-size:11px;padding:2px 6px;' + (n.shareSlug ? 'background:#ecfdf5;border-color:#a7f3d0;' : '') + '" data-folder-share="' + safe(n.id) + "\" title=\"このフォルダを共有 (受け手向けインデックス)\" data-i18n-title=\"このフォルダを共有 (受け手向けインデックス)\">" + (n.shareSlug ? uiH("共有中") : uiH("共有")) + '</button>')
             + '</div>';
     };
     const renderNodes = (nodes, depth) => {
@@ -1851,7 +1864,7 @@ async function renderList(options = {}) {
                 const inner = renderNodes(n.children || [], depth + 1);
                 html += folderHead(n, depth)
                     + '<div data-folder-body="' + safe(n.id) + '" class="space-y-2" style="margin-left:18px;border-left:2px solid #e5e7eb;padding-left:10px;' + (isCol ? 'display:none;' : '') + '">'
-                    +   (inner || '<div class="text-xs text-gray-400 px-1 py-1">（空のフォルダ）</div>')
+                    +   (inner || "<div class=\"text-xs text-gray-400 px-1 py-1\"><span data-i18n=\"（空のフォルダ）\">（空のフォルダ）</span></div>")
                     + '</div>';
             } else if (n.type === 'project') {
                 // 解決できないノードは描かない。この PC にローカル記録が無い
@@ -1869,11 +1882,11 @@ async function renderList(options = {}) {
     if (q) {
         // Search active: flat list of matching projects (folder tree hidden).
         const hits = rows.filter(r => rowText(r).includes(q)).sort(cmpRows);
-        const header = '<div class="text-xs text-gray-500 px-1 mb-2">検索「' + safe(q) + '」に該当 ' + hits.length
-            + ' 件 <button type="button" id="proj-search-clear-inline" class="text-blue-600 hover:underline" style="margin-left:6px;">クリア</button>（フォルダ表示は検索をクリアで戻ります）</div>';
+        const header = "<div class=\"text-xs text-gray-500 px-1 mb-2\"><span data-i18n=\"検索「\">検索「</span>" + safe(q) + uiH("」に該当 ") + hits.length
+            + " <span data-i18n=\"件\">件</span> <button type=\"button\" id=\"proj-search-clear-inline\" class=\"text-blue-600 hover:underline\" style=\"margin-left:6px;\"><span data-i18n=\"クリア\">クリア</span></button><span data-i18n=\"（フォルダ表示は検索をクリアで戻ります）\">（フォルダ表示は検索をクリアで戻ります）</span></div>";
         list.innerHTML = header + (hits.length
             ? hits.map(rowHtml).join('')
-            : '<div class="card p-6 text-center text-sm text-gray-500">該当するプロジェクトがありません。</div>');
+            : "<div class=\"card p-6 text-center text-sm text-gray-500\"><span data-i18n=\"該当するプロジェクトがありません。\">該当するプロジェクトがありません。</span></div>");
     } else {
         const treeHtml = renderNodes(workspaceTree.children, 0);
         const unplacedHtml = rows.filter(r => !placed.has(rkey(r)))
@@ -1895,8 +1908,8 @@ async function renderList(options = {}) {
     list.querySelectorAll('[data-folder-toggle]').forEach(btn => btn.addEventListener('click', () => {
         const id = btn.getAttribute('data-folder-toggle');
         const body = list.querySelector('[data-folder-body="' + esc(id) + '"]');
-        if (_openFolders.has(id)) { _openFolders.delete(id); if (body) body.style.display = 'none'; btn.textContent = '▶'; }
-        else { _openFolders.add(id); if (body) body.style.display = ''; btn.textContent = '▼'; }
+        if (_openFolders.has(id)) { _openFolders.delete(id); if (body) body.style.display = 'none'; uiBind(btn, uiMsg("▶")); }
+        else { _openFolders.add(id); if (body) body.style.display = ''; uiBind(btn, uiMsg("▼")); }
     }));
     list.querySelectorAll('[data-folder-add]').forEach(b => b.addEventListener('click', () => treeCreateFolder(b.getAttribute('data-folder-add'))));
     list.querySelectorAll('[data-folder-add-project]').forEach(b => b.addEventListener('click', () => runManagerAction(async () => {
@@ -1951,20 +1964,20 @@ async function renderList(options = {}) {
                 ta.value = url; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove();
             }
             const btn = row.querySelector('[data-action="copy-url"]');
-            if (btn) { const o = btn.textContent; btn.textContent = 'Copied ✓'; setTimeout(() => { btn.textContent = o; }, 1200); }
+            if (btn) { const o = btn.textContent; uiBind(btn, uiMsg("Copied ✓")); setTimeout(() => { uiBind(btn, uiMsg("{0}", () => [o])); }, 1200); }
         });
         click('delete-local', async () => {
             if (!localId) return;
-            if (!confirm(window.DESI_OFFLINE === true ? 'このブラウザーからプロジェクトを削除しますか? 必要なデータは先に Export ZIP でバックアップしてください。' : 'ローカルからこのプロジェクトを削除しますか? (サーバに publish 済みなら、サーバ側のデータは残ります)')) return;
+            if (!confirm(window.DESI_OFFLINE === true ? uiT("このブラウザーからプロジェクトを削除しますか? 必要なデータは先に Export ZIP でバックアップしてください。") : uiT("ローカルからこのプロジェクトを削除しますか? (サーバに publish 済みなら、サーバ側のデータは残ります)"))) return;
             try { await ProjectStorage.deleteProject(localId, {expectedRevision:Number(row.getAttribute('data-storage-revision'))}); }
             catch (e) { alert(e.message || String(e)); }
             await renderList();
         });
         click('delete-server', async () => {
             if (!slug) return;
-            if (!confirm('"' + slug + '" をサーバから完全に削除します。\n' +
-                         'projects / sections / rois / credentials / storage object すべて消去します。\n' +
-                         'この操作は元に戻せません。続けますか?')) return;
+            if (!confirm('"' + slug + uiT("\" をサーバから完全に削除します。\n") +
+                         uiT("projects / sections / rois / credentials / storage object すべて消去します。\n") +
+                         uiT("この操作は元に戻せません。続けますか?"))) return;
             // 既存の master pw キャッシュを再利用 (publish フローと共通)
             let masterPw = '';
             try {
@@ -1975,7 +1988,7 @@ async function renderList(options = {}) {
                 }
             } catch (e) {}
             if (!masterPw) {
-                masterPw = (prompt('Master password を入力してください') || '').trim();
+                masterPw = (prompt(uiT("Master password を入力してください")) || '').trim();
                 if (!masterPw) return;
             }
             try {
@@ -1992,15 +2005,15 @@ async function renderList(options = {}) {
                 if (Array.isArray(serverRowsCache)) {
                     serverRowsCache = serverRowsCache.filter(sp => sp && sp.slug !== slug);
                 }
-                let msg = '削除しました (DB: ok, storage objects: ' + deleted + ' 件)';
-                if (failed) msg += ' / 失敗: ' + failed + ' 件 (orphan blob として残ります)';
-                if (retained) msg += ' / 原本 ' + retained + ' 件は保持しました (管理者の保管整理対象)';
+                let msg = uiT("削除しました (DB: ok, storage objects: ") + deleted + uiT(" 件)");
+                if (failed) msg += uiT(" / 失敗: ") + failed + uiT(" 件 (orphan blob として残ります)");
+                if (retained) msg += uiT(" / 原本 ") + retained + uiT(" 件は保持しました (管理者の保管整理対象)");
                 showToast(msg, 3600);
                 await renderList();
             } catch (e) {
                 const msg = String((e && (e.message || e.details)) || '');
-                if (/unauthorized|28000/i.test(msg)) alert('Master password が違います');
-                else alert('削除失敗: ' + msg);
+                if (/unauthorized|28000/i.test(msg)) alert(uiT("Master password が違います"));
+                else alert(uiT("削除失敗: ") + msg);
             }
         });
         click('rename', async () => {
@@ -2013,19 +2026,19 @@ async function renderList(options = {}) {
             if (localId) {
                 let proj = null;
                 try { proj = await ProjectStorage.getProject(localId); } catch (e) {}
-                if (!proj) { alert('プロジェクトが見つかりません'); return; }
+                if (!proj) { alert(uiT("プロジェクトが見つかりません")); return; }
                 const cur = proj.displayName || '';
-                const name = (prompt('プロジェクト名を変更', cur) || '').trim();
+                const name = (prompt(uiT("プロジェクト名を変更"), cur) || '').trim();
                 if (!name || name === cur) return;
                 try {
                     await ProjectStorage.patchProject(localId, current => {
-                        if (current.displayName !== cur) throw new Error('別のタブで改名されています。最新の名前を確認してください。');
+                        if (current.displayName !== cur) throw new Error(uiT("別のタブで改名されています。最新の名前を確認してください。"));
                         current.displayName = name;
                         current.publishEditEpoch = (current.publishEditEpoch || 0) + 1;
                         if (current.shareInfo && current.shareInfo.slug) current.__publishPending = true;
                     });
                 }
-                catch (e) { alert('改名に失敗しました: ' + (e && e.message || e)); return; }
+                catch (e) { alert(uiT("改名に失敗しました: ") + (e && e.message || e)); return; }
                 await renderList();
                 // Auto-refresh any shared folder whose listing includes this
                 // project so its snapshot shows the new name at the SAME folder
@@ -2057,19 +2070,19 @@ async function renderList(options = {}) {
                                 } catch (e) { console.warn('auto re-share folder failed', folder.name, e); failed.push(folder.name); }
                             }
                             folderMsg = (failed.length
-                                    ? '\n\n共有フォルダ「' + failed.join('」「') + '」の一覧名は自動更新できませんでした（パスワード保護のため）。フォルダの「共有」ボタンから再共有してください。'
+                                    ? uiT("\n\n共有フォルダ「") + failed.join('」「') + uiT("」の一覧名は自動更新できませんでした（パスワード保護のため）。フォルダの「共有」ボタンから再共有してください。")
                                     : '')
                                 + (skipped.length
-                                    ? '\n\n共有フォルダ「' + skipped.join('」「') + '」の一覧は更新していません。この PC では中身の一部を解決できず、そのまま更新すると公開済みのプロジェクトが一覧から抜け落ちるためです。それらを登録した PC で一度この管理画面を開いてください。'
+                                    ? uiT("\n\n共有フォルダ「") + skipped.join('」「') + uiT("」の一覧は更新していません。この PC では中身の一部を解決できず、そのまま更新すると公開済みのプロジェクトが一覧から抜け落ちるためです。それらを登録した PC で一度この管理画面を開いてください。")
                                     : '')
-                                + (!failed.length && !skipped.length ? '\n\n共有フォルダの一覧名も更新しました。' : '');
+                                + (!failed.length && !skipped.length ? uiT("\n\n共有フォルダの一覧名も更新しました。") : '');
                         }
                     }
                 } catch (e) { console.warn('folder auto re-share skipped', e); }
-                if (slug) alert('ローカル名を変更しました。' + folderMsg
-                    + '\n\n※ プロジェクト共有ページ自体の表示名は、master で開いて再 Publish すると反映されます。');
+                if (slug) alert(uiT("ローカル名を変更しました。") + folderMsg
+                    + uiT("\n\n※ プロジェクト共有ページ自体の表示名は、master で開いて再 Publish すると反映されます。"));
             } else if (slug) {
-                if (confirm('Server only のプロジェクトはここでは直接改名できません。\n「Open (master)」でローカルに取り込んでから改名 →（必要なら）再 Publish できます。\n今すぐ master mode で開きますか?')) {
+                if (confirm(uiT("Server only のプロジェクトはここでは直接改名できません。\n「Open (master)」でローカルに取り込んでから改名 →（必要なら）再 Publish できます。\n今すぐ master mode で開きますか?"))) {
                     ProjectNavigation.openMaster({importSlug:slug});
                 }
             }
@@ -2083,16 +2096,16 @@ async function renderList(options = {}) {
 // users on the manager page don't have to bounce out to read the docs.
 // ===========================================================================
 const _helpAudiences = [
-    { key: 'manage', labelJa: '管理画面',         labelEn: 'Project mgmt' },
-    { key: 'master', labelJa: '共有 (admin)',     labelEn: 'Sharing (admin)' },
-    { key: 'viewer', labelJa: '共有 (受け手)',    labelEn: 'Sharing (viewer)' },
+    { key: 'manage', labelJa: uiT("管理画面"),         labelEn: 'Project mgmt' },
+    { key: 'master', labelJa: uiT("共有 (admin)"),     labelEn: 'Sharing (admin)' },
+    { key: 'viewer', labelJa: uiT("共有 (受け手)"),    labelEn: 'Sharing (viewer)' },
 ];
 const _helpGuideSources = {
-    'manage:ja': { path: 'USER_GUIDE.manage.md',    title: 'DESI Data Share — プロジェクト管理ガイド' },
+    'manage:ja': { path: 'USER_GUIDE.manage.md',    title: uiT("DESI Data Share — プロジェクト管理ガイド") },
     'manage:en': { path: 'USER_GUIDE.manage.en.md', title: 'DESI Data Share — Project Management Guide' },
-    'master:ja': { path: 'USER_GUIDE.master.md',    title: 'DESI Data Share — 管理者ガイド (データ共有)' },
+    'master:ja': { path: 'USER_GUIDE.master.md',    title: uiT("DESI Data Share — 管理者ガイド (データ共有)") },
     'master:en': { path: 'USER_GUIDE.master.en.md', title: 'DESI Data Share — Admin Guide (Data Sharing)' },
-    'viewer:ja': { path: 'USER_GUIDE.md',           title: 'DESI Data Share — 閲覧者ガイド' },
+    'viewer:ja': { path: 'USER_GUIDE.md',           title: uiT("DESI Data Share — 閲覧者ガイド") },
     'viewer:en': { path: 'USER_GUIDE.en.md',        title: "DESI Data Share — Viewer's Guide" },
 };
 const _helpMarkdownCache = {};
@@ -2131,7 +2144,7 @@ async function openHelpModal(audience, lang) {
         } catch (e) {
             console.error('Help fetch failed', e);
             const closeLabel = lang === 'en' ? 'Close' : 'Close';
-            const errTitle = lang === 'en' ? 'Failed to load help' : 'Help を取得できませんでした';
+            const errTitle = lang === 'en' ? 'Failed to load help' : uiT("Help を取得できませんでした");
             const fallbackHtml = `
                 <h2>${errTitle}</h2>
                 <p style="font-size:12px;color:#475569;">${cfg.path}: ${String(e.message || e)}</p>
@@ -2170,7 +2183,7 @@ async function openHelpModal(audience, lang) {
     };
     const langBtn = (key, active, label) =>
         `<button type="button" data-help-lang="${key}" style="padding:3px 10px;border:1px solid #cbd5e1;border-radius:3px;font-size:11px;cursor:pointer;background:${active ? '#2563eb' : '#fff'};color:${active ? '#fff' : '#1e293b'};">${label}</button>`;
-    const openLabel = lang === 'en' ? 'Open in new tab' : '新しいタブで開く';
+    const openLabel = lang === 'en' ? 'Open in new tab' : uiT("新しいタブで開く");
     const closeLabel = 'Close';
     const html = `
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;flex-wrap:wrap;">
@@ -2241,11 +2254,14 @@ async function init() {
         document.getElementById('btn-refresh-server').hidden = true;
         document.getElementById('btn-change-master-pw').hidden = true;
         document.getElementById('sharing-description').hidden = true;
-        document.getElementById('storage-description').textContent = 'オフライン版: この PC の同じブラウザーに保存します。各プロジェクトの Export ZIP と MRM バックアップを定期的に保存してください。';
+        const storageDescription = document.getElementById('storage-description');
+        const storageSummary = document.createElement('span');
+        uiBind(storageSummary, uiMsg("オフライン版: この PC の同じブラウザーに保存します。各プロジェクトの Export ZIP と MRM バックアップを定期的に保存してください。"));
+        storageDescription.replaceChildren(storageSummary);
         const note = document.createElement('p');
         note.className = 'text-xs text-gray-500 mt-2';
-        note.textContent = 'ブラウザーのデータ削除・別ブラウザー・別アドレスでは保存データを引き継げません。起動 BAT から毎回同じアドレスで開いてください。';
-        document.getElementById('storage-description').appendChild(note);
+        uiBind(note, uiMsg("ブラウザーのデータ削除・別ブラウザー・別アドレスでは保存データを引き継げません。起動 BAT から毎回同じアドレスで開いてください。"));
+        storageDescription.appendChild(note);
     }
     // Gate the entire management UI behind a password. The unlock modal
     // refuses to dismiss until a valid password is entered, so anything
@@ -2274,7 +2290,7 @@ async function init() {
         const btn = ev.currentTarget;
         const label = btn.textContent;
         btn.disabled = true;
-        btn.textContent = '取得中…';
+        uiBind(btn, uiMsg("取得中…"));
         try {
             const rows = await fetchServerProjectList(true);
             if (rows) {
@@ -2283,11 +2299,11 @@ async function init() {
                 await renderList();
                 // 0 件のときの案内は fetchServerProjectList 側が理由付きで出すので、
                 // ここでは取れたときだけ言う (二重に出さない)。
-                if (rows.length) showToast('サーバから ' + rows.length + ' 件を取得しました', 2400);
+                if (rows.length) showToast(uiT("サーバから ") + rows.length + uiT(" 件を取得しました"), 2400);
             }
         } finally {
             btn.disabled = false;
-            btn.textContent = label;
+            uiBind(btn, uiMsg("{0}", () => [label]));
         }
     });
     document.getElementById('btn-new-folder').addEventListener('click', () => treeCreateFolder(null));
@@ -2368,6 +2384,6 @@ document.addEventListener('DOMContentLoaded', () => { init().catch(e => { consol
      hard reload (Ctrl/Cmd-Shift-R). -->
 <div id="buildTag" title="Hard reload (Ctrl/Cmd+Shift+R) if older than the latest version" style="position:fixed;bottom:4px;right:6px;font-size:10px;color:#94a3b8;pointer-events:auto;z-index:50;user-select:text;"></div>
 <script src="version.js"></script>
-<script>(function(){var _b=document.getElementById('buildTag'); if(_b) _b.textContent=(window.APP_VERSION||'');})();</script>
+<script>(function(){var _b=document.getElementById('buildTag'); if(_b) uiBind(_b, uiMsg("{0}", () => [window.APP_VERSION||'']));})();</script>
 </body>
 </html>

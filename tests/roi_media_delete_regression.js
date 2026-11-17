@@ -29,6 +29,9 @@ function context() {
       deleteStorageObject: async (bucket, key, token) => { calls.push(['delete-file', bucket, key, token]); },
     },
   });
+  // Include the production helper used by the extracted manager error paths.
+  const uiHelper=source.match(/^function uiT\(.*$/m);
+  assert.ok(uiHelper,'manager UI helper');vm.runInContext(uiHelper[0],ctx);
   for (const name of ['scopedProjectStoragePath', 'collectServerProjectStoragePaths', 'deleteServerProjectWithMedia', 'collectProjectBlobIds']) {
     vm.runInContext(fn(name), ctx);
   }

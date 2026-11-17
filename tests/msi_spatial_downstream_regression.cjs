@@ -58,6 +58,10 @@ async function main(){
     // legacy source-scoped photographs and unknown sources isolated.
     const media=fs.readFileSync(path.join(__dirname,'../viewer/roi-media-app.js'),'utf8');
     const mediaFunction=name=>{const start=media.indexOf('    function '+name+'(');return media.slice(start,media.indexOf('\n    }',start)+6);};
+    // The isolated eligibility functions use the module's UI helper for errors;
+    // execute that production helper too instead of replacing its behavior.
+    const mediaUiHelper=media.match(/^\s*const _uiT =.*;$/m);
+    assert.ok(mediaUiHelper,'ROI media UI helper');vm.runInContext(mediaUiHelper[0],ctx);
     ctx.App={panels:new Map()};ctx.root=ctx;
     const rasterB={W:2,H:1,values:Float64Array.from([2,4]),sourceGeometry:geometries.B};
     const panel={section,msiValueRasters:new Map([['MSI_A',{sourceGeometry:geometries.A}],['MSI_B',rasterB]]),_msiLoadIdentity:()=> 'B'};

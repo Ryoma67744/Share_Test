@@ -5,6 +5,17 @@
     else root.SectionVisibility = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
     const strings = values => new Set(Array.from(values || [], String));
     function reconcileSelection(previous, sections) {
         const ids = (sections || []).map(s => String(s.id));
@@ -51,7 +62,8 @@
             ensure() {
                 const project = hooks.project();
                 const key = contextKey(project, hooks.share());
-                if (key !== this.key) {
+                const contextChanged = key !== this.key;
+                if (contextChanged) {
                     this.close(false);
                     this.key = key; this.pendingHidden.clear();
                     let saved = null;
@@ -60,14 +72,25 @@
                     this.previewTransforms = Object.assign(Object.create(null), saved && saved.previewTransforms);
                     this.previewRotations = Object.assign(Object.create(null), saved && saved.previewRotations);
                 }
-                const before = this.state && Array.from(this.state.selected || []).join('\0');
-                this.state = reconcileSelection(this.state, project && project.sections);
+                const previous = this.state, reconciled = reconcileSelection(previous, project && project.sections);
+                const sameValues = (before, after) => {
+                    if (!before) return false;
+                    const values = Array.from(before);
+                    return values.length === after.size && Array.from(after).every((value, index) => value === values[index]);
+                };
+                const selectionChanged = !sameValues(previous && previous.selected, reconciled.selected);
+                const stateChanged = selectionChanged || !sameValues(previous && previous.known, reconciled.known)
+                    || !(previous && previous.selected instanceof Set && previous.known instanceof Set);
+                if (stateChanged) this.state = reconciled;
+                let previewsChanged = false;
                 for (const map of [this.previewTransforms, this.previewRotations]) {
-                    for (const id of Object.keys(map)) if (!this.state.known.has(id)) delete map[id];
+                    for (const id of Object.keys(map)) if (!this.state.known.has(id)) { delete map[id]; previewsChanged = true; }
                 }
-                if (before !== Array.from(this.state.selected).join('\0')) this.revision++;
-                hooks.scope(this.state.selected);
-                this.save();
+                if (selectionChanged) this.revision++;
+                // Layout/resize reads also call ensure(). Reuse unchanged state
+                // so language-driven layout cannot publish scope or write data.
+                if (contextChanged || stateChanged) hooks.scope(this.state.selected);
+                if (contextChanged || stateChanged || previewsChanged) this.save();
                 return this.state.selected;
             },
             save() {
@@ -84,8 +107,8 @@
                 for (const id of result.deferred) this.pendingHidden.add(id);
                 this.state.selected = result.selected;
                 this.revision++; hooks.scope(this.state.selected); this.save();
-                const message = result.rejected ? '最低1切片を表示してください。'
-                    : result.deferred.size ? '描画中の切片は、ROIの完了・中止後に非表示になります。' : '';
+                const message = result.rejected ? _uiT("最低1切片を表示してください。")
+                    : result.deferred.size ? _uiT("描画中の切片は、ROIの完了・中止後に非表示になります。") : '';
                 hooks.changed(); this.refresh(message);
             },
             flushDeferred() {
@@ -94,6 +117,11 @@
             },
             refresh(message) {
                 this.ensure();
+                this.refreshView(message);
+            },
+            // Language changes only redraw the current session state. They must
+            // not reconcile selection, notify the viewer scope, or save storage.
+            refreshView(message) {
                 const total = this.state.known.size, count = this.state.selected.size;
                 doc.querySelectorAll('[data-section-visibility]').forEach(button => {
                     if (!button._sectionVisibilityBound) {
@@ -103,7 +131,7 @@
                             if (e.key === 'ArrowDown') { e.preventDefault(); this.open(button); }
                         });
                     }
-                    button.textContent = `表示切片 ${count}/${total}`;
+                    _uiText(button, "表示切片 {0}/{1}", {"0":(count),"1":(total)});
                     button.disabled = !total;
                     button.setAttribute('aria-haspopup', 'dialog');
                     button.setAttribute('aria-expanded', String(!!this.panel && this.anchor === button));
@@ -116,11 +144,11 @@
                 this.close(false); this.ensure(); this.anchor = anchor;
                 const panel = doc.createElement('div');
                 panel.className = 'section-visibility-panel'; panel.setAttribute('role', 'dialog');
-                panel.setAttribute('aria-label', '表示切片');
-                panel.innerHTML = '<div class="section-visibility-head"><strong>表示切片</strong><button type="button" data-close aria-label="閉じる">×</button></div>'
-                    + '<input type="search" data-search placeholder="切片名・臓器で検索" aria-label="切片名・臓器で検索">'
-                    + '<div class="section-visibility-actions"><button type="button" data-all>すべて表示</button><span data-count></span></div>'
-                    + '<p class="section-visibility-help">臓器のチェックは検索結果に関係なく、その臓器の全切片に適用します。分類は表示用です。</p>'
+                _uiAttr(panel, "aria-label", "表示切片");
+                panel.innerHTML = "<div class=\"section-visibility-head\"><strong data-i18n=\"表示切片\">表示切片</strong><button type=\"button\" data-close aria-label=\"閉じる\" data-i18n-aria-label=\"閉じる\">×</button></div>"
+                    + "<input type=\"search\" data-search placeholder=\"切片名・臓器で検索\" aria-label=\"切片名・臓器で検索\" data-i18n-placeholder=\"切片名・臓器で検索\" data-i18n-aria-label=\"切片名・臓器で検索\">"
+                    + "<div class=\"section-visibility-actions\"><button type=\"button\" data-all data-i18n=\"すべて表示\">すべて表示</button><span data-count></span></div>"
+                    + "<p class=\"section-visibility-help\" data-i18n=\"臓器のチェックは検索結果に関係なく、その臓器の全切片に適用します。分類は表示用です。\">臓器のチェックは検索結果に関係なく、その臓器の全切片に適用します。分類は表示用です。</p>"
                     + '<div data-list class="section-visibility-list"></div><div data-status role="status" aria-live="polite"></div>';
                 this.panel = panel; this.search = panel.querySelector('[data-search]');
                 this.status = panel.querySelector('[data-status]'); doc.body.appendChild(panel);
@@ -156,8 +184,8 @@
                 list.replaceChildren();
                 const groups = new Map();
                 for (const sec of (hooks.project() && hooks.project().sections) || []) {
-                    const group = hooks.organ(sec) || '未分類';
-                    if (!groups.has(group)) groups.set(group, []); groups.get(group).push(sec);
+                    const key = hooks.organ(sec) || null;
+                    if (!groups.has(key)) groups.set(key, []); groups.get(key).push(sec);
                 }
                 let matched = 0;
                 const checkbox = (labelText, key, checked, action, partial) => {
@@ -166,24 +194,26 @@
                     input.addEventListener('change', () => action(input.checked)); text.textContent = labelText;
                     label.append(input, text); return label;
                 };
-                for (const [group, sections] of groups) {
+                for (const [groupKey, sections] of groups) {
+                    const group = groupKey === null ? _uiT("未分類") : groupKey;
                     const matches = sections.filter(s => `${s.displayName || s.id} ${group}`.toLocaleLowerCase().includes(query));
                     if (!matches.length) continue;
                     matched += matches.length;
                     const shown = sections.filter(s => this.state.selected.has(String(s.id))).length;
                     const block = doc.createElement('div'); block.className = 'section-visibility-group';
-                    const head = checkbox(`${group} (${shown}/${sections.length})`, 'group:' + group, shown === sections.length,
+                    const head = checkbox(`${group} (${shown}/${sections.length})`, groupKey === null ? 'unclassified' : 'group:' + groupKey, shown === sections.length,
                         checked => this.change(sections.map(s => s.id), checked), shown > 0 && shown < sections.length);
                     head.className = 'section-visibility-group-head'; block.appendChild(head);
                     for (const sec of matches) block.appendChild(checkbox(String(sec.displayName || sec.id), 'section:' + sec.id,
                         this.state.selected.has(String(sec.id)), checked => this.change([sec.id], checked)));
                     list.appendChild(block);
                 }
-                if (!matched) { const empty = doc.createElement('p'); empty.textContent = '該当する切片がありません。'; list.appendChild(empty); }
-                this.panel.querySelector('[data-count]').textContent = `${this.state.selected.size}/${this.state.known.size} 選択中`;
+                if (!matched) { const empty = doc.createElement('p'); _uiText(empty, "該当する切片がありません。"); list.appendChild(empty); }
+                _uiText(this.panel.querySelector('[data-count]'), "{0}/{1} 選択中", {"0":(this.state.selected.size),"1":(this.state.known.size)});
                 if (focusKey) list.querySelectorAll('input').forEach(input => { if (input.dataset.focusKey === focusKey) input.focus(); });
             }
         };
+        if (globalThis.AppI18n) globalThis.AppI18n.onChange(() => { if (controller.state) controller.refreshView(); });
         return controller;
     }
     return { reconcileSelection, changeSelection, captureViewport, restoreViewport, contextKey, createController };

@@ -1,44 +1,61 @@
 {
   "format": 1,
   "sourceFilesSha256": {
+    "app-i18n-common.js": "1194e7f158b0a78e378d5e9f88dd886065c3705a6fdfd73fb5fac74f09bddc8e",
+    "app-i18n-manage.js": "4803633bdda49297e27a6307a5bb84b5918be0f3d7a18eedb983e73d8b5377ac",
+    "app-i18n-mrm.js": "a84421fec117180d18d9d29ff1fb611e8fea2e850ae6d338b089b110f5be810e",
+    "app-i18n-storage.js": "2415a82da95b72a95c7f65b87a62b4e28c68e4c690154a3b9de6e6600da4ccc9",
+    "app-i18n-viewer-modules.js": "6ed17097cf2b95e5a40cb7d7b5b7e87ea3daef3aab05e8de9963683eaaec53f5",
+    "app-i18n-viewer.js": "d3f498a8206598b81ad8c29ee80d0365b21491b6a1dc85147f6e50077c1f08ac",
+    "app-i18n.js": "886fb10104ceda47849ab33dbddde46f7fd6f21d35b6f77149365e1eefda19b6",
     "app-runtime.js": "59256f2c7e57636e21264ddb635f2372202d564090fa83985da82a437b2b1573",
-    "index.html": "8f4798c16f4a8ba2e56dc7c0aada3cec3af9ca2eb5beaa644046cd501637f742",
-    "mrm.html": "1684c0c340574c3aa79c81a2fecd909805cc8bbb4d693be969e98a5d511c94ea",
-    "mrm/exp-core.mjs": "4a341dbfe11f3e4042627b6d293c08277fafc3bbde329e8c65f49d2416f63a79",
+    "index.html": "187ced8aa7079dda416572355c578747b6784895105a23a9c4c4ed1b50bd9237",
+    "mrm.html": "d56182677c7c8058816aff3ff299534f5a194cf386a433f853bba9383159af9e",
+    "mrm/exp-core.mjs": "ac827c9beac1614150d82cdf7dff4f065ed506aeb1fe828f09f703c3a9f42009",
     "mrm/exp-editor.css": "491cb6915daa833bae995570340881ca2342587900f769334cba97e41e14cdde",
-    "mrm/exp-editor.mjs": "7e53492f0e5023ae8501ae3c74e015d3e0942291c49eaf90744056344fe786ea",
-    "mrm/exp-library-import.mjs": "284a46c01b8c9c505acd8ea1b6a04105530169bc7ca0d6efba5768d6b0fb9e7d",
-    "version.js": "821140f10e96a880b964c9f96558e3799b7e29c28cdd9cdb71e4a3f15c0bb040",
-    "viewer/alignment-session.js": "cb224af9e6379ddb4446c4ccdd507badc9e8219aa63b9ac279859cb4dad64ead",
+    "mrm/exp-editor.mjs": "482ac388026e0e8fa22b99e3866c027daea19c800dbfc7308d6cb2632ee94d95",
+    "mrm/exp-library-import.mjs": "c713e1967382a5bf5be43d6a1f3230d7d14ef7e39ad9c3c4f3f5eea9a9332189",
+    "version.js": "bfeefc1fa37ed563cf41113367f7ae611f251107a45dc510778807715500a84f",
+    "viewer/alignment-session.js": "971811aa66e0b5abf355e6a58bb145d5e7b40afa878cd839d7cb5a8ae36387fb",
     "viewer/alignment-workspace.css": "256c3b1ee65e9176cb7c48f61edfcbff7fd6144f11157dadc6784c55e404286b",
-    "viewer/alignment-workspace.js": "e0e29f4e45ac4b210fa241e726a8134e4bebaede02c5d489efbeef413e52445d",
-    "viewer/fixed-colors.js": "b3ed915c49be6fd19226016c61113d7e01b07aefbb545c5a0b80044ddf960ff5",
-    "viewer/index.html": "859920cdb1b02448706cd3f735c14eace7d82d86c1da0d6ec1f57c682a5a6838",
+    "viewer/alignment-workspace.js": "1e40e8ea25f562ad2a7a8381b7d1d902b741e49852aa4ec5afe52ffeeb398730",
+    "viewer/fixed-colors.js": "3c5a99060e7eef7d07933baf947fd0734f5114ca9787ad7671709cdf51fe3da4",
+    "viewer/index.html": "3836327c45eb4aab446ace9ca908494f80a356b3be9dacf2d9d8eec80e145b54",
+    "viewer/msi-analysis-core.js": "bd0d0f3c20f6a93aacbb284f1d7a72f5b6775b465ca2dc1420032698d0596803",
+    "viewer/msi-analysis-service.js": "0be7439ceb65849b34bb808598bd546318a0d3e45247e9f006acdc4498fe2cde",
+    "viewer/msi-analysis-worker.js": "ba70c458e61f52805ef86e9ff7ad11618abda304e7b544881e74465c730eeea6",
     "viewer/msi-display-geometry.js": "a1600289a9f5014a460f6a32c0e73c1acaa4dc277d8efbe94a17d0bb39559813",
     "viewer/msi-display-settings.js": "3ae2889e6c4d6c1c6100ea412cdf1ef96d9740ec5fd8bf407b0cf2d6bfad2ea3",
-    "viewer/msi-ratio-app.js": "7706e3297bff3746316129c00d4cd183dc99a7471bf874702cafcea9758946d5",
+    "viewer/msi-ratio-app.js": "07904a92e98db21c4fb07de392c9d74236eca09f97e2289d85874a46c757fa98",
     "viewer/msi-ratio-core.js": "fb6faf21fad5d2f0a4bb5b196e5dfb6474a7d46991ced10253af8be90c06ea79",
     "viewer/msi-ratio-model.js": "7511b5128a1c30d3636e2c0af517d68cf7f80c8176757782b566a9aed2604d97",
     "viewer/msi-ratio-worker.js": "690e94764b6b648a6a99c8369346fae46e0dd757e2aa6eb429c79c38cf70e404",
     "viewer/msi-ratio.css": "3e470053172d614bcc7262cb0c8d4a8620e88fa5a29553b3d6ef239e79d99bcb",
     "viewer/msi-roi-range.js": "8e1bb9a54ec164b9319323f0ab3ca682cb54c1053129bb4ec30930aa6e2b9ae0",
     "viewer/msi-smoothing.js": "af0964a616c68ae26e8b6ef247204da732a1e8c92ff1b2bb89ba7c1883b5f49e",
-    "viewer/project-archive.js": "6e3259ef313d053b8346c16ed42a095bcd2f2aee661e5bf6d0303ced79f4c850",
-    "viewer/project-report-app.js": "e1e98193817755539d180989d354dfb030281ee925e560ad6377e4298cd90881",
-    "viewer/project-report-data.js": "4ac90f2b73970a2e36a5df52e759206de8bdc59dd9ffc09a68486d4bcc77d798",
-    "viewer/project-report-deck.js": "764d72d9fdbddd5234981d120783c37daac062193f303b5ed95c4a28b02a81d7",
-    "viewer/publish-safety.js": "fc6d32fe068256393c06d8f3662f137a50e5707759aecb1c67ac272f48eddc3d",
-    "viewer/roi-media-app.js": "1439c3d676497d2eca1fc9641401d8416899756b2f6497f7bdaaa9445c7ee3cf",
-    "viewer/roi-media-model.js": "5f1e91b22b2d86479e600c0b90970912f2266b8b0e7968c2823fb8087d20ab6f",
-    "viewer/roi-media-msi.js": "5527cab5d45b252f35bc84529d0c9ff572aed2e5ac51e47d950e26a648f64c8d",
-    "viewer/roi-media-service.js": "423e16fe55e8516dfc66708198820260b5a2c602cd25addc42be7b7177a7c97e",
+    "viewer/msi-spatial-groups.js": "650ad676acdead65b5eadac965ef74c96b9f59441a3386671209c921e119e373",
+    "viewer/project-archive.js": "430c832665cc710fb6b9d29e6708bb307d0854e150e48e6fd2042bdd9c669a27",
+    "viewer/project-report-app.js": "73318743b51e95bd8c0a470699188869eeb472d65f8a9a84c523e6fd6d9370f2",
+    "viewer/project-report-data.js": "9277303934bf455cfdb076328a80b15da90a8861adb01e693fc3d548a1656912",
+    "viewer/project-report-deck.js": "cee20bdf1e62c16058765fc4a62ab03bc028ea5ffe3204c5067c30e45375934e",
+    "viewer/publish-safety.js": "244afd3734849ed24e06e70cb7b80e3570e6318f329b94178c225e7c20a9c82f",
+    "viewer/roi-media-app.js": "02867ec3ff402742c18700ff6bd87e10ec201daaef4cc78b6d2307da6b95b4f0",
+    "viewer/roi-media-model.js": "d397ef6f9d42bce3a3c5e9f28313b654827f364f30a5d3d20b7be97ce3b4770a",
+    "viewer/roi-media-msi.js": "929aa65f37fb83b5e5ab1a3cdd3a5b5dfdfdf58d2992d5d00d8e7e5a08eb6214",
+    "viewer/roi-media-service.js": "4a831946afdf2d6926c09bdb889051c95bc073fdd1238087b8fd245bebb435b7",
     "viewer/roi-media-viewer.css": "806dba0af97cd28c12b02b1d4e4eacb2e88f47ca4e58aa276a144d24acbb5e23",
-    "viewer/roi-media-viewer.js": "a452e59621f190157a1ea62dd3e82698ccecebf01c9acd753e8010ca95c806c8",
-    "viewer/section-visibility.js": "f44a5723e8b3a7dcd38a8bfcf7fb4543f8f90f9dfc6366c7c08663eed9bc594e"
+    "viewer/roi-media-viewer.js": "3a445f9654fd740f5071a92f81e935010dc89df545339c32bedf561c6b42c982",
+    "viewer/section-load-scheduler.js": "34d383f361213a3b8e965e5eeaa8a55527f2bb8cbf4775f6441b8f08308a8880",
+    "viewer/section-visibility.js": "cbb5563db60ad684ad866ee84cdba97ce85eb43597e3805be65f787c8fe87d9e",
+    "viewer/share-refresh.js": "1a0689d17801873706430b67b10dcbbbd06ae795d0eb1f2d414e809aa65876c8",
+    "viewer/source-loader.js": "555e2be9ae066c5c92c56be1495144d91137ea7e197a962a7dd7a6a15145b467",
+    "viewer/tic-cache.js": "9195760a9960ee8b54d1ec1dc41985aa639187b15a69b950e8c54517b332c4f1",
+    "viewer/tic-core.js": "6a1e5b1b8f291ad3c142fa0fd549cb7b8b202456fa41b53f7ebd4744430dc2b9",
+    "viewer/tic-runtime.js": "05954d46dcd09c2a2a821b4c5cc347e0b9a9a481bff3750022a64ac5f84d804a"
   },
-  "captureToolSha256": "6cfc65257d8aa5e7798040d2c472504306385985ae345344b0f73dc469a68cde",
+  "captureToolSha256": "664a7acb729a6e8449cd05c1201433b7710c98145f135e07dca4cd53d39f96ef",
   "generatedBy": "node tools/help-capture.cjs",
-  "sourceVersion": "v2026-11-05.4",
+  "sourceVersion": "v2026-11-16.1",
   "browser": "151.0.7922.34",
   "fixture": "tests/fixtures/browser/offline-smoke-project.zip with deterministic X/Y source extension",
   "fixtureSha256": "1c48173874c5f0fed7ec32759f14712785fc119b1a975461158ef2b16a452dcd",
@@ -48,15 +65,23 @@
     {
       "id": "align",
       "path": "docs/help/images/align.png",
-      "sha256": "2f0698232cecfcfa6f432a6d745ea17844f941136c3fa65a3d8314c06b078aa4",
+      "sha256": "37dddc77c94bf1bedb1f2d54d5b0b431dcdd49b75166baf9b6ee05e49f586c41",
       "scenario": "Actual Align workspace",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/align-en.png",
+          "sha256": "85dbdded12d2d1f093fc88d1cdd4e896db7ae885bb52abcb8ac45a50878c42fe",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
       "chapterIds": [
         "align"
@@ -65,32 +90,46 @@
     {
       "id": "display",
       "path": "docs/help/images/display.png",
-      "sha256": "b665311ab06e4d978c35773a0ef33f673b9f186b918701784f78a2bb6376d26f",
+      "sha256": "96b8077714dc4410d5ae9f3fee827545a38199e9bcf29275e55ee825ed8f0305",
       "scenario": "Display-only Median at strength 6 of 10",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/display-en.png",
+          "sha256": "1eb222b47cd8ffd52054546342be8253d1e99d47dfeb5e6b35bfee893efbe02c",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
-      "chapterIds": [
-        "display"
-      ]
+      "chapterIds": []
     },
     {
       "id": "exp",
       "path": "docs/help/images/exp.png",
-      "sha256": "eb316d63456fb0776422a0f1b990be204690655c06e4b502c0b96bad0a8eca7b",
+      "sha256": "c705f1ee1c72b1781bf7fa90418f99cc661cdc5f6dc0b35e7ef410c8c829f5da",
       "scenario": "Actual exp editor with the synthetic supported MRM fixture",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/exp-en.png",
+          "sha256": "481666981fc36278341c1e1ce6e9bbe8fe057b8796f2274e3f96279b9001c9b6",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
       "chapterIds": [
         "mrm"
@@ -99,15 +138,23 @@
     {
       "id": "import",
       "path": "docs/help/images/import.png",
-      "sha256": "ac4dd40b1a90dfb20be37579bfe1808cdd2b3ef6a68095e7fef9094949d4caf8",
+      "sha256": "91b8c79f7ba06626133a2798f85eea1089ec5540e240c9bea836d10dd9e864c8",
       "scenario": "ZIP import confirmation with original numerical sources",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/import-en.png",
+          "sha256": "f5bce58e2cbe4b4840150ba34af40f3c165b09b0cc5ca768584a59d5ffa665d5",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
       "chapterIds": [
         "import"
@@ -116,15 +163,23 @@
     {
       "id": "kmd",
       "path": "docs/help/images/kmd.png",
-      "sha256": "96c9b973faa3ca558733789f6e584aca56b37192a03864d2ec6fb54c0254546b",
+      "sha256": "247f881e76ac9fe67504b13d6a5110e91706d69d9432bbcb8026d059a9ec63d2",
       "scenario": "Actual non-target Method table and KMD panel with 12 synthetic masses in two CH2 series",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/kmd-en.png",
+          "sha256": "5b08cf6c42c17ab3cf02bcefd028ecfffc00e981913f87a05f6bd89e3bfaf81e",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "fixture": "offline-smoke ZIP with synthetic non-target metadata",
       "compoundMetadataSha256": "bb76fd0bec1a5c5a5d2f24abffb1469694516682eac20f66ff2dbcb8232a377b",
       "mode": "offline",
@@ -135,15 +190,23 @@
     {
       "id": "microscope",
       "path": "docs/help/images/microscope.png",
-      "sha256": "482c017c68d37a4536b5d66c57a976a1f16eb212dba336609d205e29a12a280d",
+      "sha256": "02ad2ce6c23a3baafb1b37b954141e1e5f7fddff4b7750ea03da69908ac5b1d8",
       "scenario": "Actual ROI microscopy workspace",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/microscope-en.png",
+          "sha256": "fc3499bbaf2e04e9cd586750187c9c590c96da5ae1cb2be16759b9f4187637a2",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
       "chapterIds": [
         "microscope"
@@ -152,15 +215,23 @@
     {
       "id": "mrm",
       "path": "docs/help/images/mrm.png",
-      "sha256": "15c02f5db13fbfe5d953f96e8f9cca9dbfe3727cb96c053a0db534987bae4353",
+      "sha256": "80f2afe3c9041fd9f7b8988376e339282182a1876cc37143e3789f77db52dab4",
       "scenario": "Actual local MRM management",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/mrm-en.png",
+          "sha256": "9649a403f469058f8b6d4187a8bd31d60f0c5b9966d7c199d4a8475fb9c1b215",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
       "chapterIds": [
         "mrm"
@@ -169,15 +240,23 @@
     {
       "id": "preview",
       "path": "docs/help/images/preview.png",
-      "sha256": "9a637f667c3dc2fea9c824a37296dbeb36f0704b7571fa20b765f74598788b4f",
+      "sha256": "cbfe59e15fb02b73de2ebc471950ed593a966ab6acc0751dc8e90a9c1f530a95",
       "scenario": "Actual Preview image grid",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/preview-en.png",
+          "sha256": "bccb4f800b3729e0fa7ba465eb3b6c5541a723154bcb871c5a1cb2ae8b05773e",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
       "chapterIds": [
         "preview"
@@ -186,15 +265,23 @@
     {
       "id": "projects",
       "path": "docs/help/images/projects.png",
-      "sha256": "a274501976c09aae408792b6507ac913a79d9516c380ce5f361dd1b87a2109ed",
+      "sha256": "7417a2b5b6a5fd4b9ee6fad5d1abfb6ef36d1301d022644114629bbb9600904a",
       "scenario": "Actual local project manager with imported synthetic project",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/projects-en.png",
+          "sha256": "b37c2e8aa87e36985359417720c4a54b659a479655a47324bf7b3d4d211b7dec",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
       "chapterIds": [
         "projects",
@@ -204,98 +291,121 @@
     {
       "id": "ratio",
       "path": "docs/help/images/ratio.png",
-      "sha256": "0e7eb90ecb0d801ba0070681106526412edded2cd0ba69cc5b40a0d9579a38f3",
+      "sha256": "8b9bc1c276a7dbafad9d07e1b615fc51fcf5bc35dbc3bd970febbf38e181bd08",
       "scenario": "Saved X/Y ratio with actual ROI summary and validity counts",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/ratio-en.png",
+          "sha256": "d201b530d8b7ad12cae1d13f2ffc5957c7f5f096e7f75ac9d45b3ed58ca70864",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "fixture": "tests/msi_ratio_browser_regression.cjs:fixture/archive",
       "numericalSourceSha256": "e4c385520218e38d961df791a61ac598c8c4728fb868f5e8161f92a594184dad",
       "mode": "offline",
-      "chapterIds": [
-        "ratio"
-      ]
+      "chapterIds": []
     },
     {
       "id": "ratio-image",
       "path": "docs/help/images/ratio-image.png",
-      "sha256": "57849e99e24d98da5035995cf254e9a84cf88ffb6e25ba12f813f38bdd7d70be",
+      "sha256": "0dc1a16d6da3f40f5a0395cd2022d4c09454085612f13f29032177f111e3eff1",
       "scenario": "Actual ratio MSI image after saving the definition",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/ratio-image-en.png",
+          "sha256": "aaac0c1bc05b3c229b11c3491f20126f4cbb8dfe2f88a4f16a019ae7d21b0d29",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "fixture": "tests/msi_ratio_browser_regression.cjs:fixture/archive",
       "numericalSourceSha256": "e4c385520218e38d961df791a61ac598c8c4728fb868f5e8161f92a594184dad",
       "mode": "offline",
-      "chapterIds": [
-        "ratio"
-      ]
+      "chapterIds": []
     },
     {
       "id": "report",
       "path": "docs/help/images/report.png",
-      "sha256": "c7e66602012940c4f7ee97a3e10258aca836b3423ead19ca7b4912ea49200f42",
-      "scenario": "Actual PPT export options: two comparison members, one independent automatic Range, and one excluded section",
+      "sha256": "5446ccb7f99faa8b86354c7f7374ae80f7e6ab5c1434cef5aff27b532e16bb03",
+      "scenario": "Actual PPT export options",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/report-en.png",
+          "sha256": "0ac2331f0931f4abaf7372ff3801147b7e19d2022e66198d73c8960cb5757af1",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
       "chapterIds": [
         "preview"
-      ],
-      "browser": "151.0.7922.34",
-      "fixture": "tools/help-capture.cjs fixture(): four named copies of the same synthetic X/Y section, no ROI",
-      "captureMethod": "Local-only isolated Playwright capture using tools/help-capture.cjs fixture/startServer exports",
-      "fixtureSha256": "5f94053caf563048aa6d8180c0a6d0d8e2743d73cc6fc4e0f04c7b1c3356a5d5",
-      "numericalSourceSha256": "f5e4c58d3a04cc51c2e7569f35e1aeb99365856b37bdde37fd3350c0fd253835",
-      "sourceFilesSha256": {
-        "viewer/index.html": "9a4d445abf84540b99bb4c41b43863e3d49806427db33367eed22430d13cb3b7",
-        "viewer/project-report-app.js": "50dbd1aec33e401d0085f6fdb2e936fb241abf2c4dc9ccd5b61c25e1d56c0afc",
-        "viewer/project-report-data.js": "9c3390e247a82074a5c599950aae131632ab28190b6d5379ff9cfc833b340283",
-        "viewer/project-report-deck.js": "05b5024488b9f7720a73fb0cdc4b1f02e37e3b531ea34c229208d14bde97502d"
-      }
+      ]
     },
     {
       "id": "roi",
       "path": "docs/help/images/roi.png",
-      "sha256": "ebef745c20911b750a1b28d5fef33350350c4cf59743c3df456370d08199c3df",
+      "sha256": "b9edf3ebb8f0ef2eee4a0ebb0a73fc43915e1367ec5e3eba7f852908897d4521",
       "scenario": "ROI-only display with automatic ROI Range",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/roi-en.png",
+          "sha256": "146b4a1c9dc9b2130fae603c27fae2221dd53bf7d2aa9f105b6b24c55cc1d52a",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
-      "chapterIds": [
-        "roi"
-      ]
+      "chapterIds": []
     },
     {
       "id": "save",
       "path": "docs/help/images/save.png",
-      "sha256": "b779e30ff6b104391a8f001342205b45ef2f1df81cce486f15cdb7c6307646b7",
+      "sha256": "849df8f9f28639dd61072cb4d3f745570f0929afb47ec0f505fe18249ffd629e",
       "scenario": "Main toolbar exposes Export ZIP, Memo and project saving",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/save-en.png",
+          "sha256": "cc19ecdd5a6817a170d7fac7ee0295717b46df98fd7e64e196aab01b737524cf",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
       "chapterIds": [
         "save"
@@ -304,20 +414,25 @@
     {
       "id": "viewer",
       "path": "docs/help/images/viewer.png",
-      "sha256": "8e02d5061d2d699fa838e645f19dd7ab58ecfcba62ab9b481470c369013090c9",
+      "sha256": "c9bb8d8157078a2ba6fe3b7092a024f86d689b324f97993800d9cfa3dea7f95f",
       "scenario": "Compound view with X/Y numerical sources and an existing ROI",
       "role": "local author",
-      "uiLanguage": "ja / en (application labels)",
+      "uiLanguage": "ja",
       "viewport": {
         "width": 1600,
         "height": 1000
       },
       "deviceScaleFactor": 1,
+      "localized": {
+        "en": {
+          "path": "docs/help/images/viewer-en.png",
+          "sha256": "cc19ecdd5a6817a170d7fac7ee0295717b46df98fd7e64e196aab01b737524cf",
+          "uiLanguage": "en",
+          "statePreserved": true
+        }
+      },
       "mode": "offline",
-      "chapterIds": [
-        "start",
-        "view"
-      ]
+      "chapterIds": []
     }
   ]
 }

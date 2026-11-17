@@ -110,9 +110,10 @@ async function main() {
     for (const file of ['index.html', 'mrm.html']) {
         const source = fs.readFileSync(path.join(root, file), 'utf8');
         const sources = [...source.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(m => m[1]);
-        assert.deepEqual(sources.slice(0, file === 'index.html' ? 6 : 3), file === 'index.html'
-            ? ['runtime-config.js', 'app-runtime.js', 'project-store-safety.js', 'project-navigation.js', 'viewer/msi-display-settings.js', 'offline/offline.js']
-            : ['runtime-config.js', 'app-runtime.js', 'offline/offline.js']);
+        const translationAssets = ['app-i18n.js', 'app-i18n-common.js', 'app-i18n-storage.js', file === 'index.html' ? 'app-i18n-manage.js' : 'app-i18n-mrm.js'];
+        assert.deepEqual(sources.slice(0, file === 'index.html' ? 10 : 7), file === 'index.html'
+            ? ['runtime-config.js', 'app-runtime.js', ...translationAssets, 'project-store-safety.js', 'project-navigation.js', 'viewer/msi-display-settings.js', 'offline/offline.js']
+            : ['runtime-config.js', 'app-runtime.js', ...translationAssets, 'offline/offline.js']);
         assert.ok(sources.includes('vendor/supabase.min.js'));
         for (const src of sources) assert.ok(new URL(src, 'https://example.invalid/Share_Test/' + file).pathname.startsWith('/Share_Test/'), src + ' escapes the app subpath');
         assert.doesNotMatch(source, /window\.SUPABASE_(?:URL|ANON_KEY)\s*=/, 'runtime config must remain authoritative');

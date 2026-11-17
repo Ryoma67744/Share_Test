@@ -58,7 +58,7 @@ async function archive(data) {
     meta:data.doc.meta.project_meta,rois:[roi],roiMedia:{version:1,items:[]},sections}));
   return zip.generateAsync({type:'nodebuffer'});
 }
-async function startServer(data = fixture()) {
+async function startServer(data = fixture(), options = {}) {
   const state = {online:false,writes:[],data};
   const server = createServer(async(req,res) => {
     try {
@@ -84,8 +84,9 @@ async function startServer(data = fixture()) {
       if (pathname.startsWith(prefix) && data.sources[pathname.slice(prefix.length)]) {
         res.setHeader('Content-Type','text/csv');res.end(data.sources[pathname.slice(prefix.length)]);return;
       }
-      const file = path.resolve(root,'.' + pathname + (pathname.endsWith('/') ? 'index.html' : ''));
-      if (!file.startsWith(root + path.sep)) {res.writeHead(403);res.end();return;}
+      const staticRoot = path.resolve(options.sourceRoot || root);
+      const file = path.resolve(staticRoot,'.' + pathname + (pathname.endsWith('/') ? 'index.html' : ''));
+      if (!file.startsWith(staticRoot + path.sep)) {res.writeHead(403);res.end();return;}
       res.setHeader('Content-Type',({'.js':'text/javascript','.html':'text/html; charset=utf-8','.css':'text/css'})[path.extname(file)] || 'application/octet-stream');
       res.end(await fs.readFile(file));
     } catch (_) {res.writeHead(404);res.end();}

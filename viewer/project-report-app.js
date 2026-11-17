@@ -5,11 +5,22 @@
     else root.ProjectReportApp = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root, MsiSmoothing) {
     'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
     // Keep these three report modules and their viewer URLs on one revision.
     const REPORT_REVISION = 'ppt-20261110-1';
     function assertReportModules(data, deck) {
         if (!data || !deck || data.REPORT_REVISION !== REPORT_REVISION || deck.REPORT_REVISION !== REPORT_REVISION) {
-            const error = new Error('レポート機能が更新されました。ページを再読み込みしてから作成し直してください。');
+            const error = new Error(_uiT("レポート機能が更新されました。ページを再読み込みしてから作成し直してください。"));
             error.code = 'REPORT_VERSION_MISMATCH';
             throw error;
         }
@@ -111,7 +122,7 @@
     }
     function captureExportContext(getApp) {
         const app = getApp(), project = app && app.project;
-        if (!project) throw new Error('プロジェクトを開いてから PPT レポートを作成してください。');
+        if (!project) throw new Error(_uiT("プロジェクトを開いてから PPT レポートを作成してください。"));
         const session = app.shareMode, signature = shareSignature(app, project);
         const shared = !!(session || project.__share);
         return { shared, canIncludeCeCv: !shared || !!(session && session.role === 'admin'), assertCurrent() {
@@ -148,12 +159,12 @@
         return parts.join('  |  ');
     }
     function cancelledError() {
-        const error = new Error('PPT レポートの作成を中止しました。');
+        const error = new Error(_uiT("PPT レポートの作成を中止しました。"));
         error.name = 'AbortError';
         return error;
     }
     function staleError() {
-        const error = new Error('作成中にプロジェクトまたは測定データが変更されました。現在のプロジェクトから作成し直してください。');
+        const error = new Error(_uiT("作成中にプロジェクトまたは測定データが変更されました。現在のプロジェクトから作成し直してください。"));
         error.code = 'REPORT_SOURCE_CHANGED';
         return error;
     }
@@ -179,7 +190,7 @@
     }
     function normalizeOutputPlan(sections, plan) {
         const invalid = () => {
-            const error = new Error('PPT の出力対象・比較グループを確認してください。');
+            const error = new Error(_uiT("PPT の出力対象・比較グループを確認してください。"));
             error.code = 'REPORT_OUTPUT_PLAN_INVALID';
             throw error;
         };
@@ -204,7 +215,7 @@
     }
     function createAdapter(hooks, options = {}) {
         const app = hooks.getApp(), project = app && app.project;
-        if (!project) throw new Error('プロジェクトを開いてから PPT レポートを作成してください。');
+        if (!project) throw new Error(_uiT("プロジェクトを開いてから PPT レポートを作成してください。"));
         const session = app.shareMode, shareState = shareSignature(app, project);
         const shared = !!(session || project.__share);
         const viewer = shared && (!session || session.role !== 'admin');
@@ -219,7 +230,7 @@
             displayStyle.linearStrength=MsiSmoothing.normalizeLevel(displaySettings.linearStrength,10);
         }
         if (options.useDisplayStyle && (!displayStyle || !Array.isArray(displayStyle.lut) || displayStyle.lut.length !== 256))
-            throw new Error('表示スタイルを取得できません。');
+            throw new Error(_uiT("表示スタイルを取得できません。"));
         const manualWindows = copy(app.msiUserWindow || {});
         // The source guard covers the complete inventory even when export omits
         // sections. Selection must not change scientific MRM identity resolution.
@@ -284,7 +295,7 @@
                 jobs.push(job);
             }
         }
-        if (!jobs.length) throw new Error('このプロジェクトには MSI レイヤーが登録されていません。');
+        if (!jobs.length) throw new Error(_uiT("このプロジェクトには MSI レイヤーが登録されていません。"));
         if (!includeCeCv) for (const job of jobs) job.meta = voltageFreeMeta(job.key, job.meta, job.registeredBase, voltagePairs);
         const counts = new Map(), ambiguous = new Set();
         for (const job of jobs) {
@@ -299,7 +310,7 @@
             const repeat = ambiguous.has(job.scientificId);
             const groupId = repeat ? JSON.stringify([job.scientificId, job.key]) : job.scientificId;
             if (!groups.has(groupId)) groups.set(groupId, { key: groupId, layerKey: job.key, name: label(job.key, job.meta),
-                subtitle: transitionSubtitle(job.meta) + (repeat && includeCeCv ? '  |  測定: ' + job.key.replace(/^MSI_/i, '') : ''),
+                subtitle: transitionSubtitle(job.meta) + (repeat && includeCeCv ? _uiT("  |  測定: {0}", {"0":(job.key.replace(/^MSI_/i, ''))}) : ''),
                 metadata: job.meta, jobs: [] });
             groups.get(groupId).jobs.push(job);
         }
@@ -312,12 +323,12 @@
                 const first = group.jobs[0], repeat = ambiguous.has(first.scientificId);
                 group.layerKey = first.key; group.metadata = first.meta; group.name = label(first.key, first.meta);
                 group.subtitle = transitionSubtitle(first.meta)
-                    + (repeat && includeCeCv ? '  |  測定: ' + first.key.replace(/^MSI_/i, '') : '');
+                    + (repeat && includeCeCv ? _uiT("  |  測定: {0}", {"0":(first.key.replace(/^MSI_/i, ''))}) : '');
             }
         }
         const selectedStates = sectionStates.filter(state => !selectedIds || selectedIds.has(state.section.id));
         const selectedJobCount = Array.from(groups.values()).reduce((count, group) => count + group.jobs.length, 0);
-        if (!selectedJobCount) throw new Error('出力対象の切片には MSI レイヤーが登録されていません。');
+        if (!selectedJobCount) throw new Error(_uiT("出力対象の切片には MSI レイヤーが登録されていません。"));
         if (!includeCeCv) {
             const visibleCounts = new Map(), visibleIndexes = new Map();
             for (const group of groups.values()) {
@@ -333,7 +344,7 @@
                 if (visibleCounts.get(visibleId) > 1) {
                     const measurement = (visibleIndexes.get(visibleId) || 0) + 1;
                     visibleIndexes.set(visibleId, measurement);
-                    group.subtitle += (group.subtitle ? '  |  ' : '') + '測定 ' + measurement;
+                    group.subtitle += _uiT("{0}測定 {1}", {"0":(group.subtitle ? '  |  ' : ''),"1":(measurement)});
                 }
             }
         }
@@ -381,9 +392,9 @@
                 archiveProvenance: root.ProjectArchive ? root.ProjectArchive.provenance(job.archiveProvenance) : null,
                 qualityNote: root.ProjectArchive ? root.ProjectArchive.qualityLabel(job.archiveProvenance) : '' };
             if (!job.entry || (!job.entry.blobId && !job.entry.sourceUrl)) {
-                result.missingReason = '元の数値データが登録されていません。';
+                result.missingReason = _uiT("元の数値データが登録されていません。");
             } else if (!panel || typeof panel.ensureMsiLayerLoaded !== 'function') {
-                result.missingReason = '切片の読み込みが完了していません。';
+                result.missingReason = _uiT("切片の読み込みが完了していません。");
             } else {
                 let ok = false;
                 try { ok = await panel.ensureMsiLayerLoaded(job.key); }
@@ -395,7 +406,7 @@
                 const raster = panel.msiValueRasters && panel.msiValueRasters.get(job.key);
                 if (!ok || !raster || !(raster.W > 0 && raster.H > 0) || !raster.values
                     || raster.values.length !== raster.W * raster.H) {
-                    result.missingReason = '元の数値データを読み込めませんでした。';
+                    result.missingReason = _uiT("元の数値データを読み込めませんでした。");
                 } else {
                     result.raster = { W: raster.W, H: raster.H, values: raster.values.slice() };
                     if (raster.measuredMask) result.raster.measuredMask = raster.measuredMask.slice();
@@ -526,14 +537,14 @@
                             registeredPixelPitch:registeredPitchValue(state.calibration && state.calibration.msi_um_per_px),
                             transform:copy(state.ratioTransform)};
                         if (outputPlan) entry.metadata.formula=bindingFormula(bindingFor(section));
-                        if (typeof app.resolveRatio !== 'function') entry.missingReason='比の数値データを読み込めません。';
+                        if (typeof app.resolveRatio !== 'function') entry.missingReason=_uiT("比の数値データを読み込めません。");
                         else {
                             let resolved;
                             try { resolved=await app.resolveRatio(section,ratioInput.key,{signal:options.signal}); }
                             catch(error) {
                                 assertCurrent();
                                 if(error && error.name==='AbortError')throw error;
-                                entry.missingReason='この切片の比の元データを読み込めませんでした。';
+                                entry.missingReason=_uiT("この切片の比の元データを読み込めませんでした。");
                             }
                             assertCurrent();
                             if (resolved && typeof resolved.assertCurrent === 'function') {
@@ -542,7 +553,7 @@
                             if(resolved && resolved.formula)entry.metadata.formula=cleanRatioText(resolved.formula);
                             const raster=resolved && resolved.raster;
                             if (!raster || !(raster.W>0 && raster.H>0) || !raster.values || raster.values.length!==raster.W*raster.H)
-                                entry.missingReason=entry.missingReason || cleanRatioText(resolved && resolved.reason || 'この切片で比を利用できません。');
+                                entry.missingReason=entry.missingReason || cleanRatioText(resolved && resolved.reason || _uiT("この切片で比を利用できません。"));
                             else {
                                 entry.raster={W:raster.W,H:raster.H,values:raster.values.slice()};
                                 const mask=raster.measuredMask || raster.validMask;
@@ -636,31 +647,31 @@
         const el = (tag, label) => { const node = doc.createElement(tag); if (label != null) node.textContent = label; return node; };
         const button = (label, attribute) => { const node = el('button', label); node.type='button'; node.className='btn'; node.setAttribute(attribute, ''); return node; };
         const toolbar = el('div'); toolbar.style.cssText='display:flex;flex-wrap:wrap;gap:8px;margin:12px 0';
-        const add = button('比較グループを追加', 'data-report-add-group');
-        const allIndependent = button('すべて独立にする', 'data-report-all-independent');
+        const add = _uiText(button('', 'data-report-add-group'), "比較グループを追加");
+        const allIndependent = _uiText(button('', 'data-report-all-independent'), "すべて独立にする");
         toolbar.append(add, allIndependent);
         const manager = el('div');
         const bulk = el('div'); bulk.style.cssText=toolbar.style.cssText;
-        const bulkGroup = el('select'); bulkGroup.setAttribute('data-report-bulk-group',''); bulkGroup.setAttribute('aria-label','選択した切片の比較グループ');
-        const apply = button('選択した切片に適用', 'data-report-apply-group');
+        const bulkGroup = el('select'); bulkGroup.setAttribute('data-report-bulk-group',''); _uiAttr(bulkGroup, "aria-label", "選択した切片の比較グループ");
+        const apply = _uiText(button('', 'data-report-apply-group'), "選択した切片に適用");
         bulk.append(bulkGroup, apply);
         const scroll = el('div'); scroll.style.cssText='max-height:32vh;overflow:auto;border:1px solid #cbd5e1;border-radius:6px';
         const table = el('table'); table.style.cssText='border-collapse:collapse;width:100%;font-size:13px';
         const head = el('thead'), heading = el('tr');
         const selectHead = el('th'), selectAll = el('input'); selectAll.type='checkbox';
-        selectAll.setAttribute('aria-label','一括変更する切片をすべて選択'); selectAll.setAttribute('data-report-select-all','');
+        _uiAttr(selectAll, "aria-label", "一括変更する切片をすべて選択"); selectAll.setAttribute('data-report-select-all','');
         selectHead.append(selectAll); heading.append(selectHead);
-        for (const title of ['出力','切片','比較・独立','適用するRange']) heading.append(el('th',title));
+        for (const title of ['出力','切片','比較・独立','適用するRange']) heading.append(_uiText(el('th'),title));
         head.append(heading); const body=el('tbody'); table.append(head,body); scroll.append(table);
         const summary = el('p'); summary.setAttribute('data-report-summary',''); summary.setAttribute('role','status');
         summary.style.cssText='font-size:13px;line-height:1.6;white-space:pre-line';
         const rows = sections.map((section, index) => {
             const assignment = state.assignments[index], tr=el('tr'); tr.setAttribute('data-report-section-id',String(section.id));
-            const checked=el('input'); checked.type='checkbox'; checked.setAttribute('data-report-select',''); checked.setAttribute('aria-label','一括変更: '+(section.displayName || '切片 '+(index+1)));
-            const included=el('input'); included.type='checkbox'; included.checked=assignment.included; included.setAttribute('data-report-output',''); included.setAttribute('aria-label','出力: '+(section.displayName || '切片 '+(index+1)));
-            const group=el('select'); group.setAttribute('data-report-group',''); group.setAttribute('aria-label','比較・独立: '+(section.displayName || '切片 '+(index+1)));
+            const checked=el('input'); checked.type='checkbox'; checked.setAttribute('data-report-select',''); _uiAttr(checked, "aria-label", "一括変更: {0}", {"0":(section.displayName || _uiT("切片 {0}", {"0":(index+1)}))});
+            const included=el('input'); included.type='checkbox'; included.checked=assignment.included; included.setAttribute('data-report-output',''); _uiAttr(included, "aria-label", "出力: {0}", {"0":(section.displayName || _uiT("切片 {0}", {"0":(index+1)}))});
+            const group=el('select'); group.setAttribute('data-report-group',''); _uiAttr(group, "aria-label", "比較・独立: {0}", {"0":(section.displayName || _uiT("切片 {0}", {"0":(index+1)}))});
             const range=el('span');
-            for (const value of [checked,included,el('span',section.displayName || '切片 '+(index+1)),group,range]) {
+            for (const value of [checked,included,el('span',section.displayName || _uiT("切片 {0}", {"0":(index+1)})),group,range]) {
                 const cell=el('td');cell.style.cssText='padding:8px;border-top:1px solid #e2e8f0;overflow-wrap:anywhere';cell.append(value);tr.append(cell);
             }
             body.append(tr);
@@ -670,8 +681,8 @@
             return {assignment,checked,included,group,range};
         });
         const fillSelect = (select, value) => {
-            select.replaceChildren(); const independent=el('option','独立'); independent.value=''; select.append(independent);
-            for (const group of state.groups) {const option=el('option',group.name || '名称未入力');option.value=group.id;select.append(option);}
+            select.replaceChildren(); const independent=_uiText(el('option', ''), "独立"); independent.value=''; select.append(independent);
+            for (const group of state.groups) {const option=el('option',group.name || _uiT("名称未入力"));option.value=group.id;select.append(option);}
             select.value=value;
         };
         function refreshSummary() {
@@ -682,12 +693,11 @@
             const included=state.assignments.filter(row=>row.included);
             const comparisons=state.groups.map(group=>({group,count:included.filter(row=>row.groupId===group.id).length}));
             const independent=included.filter(row=>!row.groupId).length;
-            summary.textContent='出力 '+included.length+' 切片／独立 '+independent+' 切片／除外 '+(rows.length-included.length)+' 切片'
-                + comparisons.filter(item=>item.count).map(({group,count})=>'\n'+group.name+'：'+count+' 切片'+(count===1?'（1切片のみ）':'')+'・共通自動Range').join('');
+            _uiText(summary, "出力 {0} 切片／独立 {1} 切片／除外 {2} 切片{3}", {"0":(included.length),"1":(independent),"2":(rows.length-included.length),"3":(comparisons.filter(item=>item.count).map(({group,count})=>_uiT("\n{0}：{1} 切片{2}・共通自動Range", {"0":(group.name),"1":(count),"2":(count===1?_uiT("（1切片のみ）"):'')})).join(''))});
             create.disabled=!included.length || comparisons.some(({group,count})=>count>0 && !group.name.trim());
             for (const row of rows) {
                 row.group.disabled=!row.assignment.included;
-                row.range.textContent=!row.assignment.included?'出力しない':row.assignment.groupId?'グループ共通・自動':'この切片のみ・自動';
+                (!row.assignment.included ? _uiText(row.range, "出力しない") : (row.assignment.groupId ? _uiText(row.range, "グループ共通・自動") : _uiText(row.range, "この切片のみ・自動")));
             }
         }
         function refreshGroups() {
@@ -698,9 +708,9 @@
             for (const group of state.groups) {
                 const line=el('div');line.setAttribute('data-report-group-id',group.id);line.style.cssText=toolbar.style.cssText;
                 const name=el('input'); name.type='text';name.value=group.name;name.maxLength=120;name.required=true;
-                name.style.cssText='border:1px solid #cbd5e1;border-radius:4px;padding:6px 8px;background:white;max-width:100%';name.title='比較グループ名';name.placeholder='比較グループ名';
-                name.setAttribute('data-report-group-name','');name.setAttribute('aria-label','比較グループ名');
-                const remove=button('削除','data-report-delete-group'); remove.setAttribute('aria-label',group.name+'を削除');
+                name.style.cssText='border:1px solid #cbd5e1;border-radius:4px;padding:6px 8px;background:white;max-width:100%';_uiAttr(name, "title", "比較グループ名");_uiAttr(name, "placeholder", "比較グループ名");
+                name.setAttribute('data-report-group-name','');_uiAttr(name, "aria-label", "比較グループ名");
+                const remove=_uiText(button('', 'data-report-delete-group'), "削除"); _uiAttr(remove, "aria-label", "{0}を削除", {"0":(group.name)});
                 name.addEventListener('input',()=>{
                     group.name=name.value;for(const row of rows)fillSelect(row.group,row.assignment.groupId);
                     const current=bulkGroup.value;fillSelect(bulkGroup,current);refreshSummary();
@@ -716,7 +726,7 @@
         }
         add.addEventListener('click',()=>{
             let index=1;while(state.groups.some(group=>group.id==='compare-'+index))index++;
-            const group={id:'compare-'+index,name:'比較グループ '+(index<=26?String.fromCharCode(64+index):index)};
+            const group={id:'compare-'+index,name:_uiT("比較グループ {0}", {"0":(index<=26?String.fromCharCode(64+index):index)})};
             state.groups.push(group);refreshGroups();bulkGroup.value=group.id;
             manager.lastElementChild.querySelector('input').focus();
         });
@@ -724,6 +734,9 @@
         apply.addEventListener('click',()=>{for(const row of rows)if(row.checked.checked)row.assignment.groupId=bulkGroup.value;refreshGroups();});
         selectAll.addEventListener('change',()=>{for(const row of rows)row.checked.checked=selectAll.checked;refreshSummary();});
         container.append(toolbar,manager,bulk,scroll,summary);refreshGroups();
+        // Recompute only display summaries; retain all input nodes and unsaved group names.
+        const unsubscribe = globalThis.AppI18n?.onChange(() => { if (container.isConnected) refreshSummary(); });
+        container.disposeI18n = () => unsubscribe?.();
         return container;
     }
     function selectReportOptions(doc, canIncludeCeCv, hasRatios = false, project) {
@@ -734,35 +747,36 @@
             overlay.style.cssText = 'position:fixed;inset:0;z-index:12000;background:#0008;display:flex;align-items:center;justify-content:center;padding:20px';
             const dialog = doc.createElement('div');
             dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
-            dialog.setAttribute('aria-label', 'PPT レポートの設定');
+            _uiAttr(dialog, "aria-label", "PPT レポートの設定");
             dialog.setAttribute('aria-describedby', 'project-report-options-help');
             dialog.style.cssText = 'background:white;color:#1e293b;border-radius:10px;padding:24px;width:min(900px,100%);max-height:90vh;overflow:auto;box-shadow:0 12px 40px #0005';
-            const title = doc.createElement('h2'); title.textContent = 'PPT レポートの設定';
+            const title = doc.createElement('h2'); _uiText(title, "PPT レポートの設定");
             title.style.cssText = 'font-size:18px;font-weight:600;margin:0 0 16px';
             const label = doc.createElement('label');
             label.style.cssText = 'display:flex;align-items:center;gap:8px;font-weight:600';
             const checkbox = doc.createElement('input'); checkbox.type = 'checkbox';
             checkbox.id = 'project-report-include-ce-cv'; checkbox.checked = false;
-            label.append(checkbox, doc.createTextNode('CV・CEを含める'));
+            label.append(checkbox, _uiTextNode(doc, "CV・CEを含める"));
             const styleLabel = doc.createElement('label');
             styleLabel.style.cssText = 'display:flex;align-items:center;gap:8px;font-weight:600;margin:14px 0';
             const style = doc.createElement('input'); style.type='checkbox';style.id='project-report-use-display-style';style.checked=false;
-            styleLabel.append(style,doc.createTextNode('表示スタイルを使う（配色・補間・Otsu）'));
+            styleLabel.append(style,_uiTextNode(doc, "表示スタイルを使う（配色・補間・Otsu）"));
             const ratioLabel=doc.createElement('label');ratioLabel.style.cssText=styleLabel.style.cssText;
             const ratios=doc.createElement('input');ratios.type='checkbox';ratios.id='project-report-include-ratios';ratios.checked=hasRatios;
-            ratioLabel.append(ratios,doc.createTextNode('比の画像・ROI集計を含める（このタブの比を含む）'));
+            ratioLabel.append(ratios,_uiTextNode(doc, "比の画像・ROI集計を含める（このタブの比を含む）"));
             const help = doc.createElement('p'); help.id = 'project-report-options-help';
-            help.textContent = '初期設定は全切片を独立で出力します。同じ比較グループは分子ごとに共通の自動Range、独立切片はそれぞれの自動Rangeを使います。手動Range・画面のSame/Individual設定は使いません。標準はp99.8、表示スタイルを使う場合は画面の自動上限方式を使います。全分子のうち各切片に登録のあるものを掲載し、比の利用不可表示は残します。設定はこのタブで同じプロジェクトを開いている間だけ保持します。';
+            _uiText(help, "初期設定は全切片を独立で出力します。同じ比較グループは分子ごとに共通の自動Range、独立切片はそれぞれの自動Rangeを使います。手動Range・画面のSame/Individual設定は使いません。標準はp99.8、表示スタイルを使う場合は画面の自動上限方式を使います。全分子のうち各切片に登録のあるものを掲載し、比の利用不可表示は残します。設定はこのタブで同じプロジェクトを開いている間だけ保持します。");
             help.style.cssText = 'font-size:13px;line-height:1.6;margin:12px 0 20px';
             const actions = doc.createElement('div'); actions.style.cssText = 'display:flex;justify-content:flex-end;gap:8px';
             const cancel = doc.createElement('button'); cancel.type = 'button'; cancel.className = 'btn';
-            cancel.setAttribute('data-report-cancel', ''); cancel.textContent = 'キャンセル';
+            cancel.setAttribute('data-report-cancel', ''); _uiText(cancel, "キャンセル");
             const create = doc.createElement('button'); create.type = 'button'; create.className = 'btn';
-            create.setAttribute('data-report-create', ''); create.textContent = '作成';
+            create.setAttribute('data-report-create', ''); _uiText(create, "作成");
             const sections = project ? (project.sections || []).slice() : [];
             const selection = reconcileSelection(sections, project && selectionHistory.get(project));
             const controls = project ? selectionControls(doc,sections,selection,create) : null;
             const close = result => {
+                controls?.disposeI18n?.();
                 overlay.remove();
                 if (focused && typeof focused.focus === 'function') focused.focus();
                 resolve(result);
@@ -771,7 +785,7 @@
             create.addEventListener('click', () => {
                 const outputPlan = project ? selectionPlan(sections,selection) : null;
                 if (project) selectionHistory.set(project,copy(selection));
-                close({ includeCeCv: canIncludeCeCv && checkbox.checked,useDisplayStyle:style.checked,
+                close({ locale: globalThis.AppI18n?.getLocale() || "ja", includeCeCv: canIncludeCeCv && checkbox.checked,useDisplayStyle:style.checked,
                     includeRatios:hasRatios && ratios.checked, ...(outputPlan ? {outputPlan, sectionInventory:sections} : {}) });
             });
             overlay.addEventListener('keydown', event => {
@@ -794,14 +808,14 @@
         overlay.style.cssText = 'position:fixed;inset:0;z-index:12000;background:#0008;display:flex;align-items:center;justify-content:center;padding:20px';
         const dialog = doc.createElement('div');
         dialog.setAttribute('role', 'dialog'); dialog.setAttribute('aria-modal', 'true');
-        dialog.setAttribute('aria-label', 'PPT レポートを作成');
+        _uiAttr(dialog, "aria-label", "PPT レポートを作成");
         dialog.style.cssText = 'background:white;color:#1e293b;border-radius:10px;padding:24px;width:min(480px,100%);box-shadow:0 12px 40px #0005';
-        const title = doc.createElement('strong'); title.textContent = 'PPT レポートを作成しています';
+        const title = doc.createElement('strong'); _uiText(title, "PPT レポートを作成しています");
         const status = doc.createElement('p'); status.setAttribute('role', 'status'); status.setAttribute('aria-live', 'polite');
-        status.style.cssText = 'margin:14px 0;overflow-wrap:anywhere'; status.textContent = 'レポートの準備中…';
+        status.style.cssText = 'margin:14px 0;overflow-wrap:anywhere'; _uiText(status, "レポートの準備中…");
         const bar = doc.createElement('progress'); bar.style.cssText = 'width:100%;height:12px;margin-bottom:16px';
-        const button = doc.createElement('button'); button.type = 'button'; button.className = 'btn'; button.textContent = '中止';
-        button.addEventListener('click', () => { cancel(); button.disabled = true; status.textContent = '中止しています…'; });
+        const button = doc.createElement('button'); button.type = 'button'; button.className = 'btn'; _uiText(button, "中止");
+        button.addEventListener('click', () => { cancel(); button.disabled = true; _uiText(status, "中止しています…"); });
         dialog.append(title, status, bar, button); overlay.appendChild(dialog); doc.body.appendChild(overlay);
         const focused = doc.activeElement;
         button.focus();
@@ -814,12 +828,12 @@
             update(event) {
                 if (button.disabled) return;
                 if (event.phase === 'load') {
-                    status.textContent = '数値データを読み込み中 ' + event.index + ' / ' + event.total + '：' + event.moleculeName + ' / ' + event.sectionName;
+                    _uiText(status, "数値データを読み込み中 {0} / {1}：{2} / {3}", {"0":(event.index),"1":(event.total),"2":(event.moleculeName),"3":(event.sectionName)});
                     bar.max = event.total; bar.value = event.index;
                 } else if (event.phase === 'render') {
-                    status.textContent = '画像を作成中：' + (event.moleculeName || '') + ' (' + event.index + ' / ' + event.total + ')';
+                    _uiText(status, "画像を作成中：{0} ({1} / {2})", {"0":(event.moleculeName || ''),"1":(event.index),"2":(event.total)});
                     bar.removeAttribute('value');
-                } else { status.textContent = event.message || 'PowerPoint をまとめています…'; bar.removeAttribute('value'); }
+                } else { status.textContent = event.message || _uiT("PowerPoint をまとめています…"); bar.removeAttribute('value'); }
             },
             close() { overlay.remove(); if (focused && typeof focused.focus === 'function') focused.focus(); }
         };
@@ -901,20 +915,20 @@
                 await root.loadScript(libs.projectReportData || 'project-report-data.js?v=' + REPORT_REVISION); input.assertCurrent();
                 await root.loadScript(libs.projectReportDeck || 'project-report-deck.js?v=' + REPORT_REVISION); input.assertCurrent();
                 assertReportModules(root.ProjectReportData, root.ProjectReportDeck);
-                const report = await root.ProjectReportData.prepare(input, { createCanvas: () => doc.createElement('canvas'),
+                const report = await root.ProjectReportData.prepare(input, { locale:selected.locale, createCanvas: () => doc.createElement('canvas'),
                     signal: controller.signal, onProgress: event => progress.update(event) });
                 input.assertCurrent();
                 progress.update({ phase: 'write' });
                 const blob = await root.ProjectReportDeck.create(report, { type: 'blob', signal: controller.signal,
                     assertCurrent: input.assertCurrent, onProgress: event => progress.update(event) });
                 input.assertCurrent();
-                if (!blob || !(blob.size > 0)) throw new Error('PowerPoint ファイルを作成できませんでした。');
+                if (!blob || !(blob.size > 0)) throw new Error(_uiT("PowerPoint ファイルを作成できませんでした。"));
                 downloadAsFile(blob, safeFileName(input.projectName));
-                if (typeof showToast === 'function') showToast('PPT レポートを保存しました。');
+                if (typeof showToast === 'function') showToast(_uiT("PPT レポートを保存しました。"));
                 return blob;
             } catch (error) {
-                const message = error && error.name === 'AbortError' ? 'PPT レポートの作成を中止しました。'
-                    : 'PPT レポートを作成できませんでした：' + (error && error.message || String(error));
+                const message = error && error.name === 'AbortError' ? _uiT("PPT レポートの作成を中止しました。")
+                    : _uiT("PPT レポートを作成できませんでした：{0}", {"0":(error && error.message || String(error))});
                 if (typeof showToast === 'function') showToast(message, 8000);
                 else if (root.alert) root.alert(message);
                 return null;

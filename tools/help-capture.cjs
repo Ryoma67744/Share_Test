@@ -38,15 +38,64 @@ async function prepare(page){
   await page.evaluate(async()=>{for(const s of App.project.sections)for(const key of Object.keys(s.msiSeries||{}))await App.panels.get(s.id).ensureMsiLayerLoaded(key);const s=App.project.sections[0];App.setActiveSection(s.id);App.setViewMode('compound');App.setFocusCompoundKey(Object.keys(s.msiSeries)[0]);App.recomputeMsiAbsScale();});
 }
 async function main(){
-  const {server,origin}=await startServer(),data=await fixture();let browser;const captures=[],errors=[];
-  const onlyRatio=process.argv.includes('--ratio-only'),onlyKmd=process.argv.includes('--kmd-only');
+  const {server,origin}=await startServer(),data=await fixture();let browser;const captures=[],errors=[],untranslatedReports=[];
+  const onlyRatio=process.argv.includes('--ratio-only'),onlyKmd=process.argv.includes('--kmd-only'),onlyMrm=process.argv.includes('--mrm-only');
   try{
+    if([onlyRatio,onlyKmd,onlyMrm].filter(Boolean).length>1)throw new Error('Choose at most one capture-only option.');
     browser=await chromium.launch({headless:true,executablePath:process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH||undefined});
     const context=await browser.newContext({viewport,deviceScaleFactor:1});
     await context.route('**/*',route=>route.request().url().startsWith(origin+'/')||/^(blob|data):/.test(route.request().url())?route.continue():route.abort());
     const page=await context.newPage();page.on('dialog',d=>d.accept());page.on('pageerror',e=>errors.push(e.message));
     const output=path.join(root,'docs/help/images');await fs.mkdir(output,{recursive:true});
-    async function shot(id,scenario){await page.waitForFunction(()=>!document.querySelector('#toast-host .toast'),{},{timeout:30000});await page.evaluate(()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));const bytes=await page.screenshot({path:path.join(output,id+'.png'),fullPage:false});captures.push({id,path:'docs/help/images/'+id+'.png',sha256:sha(bytes),scenario,role:'local author',uiLanguage:'ja / en (application labels)',viewport,deviceScaleFactor:1});console.log('Captured '+id);}
+    async function shot(id,scenario){
+      await page.waitForFunction(()=>!document.querySelector('#toast-host .toast'),{},{timeout:30000});
+      // Finish saves caused by the preceding scenario action before testing
+      // language changes; an unrelated storageRevision update is not a locale edit.
+      await page.evaluate(async()=>{if(typeof App!=='undefined'&&App.project&&App._flushSave)await App._flushSave();});
+      await page.evaluate(()=>{
+        if(!window.AppI18n)throw new Error('The application language module is required for localized captures');
+        AppI18n.setLocale('ja');AppI18n.clearMissingKeys();
+        window.__helpLocaleCapture={project:typeof App!=='undefined'?JSON.stringify(App.project):null,
+          controls:[...document.querySelectorAll('input,textarea,select')].filter(node=>!node.hasAttribute('data-i18n-switch')).map(node=>({node,value:node.value,checked:node.checked,selection:node.tagName==='SELECT'?node.selectedIndex:null}))};
+      });
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+      const bytes=await page.screenshot({path:path.join(output,id+'.png'),fullPage:false});
+      await page.evaluate(()=>AppI18n.setLocale('en'));
+      await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+      const english=await page.screenshot({path:path.join(output,id+'-en.png'),fullPage:false});
+      const missing=await page.evaluate(()=>AppI18n.getMissingKeys());
+      // This fixture contains English-only user names. Visible Japanese text
+      // therefore reveals unbound UI copy; the language-switch label is expected.
+      const untranslated=await page.evaluate(()=>{
+        const out=[],walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+        while(walker.nextNode()){
+          const node=walker.currentNode,text=node.textContent.trim(),parent=node.parentElement;
+          if(!/[\u3040-\u30ff\u3400-\u9fff]/.test(text)||text==='日本語'||!parent||parent.closest('script,style,textarea,[contenteditable]'))continue;
+          if(parent.tagName==='OPTION'&&!parent.selected)continue;
+          const range=document.createRange();range.selectNodeContents(node);const rect=range.getBoundingClientRect();
+          const style=getComputedStyle(parent);
+          if(rect.width>0&&rect.height>0&&style.visibility!=='hidden'&&style.display!=='none')out.push(text);
+        }
+        for(const element of document.querySelectorAll('[title],[aria-label],[placeholder]')){
+          if(element.closest('[data-i18n-switch]')||!element.getClientRects().length)continue;
+          for(const name of ['title','aria-label','placeholder']){const text=element.getAttribute(name)||'';if(/[\u3040-\u30ff\u3400-\u9fff]/.test(text)&&!['日本語に切り替え','Language / 言語'].includes(text))out.push(name+': '+text);}
+        }
+        return [...new Set(out)];
+      });
+      const preserved=await page.evaluate(()=>{
+        const before=window.__helpLocaleCapture;
+        const check=()=>({project:before.project===(typeof App!=='undefined'?JSON.stringify(App.project):null),changedProjectKeys:before.project&&typeof App!=='undefined'?Object.keys({...JSON.parse(before.project),...App.project}).filter(key=>JSON.stringify(JSON.parse(before.project)[key])!==JSON.stringify(App.project[key])):[],controls:before.controls.every(({node,value,checked,selection})=>node.isConnected&&node.value===value&&node.checked===checked&&(selection===null||node.selectedIndex===selection))});
+        const english=check();AppI18n.setLocale('ja');const japanese=check();delete window.__helpLocaleCapture;
+        return {english,japanese};
+      });
+      if(Object.values(preserved).some(result=>!result.project||!result.controls))throw new Error('Language switch changed project or controls during '+id+': '+JSON.stringify(preserved));
+      if(missing.length)throw new Error('Missing English UI translations during '+id+': '+JSON.stringify(missing));
+      if(untranslated.length){untranslatedReports.push({id,text:untranslated});console.error('Unbound Japanese UI text during '+id+': '+JSON.stringify(untranslated));if(!process.argv.includes('--audit-untranslated'))throw new Error('Unbound Japanese UI text during '+id);}
+      captures.push({id,path:'docs/help/images/'+id+'.png',sha256:sha(bytes),scenario,role:'local author',uiLanguage:'ja',viewport,deviceScaleFactor:1,
+        localized:{en:{path:'docs/help/images/'+id+'-en.png',sha256:sha(english),uiLanguage:'en',statePreserved:true}}});
+      console.log('Captured '+id+' (ja/en; editing state preserved)');
+    }
+    if(!onlyMrm){
     await page.goto(origin+'/viewer/?project=help-empty');await page.waitForFunction(()=>typeof App!=='undefined'&&App.offline);
     await page.locator('#hidden-import-input').setInputFiles({name:'Help-synthetic.zip',mimeType:'application/zip',buffer:data.buffer});
     await page.getByRole('button',{name:'復元 / Restore',exact:true}).waitFor();if(!onlyRatio&&!onlyKmd)await shot('import','ZIP import confirmation with original numerical sources');
@@ -93,18 +142,21 @@ async function main(){
       await page.locator('#kmd-unit').selectOption('CH2');await shot('kmd','Actual non-target Method table and KMD panel with 12 synthetic masses in two CH2 series');
       captures.at(-1).fixture='offline-smoke ZIP with synthetic non-target metadata';captures.at(-1).compoundMetadataSha256=sha(JSON.stringify(section.originalSeries));
     }
+    }
     if(!onlyRatio&&!onlyKmd){
-      await page.goto(origin+'/');await page.locator('#btn-help').waitFor();await shot('projects','Actual local project manager with imported synthetic project');
+      await page.goto(origin+'/');await page.locator('#btn-help').waitFor();if(!onlyMrm)await shot('projects','Actual local project manager with imported synthetic project');
       await page.evaluate(()=>localStorage.setItem('desi:offlineMrm:v1',JSON.stringify({format:'desi-offline-mrm',version:1,sets:[],template:null,ignored:[],compounds:[{id:'help-compound',name:'Synthetic lactate',polarity:'-',shelf:'main',check_level:'std',tags:['Help sample'],note:'Synthetic demonstration data',transitions:[{id:'help-transition',compound_id:'help-compound',precursor:89,product:43,ce:11,cv:20,usages:[]}]}]})));await page.goto(origin+'/mrm.html');await page.locator('#btn-exp-edit').waitFor();await page.waitForFunction(()=>!document.getElementById('lib').textContent.includes('読み込み中'));await shot('mrm','Actual local MRM management');
       await page.locator('#btn-exp-edit').click();await page.getByLabel('.exp ファイルを選択',{exact:true}).setInputFiles(path.join(root,'tests/fixtures/exp/flat-mrm-selection-synthetic.exp'));await page.getByLabel('1 行目 CE（衝突）',{exact:true}).waitFor();await shot('exp','Actual exp editor with the synthetic supported MRM fixture');
     }
+    if(untranslatedReports.length)throw new Error('Untranslated UI audit: '+JSON.stringify(untranslatedReports));
     let previous={captures:[]};try{previous=JSON.parse(await fs.readFile(path.join(root,'docs/help/capture-manifest.json'),'utf8'));}catch{}
     const ids=new Set(captures.map(c=>c.id));const sourceVersion=(await fs.readFile(path.join(root,'version.js'),'utf8')).match(/v\d{4}-\d{2}-\d{2}\.\d+/)?.[0];
-    const sourceFiles=['index.html','mrm.html','app-runtime.js','version.js',...(await fs.readdir(path.join(root,'viewer'))).filter(name=>/\.(?:html|js|css)$/.test(name)).map(name=>'viewer/'+name),...(await fs.readdir(path.join(root,'mrm'))).filter(name=>/\.(?:mjs|css)$/.test(name)).map(name=>'mrm/'+name)];
+    const sourceFiles=['index.html','mrm.html','app-runtime.js','version.js',...(await fs.readdir(root)).filter(name=>/^app-i18n(?:-[a-z0-9-]+)?\.js$/.test(name)),...(await fs.readdir(path.join(root,'viewer'))).filter(name=>/\.(?:html|js|css)$/.test(name)).map(name=>'viewer/'+name),...(await fs.readdir(path.join(root,'mrm'))).filter(name=>/\.(?:mjs|css)$/.test(name)).map(name=>'mrm/'+name)];
     const sourceFilesSha256=Object.fromEntries(await Promise.all(sourceFiles.sort().map(async file=>[file,sha(await fs.readFile(path.join(root,file)))])));
-    const help=JSON.parse(await fs.readFile(path.join(root,'docs/help/manifest.json'),'utf8'));for(const item of captures){item.mode='offline';item.chapterIds=help.chapters.filter(chapter=>chapter.screenshots.includes(item.id)).map(chapter=>chapter.id);}
+    const help=JSON.parse(await fs.readFile(path.join(root,'docs/help/manifest.json'),'utf8'));for(const item of captures){item.mode='offline';item.chapterIds=help.chapters.filter(chapter=>chapter.screenshots.includes(item.id)).map(chapter=>chapter.id);const shot=help.screenshots.find(shot=>shot.id===item.id);if(shot)shot.localizedPaths={...(shot.localizedPaths||{}),en:item.localized.en.path};}
     const meta={format:1,sourceFilesSha256,captureToolSha256:sha(await fs.readFile(__filename)),generatedBy:'node tools/help-capture.cjs',sourceVersion,browser:browser.version(),fixture:'tests/fixtures/browser/offline-smoke-project.zip with deterministic X/Y source extension',fixtureSha256:data.sourceHash,numericalSourceSha256:data.dataHash,synthetic:true,captures:[...previous.captures.filter(c=>!ids.has(c.id)),...captures].sort((a,b)=>a.id.localeCompare(b.id))};
     await fs.writeFile(path.join(root,'docs/help/capture-manifest.json'),JSON.stringify(meta,null,2)+'\n');
+    await fs.writeFile(path.join(root,'docs/help/manifest.json'),JSON.stringify(help,null,2)+'\n');
     if(errors.length)throw new Error('Application page errors: '+JSON.stringify(errors));
   }finally{if(browser)await browser.close();await new Promise(resolve=>server.close(resolve));}
 }

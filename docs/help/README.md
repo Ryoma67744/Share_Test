@@ -6,10 +6,16 @@ coverage and screenshots. Shared viewer / administrator audiences omit author
 management, import and MRM chapters. Shared ratio edits are personal overrides.
 Offline mode retains all local functionality and explicitly excludes publication.
 
-The current app uses mixed Japanese / English labels. Both Help languages use
-the same actual UI screenshots; captions and alternative text are translated.
-Do not translate a screenshot by drawing fake controls over it. When the app UI
-itself gains a locale switch, add separate locale captures in the manifest.
+The application has a shared Japanese / English language preference. Synthetic
+UI screenshots are captured in both languages; `localizedPaths.en` selects the
+English capture, including in generated guides and the offline distribution.
+Captions and alternative text are translated. Do not translate screenshots by
+drawing fake controls over them. Measured `brain-*` figures retain their original
+captures and provenance; their surrounding explanation is translated.
+
+During each synthetic capture, the tool switches to English and back to Japanese
+without reloading. It checks that form values, control identity and the project
+remain unchanged. Each language's image hash is recorded in the capture manifest.
 
 Run from the repository root after installing `tests` development dependencies:
 
@@ -29,6 +35,9 @@ synthetic exp fixture and local MRM sample data. No account or real project is
 used. `capture-manifest.json` records viewport, browser version, source version,
 fixture hashes, screenshot hashes, application source hashes and capture scenarios. The source hashes identify the captured working tree even before it has a commit. `--ratio-only` refreshes
 the ratio screen after changes without recapturing the other scenarios.
+`--mrm-only` refreshes MRM management and the .exp editor without opening the
+viewer or rewriting its screenshots. Use a partial capture only when the changed
+application sources affect those scenarios; otherwise run the full capture.
 
 Capture actual working controls and wait for images, computation and transient
 toasts to finish. Review the resulting PNGs. Never substitute a design mock for

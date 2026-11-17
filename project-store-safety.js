@@ -5,6 +5,12 @@
     if (root) root.ProjectStoreSafety = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function() {
     'use strict';
+// UI-only bindings: parameters keep user data separate from translation keys.
+function uiT(source, params) { const api=globalThis.AppI18n; if(typeof params==='function')params=params(); return api ? api.t(source, params) : String(source).replace(/\{(\w+)\}/g,(token,k)=>params && Object.prototype.hasOwnProperty.call(params,k) ? String(params[k] ?? '') : token); }
+function uiMsg(source, params) { return {__uiMessage:true,source,params}; }
+function uiBind(element, message) { element.__uiMessageSource=message.source; const api=globalThis.AppI18n; if(api) api.setText(element,message.source,message.params); else element.textContent=uiT(message.source,message.params); return element; }
+function uiAttr(element, name, message) { const api=globalThis.AppI18n; if(api) api.setAttribute(element,name,message.source,message.params); else element.setAttribute(name,uiT(message.source,message.params)); return element; }
+
     const VERSION = 6;
     const referenceStores = ['projects', 'project_recovery', 'blob_pins', 'archive_jobs'];
     const clone = value => structuredClone(value);
@@ -55,7 +61,7 @@
         // test runtimes that now provide their own native navigator.locks.
         const locks = options.locks === null ? null : options.locks || (typeof navigator !== 'undefined' && navigator.locks);
         const blobLeases = new Map();
-        const leaseError = () => Object.assign(new Error('この読み込みの原本保持は終了したか、別のタブが所有しています。'), {code:'BLOB_LEASE_OWNER'});
+        const leaseError = () => Object.assign(new Error(uiT("この読み込みの原本保持は終了したか、別のタブが所有しています。")), {code:'BLOB_LEASE_OWNER'});
         function ownedLease(handle, allowClosed = false) {
             const state = handle && blobLeases.get(handle.id);
             if (!state || state.handle !== handle || (!allowClosed && (state.closed || state.closing))) throw leaseError();
@@ -94,7 +100,7 @@
             return run(['blob_pins','blobs'],'readwrite',async tx=>{
                 const row=await leaseRow(tx,handle), pinned=new Set(row.blobIds);
                 for(const id of ids) {
-                    if(!await request(tx.objectStore('blobs').get(id))) throw new Error('原本がありません: '+id);
+                    if(!await request(tx.objectStore('blobs').get(id))) throw new Error(uiT("原本がありません: ")+id);
                     pinned.add(id);
                 }
                 row.blobIds=[...pinned];await request(tx.objectStore('blob_pins').put(row));
@@ -261,7 +267,7 @@
             try { committed = await run(load ? [...referenceStores,'project_index','blobs','preferences'] : ['projects', 'project_index', 'project_recovery', 'blob_pins','preferences'], 'readwrite', async tx => {
                 const projects = tx.objectStore('projects');
                 const lease = load && await leaseRow(tx,settings.blobLease);
-                if(lease)for(const id of collectBlobIds(record))if(!await request(tx.objectStore('blobs').get(id)))throw new Error('取り込み原本がありません: '+id);
+                if(lease)for(const id of collectBlobIds(record))if(!await request(tx.objectStore('blobs').get(id)))throw new Error(uiT("取り込み原本がありません: ")+id);
                 const active = !load && activeProjectId === record.id;
                 if (settings.createOnly) {
                     while (await request(projects.get(record.id))) record.id = uid('proj');
@@ -277,7 +283,7 @@
                 if (!current || expected == null || revision(expected) == null || actualRevision !== expected) {
                     if (active) await writeSession(tx, record);
                     if (!await recoveryEnabled(tx)) {
-                        failure = conflict('別のタブで更新または削除されています。回復用下書きの自動作成はOFFのため、今回の編集は退避していません。',
+                        failure = conflict(uiT("別のタブで更新または削除されています。回復用下書きの自動作成はOFFのため、今回の編集は退避していません。"),
                             {projectId:record.id,expectedRevision:expected ?? null,actualRevision,recovered:false});
                         return null;
                     }
@@ -287,7 +293,7 @@
                     await request(tx.objectStore('project_recovery').put({id: recoveryId, projectId: record.id,
                         project: record, expectedRevision: expected ?? null, actualRevision,
                         createdAt: previous ? previous.createdAt : recoveryUpdatedAt, updatedAt: recoveryUpdatedAt}));
-                    failure = conflict('別のタブで更新または削除されています。今回の編集は回復用下書きに保存しました。',
+                    failure = conflict(uiT("別のタブで更新または削除されています。今回の編集は回復用下書きに保存しました。"),
                         {projectId: record.id, recoveryId, recoveryUpdatedAt, expectedRevision: expected ?? null, actualRevision, recovered: true});
                     return null; // Commit the recovery without touching the authoritative project.
                 }
@@ -308,7 +314,7 @@
                 if (!current) return {applied: false, project: null, reason: 'deleted'};
                 const previousStorageRevision = revision(current.storageRevision);
                 if (previousStorageRevision == null || (settings.expectedRevision != null && settings.expectedRevision !== previousStorageRevision)) {
-                    throw conflict('別のタブで更新されています。最新の内容を確認してください。', {projectId: id, actualRevision: previousStorageRevision});
+                    throw conflict(uiT("別のタブで更新されています。最新の内容を確認してください。"), {projectId: id, actualRevision: previousStorageRevision});
                 }
                 const apply = mutate(current);
                 if (apply && typeof apply.then === 'function') throw new Error('patchProject mutator must be synchronous');
@@ -328,7 +334,7 @@
             };
             assertCurrent();
             if (!id || !downloadedProject || downloadedProject.__summary || !Array.isArray(downloadedProject.sections)) {
-                throw new Error('サーバー版の完全なプロジェクトが必要です。');
+                throw new Error(uiT("サーバー版の完全なプロジェクトが必要です。"));
             }
             // Freeze all caller-controlled inputs before waiting for an IDB transaction.
             const record = clone(downloadedProject), expected = settings.expectedRevision;
@@ -336,14 +342,14 @@
             const checkServer = Object.prototype.hasOwnProperty.call(settings, 'expectedServerRevision');
             const handle = settings.lease || settings.blobLease;
             const load = ownedLease(handle);
-            if (!Number.isSafeInteger(expected) || expected < 0) throw conflict('取り込み前の保存版を確認してください。', {projectId:id});
+            if (!Number.isSafeInteger(expected) || expected < 0) throw conflict(uiT("取り込み前の保存版を確認してください。"), {projectId:id});
             if (options.prepare) options.prepare(record);
             const pending = project => !!(project.__publishPending || project.pendingPublish || project.shareInfo?.pendingPublish);
             const incoming = record.shareInfo;
             if (record.__importFailures || pending(record) || !incoming?.slug
                 || !Number.isSafeInteger(incoming.serverRevision) || incoming.serverRevision < 0
                 || (checkServer && (!Number.isSafeInteger(expectedServer) || expectedServer < 0 || incoming.serverRevision !== expectedServer))) {
-                throw new Error('サーバー版の取得が未完了か、公開版番号を確認できません。');
+                throw new Error(uiT("サーバー版の取得が未完了か、公開版番号を確認できません。"));
             }
             if (Array.isArray(record.rois)) record.rois = record.rois.filter(r => !(r && r._collab));
             record.id = id;
@@ -353,21 +359,21 @@
                 result = await run([...referenceStores,'project_index','blobs','preferences'], 'readwrite', async tx => {
                     const projects = tx.objectStore('projects');
                     const lease = await leaseRow(tx, handle);
-                    if (lease.purpose !== 'cloud-import') throw new Error('サーバー取り込み用の原本保持が必要です。');
+                    if (lease.purpose !== 'cloud-import') throw new Error(uiT("サーバー取り込み用の原本保持が必要です。"));
                     const current = await request(projects.get(id));
                     const actual = current ? revision(current.storageRevision) : null;
                     assertCurrent();
-                    if (!current || actual !== expected) throw conflict('取得中に別のタブで更新または削除されています。取り込み直してください。',
+                    if (!current || actual !== expected) throw conflict(uiT("取得中に別のタブで更新または削除されています。取り込み直してください。"),
                         {projectId:id,expectedRevision:expected,actualRevision:actual});
-                    if (pending(current)) throw conflict('未公開の変更または公開結果の確認中の処理があるため、サーバー版を反映できません。',
+                    if (pending(current)) throw conflict(uiT("未公開の変更または公開結果の確認中の処理があるため、サーバー版を反映できません。"),
                         {projectId:id,reason:'publish-pending'});
                     const share = current.shareInfo;
                     if (!share?.slug || share.slug !== incoming.slug
                         || (Number.isSafeInteger(share.serverRevision) && incoming.serverRevision < share.serverRevision)) {
-                        throw conflict('共有先または公開版番号が変わっています。取り込み直してください。', {projectId:id,reason:'server-version-changed'});
+                        throw conflict(uiT("共有先または公開版番号が変わっています。取り込み直してください。"), {projectId:id,reason:'server-version-changed'});
                     }
                     for (const blobId of collectBlobIds(record)) {
-                        if (!await request(tx.objectStore('blobs').get(blobId))) throw new Error('取り込み原本がありません: ' + blobId);
+                        if (!await request(tx.objectStore('blobs').get(blobId))) throw new Error(uiT("取り込み原本がありません: ") + blobId);
                     }
                     assertCurrent();
                     // This is an explicit, independently listed backup, regardless of
@@ -468,7 +474,7 @@
         }
         async function restoreRecovery(id) {
             const session = id.startsWith('edit:');
-            if (session && !await sessionInactive(id)) throw new Error('この保持データは別のタブで使用中です');
+            if (session && !await sessionInactive(id)) throw new Error(uiT("この保持データは別のタブで使用中です"));
             return run(['project_recovery', 'projects', 'project_index','blob_pins'], 'readwrite', async tx => {
                 const recoveryStore = tx.objectStore(session ? 'blob_pins' : 'project_recovery');
                 const recovery = await request(recoveryStore.get(id));
@@ -485,7 +491,7 @@
         }
         async function discardRecovery(id) {
             const session = id.startsWith('edit:');
-            if (session && !await sessionInactive(id)) throw new Error('この保持データは別のタブで使用中です');
+            if (session && !await sessionInactive(id)) throw new Error(uiT("この保持データは別のタブで使用中です"));
             return run([...referenceStores,'blobs'], 'readwrite', async tx => {
                 const store=tx.objectStore(session ? 'blob_pins':'project_recovery');
                 const row=await request(store.get(id));if(!row)return false;
@@ -560,7 +566,7 @@
                 const project = await request(tx.objectStore('projects').get(id));
                 if (!project) return false;
                 if (settings.expectedRevision != null && revision(project.storageRevision) !== settings.expectedRevision) {
-                    throw conflict('別のタブで更新されています。削除前に最新の内容を確認してください。', {projectId: id});
+                    throw conflict(uiT("別のタブで更新されています。削除前に最新の内容を確認してください。"), {projectId: id});
                 }
                 const owned = collectBlobIds(project);
                 await request(tx.objectStore('projects').delete(id));
@@ -609,14 +615,14 @@
             else (document.querySelector('header') || document.body).appendChild(button);
         }
         button.hidden = false; button.style.display = '';
-        button.textContent = '回復・設定';
+        uiBind(button, uiMsg("回復・設定"));
         button.setAttribute('aria-haspopup', 'dialog');
         const notice = document.createElement('div'); notice.id = 'local-recovery-notice'; notice.hidden = true;
         notice.setAttribute('role', 'alert');
         notice.style.cssText = 'position:fixed;right:14px;bottom:14px;z-index:99990;box-sizing:border-box;width:360px;max-width:calc(100vw - 28px);padding:12px 14px;background:#fff7ed;border:1px solid #c2410c;border-radius:6px;color:#7c2d12;font-size:13px;line-height:1.6;overflow-wrap:anywhere';
         const noticeText = document.createElement('p'); noticeText.id = 'local-recovery-notice-message'; noticeText.style.margin = '0 0 8px';
-        const review = document.createElement('button'); review.id = 'local-recovery-review'; review.type = 'button'; review.className = 'btn'; review.textContent = '確認する'; review.style.marginRight = '8px';
-        const dismiss = document.createElement('button'); dismiss.id = 'local-recovery-dismiss'; dismiss.type = 'button'; dismiss.className = 'btn'; dismiss.textContent = '通知を閉じる';
+        const review = document.createElement('button'); review.id = 'local-recovery-review'; review.type = 'button'; review.className = 'btn'; uiBind(review, uiMsg("確認する")); review.style.marginRight = '8px';
+        const dismiss = document.createElement('button'); dismiss.id = 'local-recovery-dismiss'; dismiss.type = 'button'; dismiss.className = 'btn'; uiBind(dismiss, uiMsg("通知を閉じる"));
         notice.append(noticeText, review, dismiss); document.body.appendChild(notice);
         let settingsUi = null, changing = false, refreshId = 0;
         let rows = [], pendingConflict = null, readFailure = null, dismissedReadFailure = null, visibleRowKeys = [];
@@ -627,11 +633,11 @@
         const renderNotice = () => {
             const unseen = rows.filter(row => !acknowledgedRows.has(rowKey(row)));
             const message = pendingConflict?.message || (readFailure !== dismissedReadFailure ? readFailure : null)
-                || (unseen.length ? '確認が必要な回復用下書きが ' + unseen.length + ' 件あります。内容を確認して復元または破棄できます。' : '');
+                || (unseen.length ? uiT("確認が必要な回復用下書きが ") + unseen.length + uiT(" 件あります。内容を確認して復元または破棄できます。") : '');
             visibleRowKeys = message ? unseen.map(rowKey) : [];
             notice.hidden = !message;
             // Avoid re-announcing unchanged text whenever the window regains focus.
-            if (noticeText.textContent !== message) noticeText.textContent = message;
+            if (noticeText.textContent !== message) uiBind(noticeText, uiMsg("{0}", () => [message]));
         };
         const dismissNotice = () => {
             visibleRowKeys.forEach(key => acknowledgedRows.add(key));
@@ -650,15 +656,15 @@
                 if (id !== refreshId) return;
                 rows = recovered; readFailure = null; dismissedReadFailure = null;
                 if (pendingConflict?.recoveryId && !rows.some(row => row.id === pendingConflict.recoveryId)) pendingConflict = null;
-                button.textContent = '回復・設定' + (rows.length ? ' (' + rows.length + ')' : '');
-                button.title = '自動作成: ' + (enabled ? 'ON' : 'OFF');
+                uiBind(button, uiMsg("回復・設定{0}", () => [rows.length ? ' (' + rows.length + ')' : '']));
+                uiAttr(button, "title", uiMsg("自動作成: {0}", () => [enabled ? 'ON' : 'OFF']));
                 if (settingsUi && !changing) settingsUi.update(enabled);
                 renderNotice();
             } catch (error) {
                 if (id !== refreshId) return;
-                button.title = '下書き設定を読み込めません: ' + String(error.message || error);
+                uiAttr(button, "title", uiMsg("下書き設定を読み込めません: {0}", () => [String(error.message || error)]));
                 readFailure = button.title;
-                if (settingsUi) settingsUi.status.textContent = button.title;
+                if (settingsUi) uiBind(settingsUi.status, uiMsg("{0}", () => [button.title]));
                 renderNotice();
             }
         };
@@ -667,17 +673,17 @@
             const conflictMessage = pendingConflict?.message;
             dismissNotice();
             const dialog = document.createElement('dialog'); dialog.id = 'local-recovery-dialog';
-            dialog.setAttribute('aria-label', '回復用下書きと設定');
+            uiAttr(dialog, 'aria-label', uiMsg("回復用下書きと設定"));
             dialog.style.cssText = 'box-sizing:border-box;width:min(640px,calc(100vw - 32px));max-height:85vh;overflow:auto;padding:24px;border:1px solid #94a3b8;border-radius:8px;background:white;color:#0f172a;line-height:1.7';
-            const title = document.createElement('h2'); title.textContent = '回復用下書きと設定'; dialog.appendChild(title);
+            const title = document.createElement('h2'); uiBind(title, uiMsg("回復用下書きと設定")); dialog.appendChild(title);
             if (conflictMessage) {
-                const warning = document.createElement('p'); warning.textContent = conflictMessage; warning.style.color = '#9a3412'; dialog.appendChild(warning);
+                const warning = document.createElement('p'); uiBind(warning, uiMsg("{0}", () => [conflictMessage])); warning.style.color = '#9a3412'; dialog.appendChild(warning);
             }
             const fieldset = document.createElement('fieldset');
             fieldset.style.cssText = 'padding:12px 16px;border:1px solid #cbd5e1;border-radius:6px';
-            const legend = document.createElement('legend'); legend.textContent = '回復用下書きの自動作成'; fieldset.appendChild(legend);
+            const legend = document.createElement('legend'); uiBind(legend, uiMsg("回復用下書きの自動作成")); fieldset.appendChild(legend);
             const radios = [];
-            for (const [value, caption] of [[true, '自動作成する'], [false, '自動作成しない']]) {
+            for (const [value, caption] of [[true, uiT("自動作成する")], [false, uiT("自動作成しない")]]) {
                 const label = document.createElement('label'), radio = document.createElement('input');
                 label.style.cssText = 'display:inline-flex;align-items:center;gap:6px;margin-right:20px;cursor:pointer';
                 radio.type = 'radio'; radio.name = 'recovery-enabled'; radio.value = String(value); radio.disabled = true;
@@ -685,12 +691,12 @@
                 radio.onchange = async () => {
                     if (!radio.checked || changing) return;
                     changing = true; radios.forEach(input => { input.disabled = true; });
-                    status.textContent = '設定を保存しています…';
+                    uiBind(status, uiMsg("設定を保存しています…"));
                     try {
                         await storage.setRecoveryEnabled(value);
-                        status.textContent = '設定を保存しました。';
+                        uiBind(status, uiMsg("設定を保存しました。"));
                     } catch (error) {
-                        status.textContent = '設定を保存できませんでした: ' + String(error.message || error);
+                        uiBind(status, uiMsg("設定を保存できませんでした: {0}", () => [String(error.message || error)]));
                     } finally {
                         changing = false;
                         // Display only the persisted preference, including after a failed write.
@@ -699,20 +705,20 @@
                 };
             }
             const scope = document.createElement('p');
-            scope.textContent = 'このブラウザー内のすべてのローカルプロジェクトに適用します。初期設定は「自動作成する」です。';
+            uiBind(scope, uiMsg("このブラウザー内のすべてのローカルプロジェクトに適用します。初期設定は「自動作成する」です。"));
             scope.style.cssText = 'font-size:13px;color:#475569;margin:8px 0'; fieldset.appendChild(scope);
             const effect = document.createElement('p');
-            effect.textContent = '「自動作成しない」場合、保存が競合した編集は回復用下書きに退避されません。通常の保存・共有更新は引き続き行えます。';
+            uiBind(effect, uiMsg("「自動作成しない」場合、保存が競合した編集は回復用下書きに退避されません。通常の保存・共有更新は引き続き行えます。"));
             effect.style.cssText = 'font-size:13px;margin:8px 0'; fieldset.appendChild(effect);
             const existing = document.createElement('p');
-            existing.textContent = '作成済みの下書きは、この設定を変更しても削除されません。';
+            uiBind(existing, uiMsg("作成済みの下書きは、この設定を変更しても削除されません。"));
             existing.style.cssText = 'font-size:13px;margin:8px 0'; fieldset.appendChild(existing);
             const status = document.createElement('p'); status.setAttribute('role','status'); status.style.cssText = 'font-size:13px;margin:4px 0';
             fieldset.appendChild(status); dialog.appendChild(fieldset);
             settingsUi = {status, update: enabled => { for (const radio of radios) { radio.checked = radio.value === String(enabled); radio.disabled = false; } }};
-            const text = document.createElement('p'); text.textContent = '下書きは、共有先のない別プロジェクトとして復元できます。'; dialog.appendChild(text);
+            const text = document.createElement('p'); uiBind(text, uiMsg("下書きは、共有先のない別プロジェクトとして復元できます。")); dialog.appendChild(text);
             const rowsBox = document.createElement('div'); dialog.appendChild(rowsBox);
-            const close = document.createElement('button'); close.type = 'button'; close.textContent = '閉じる'; close.onclick = () => dialog.close();
+            const close = document.createElement('button'); close.type = 'button'; uiBind(close, uiMsg("閉じる")); close.onclick = () => dialog.close();
             dialog.appendChild(close); dialog.addEventListener('close', () => { settingsUi = null; dialog.remove(); button.focus(); });
             document.body.appendChild(dialog); dialog.showModal(); close.focus();
             let dialogRows;
@@ -722,33 +728,33 @@
                 if (!dialog.isConnected) return;
                 settingsUi.update(enabled);
             } catch (error) {
-                status.textContent = '下書き設定を読み込めません: ' + String(error.message || error);
+                uiBind(status, uiMsg("下書き設定を読み込めません: {0}", () => [String(error.message || error)]));
                 return;
             }
-            if (!dialogRows.length) rowsBox.textContent = '回復用下書きはありません。';
+            if (!dialogRows.length) uiBind(rowsBox, uiMsg("回復用下書きはありません。"));
             for (const row of dialogRows) {
                 acknowledgedRows.add(rowKey(row));
                 const item = document.createElement('p'), label = document.createElement('span'), restore = document.createElement('button');
                 item.style.cssText = 'padding:12px 0;border-top:1px solid #e2e8f0';
                 label.style.cssText = 'display:block;overflow-wrap:anywhere';
-                label.textContent = row.displayName + ' — ' + row.updatedAt + (row.kind === 'editing-session' ? ' (終了したタブの保持データ) ' : ' ');
-                restore.type = 'button'; restore.textContent = '別コピーとして復元';
+                uiBind(label, uiMsg("{0} — {1}{2}", () => [row.displayName, row.updatedAt, row.kind === 'editing-session' ? uiT(" (終了したタブの保持データ) ") : ' ']));
+                restore.type = 'button'; uiBind(restore, uiMsg("別コピーとして復元"));
                 restore.onclick = async () => {
                     restore.disabled = true;
                     try { const project = await storage.restoreRecovery(row.id); if (project) {
                         restore.remove(); discard.remove();
-                        label.textContent = project.displayName + ' — 復元しました。 ';
+                        uiBind(label, uiMsg("{0} — 復元しました。 ", () => [project.displayName]));
                         if (options.projectUrl) {
-                            const link=document.createElement('a');link.textContent='別タブで開く';link.href=options.projectUrl(project.id);link.target='_blank';link.rel='noopener';item.appendChild(link);
+                            const link=document.createElement('a');uiBind(link, uiMsg("別タブで開く"));link.href=options.projectUrl(project.id);link.target='_blank';link.rel='noopener';item.appendChild(link);
                         }
                         await refresh(); if (options.onRestored) await options.onRestored(project);
-                    } } catch (error) { restore.disabled = false; label.textContent = String(error.message || error); }
+                    } } catch (error) { restore.disabled = false; uiBind(label, uiMsg("{0}", () => [String(error.message || error)])); }
                 };
-                const discard = document.createElement('button'); discard.type='button'; discard.textContent='下書き・保持を破棄';
+                const discard = document.createElement('button'); discard.type='button'; uiBind(discard, uiMsg("下書き・保持を破棄"));
                 discard.onclick = async () => {
-                    if (!confirm('この下書き・保持データを破棄しますか? 他のプロジェクトや処理が参照しない原本だけが削除されます。')) return;
+                    if (!confirm(uiT("この下書き・保持データを破棄しますか? 他のプロジェクトや処理が参照しない原本だけが削除されます。"))) return;
                     try { await storage.discardRecovery(row.id); item.remove(); await refresh(); }
-                    catch (error) { label.textContent=String(error.message || error); }
+                    catch (error) { uiBind(label, uiMsg("{0}", () => [String(error.message || error)])); }
                 };
                 restore.style.marginRight = '8px';
                 item.append(label, restore, discard); rowsBox.appendChild(item);
@@ -760,8 +766,8 @@
         refresh();
         return {refresh, notify: error => {
             if (error) {
-                let message = String(error.message || '別のタブで更新されています。保存内容を確認してください。');
-                if (error.recovered === false) message += ' タブを閉じる前に、未保存の編集内容を確認してください。';
+                let message = String(error.message || uiT("別のタブで更新されています。保存内容を確認してください。"));
+                if (error.recovered === false) message += uiT(" タブを閉じる前に、未保存の編集内容を確認してください。");
                 const recoveryId = error.recovered === true ? error.recoveryId : null;
                 pendingConflict = {message, recoveryId,
                     recoveryKey: recoveryId && error.recoveryUpdatedAt ? rowKey({id:recoveryId,updatedAt:error.recoveryUpdatedAt}) : null};

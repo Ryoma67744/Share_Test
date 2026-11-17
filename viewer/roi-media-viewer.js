@@ -5,6 +5,17 @@
   root.RoiMediaViewer = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (root) {
   'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
 
   // The window owns display state only. All persistent changes go through the
   // adapter, which validates the project/ROI and commits the image atomically.
@@ -34,7 +45,7 @@
 
   function metadataPatch(fields) {
     const x = text(fields.umX).trim(), y = text(fields.umY).trim();
-    if ((x || y) && (!positive(x) || !positive(y))) throw new Error('µm/px は X・Y の両方に正の数を入力してください。');
+    if ((x || y) && (!positive(x) || !positive(y))) throw new Error(_uiT("µm/px は X・Y の両方に正の数を入力してください。"));
     return {
       title: text(fields.title).trim(), kind: text(fields.kind || 'Other'),
       magnification: text(fields.magnification).trim(), capturedAt: text(fields.capturedAt).trim(),
@@ -68,7 +79,7 @@
   }
   function setStatus(state, message, error) {
     if (!current(state)) return;
-    state.status.textContent = text(message);
+    _uiText(state.status, text(message));
     state.status.classList.toggle('is-error', !!error);
   }
   function disposeResult(result) {
@@ -90,7 +101,7 @@
     state.replace.disabled = !canEdit || state.busy || !item;
     state.remove.disabled = !canEdit || state.busy || !item;
     state.primary.disabled = !canEdit || state.busy || !item || !!item.isPrimary;
-    state.primary.textContent = item && item.isPrimary ? '★ 代表画像' : '代表にする';
+    (item && item.isPrimary ? _uiText(state.primary, "★ 代表画像") : _uiText(state.primary, "代表にする"));
     state.save.disabled = !canEdit || state.busy || !item || !state.dirty;
     state.sectionSelect.disabled = state.busy || state.sections.length < 2;
     state.form.hidden = !item;
@@ -103,7 +114,7 @@
 
   function allowDiscard(state) {
     if (!state.dirty) return true;
-    return typeof root.confirm === 'function' && root.confirm('写真情報に未保存の変更があります。変更を破棄しますか？');
+    return typeof root.confirm === 'function' && root.confirm(_uiT("写真情報に未保存の変更があります。変更を破棄しますか？"));
   }
 
   function populateFields(state, item) {
@@ -116,7 +127,7 @@
     state.fields.umY.value = text(item && item.umPerPixel && item.umPerPixel.y);
     state.dirty = false;
     state.filename.textContent = item ? [item.filename, positive(item.width) && positive(item.height) ? `${item.width} × ${item.height} px` : ''].filter(Boolean).join(' · ') : '';
-    state.detailsLabel.textContent = item ? `写真情報${item.magnification ? ' · ' + item.magnification : ''}` : '写真情報';
+    (item ? _uiText(state.detailsLabel, "写真情報{0}", {"0":(item.magnification ? ' · ' + item.magnification : '')}) : _uiText(state.detailsLabel, "写真情報"));
     state.association.textContent = text(item && (item.associationWarning || item.warning));
     state.association.hidden = !state.association.textContent;
     updateControls(state);
@@ -137,35 +148,42 @@
     state.photoId = text(photoId);
     const item = selected(state);
     try { if (state.adapter.selectPhoto) state.adapter.selectPhoto(state.project, state.roi, state.sectionId, item); }
-    catch (error) { setStatus(state, error && error.message || '写真の対応先を確認できません。', true); return; }
+    catch (error) { setStatus(state, error && error.message || _uiT("写真の対応先を確認できません。"), true); return; }
     ++state.msiGeneration;
     state.msiRenderer.setFrame(null);
     state.msiMessage.hidden = false;
-    state.msiMessage.textContent = '対応するMSIを確認しています…';
+    _uiText(state.msiMessage, "対応するMSIを確認しています…");
     // Photo selection establishes the reference source before MSI compatibility
     // is evaluated. Thumbnail decoding must never change this selection.
     refreshCompounds(state, state.compoundsInitialized);
     populateFields(state, item);
     state.thumbnailButtons.forEach(node => node.setAttribute('aria-pressed', node.dataset.photoId === state.photoId ? 'true' : 'false'));
     state.photoMessage.hidden = false;
-    state.photoMessage.textContent = item ? '画像を読み込み中…' : 'このROIの写真はまだ登録されていません。';
-    state.photoResolution.textContent = '';
+    (item ? _uiText(state.photoMessage, "画像を読み込み中…") : _uiText(state.photoMessage, "このROIの写真はまだ登録されていません。"));
+    globalThis.AppI18n?.clearBinding(state.photoResolution); state.photoResolution.textContent = '';
     if (!item) return;
     try {
       const result = await state.adapter.loadPhoto(item);
       if (!current(state) || generation !== state.photoGeneration) { disposeResult(result); return; }
       const image = result && result.image;
       const width = image && (image.naturalWidth || image.width), height = image && (image.naturalHeight || image.height);
-      if (!positive(width) || !positive(height)) { disposeResult(result); throw new Error('画像を表示できませんでした。'); }
+      if (!positive(width) || !positive(height)) { disposeResult(result); throw new Error(_uiT("画像を表示できませんでした。")); }
       state.photoResult = result; state.photoImage = image;
       state.photoMessage.hidden = true;
-      state.photoResolution.textContent = result.status || `原解像度 ${width} × ${height} px`;
+      // Bind only explicit adapter-owned labels. The closure keeps primitive
+      // sources, not the decoded image, and never rewrites user metadata.
+      if (Array.isArray(result.statusI18n) && globalThis.AppI18n) {
+        const sources = result.statusI18n.slice();
+        _uiText(state.photoResolution, '{value}', () => ({value:sources.map(source => _uiT(source)).join('')}));
+      } else if (result.status) {
+        globalThis.AppI18n?.clearBinding(state.photoResolution); state.photoResolution.textContent = result.status;
+      } else _uiText(state.photoResolution, "原解像度 {0} × {1} px", {"0":width,"1":height});
       state.photoPane.fit();
       const thumb = state.thumbnailCanvases.get(text(item.id));
       if (thumb) paintThumbnail(thumb, image);
     } catch (error) {
       if (!current(state) || generation !== state.photoGeneration) return;
-      state.photoMessage.textContent = error && error.message || '写真の読み込みに失敗しました。';
+      globalThis.AppI18n?.clearBinding(state.photoMessage); state.photoMessage.textContent = error && error.message || _uiT("写真の読み込みに失敗しました。");
       setStatus(state, state.photoMessage.textContent, true);
     }
   }
@@ -193,7 +211,7 @@
         result = await (state.adapter.loadThumbnail ? state.adapter.loadThumbnail(item) : state.adapter.loadPhoto(item));
         if (!current(state) || generation !== state.thumbnailGeneration) return;
         if (result && result.image) paintThumbnail(canvas, result.image);
-      } catch (_) { canvas.setAttribute('aria-label', 'プレビューを読み込めません'); }
+      } catch (_) { _uiAttr(canvas, "aria-label", "プレビューを読み込めません"); }
       finally { disposeResult(result); }
     }
   }
@@ -202,7 +220,7 @@
     const generation = ++state.thumbnailGeneration;
     state.thumbnails.replaceChildren(); state.thumbnailButtons = []; state.thumbnailCanvases = new Map();
     state.items.forEach(item => {
-      const title = item.title || item.filename || '写真';
+      const title = item.title || item.filename || _uiT("写真");
       const node = button('', title); node.className = 'roi-media-thumbnail';
       node.dataset.photoId = text(item.id); node.setAttribute('aria-pressed', 'false');
       const canvas = el('canvas'); canvas.width = 144; canvas.height = 88; canvas.setAttribute('aria-hidden', 'true');
@@ -233,32 +251,32 @@
       }
     } catch (error) {
       if (current(state) && generation === state.listGeneration && sectionId === state.sectionId)
-        setStatus(state, error && error.message || '写真一覧の読み込みに失敗しました。', true);
+        setStatus(state, error && error.message || _uiT("写真一覧の読み込みに失敗しました。"), true);
     }
   }
 
   async function loadMsi(state) {
     const generation = ++state.msiGeneration, sectionId = state.sectionId, key = state.compoundSelect.value;
-    state.msiNotice.textContent = '';
+    globalThis.AppI18n?.clearBinding(state.msiNotice); state.msiNotice.textContent = '';
     state.msiRenderer.setFrame(null);
     if (!key) {
       state.msiMessage.hidden = false;
-      state.msiMessage.textContent = state.compoundNotice || '対応する化合物を選択してください。';
+      globalThis.AppI18n?.clearBinding(state.msiMessage); state.msiMessage.textContent = state.compoundNotice || _uiT("対応する化合物を選択してください。");
       return;
     }
-    state.msiMessage.hidden = false; state.msiMessage.textContent = 'MSIを読み込み中…';
+    state.msiMessage.hidden = false; _uiText(state.msiMessage, "MSIを読み込み中…");
     try {
       const frame = await state.adapter.loadMsi(state.project, state.roi, sectionId, key);
       if (!current(state) || generation !== state.msiGeneration || sectionId !== state.sectionId) { disposeResult(frame); return; }
       disposeResult(state.msiFrame); state.msiFrame = frame;
-      if (!frame || !frame.canvas) throw new Error(frame && (frame.notice || frame.message) || '対応するMSI画像を表示できません。');
+      if (!frame || !frame.canvas) throw new Error(frame && (frame.notice || frame.message) || _uiT("対応するMSI画像を表示できません。"));
       const rendered = state.msiRenderer.setFrame(frame);
-      if (!rendered) throw new Error(state.msiNotice.textContent || 'ROIとMSIの表示座標を確認できません。');
+      if (!rendered) throw new Error(state.msiNotice.textContent || _uiT("ROIとMSIの表示座標を確認できません。"));
       state.msiMessage.hidden = true;
-      state.msiNotice.textContent = text(frame.notice || frame.warning || frame.status || '全体・ROI周辺で配色と強度範囲は共通です。');
+      globalThis.AppI18n?.clearBinding(state.msiNotice); state.msiNotice.textContent = text(frame.notice || frame.warning || frame.status || _uiT("全体・ROI周辺で配色と強度範囲は共通です。"));
     } catch (error) {
       if (!current(state) || generation !== state.msiGeneration) return;
-      state.msiMessage.hidden = false; state.msiMessage.textContent = error && error.message || 'MSIの読み込みに失敗しました。';
+      state.msiMessage.hidden = false; globalThis.AppI18n?.clearBinding(state.msiMessage); state.msiMessage.textContent = error && error.message || _uiT("MSIの読み込みに失敗しました。");
       setStatus(state, state.msiMessage.textContent, true);
     }
   }
@@ -273,7 +291,7 @@
       state.compoundNotice = text(result && result.notice);
       const preferred = oldKey != null ? oldKey : state.adapter.preferredCompound ? await state.adapter.preferredCompound(state.project, state.roi, sectionId) : null;
       if (!current(state) || generation !== state.compoundGeneration || sectionId !== state.sectionId) return;
-      state.compoundSelect.replaceChildren(option('', '化合物を選択'));
+      state.compoundSelect.replaceChildren(_uiText(option('', ''), "化合物を選択"));
       items.forEach(item => {
         const node = option(item.key, item.label || item.key);
         node.disabled = !!item.disabled; if (item.reason) node.title = text(item.reason);
@@ -282,11 +300,11 @@
       state.compoundSelect.disabled = !items.some(item => !item.disabled);
       state.compoundSelect.value = items.some(item => !item.disabled && text(item.key) === text(preferred)) ? text(preferred) : '';
       state.compoundsInitialized = true;
-      if (!items.length && !state.compoundNotice) state.compoundNotice = 'このROIの測定座標に対応するMSIがありません。写真は閲覧できます。';
+      if (!items.length && !state.compoundNotice) state.compoundNotice = _uiT("このROIの測定座標に対応するMSIがありません。写真は閲覧できます。");
       await loadMsi(state);
     } catch (error) {
       if (current(state) && generation === state.compoundGeneration && sectionId === state.sectionId)
-        setStatus(state, error && error.message || '化合物一覧の読み込みに失敗しました。', true);
+        setStatus(state, error && error.message || _uiT("化合物一覧の読み込みに失敗しました。"), true);
     }
   }
 
@@ -298,7 +316,7 @@
     state.photoId = ''; state.items = []; state.dirty = false;
     state.compoundsInitialized = false; state.compoundSelect.value = '';
     if (state.adapter.selectPhoto) state.adapter.selectPhoto(state.project, state.roi, state.sectionId, null);
-    state.msiRenderer.setFrame(null); state.msiMessage.hidden = false; state.msiMessage.textContent = '対応するMSIを確認しています…';
+    state.msiRenderer.setFrame(null); state.msiMessage.hidden = false; _uiText(state.msiMessage, "対応するMSIを確認しています…");
     releasePhoto(state); renderThumbnails(state); populateFields(state, null);
     await refreshPhotos(state, '', false);
   }
@@ -306,16 +324,16 @@
   async function mutate(state, operation, success, preferredId) {
     if (!current(state) || state.busy || !editable(state)) return;
     const sectionId = state.sectionId;
-    state.busy = true; updateControls(state); setStatus(state, '保存しています…');
+    state.busy = true; updateControls(state); setStatus(state, "保存しています…");
     try {
       const result = await operation();
       if (!current(state) || sectionId !== state.sectionId) return;
       state.dirty = false;
       const item = Array.isArray(result) ? result[0] : result;
       await refreshPhotos(state, preferredId || item && item.id || state.photoId, false);
-      setStatus(state, success || '保存しました。');
+      setStatus(state, success || "保存しました。");
     } catch (error) {
-      if (current(state)) setStatus(state, error && error.message || '保存に失敗しました。登録済み画像は保持されています。', true);
+      if (current(state)) setStatus(state, error && error.message || _uiT("保存に失敗しました。登録済み画像は保持されています。"), true);
     } finally {
       state.busy = false; if (current(state)) updateControls(state);
     }
@@ -432,12 +450,12 @@
   }
 
   function createForm(state) {
-    const details = el('details', 'roi-media-details'), summary = el('summary', '', '写真情報');
+    const details = el('details', 'roi-media-details'), summary = _uiText(el('summary', '', ''), "写真情報");
     state.details = details;
     state.detailsLabel = summary; details.appendChild(summary);
     const form = el('form', 'roi-media-form'); state.form = form; state.fields = {};
     const field = (key, label, type, span) => {
-      const labelNode = el('label', span ? 'is-wide' : '', label);
+      const labelNode = _uiText(el('label', span ? 'is-wide' : '', ''), label);
       const input = type === 'textarea' ? el('textarea') : el('input');
       if (type !== 'textarea') input.type = type || 'text';
       input.name = key; if (type === 'number') { input.min = '0'; input.step = 'any'; }
@@ -446,21 +464,21 @@
       if (type === 'textarea') input.maxLength = 4000;
       labelNode.appendChild(input); form.appendChild(labelNode); state.fields[key] = input;
     };
-    field('title', '写真名', 'text', true);
-    const kindLabel = el('label', '', '画像種別'), kind = el('select');
-    [['HE', 'HE'], ['IF', '蛍光 / IF'], ['Other', 'その他']].forEach(([value, label]) => kind.appendChild(option(value, label)));
+    field('title', "写真名", 'text', true);
+    const kindLabel = _uiText(el('label', '', ''), "画像種別"), kind = el('select');
+    [['HE', 'HE'], ['IF', '蛍光 / IF'], ['Other', 'その他']].forEach(([value, label]) => kind.appendChild(_uiText(option(value, ''), label)));
     kindLabel.appendChild(kind); form.appendChild(kindLabel); state.fields.kind = kind;
-    field('magnification', '撮影倍率', 'text'); state.fields.magnification.placeholder = '例: 40×';
-    field('capturedAt', '撮影日（任意）', 'date');
-    field('note', 'メモ', 'textarea', true);
-    field('umX', 'X µm/px（任意）', 'number'); field('umY', 'Y µm/px（任意）', 'number');
-    form.appendChild(el('p', 'roi-media-calibration-note is-wide', '倍率から実寸や位置合わせは推定しません。µm/px は校正値がある場合に入力してください。'));
+    field('magnification', "撮影倍率", 'text'); _uiAttr(state.fields.magnification, "placeholder", "例: 40×");
+    field('capturedAt', "撮影日（任意）", 'date');
+    field('note', "メモ", 'textarea', true);
+    field('umX', "X µm/px（任意）", 'number'); field('umY', "Y µm/px（任意）", 'number');
+    form.appendChild(_uiText(el('p', 'roi-media-calibration-note is-wide', ''), "倍率から実寸や位置合わせは推定しません。µm/px は校正値がある場合に入力してください。"));
     state.filename = el('p', 'roi-media-file-info is-wide'); form.appendChild(state.filename);
     const controls = el('div', 'roi-media-form-actions is-wide');
-    state.save = button('情報を保存'); state.save.type = 'submit'; controls.appendChild(state.save);
-    state.primary = button('代表にする'); controls.appendChild(state.primary);
-    state.replace = button('画像を差し替え'); controls.appendChild(state.replace);
-    state.remove = button('写真を削除'); state.remove.classList.add('is-danger'); controls.appendChild(state.remove);
+    state.save = _uiText(button(''), "情報を保存"); state.save.type = 'submit'; controls.appendChild(state.save);
+    state.primary = _uiText(button(''), "代表にする"); controls.appendChild(state.primary);
+    state.replace = _uiText(button(''), "画像を差し替え"); controls.appendChild(state.replace);
+    state.remove = _uiText(button(''), "写真を削除"); state.remove.classList.add('is-danger'); controls.appendChild(state.remove);
     form.appendChild(controls); details.appendChild(form);
     listen(state, form, 'input', () => { state.dirty = true; updateControls(state); });
     listen(state, form, 'change', () => { state.dirty = true; updateControls(state); });
@@ -470,19 +488,19 @@
       try { patch = metadataPatch(Object.fromEntries(Object.entries(state.fields).map(([key, input]) => [key, input.value]))); }
       catch (error) { setStatus(state, error.message, true); return; }
       const sectionId = state.sectionId;
-      mutate(state, () => state.adapter.update(state.project, state.roi, sectionId, item, patch), '写真情報を保存しました。', item.id);
+      mutate(state, () => state.adapter.update(state.project, state.roi, sectionId, item, patch), "写真情報を保存しました。", item.id);
     });
     listen(state, state.primary, 'click', () => {
       const item = selected(state); if (!item || !allowDiscard(state)) return;
       const sectionId = state.sectionId;
-      mutate(state, () => state.adapter.makePrimary(state.project, state.roi, sectionId, item), '代表画像を変更しました。', item.id);
+      mutate(state, () => state.adapter.makePrimary(state.project, state.roi, sectionId, item), "代表画像を変更しました。", item.id);
     });
     listen(state, state.replace, 'click', () => { if (allowDiscard(state)) state.replaceInput.click(); });
     listen(state, state.remove, 'click', () => {
       const item = selected(state); if (!item) return;
-      if (typeof root.confirm !== 'function' || !root.confirm(`「${item.title || item.filename || 'この写真'}」の登録を削除しますか？ ROIの形状は保持されます。`)) return;
+      if (typeof root.confirm !== 'function' || !root.confirm(_uiT("「{0}」の登録を削除しますか？ ROIの形状は保持されます。", {"0":(item.title || item.filename || _uiT("この写真"))}))) return;
       const sectionId = state.sectionId;
-      mutate(state, () => state.adapter.remove(state.project, state.roi, sectionId, item), '写真の登録を削除しました。');
+      mutate(state, () => state.adapter.remove(state.project, state.roi, sectionId, item), "写真の登録を削除しました。");
     });
     return details;
   }
@@ -493,40 +511,40 @@
     const id = 'roi-media-title-' + ++nextWindowId;
     win.setAttribute('aria-labelledby', id);
     const header = el('header', 'roi-media-header'), title = el('strong', 'roi-media-title'); title.id = id; state.title = title;
-    const sectionLabel = el('label', 'roi-media-section-label', '切片 '); state.sectionSelect = el('select'); state.sectionSelect.setAttribute('aria-label', '対象切片'); sectionLabel.appendChild(state.sectionSelect);
-    const closeButton = button('×', '比較ウィンドウを閉じる'); closeButton.classList.add('roi-media-close');
+    const sectionLabel = _uiText(el('label', 'roi-media-section-label', ''), "切片 "); state.sectionSelect = el('select'); _uiAttr(state.sectionSelect, "aria-label", "対象切片"); sectionLabel.appendChild(state.sectionSelect);
+    const closeButton = _uiAttr(_uiAttr(button('×', _uiT("比較ウィンドウを閉じる")), "title", "比較ウィンドウを閉じる"), "aria-label", "比較ウィンドウを閉じる"); closeButton.classList.add('roi-media-close');
     header.append(title, sectionLabel, closeButton); win.appendChild(header);
     const body = el('div', 'roi-media-body'), photo = el('section', 'roi-media-photo'), msi = el('section', 'roi-media-msi');
     body.append(photo, msi); win.appendChild(body);
 
-    const photoBar = el('div', 'roi-media-toolbar'); photoBar.appendChild(el('strong', '', '顕微鏡写真'));
-    state.add = button('＋ 画像を新規登録'); photoBar.appendChild(state.add);
-    const photoMinus = button('−', '写真を縮小'), photoPlus = button('＋', '写真を拡大'), photoFitButton = button('全体', '写真を全体表示'), photoActual = button('100%', '写真を原寸表示');
+    const photoBar = el('div', 'roi-media-toolbar'); photoBar.appendChild(_uiText(el('strong', '', ''), "顕微鏡写真"));
+    state.add = _uiText(button(''), "＋ 画像を新規登録"); photoBar.appendChild(state.add);
+    const photoMinus = _uiAttr(_uiAttr(button('−', _uiT("写真を縮小")), "title", "写真を縮小"), "aria-label", "写真を縮小"), photoPlus = _uiAttr(_uiAttr(button('＋', _uiT("写真を拡大")), "title", "写真を拡大"), "aria-label", "写真を拡大"), photoFitButton = _uiAttr(_uiAttr(_uiText(button('', _uiT("写真を全体表示")), "全体"), "title", "写真を全体表示"), "aria-label", "写真を全体表示"), photoActual = _uiAttr(_uiAttr(button('100%', _uiT("写真を原寸表示")), "title", "写真を原寸表示"), "aria-label", "写真を原寸表示");
     photoBar.append(photoMinus, photoPlus, photoFitButton, photoActual); state.photoZoom = el('span', 'roi-media-zoom'); photoBar.appendChild(state.photoZoom); photo.appendChild(photoBar);
-    const photoViewport = el('div', 'roi-media-image-viewport'); photoViewport.tabIndex = 0; photoViewport.setAttribute('aria-label', '顕微鏡写真。ドラッグで移動、ホイールで拡大縮小');
+    const photoViewport = el('div', 'roi-media-image-viewport'); photoViewport.tabIndex = 0; _uiAttr(photoViewport, "aria-label", "顕微鏡写真。ドラッグで移動、ホイールで拡大縮小");
     const photoCanvas = el('canvas'); photoCanvas.setAttribute('aria-hidden', 'true'); photoViewport.appendChild(photoCanvas);
-    state.photoMessage = el('p', 'roi-media-empty', '画像を読み込み中…'); photoViewport.appendChild(state.photoMessage); photo.appendChild(photoViewport);
+    state.photoMessage = _uiText(el('p', 'roi-media-empty', ''), "画像を読み込み中…"); photoViewport.appendChild(state.photoMessage); photo.appendChild(photoViewport);
     state.photoResolution = el('div', 'roi-media-resolution'); photo.appendChild(state.photoResolution);
     state.association = el('p', 'roi-media-warning'); state.association.hidden = true; photo.appendChild(state.association);
-    state.thumbnails = el('div', 'roi-media-thumbnails'); state.thumbnails.setAttribute('aria-label', '登録写真'); photo.appendChild(state.thumbnails);
-    state.readOnly = el('p', 'roi-media-read-only', '閲覧専用：写真の登録・編集は作成者側で行えます。'); photo.appendChild(state.readOnly);
+    state.thumbnails = el('div', 'roi-media-thumbnails'); _uiAttr(state.thumbnails, "aria-label", "登録写真"); photo.appendChild(state.thumbnails);
+    state.readOnly = _uiText(el('p', 'roi-media-read-only', ''), "閲覧専用：写真の登録・編集は作成者側で行えます。"); photo.appendChild(state.readOnly);
     photo.appendChild(createForm(state));
     state.photoPane = createPhotoPane(state, photoViewport, photoCanvas);
     listen(state, photoMinus, 'click', () => state.photoPane.zoomBy(0.8)); listen(state, photoPlus, 'click', () => state.photoPane.zoomBy(1.25));
     listen(state, photoFitButton, 'click', () => state.photoPane.fit()); listen(state, photoActual, 'click', () => state.photoPane.actual());
 
     const msiBar = el('div', 'roi-media-toolbar'); msiBar.appendChild(el('strong', '', 'MSI'));
-    state.compoundSelect = el('select'); state.compoundSelect.setAttribute('aria-label', 'MSIの化合物'); state.compoundSelect.appendChild(option('', '化合物を選択')); msiBar.appendChild(state.compoundSelect); msi.appendChild(msiBar);
+    state.compoundSelect = el('select'); _uiAttr(state.compoundSelect, "aria-label", "MSIの化合物"); state.compoundSelect.appendChild(_uiText(option('', ''), "化合物を選択")); msiBar.appendChild(state.compoundSelect); msi.appendChild(msiBar);
     const displayBar = el('div', 'roi-media-toolbar');
-    const whole = button('全体'), crop = button('ROI周辺'); whole.setAttribute('aria-pressed', 'false'); crop.setAttribute('aria-pressed', 'true'); displayBar.append(whole, crop);
-    const marginLabel = el('label', '', '余白 '), margin = el('select'); [2, 4, 8, 16].forEach(value => margin.appendChild(option(value, `${value} px`))); margin.value = '4'; margin.setAttribute('aria-label', 'ROI周辺の余白（MSI画像ピクセル）'); marginLabel.appendChild(margin); displayBar.appendChild(marginLabel);
-    const outlineLabel = el('label', '', ''), outline = el('input'); outline.type = 'checkbox'; outline.checked = true; outlineLabel.append(outline, root.document.createTextNode(' ROI輪郭')); displayBar.appendChild(outlineLabel);
-    const msiMinus = button('−', 'MSIを縮小'), msiPlus = button('＋', 'MSIを拡大'), msiFit = button('表示リセット'); displayBar.append(msiMinus, msiPlus, msiFit); msi.appendChild(displayBar);
-    const msiViewport = el('div', 'roi-media-msi-viewport'); state.msiMessage = el('p', 'roi-media-empty', '化合物を選択してください。');
+    const whole = _uiText(button(''), "全体"), crop = _uiText(button(''), "ROI周辺"); whole.setAttribute('aria-pressed', 'false'); crop.setAttribute('aria-pressed', 'true'); displayBar.append(whole, crop);
+    const marginLabel = _uiText(el('label', '', ''), "余白 "), margin = el('select'); [2, 4, 8, 16].forEach(value => margin.appendChild(option(value, `${value} px`))); margin.value = '4'; _uiAttr(margin, "aria-label", "ROI周辺の余白（MSI画像ピクセル）"); marginLabel.appendChild(margin); displayBar.appendChild(marginLabel);
+    const outlineLabel = el('label', '', ''), outline = el('input'); outline.type = 'checkbox'; outline.checked = true; outlineLabel.append(outline, _uiTextNode(root.document, " ROI輪郭")); displayBar.appendChild(outlineLabel);
+    const msiMinus = _uiAttr(_uiAttr(button('−', _uiT("MSIを縮小")), "title", "MSIを縮小"), "aria-label", "MSIを縮小"), msiPlus = _uiAttr(_uiAttr(button('＋', _uiT("MSIを拡大")), "title", "MSIを拡大"), "aria-label", "MSIを拡大"), msiFit = _uiText(button(''), "表示リセット"); displayBar.append(msiMinus, msiPlus, msiFit); msi.appendChild(displayBar);
+    const msiViewport = el('div', 'roi-media-msi-viewport'); state.msiMessage = _uiText(el('p', 'roi-media-empty', ''), "化合物を選択してください。");
     msi.appendChild(msiViewport);
-    if (!root.RoiMediaMsi || typeof root.RoiMediaMsi.createViewport !== 'function') throw new Error('MSI比較表示のモジュールを読み込めませんでした。ページを再読み込みしてください。');
+    if (!root.RoiMediaMsi || typeof root.RoiMediaMsi.createViewport !== 'function') throw new Error(_uiT("MSI比較表示のモジュールを読み込めませんでした。ページを再読み込みしてください。"));
     state.msiNotice = el('p', 'roi-media-msi-notice');
-    state.msiRenderer = root.RoiMediaMsi.createViewport(msiViewport, {onStatus: message => { if (current(state) && message) state.msiNotice.textContent = text(message); }});
+    state.msiRenderer = root.RoiMediaMsi.createViewport(msiViewport, {onStatus: message => { if (current(state) && message) globalThis.AppI18n?.clearBinding(state.msiNotice); state.msiNotice.textContent = text(message); }});
     msiViewport.appendChild(state.msiMessage);
     msi.appendChild(state.msiNotice);
     listen(state, whole, 'click', () => { whole.setAttribute('aria-pressed', 'true'); crop.setAttribute('aria-pressed', 'false'); margin.disabled = true; state.msiRenderer.setMode('whole'); });
@@ -547,17 +565,17 @@
     listen(state, state.compoundSelect, 'change', () => loadMsi(state));
 
     const footer = el('footer', 'roi-media-footer'); state.status = el('span', 'roi-media-status'); state.status.setAttribute('role', 'status'); state.status.setAttribute('aria-live', 'polite');
-    const handle = button('◢', 'ウィンドウのサイズ変更。矢印キーでも変更できます。'); handle.classList.add('roi-media-resize'); footer.append(state.status, handle); win.appendChild(footer);
+    const handle = _uiAttr(_uiAttr(button('◢', _uiT("ウィンドウのサイズ変更。矢印キーでも変更できます。")), "title", "ウィンドウのサイズ変更。矢印キーでも変更できます。"), "aria-label", "ウィンドウのサイズ変更。矢印キーでも変更できます。"); handle.classList.add('roi-media-resize'); footer.append(state.status, handle); win.appendChild(footer);
     const addInput = el('input'), replaceInput = el('input'); state.addInput = addInput; state.replaceInput = replaceInput;
     [addInput, replaceInput].forEach(input => { input.type = 'file'; input.accept = '.png,.jpg,.jpeg,.tif,.tiff,image/png,image/jpeg,image/tiff'; input.hidden = true; win.appendChild(input); }); addInput.multiple = true;
     listen(state, state.add, 'click', () => { if (allowDiscard(state)) addInput.click(); });
     listen(state, addInput, 'change', () => {
       const files = Array.from(addInput.files || []), sectionId = state.sectionId; addInput.value = '';
-      if (files.length) mutate(state, () => state.adapter.add(state.project, state.roi, sectionId, files), '画像を登録しました。');
+      if (files.length) mutate(state, () => state.adapter.add(state.project, state.roi, sectionId, files), "画像を登録しました。");
     });
     listen(state, replaceInput, 'change', () => {
       const file = replaceInput.files && replaceInput.files[0], item = selected(state), sectionId = state.sectionId; replaceInput.value = '';
-      if (file && item) mutate(state, () => state.adapter.replace(state.project, state.roi, sectionId, item, file), '画像を差し替えました。', item.id);
+      if (file && item) mutate(state, () => state.adapter.replace(state.project, state.roi, sectionId, item, file), "画像を差し替えました。", item.id);
     });
     listen(state, state.sectionSelect, 'change', () => changeSection(state, state.sectionSelect.value, false));
     listen(state, closeButton, 'click', () => { if (allowDiscard(state)) close(); });
@@ -591,7 +609,7 @@
       const sections = await state.adapter.sections(state.project, state.roi);
       if (!current(state) || generation !== state.contextGeneration) return;
       state.sections = Array.isArray(sections) ? sections : [];
-      state.title.textContent = `${state.roi.name || 'ROI'} · 顕微鏡写真 / MSI`;
+      _uiText(state.title, "{0} · 顕微鏡写真 / MSI", {"0":(state.roi.name || 'ROI')});
       state.sectionSelect.replaceChildren(...state.sections.map(section => option(section.id, section.name || section.id)));
       const keep = state.sections.some(section => text(section.id) === state.sectionId);
       const section = keep ? state.sectionId : state.sections[0] && text(state.sections[0].id) || '';
@@ -600,14 +618,14 @@
         state.sectionId = ''; ++state.photoGeneration; ++state.msiGeneration; ++state.thumbnailGeneration; ++state.compoundGeneration;
         state.items = []; state.photoId = ''; releasePhoto(state); renderThumbnails(state); populateFields(state, null);
         if (state.adapter.selectPhoto) state.adapter.selectPhoto(state.project, state.roi, '', null);
-        state.msiRenderer.setFrame(null); state.photoMessage.hidden = false; state.photoMessage.textContent = '対象切片にROIがありません。';
-        state.msiMessage.hidden = false; state.msiMessage.textContent = '対象切片にROIがありません。';
+        state.msiRenderer.setFrame(null); state.photoMessage.hidden = false; _uiText(state.photoMessage, "対象切片にROIがありません。");
+        state.msiMessage.hidden = false; _uiText(state.msiMessage, "対象切片にROIがありません。");
         updateControls(state); return;
       }
       if (!keep) await changeSection(state, section, true);
       else await refreshPhotos(state, null, true);
       updateControls(state);
-    } catch (error) { setStatus(state, error && error.message || '比較画面を更新できませんでした。', true); }
+    } catch (error) { setStatus(state, error && error.message || _uiT("比較画面を更新できませんでした。"), true); }
   }
 
   function close(options) {
@@ -622,7 +640,7 @@
   }
 
   function open(options) {
-    if (!options || !options.project || !options.roi || !options.adapter) throw new Error('ROI比較画面の設定が不足しています。');
+    if (!options || !options.project || !options.roi || !options.adapter) throw new Error(_uiT("ROI比較画面の設定が不足しています。"));
     if (active && active.project === options.project && active.roi === options.roi) { active.window.focus({preventScroll: true}); refresh(); return true; }
     if (active && !allowDiscard(active)) return false;
     close({restoreFocus: false});

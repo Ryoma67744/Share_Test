@@ -17,7 +17,7 @@ async function main(){
       assert.ok((await page.locator('.gh-main img').first().getAttribute('src')).startsWith(origin+prefix+'docs/help/'));
       assert.match(await page.locator('[data-help-example=brain-ratio]').innerText(),/35,267[\s\S]*23,512/);
       assert.match(await page.locator('[data-help-example=brain-ratio]').innerText(),/無効点を灰色/);
-      assert.equal(new URL(await page.locator('.gh-main img').first().getAttribute('src')).searchParams.get('v'),'2026-11-09.1','versioned Help loads matching figures');
+      assert.equal(new URL(await page.locator('.gh-main img').first().getAttribute('src')).searchParams.get('v'),'2026-11-16.1','versioned Help loads matching figures');
       await page.getByRole('tab',{name:'集計への影響',exact:true}).click();assert.match(await page.locator('[role=tabpanel]').innerText(),/ROI総信号比/);assert.match(await page.locator('[role=tabpanel]').innerText(),/10 \/ 3/);
       await page.getByRole('tab',{name:'保存と共有',exact:true}).click();assert.match(await page.locator('[role=tabpanel]').innerText(),/個人用/);
       await page.getByRole('button',{name:'Switch to English',exact:true}).click();assert.match(await page.locator('.gh-main h1').innerText(),/ratio/);
@@ -43,7 +43,9 @@ async function main(){
       assert.equal(new URL(page.url()).hash,'#keep-project-hash');
       await page.getByRole('searchbox').fill('');
       await page.getByRole('link',{name:'Read the detailed guide',exact:true}).click();await page.locator('.gh-detailed').waitFor();assert.match(await page.locator('.gh-detailed').innerText(),/Median/);assert.deepEqual(await page.locator('.gh-detailed').evaluate(body=>{const ids=new Set([...body.querySelectorAll('[id]')].map(e=>e.id));return [...body.querySelectorAll('a[href^="#"]')].map(a=>decodeURIComponent(a.getAttribute('href').slice(1))).filter(id=>!ids.has(id));}),[],'detailed guide anchors resolve');await page.locator('.gh-detailed a[href^="#"]').first().click();assert.equal(new URL(page.url()).hash,'#keep-project-hash');await page.getByRole('button',{name:'Back to guide',exact:true}).click();
-      for(const id of await page.locator('[data-help-chapter]').evaluateAll(items=>items.map(i=>i.dataset.helpChapter))){await page.locator('[data-help-chapter='+id+']').click();await page.locator('.gh-main img').evaluateAll(images=>Promise.all(images.map(image=>image.decode())));}
+      for(const id of await page.locator('[data-help-chapter]').evaluateAll(items=>items.map(i=>i.dataset.helpChapter))){await page.locator('[data-help-chapter='+id+']').click();await page.locator('.gh-main img').evaluateAll(images=>Promise.all(images.map(image=>image.decode())));
+        for(const src of await page.locator('.gh-main img').evaluateAll(images=>images.map(image=>image.src)))if(!src.includes('/brain-'))assert.match(src,/-en\.png(?:\?|$)/,'English Help uses an English UI capture');
+      }
       const safe=await page.evaluate(()=>['docs/help/../private.png','https://other.invalid/a.png','docs/help/images/a%2fb.png','docs/help//manifest.json'].map(s=>{try{GuidedHelp.asset(s);return false;}catch{return true;}}));assert.ok(safe.every(Boolean));
       for(const role of ['viewer','admin']){
         await page.goto(origin+prefix+'help.html?chapter=ratio&role='+role+'&lang=ja&mode=online');await page.locator('.gh-main h1').waitFor();assert.equal(await page.locator('[data-help-chapter]').count(),10);

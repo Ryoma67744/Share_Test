@@ -5,6 +5,17 @@
   if (root) root.ProjectReportData = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function(MsiSmoothing) {
   'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
   const REPORT_REVISION = 'ppt-20261110-1';
 
   // Report colour clipping is a display operation. Quantitative table values
@@ -37,15 +48,15 @@
   function validateRaster(raster) {
     if (!raster || !Number.isSafeInteger(raster.W) || !Number.isSafeInteger(raster.H)
         || raster.W < 1 || raster.H < 1 || !Number.isSafeInteger(raster.W * raster.H)) {
-      throw new Error('MSIラスターの画像サイズを確認できません。');
+      throw new Error(_uiT("MSIラスターの画像サイズを確認できません。"));
     }
     const size = raster.W * raster.H;
-    if (size > MAX_SAMPLES) throw new Error('1分子の画像画素数がレポートの上限（2,000万）を超えています。');
+    if (size > MAX_SAMPLES) throw new Error(_uiT("1分子の画像画素数がレポートの上限（2,000万）を超えています。"));
     if (!numericArray(raster.values) || raster.values.length !== size) {
-      throw new Error('元の強度に対応するMSIラスターがありません。');
+      throw new Error(_uiT("元の強度に対応するMSIラスターがありません。"));
     }
     if (raster.measuredMask != null && (!numericArray(raster.measuredMask) || raster.measuredMask.length !== size)) {
-      throw new Error('MSIラスターの測定画素マスクが一致しません。');
+      throw new Error(_uiT("MSIラスターの測定画素マスクが一致しません。"));
     }
     return size;
   }
@@ -110,8 +121,8 @@
   }
 
   function percentile(values, p = PERCENTILE) {
-    if (!numericArray(values) || values.length > MAX_SAMPLES) throw new Error('強度配列のサイズが不正です。');
-    if (!Number.isFinite(p) || p < 0 || p > 100) throw new Error('パーセンタイルが不正です。');
+    if (!numericArray(values) || values.length > MAX_SAMPLES) throw new Error(_uiT("強度配列のサイズが不正です。"));
+    if (!Number.isFinite(p) || p < 0 || p > 100) throw new Error(_uiT("パーセンタイルが不正です。"));
     let count = 0;
     for (let i = 0; i < values.length; i++) if (Number.isFinite(values[i])) count++;
     const copy = new Float64Array(count);
@@ -124,10 +135,10 @@
     if (!Array.isArray(m) || m.length !== 3
         || !m.every(row => Array.isArray(row) && row.length === 3 && row.every(Number.isFinite))
         || Math.abs(m[2][0]) > 1e-10 || Math.abs(m[2][1]) > 1e-10 || Math.abs(m[2][2] - 1) > 1e-10) {
-      throw new Error('MSIの表示座標を確認できません。');
+      throw new Error(_uiT("MSIの表示座標を確認できません。"));
     }
     const determinant = m[0][0] * m[1][1] - m[0][1] * m[1][0];
-    if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-14) throw new Error('MSIの表示座標が特異です。');
+    if (!Number.isFinite(determinant) || Math.abs(determinant) < 1e-14) throw new Error(_uiT("MSIの表示座標が特異です。"));
     return m;
   }
 
@@ -147,7 +158,7 @@
     }
     const worldWidth = right - left, worldHeight = bottom - top;
     if (![left, top, worldWidth, worldHeight].every(Number.isFinite) || worldWidth <= 0 || worldHeight <= 0) {
-      throw new Error('MSIの表示範囲を確認できません。');
+      throw new Error(_uiT("MSIの表示範囲を確認できません。"));
     }
     const limit = Math.max(1, Math.min(MAX_IMAGE_DIMENSION, Math.floor(maxDimension) || MAX_IMAGE_DIMENSION));
     const longest = Math.max(worldWidth, worldHeight);
@@ -221,13 +232,13 @@
   async function render(raster, upper, options) {
     const o = options || {}, g = geometry(raster, o.transform, o.maxDimension, o.nearestUpscale !== false, o.frame);
     const makeCanvas = o.createCanvas || ((w, h) => {
-      if (typeof document === 'undefined') throw new Error('画像作製用Canvasが利用できません。');
+      if (typeof document === 'undefined') throw new Error(_uiT("画像作製用Canvasが利用できません。"));
       const c = document.createElement('canvas'); c.width = w; c.height = h; return c;
     });
     const canvas = makeCanvas(g.width, g.height);
     canvas.width = g.width; canvas.height = g.height;
     const ctx = canvas.getContext('2d');
-    if (!ctx) throw new Error('画像作製用Canvasが利用できません。');
+    if (!ctx) throw new Error(_uiT("画像作製用Canvasが利用できません。"));
     const pixels = ctx.createImageData(g.width, g.height), rgba = pixels.data;
     const m = g.matrix, det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
     const style=o.displayStyle,win=o.displayWindow;
@@ -291,7 +302,7 @@
 
   function captureOutputPlan(plan, sections) {
     if (plan == null) return null; // Existing non-UI callers keep their legacy range contract.
-    const invalid = () => new Error('PPT の比較グループと対象切片を確認してください。');
+    const invalid = () => new Error(_uiT("PPT の比較グループと対象切片を確認してください。"));
     if (plan.version !== 1 || !Array.isArray(plan.groups) || !plan.groups.length) throw invalid();
     const known = new Set(), assigned = new Map(), ids = new Set();
     for (const section of sections) {
@@ -348,7 +359,7 @@
         let maximum = -Infinity, low = Infinity, high = -Infinity;
         for (const state of valid) {
           const auto = state.entry.displayAuto;
-          if (!auto || !Number.isFinite(auto.max)) throw new Error('PPT の自動表示範囲を確認できません。');
+          if (!auto || !Number.isFinite(auto.max)) throw new Error(_uiT("PPT の自動表示範囲を確認できません。"));
           maximum = Math.max(maximum, auto.max);
           const rr = auto.rawRange;
           if (Array.isArray(rr) && rr.length === 2 && rr.every(Number.isFinite)) {
@@ -373,7 +384,7 @@
         }
       }
       if (!Number.isFinite(min) || !Number.isFinite(max) || !(max > min))
-        throw new Error('PPT の自動表示範囲を確認できません。');
+        throw new Error(_uiT("PPT の自動表示範囲を確認できません。"));
       scales.push([group.id, {min, max, upperBasis, percentileValue, sampleCount, policy, available: sampleCount > 0}]);
       await yieldTask(); assertCurrent();
     }
@@ -382,32 +393,34 @@
 
   async function prepare(input, options) {
     const o = options || {};
-    if (!input || !Array.isArray(input.molecules) || !Array.isArray(input.sections)) throw new Error('プロジェクトのレポート情報が不正です。');
+    const outputLocale = o.locale || input.locale || globalThis.AppI18n?.getLocale() || 'ja';
+    const reportText = (source,params) => globalThis.AppI18n?.tFor ? globalThis.AppI18n.tFor(outputLocale,source,params) : _uiT(source,params);
+    if (!input || !Array.isArray(input.molecules) || !Array.isArray(input.sections)) throw new Error(_uiT("プロジェクトのレポート情報が不正です。"));
     const capturedPlan = captureOutputPlan(input.outputPlan, input.sections);
     if(input.displayStyle && (!Array.isArray(input.displayStyle.lut)||input.displayStyle.lut.length!==256
         ||!input.displayStyle.lut.every(c=>Array.isArray(c)&&c.length===3&&c.every(v=>Number.isFinite(v)&&v>=0&&v<=255))))
-      throw new Error('表示スタイルの配色を確認できません。');
+      throw new Error(_uiT("表示スタイルの配色を確認できません。"));
     function assertCurrent() {
-      if (o.signal && o.signal.aborted) { const error = new Error('レポート作製を中止しました。'); error.name = 'AbortError'; throw error; }
+      if (o.signal && o.signal.aborted) { const error = new Error(_uiT("レポート作製を中止しました。")); error.name = 'AbortError'; throw error; }
       if (typeof input.assertCurrent === 'function') input.assertCurrent();
     }
     assertCurrent();
     const result = {
-      projectName: text(input.projectName), generatedAt: input.generatedAt || new Date().toISOString(),
+      locale: outputLocale, projectName: text(input.projectName), generatedAt: input.generatedAt || new Date().toISOString(),
       metadata: metadataCopy(input.metadata || {}), displayStyle:metadataCopy(input.displayStyle || null),
       ...(capturedPlan ? {outputPlan: capturedPlan.plan} : {}),
       sections: input.sections.map(s => ({...s})), molecules: [],
       intensityScale: {percentile: PERCENTILE, basis: 'finite-measured-display-raster',
         statisticsBasis: 'original-measurement-rows',
-        note: '画像は同一分子の全切片に共通の表示ラスター p99.8 で配色。p99.8が0以下または計算不可の場合、正の最大表示強度、それも無い場合は1を表示上限に使用。最大・平均は元測定行の統計値を使用。欠損は測定ゼロに置換しない。'}
+        note: reportText("画像は同一分子の全切片に共通の表示ラスター p99.8 で配色。p99.8が0以下または計算不可の場合、正の最大表示強度、それも無い場合は1を表示上限に使用。最大・平均は元測定行の統計値を使用。欠損は測定ゼロに置換しない。")}
     };
     if(input.displayStyle)result.intensityScale={basis:'display-style',statisticsBasis:'original-measurement-rows',
-      note:'全切片・全分子を開始時の表示スタイルで出力。Same自動上限は全出力切片で再計算。元測定行の最大・平均は変更しない。'};
+      note: reportText("全切片・全分子を開始時の表示スタイルで出力。Same自動上限は全出力切片で再計算。元測定行の最大・平均は変更しない。")};
     if(capturedPlan)result.intensityScale={basis:'group-automatic',statisticsBasis:'original-measurement-rows',
-      note:'比較グループ内は同一分子の共通自動Range、個別出力は各切片の自動Rangeを使用。手動Rangeは使用しない。元測定行の最大・平均は変更しない。'};
+      note: reportText("比較グループ内は同一分子の共通自動Range、個別出力は各切片の自動Rangeを使用。手動Rangeは使用しない。元測定行の最大・平均は変更しない。")};
     if(input.molecules.some(source=>source.kind==='ratio')) {
       result.intensityScale.statisticsBasis='per-layer';
-      result.intensityScale.note+=' 比の統計は同じ有効な原本ペアから計算し、実測Intensityの統計とは区別する。';
+      result.intensityScale.note+=reportText(" 比の統計は同じ有効な原本ペアから計算し、実測Intensityの統計とは区別する。");
     }
     for (let moleculeIndex = 0; moleculeIndex < input.molecules.length; moleculeIndex++) {
       assertCurrent();
@@ -415,7 +428,7 @@
       const displayStyle=capturedPlan ? metadataCopy(source.displayStyle || input.displayStyle) : source.displayStyle || input.displayStyle;
       const entries = typeof source.loadEntries === 'function' ? await source.loadEntries() : source.sections;
       assertCurrent();
-      if (!Array.isArray(entries)) throw new Error('分子の切片情報を読み込めません。');
+      if (!Array.isArray(entries)) throw new Error(_uiT("分子の切片情報を読み込めません。"));
       const states = [];
       const seenSections = new Set();
       let totalSize = 0, measuredCount = 0, max = -Infinity;
@@ -423,13 +436,13 @@
         assertCurrent();
         const outputGroupId = capturedPlan && capturedPlan.assigned.get(text(entry.sectionId));
         if (capturedPlan && (!outputGroupId || seenSections.has(text(entry.sectionId))))
-          throw new Error('分子の出力対象切片が比較グループと一致しません。');
+          throw new Error(_uiT("分子の出力対象切片が比較グループと一致しません。"));
         seenSections.add(text(entry.sectionId));
         let error = entry.missingReason || null, size = 0, count = 0, maximum = -Infinity;
         if (entry.raster && !error) {
           size = validateRaster(entry.raster);
           totalSize += size;
-          if (totalSize > MAX_SAMPLES) throw new Error('1分子の全切片の画像画素数がレポートの上限（2,000万）を超えています。');
+          if (totalSize > MAX_SAMPLES) throw new Error(_uiT("1分子の全切片の画像画素数がレポートの上限（2,000万）を超えています。"));
           // Invalid transforms are explicit missing images, not silently
           // replaced by a scientifically different orientation.
           try { affine(entry.transform); } catch (e) { error = e.message; }
@@ -438,8 +451,8 @@
             if (measured(entry.raster, i)) { count++; maximum = Math.max(maximum, entry.raster.values[i]); }
           }
         }
-        if (!entry.raster && !error) error = '元データのMSI強度を利用できません。';
-        if (!count && !error) error = '有効な測定画素がありません。';
+        if (!entry.raster && !error) error = _uiT("元データのMSI強度を利用できません。");
+        if (!count && !error) error = _uiT("有効な測定画素がありません。");
         measuredCount += count;
         max = Math.max(max, maximum);
         states.push({entry, size, count, error, maximum, outputGroupId});
@@ -489,7 +502,7 @@
         const displayWindow = scope ? {min:scope.min,max:scope.max} : entry.displayWindow;
         if(state.count && displayStyle && (!displayWindow || !Number.isFinite(displayWindow.min)
           || !Number.isFinite(displayWindow.max) || !(displayWindow.max>displayWindow.min)))
-          throw new Error('表示スタイルの強度範囲を確認できません。');
+          throw new Error(_uiT("表示スタイルの強度範囲を確認できません。"));
         const image = state.count ? await render(entry.raster, scope ? scope.max : upper, {
           createCanvas: o.createCanvas, transform: entry.transform, frame:entry.frame, pixelPitch: entry.pixelPitch, assertCurrent,
           displayStyle, displayWindow, keepGrid:entry.keepGrid,

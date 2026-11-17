@@ -24,7 +24,7 @@ const VIEWER_FILES = [
 const MRM_FILES = ['exp-core.mjs', 'exp-editor.mjs', 'exp-editor.css', 'exp-library-import.mjs']
   .map(file => 'mrm/' + file);
 const COMMON_FILES = ['.nojekyll', 'index.html', 'mrm.html', 'version.js', 'runtime-config.js',
-  'help.html', 'help.js', 'help.css', 'app-runtime.js', 'project-store-safety.js', 'project-navigation.js', 'offline/offline.js', 'offline/local-mrm.js', 'vendor/SOURCES.json',
+  'help.html', 'help.js', 'help.css', 'app-runtime.js', 'app-i18n.js', 'app-i18n-common.js', 'project-store-safety.js', 'project-navigation.js', 'offline/offline.js', 'offline/local-mrm.js', 'vendor/SOURCES.json',
   'docs/EXP_EDITOR.md', 'docs/LOCAL_STORAGE_UPGRADE.md', 'docs/ARCHIVE_COMPATIBILITY.md', 'docs/ARCHIVE_COMPATIBILITY.en.md', 'docs/VIEWER_LOADING.md', ...VIEWER_FILES, ...MRM_FILES];
 const OFFLINE_FILES = ['offline/server.cjs', 'offline/config.cjs', 'offline/make-manifest.cjs',
   'START_HERE.txt', 'DISTRIBUTION_NOTE.txt', 'OFFLINE_GUIDE.md'];
@@ -53,17 +53,18 @@ function readLock(root) {
   return lock;
 }
 function commonFiles(root, lock) {
+  const localeFiles = fs.readdirSync(root).filter(file => /^app-i18n-[a-z0-9-]+\.js$/.test(file));
   const guides = fs.readdirSync(root).filter(file => /^USER_GUIDE(?:\.[a-z]+)*\.(?:md|pdf)$/.test(file));
   const optional = ['OFFLINE_GUIDE.md', 'VALIDATION.txt', 'REGRESSION_RESULTS.txt'].filter(file => fs.existsSync(path.join(root, file)));
   const help = JSON.parse(readFile(root, 'docs/help/manifest.json'));
   const helpFiles = ['docs/help/manifest.json', 'docs/help/capture-manifest.json',
     ...(help.examples?.length ? ['docs/help/images/brain-colorbar.png'] : []),
-    ...help.screenshots.flatMap(shot => [shot.path, ...(shot.provenance ? [shot.provenance] : [])])];
+    ...help.screenshots.flatMap(shot => [shot.path, ...Object.values(shot.localizedPaths || {}), ...(shot.provenance ? [shot.provenance] : [])])];
   for (const file of helpFiles) {
     if (!/^docs\/help\/(?:[\w.-]+\.json|images\/[\w.-]+\.png)$/.test(file)) throw new Error('Invalid Help asset: ' + file);
     readFile(root, file);
   }
-  return [...new Set([...COMMON_FILES, ...helpFiles, ...guides, ...optional, ...lock.vendor.map(entry => entry.file)])].sort();
+  return [...new Set([...COMMON_FILES, ...localeFiles, ...helpFiles, ...guides, ...optional, ...lock.vendor.map(entry => entry.file)])].sort();
 }
 function writeFile(root, rel, value) {
   const absolute = path.join(root, rel);

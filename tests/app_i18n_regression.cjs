@@ -1,0 +1,41 @@
+'use strict';
+const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path'), vm = require('node:vm');
+const root = path.resolve(__dirname, '..');
+function load(initial, blocked) {
+  const values = new Map(Object.entries(initial || {}));
+  const context = vm.createContext({localStorage:{getItem:key => { if(blocked)throw Error('Storage blocked');return values.get(key) || null; },setItem:(key,value) => { if(blocked)throw Error('Storage blocked');values.set(key,value); }}});
+  vm.runInContext(fs.readFileSync(path.join(root,'app-i18n.js'),'utf8'), context);
+  vm.runInContext(fs.readFileSync(path.join(root,'app-i18n-common.js'),'utf8'), context);
+  return {api:context.AppI18n,values};
+}
+for(const legacy of ['desi:help:lang','desi:helpLang'])assert.equal(load({[legacy]:'en'}).api.getLocale(),'en');
+assert.equal(load({'desi:ui:lang':'ja','desi:help:lang':'en'}).api.getLocale(),'ja');
+assert.equal(load({'desi:ui:lang':'invalid'}).api.getLocale(),'ja');
+const {api,values}=load();
+assert.equal(api.getLocale(),'ja');assert.equal(api.t('保存'),'保存');
+api.register('fixture',{'化合物 {name} を {count} 件保存しました':'Saved {count} entries for {name}.','{0} を開く':'Open {0}'});
+let changes=0;const unsubscribe=api.onChange(()=>changes++);
+api.setLocale('en');assert.equal(api.t('保存'),'Save');assert.equal(api.t('化合物 {name} を {count} 件保存しました',{name:'保存',count:2}),'Saved 2 entries for 保存.');
+assert.equal(api.tFor('ja','保存'),'保存');assert.equal(api.tFor('en','保存'),'Save');assert.equal(api.getLocale(),'en');
+api.register('mrm-role',{'確認':'Qualifier','定量':'Quantifier'},{scoped:true});assert.equal(api.t('確認'),'Confirm');assert.equal(api.t('確認',null,'mrm-role'),'Qualifier');assert.equal(api.tFor('ja','確認',null,'mrm-role'),'確認');
+assert.equal(api.t('{0} を開く',()=>[api.t('保存')]),'Open Save');
+assert.equal(api.t('{0} を開く',['日本語 project']),'Open 日本語 project');
+assert.equal(api.t('化合物 {name} を {count} 件保存しました',{name:'<img src=x>'}),'Saved {count} entries for <img src=x>.');
+assert.equal(api.t('未登録のエラー'),'未登録のエラー');assert.ok(api.getMissingKeys().includes('未登録のエラー'));
+api.register('late',{'未登録のエラー':'Unknown error'});assert.equal(api.t('未登録のエラー'),'Unknown error');assert.ok(!api.getMissingKeys().includes('未登録のエラー'));
+api.clearMissingKeys();assert.equal(api.getMissingKeys().length,0);
+const html=api.html('{0} を開く',['<img src=x onerror="throw 1">']);
+assert.ok(html.includes('&lt;img'));assert.ok(!html.includes('<img'));assert.ok(html.includes('data-i18n-params='));
+assert.equal(api.span,api.html);assert.throws(()=>api.attr('onclick','保存'),/UI text/);
+assert.ok(api.attr('title','{0} を開く',['" onmouseover="boom']).includes('&quot;'));
+api.setLocale('en');assert.equal(changes,1);unsubscribe();api.setLocale('ja');assert.equal(changes,1);
+assert.equal(values.get('desi:ui:lang'),'ja');assert.equal(values.get('desi:help:lang'),'ja');assert.equal(values.get('desi:helpLang'),'ja');
+assert.equal(api.setLocale('invalid'),false);assert.equal(api.getLocale(),'ja');
+assert.equal(load({},true).api.setLocale('en'),true);
+api.register('page',{'保存':'Save project'});api.register('common',{'保存':'Save'});api.setLocale('en');assert.equal(api.t('保存'),'Save project');
+const {resolveStatic}=require('../offline/server.cjs'), {commonFiles,readLock}=require('../tools/build.cjs');
+const catalogFiles=fs.readdirSync(root).filter(name=>/^app-i18n(?:-[a-z0-9-]+)?\.js$/.test(name));
+const files=commonFiles(root,readLock(root));
+for(const file of catalogFiles){assert.ok(files.includes(file),'distribution includes '+file);assert.equal(resolveStatic('/'+file,root),path.join(root,file));}
+assert.equal(resolveStatic('/app-i18n-../secret.js',root),null);
+console.log('Application language regression: PASS (preferences, explicit source keys, interpolation, safe markup, missing keys, offline packaging)');

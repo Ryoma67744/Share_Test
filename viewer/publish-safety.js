@@ -1,5 +1,16 @@
 (function(root,factory){'use strict';const api=factory(root);if(typeof module==='object'&&module.exports)module.exports=api;if(root)root.PublishSafety=api;})(typeof globalThis!=='undefined'?globalThis:this,function(root){
  'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
  const copy=value=>JSON.parse(JSON.stringify(value));
  const revision=value=>Number.isSafeInteger(value)&&value>=0;
  const error=(code,message)=>Object.assign(new Error(message),{code});
@@ -8,17 +19,17 @@
  function baseline(project,slug){
    const info=project.shareInfo||{};
    if(info.slug!==slug)return {create:true,revision:0};
-   if(!revision(info.serverRevision))throw error('PUBLISH_BASELINE_UNKNOWN','このローカル版がどの公開版に対応するか未確認です。比較画面で共有版を確認してください。');
+   if(!revision(info.serverRevision))throw error('PUBLISH_BASELINE_UNKNOWN',_uiT("このローカル版がどの公開版に対応するか未確認です。比較画面で共有版を確認してください。"));
    return {create:false,revision:info.serverRevision};
  }
  function confirmedOverwriteBaseline(project,slug,confirmation){
    if(!confirmation||typeof confirmation!=='object'||Array.isArray(confirmation)
      ||confirmation.slug!==slug||project.shareInfo?.slug!==slug||!revision(confirmation.serverRevision))
-     throw error('PUBLISH_OVERWRITE_INVALID','比較画面で確認した同じ共有URLの公開版を指定してください。');
+     throw error('PUBLISH_OVERWRITE_INVALID',_uiT("比較画面で確認した同じ共有URLの公開版を指定してください。"));
    if(project.__importFailures>0)
-     throw error('PUBLISH_SOURCE_MISSING','共有版の取得が一部失敗したローカル版からは上書きできません。原本とROIを完全に取得してから比較してください。');
+     throw error('PUBLISH_SOURCE_MISSING',_uiT("共有版の取得が一部失敗したローカル版からは上書きできません。原本とROIを完全に取得してから比較してください。"));
    if(revision(project.shareInfo.serverRevision)&&project.shareInfo.serverRevision>confirmation.serverRevision)
-     throw error('PT409','比較後に公開版が更新されています。もう一度共有版を確認してください。');
+     throw error('PT409',_uiT("比較後に公開版が更新されています。もう一度共有版を確認してください。"));
    return {create:false,revision:confirmation.serverRevision};
  }
  async function parallel(items,limit,fn){
@@ -30,7 +41,7 @@
  function assertReceipt(receipt,job){
    if(!receipt||receipt.protocol!==2||receipt.ok!==true||receipt.slug!==job.slug||receipt.request_id!==job.jobId
      ||!revision(receipt.server_revision)||receipt.server_revision!==job.baseServerRevision+1)
-     throw error('PUBLISH_INVALID_RECEIPT','公開完了の確認に失敗しました。同じプロジェクトから再試行してください。');
+     throw error('PUBLISH_INVALID_RECEIPT',_uiT("公開完了の確認に失敗しました。同じプロジェクトから再試行してください。"));
  }
  function localReceipt(server,job,meta,assets,url){
    return {slug:job.slug,serverRevision:server.server_revision,publishedAt:server.committed_at,lastSyncedAt:server.committed_at,
@@ -47,7 +58,7 @@
    // Blob is immutable, so retaining it does not copy a large RAW into memory.
    const snapshot=copy(project),settings=copy(meta),job={projectId:project.id,sourceSlug:project.shareInfo?.slug||null,previousSlug:project.shareInfo?.slug||null,slug:meta.slug,jobId:(hooks.uuid||uuid)(),
      publishedEditEpoch:project.publishEditEpoch||0,sourceStorageRevision:project.storageRevision||0};
-   if(!/^[A-Za-z0-9_-]+$/.test(job.slug||''))throw error('PUBLISH_INVALID_SLUG','共有URLの名前を確認してください。');
+   if(!/^[A-Za-z0-9_-]+$/.test(job.slug||''))throw error('PUBLISH_INVALID_SLUG',_uiT("共有URLの名前を確認してください。"));
    // Approval changes this request's CAS base only. Do not promote an unknown
    // local baseline until a verified receipt is recorded, or persist a flag
    // that could silently authorize a later automatic publish.
@@ -55,13 +66,13 @@
      :confirmedOverwriteBaseline(snapshot,job.slug,options.confirmedOverwrite);
    const oldPending=snapshot.shareInfo&&snapshot.shareInfo.pendingPublish;
    if(overwrite&&oldPending&&oldPending.slug!==job.slug)
-     throw error('PUBLISH_PENDING_CONFLICT','別の共有URLへの公開処理が未確認です。その処理を確認してから上書きしてください。');
+     throw error('PUBLISH_PENDING_CONFLICT',_uiT("別の共有URLへの公開処理が未確認です。その処理を確認してから上書きしてください。"));
    hooks.freezeSources(snapshot);
    if(snapshot.meta && snapshot.meta.msiRatios!=null){
      const model=typeof module==='object'&&module.exports?require('./msi-ratio-model.js'):root.MsiRatioModel;
-     if(!model)throw error('PUBLISH_RATIO_MODEL_MISSING','比の保存形式を検証できません。アプリを再読み込みしてください。');
+     if(!model)throw error('PUBLISH_RATIO_MODEL_MISSING',_uiT("比の保存形式を検証できません。アプリを再読み込みしてください。"));
      const check=model.validateProjectReferences(snapshot);
-     if(!check.valid)throw error('PUBLISH_RATIO_SOURCE_MISSING','比の入力参照を確認してください。修復または除外してから公開してください: '+check.errors.join('; '));
+     if(!check.valid)throw error('PUBLISH_RATIO_SOURCE_MISSING',_uiT("比の入力参照を確認してください。修復または除外してから公開してください: {0}", {"0":(check.errors.join('; '))}));
      snapshot.meta.msiRatios=model.normalizeRegistry(snapshot.meta.msiRatios);
    }
    let resumedCreate=false;
@@ -69,7 +80,7 @@
      // A lost commit response is reconciled before a fresh request. Never attach
      // the latest server revision to an unknown local snapshot.
      const state=await hooks.state(job.slug,oldPending.jobId);
-     if(overwrite&&(!state||state.protocol!==2))throw error('PUBLISH_PROTOCOL_REQUIRED','共有公開版を確認できません。アプリとサーバの公開APIを確認してください。');
+     if(overwrite&&(!state||state.protocol!==2))throw error('PUBLISH_PROTOCOL_REQUIRED',_uiT("共有公開版を確認できません。アプリとサーバの公開APIを確認してください。"));
      let previousReceipt=state&&state.receipt;
      // A fresh overwrite must never publish an older pending document first.
      // Its original receipt may be reconciled; an uncommitted intent is then
@@ -83,23 +94,23 @@
        const receipt=localReceipt(previousReceipt,oldPending,oldPending.settings||settings,oldPending,hooks.url(job.slug));
        await hooks.receipt(receipt);await hooks.release(oldPending.jobId);job.sourceSlug=receipt.slug;job.previousSlug=receipt.slug;snapshot.shareInfo={...(snapshot.shareInfo||{}),slug:receipt.slug,serverRevision:receipt.serverRevision,blobPaths:receipt.blobPaths};
        if(overwrite&&receipt.serverRevision>overwrite.revision)
-         throw error('PT409','比較後に公開版が更新されています。もう一度共有版を確認してください。');
+         throw error('PT409',_uiT("比較後に公開版が更新されています。もう一度共有版を確認してください。"));
        if(oldPending.publishedEditEpoch===job.publishedEditEpoch&&JSON.stringify(oldPending.settings)===JSON.stringify(settings)
          &&(!overwrite||(state.exists===true&&receipt.serverRevision===overwrite.revision&&state.server_revision===overwrite.revision)))return receipt;
      }else resumedCreate=!!oldPending.create&&state&&state.exists===false;
      if(overwrite&&(state.exists!==true||state.server_revision!==overwrite.revision))
-       throw error('PT409','比較後に公開版が更新されています。もう一度共有版を確認してください。');
+       throw error('PT409',_uiT("比較後に公開版が更新されています。もう一度共有版を確認してください。"));
    }
    const base=overwrite||(resumedCreate?{create:true,revision:0}:baseline(snapshot,job.slug));job.create=base.create;job.baseServerRevision=base.revision;
    const session=await hooks.session(job);
    if(!session||session.protocol!==2||!session.token||session.object_prefix!==job.slug+'/publish-v2/'+job.jobId+'/')
-     throw error('PUBLISH_PROTOCOL_REQUIRED','サーバの公開APIをv2へ更新してから、アプリを再読み込みしてください。');
+     throw error('PUBLISH_PROTOCOL_REQUIRED',_uiT("サーバの公開APIをv2へ更新してから、アプリを再読み込みしてください。"));
    const media=hooks.media(snapshot),paths=new Map(),assets={uploadedPaths:[],blobPaths:{}},pins=[];
    const trusted=(snapshot.shareInfo&&snapshot.shareInfo.slug===job.slug&&snapshot.shareInfo.blobPaths)||{};
    const add=(entry,key,assign)=>{
-     if(!entry)throw error('PUBLISH_SOURCE_MISSING','登録原本の参照がありません: '+key);
+     if(!entry)throw error('PUBLISH_SOURCE_MISSING',_uiT("登録原本の参照がありません: {0}", {"0":(key)}));
      const identity=entry.blobId?'blob:'+entry.blobId:'path:'+entry.storagePath;
-     if(!entry.blobId&&!entry.storagePath)throw error('PUBLISH_SOURCE_MISSING','登録原本の参照がありません: '+key);
+     if(!entry.blobId&&!entry.storagePath)throw error('PUBLISH_SOURCE_MISSING',_uiT("登録原本の参照がありません: {0}", {"0":(key)}));
      let asset=paths.get(identity);
      if(!asset){
        const known=entry.blobId&&trusted[entry.blobId];
@@ -123,7 +134,7 @@
      return {id:section.id,ordinal:section.ordinal||0,displayName:section.displayName||'Section',meta,storagePaths:storage};
    });
    const photoItems=[];
-   for(const item of media.items){const out=hooks.publicPhoto(item,null);photoItems.push(out);add(item,'ROI写真 / '+item.filename,ref=>{out.storagePath=ref.path;out.mime=ref.mime||item.mime;});}
+   for(const item of media.items){const out=hooks.publicPhoto(item,null);photoItems.push(out);add(item,_uiT("ROI写真 / {0}", {"0":(item.filename)}),ref=>{out.storagePath=ref.path;out.mime=ref.mime||item.mime;});}
    const rois=ownedRois(snapshot,hooks.encodeRoi);
    await hooks.pin(job.jobId,[...new Set(pins)],job.projectId);
    try{
@@ -140,7 +151,7 @@
        if(!asset.reuse&&!asset.path.startsWith(session.object_prefix))asset.path=session.object_prefix+(hooks.uuid||uuid)();
        if(asset.blob&&(!(asset.blob.size>=0)||typeof asset.blob.arrayBuffer!=='function'))missing.push(asset.key);
      });
-     if(missing.length)throw error('PUBLISH_SOURCE_MISSING','原本を確認できないため公開を中止しました: '+missing.join(', '));
+     if(missing.length)throw error('PUBLISH_SOURCE_MISSING',_uiT("原本を確認できないため公開を中止しました: {0}", {"0":(missing.join(', '))}));
      // Pin a retry intent before the first upload, and persist its paths before
      // commit. A later retry can reconcile a successful-but-lost response.
      const intent={...job,replacesJobId:oldPending?.jobId||null,settings,uploadedPaths:[],blobPaths:{}};await hooks.intent(intent);

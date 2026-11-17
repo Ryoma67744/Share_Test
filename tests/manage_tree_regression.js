@@ -201,6 +201,7 @@ function testFailedHealIsRetriedOnTheNextFetch() {
 
   const context = vm.createContext({
     console, Map, Set, Math, JSON,
+    uiT: source => source, // This isolated storage test does not load the UI runtime.
     workspaceTree: null,
     _treeLoaded: false, _treeDirty: false, _treePersisting: false,
     _treeSavePromise: null, _treeHealed: 0,

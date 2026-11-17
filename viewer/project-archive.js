@@ -5,18 +5,29 @@
     root.ProjectArchive = api;
 })(typeof globalThis === 'object' ? globalThis : this, function(root) {
     'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
     const bases = new Set(['registered-source', 'legacy-v1-file', 'legacy-v2-file', 'legacy-derived-csv', 'unknown']);
     const clone = value => value == null ? value : JSON.parse(JSON.stringify(value));
     const activeJobs = new Set();
     function ratioModel() {
         const model=typeof module==='object'&&module.exports?require('./msi-ratio-model.js'):root.MsiRatioModel;
-        if(!model)throw new Error('比の保存形式を検証できません。アプリを再読み込みしてください。');
+        if(!model)throw new Error(_uiT("比の保存形式を検証できません。アプリを再読み込みしてください。"));
         return model;
     }
     const identifier = value => typeof value === 'string' && value.length > 0
         && !['__proto__', 'constructor', 'prototype'].includes(value);
     function cancelled(signal) {
-        if (signal && signal.aborted) { const e = new Error('ZIP 処理を中止しました / ZIP operation cancelled'); e.name = 'AbortError'; throw e; }
+        if (signal && signal.aborted) { const e = new Error(_uiT("ZIP 処理を中止しました / ZIP operation cancelled")); e.name = 'AbortError'; throw e; }
     }
     function provenance(value, fallback = 'unknown') {
         const p = value && value.version === 1 && bases.has(value.basis) ? value : {basis: fallback};
@@ -38,7 +49,7 @@
     function path(value) {
         if (typeof value !== 'string' || !value || value.includes('\\') || value.startsWith('/')
             || value.split('/').some(x => !x || x === '.' || x === '..') || /^[a-z]+:/i.test(value))
-            throw new Error('ZIP の参照パスが不正です / Invalid ZIP path: ' + value);
+            throw new Error(_uiT("ZIP の参照パスが不正です / Invalid ZIP path: {0}", {"0":(value)}));
         return value;
     }
     function object(value, label) {
@@ -76,11 +87,11 @@
         const sectionIds = new Set(), counts = {registered: 0, legacyFiles: 0, legacyCsv: 0, unknown: 0, variants: 0};
         function requireFile(value, label) {
             const p = path(value);
-            if (!zip.file(p)) throw new Error('ZIPに原本がありません / ZIP original missing: ' + p + ' (' + label + ')');
+            if (!zip.file(p)) throw new Error(_uiT("ZIPに原本がありません / ZIP original missing: {0} ({1})", {"0":(p),"1":(label)}));
             required.add(p); return p;
         }
         function addSection(id) {
-            if (!identifier(id) || sectionIds.has(id)) throw new Error('ZIP の切片 ID が重複または不正です / Invalid section ID: ' + id);
+            if (!identifier(id) || sectionIds.has(id)) throw new Error(_uiT("ZIP の切片 ID が重複または不正です / Invalid section ID: {0}", {"0":(id)}));
             sectionIds.add(id);
         }
         function record(entry, fallback, background) {
@@ -92,7 +103,7 @@
         }
         if (doc.format === 'desi_data_share_v1') {
             const atlasPaths = Object.keys(zip.files).filter(p => /^sections\/[^/]+\/atlas\.json$/.test(p));
-            if (!atlasPaths.length) throw new Error('ZIP に切片がありません / No sections in ZIP');
+            if (!atlasPaths.length) throw new Error(_uiT("ZIP に切片がありません / No sections in ZIP"));
             for (const ap of atlasPaths) {
                 cancelled(options.signal);
                 const atlas = object(JSON.parse(await zip.file(ap).async('string')), 'atlas');
@@ -173,7 +184,7 @@
                 for (const [key, entry] of [...Object.entries(raw), ...Object.entries(pq)]) {
                     if (originals[key]) continue;
                     const source = fileMeta[entry.sourceFileId];
-                    if (!source || !source.sourcePath) throw new Error('ZIPに RAW/Parquet 原本がありません / ZIP source missing: ' + key);
+                    if (!source || !source.sourcePath) throw new Error(_uiT("ZIPに RAW/Parquet 原本がありません / ZIP source missing: {0}", {"0":(key)}));
                     requireFile(source.sourcePath, key); record(entry, 'legacy-v2-file');
                 }
                 const csvKeys = new Set();
@@ -206,7 +217,7 @@
             if (media.version !== 1 || !Array.isArray(media.items)) throw new Error('Unsupported ZIP ROI media');
             for (const item of media.items) {
                 if (!sectionIds.has(item.sectionId)) throw new Error('ZIP ROI photo references an unknown section');
-                if (!item.sourcePath || !zip.file(item.sourcePath)) throw new Error('ZIPにROI写真の原本がありません / ZIP ROI original missing: ' + (item.filename || item.id));
+                if (!item.sourcePath || !zip.file(item.sourcePath)) throw new Error(_uiT("ZIPにROI写真の原本がありません / ZIP ROI original missing: {0}", {"0":(item.filename || item.id)}));
                 requireFile(item.sourcePath, 'ROI photo');
             }
         }
@@ -214,9 +225,15 @@
         return {zip: view, doc, counts, requiredPaths: [...required]};
     }
     function summary(counts) {
-        return 'ZIP: 原本登録 ' + counts.registered + ' / 旧保存ファイル ' + counts.legacyFiles
-            + ' / 旧CSV参考値 ' + counts.legacyCsv + ' / 来歴未確認 ' + counts.unknown
-            + (counts.variants ? ' / 別保存版 ' + counts.variants : '')
+        return _uiT("ZIP: 原本登録 {0} / 旧保存ファイル {1} / 旧CSV参考値 {2} / 来歴未確認 {3}{4}\nLegacy CSV values are preserved without correction; original missing states cannot be recovered.", {"0":(counts.registered),"1":(counts.legacyFiles),"2":(counts.legacyCsv),"3":(counts.unknown),"4":(counts.variants ? _uiT(" / 別保存版 {0}", {"0":(counts.variants)}) : '')});
+    }
+    function summaryHtml(counts) {
+        // Keep counts as parameters so an already-open review follows locale changes.
+        const escape = value => String(value).replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+        if (!root.AppI18n) return escape(summary(counts));
+        return root.AppI18n.html("ZIP: 原本登録 {0} / 旧保存ファイル {1} / 旧CSV参考値 {2} / 来歴未確認 {3}",
+            {0:counts.registered,1:counts.legacyFiles,2:counts.legacyCsv,3:counts.unknown})
+            + (counts.variants ? root.AppI18n.html(" / 別保存版 {0}", {0:counts.variants}) : '')
             + '\nLegacy CSV values are preserved without correction; original missing states cannot be recovered.';
     }
     function id() { return 'archive-' + (root.crypto && root.crypto.randomUUID ? root.crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2)); }
@@ -293,7 +310,7 @@
         if(snapshot.meta && snapshot.meta.msiRatios!=null) {
             const model=ratioModel();
             const check=model.validateProjectReferences(snapshot);
-            if(!check.valid)throw new Error('比の入力参照を確認してください。修復または除外してからZIPへ保存してください: '+check.errors.join('; '));
+            if(!check.valid)throw new Error(_uiT("比の入力参照を確認してください。修復または除外してからZIPへ保存してください: {0}", {"0":(check.errors.join('; '))}));
             snapshot.meta.msiRatios=model.normalizeRegistry(snapshot.meta.msiRatios);
         }
         const job = {id: id(), kind: 'zip-export', state: 'staging', ownedBlobIds: [], createdAt: Date.now()};
@@ -306,9 +323,9 @@
         function assertCurrent() {
             cancelled(options.signal);
             if ((options.currentProject && options.currentProject() !== project) || fingerprint(project) !== signature)
-                throw new Error('ZIP 作成中にプロジェクトが変更されました。再実行してください / Project changed during ZIP export');
+                throw new Error(_uiT("ZIP 作成中にプロジェクトが変更されました。再実行してください / Project changed during ZIP export"));
             if(currentRatioRegistry && JSON.stringify(currentRatioRegistry() || null)!==ratioSignature)
-                throw new Error('ZIP 作成中にこのタブの比が変更されました。再実行してください / Ratios changed during ZIP export');
+                throw new Error(_uiT("ZIP 作成中にこのタブの比が変更されました。再実行してください / Ratios changed during ZIP export"));
         }
         async function close() {
             try { await cleanup(storage, job); }
@@ -342,7 +359,7 @@
                 try { media.set(item.id, await options.readMedia(item)); }
                 catch (_) { missing.push('ROI photo / ' + (item.filename || item.id)); }
             }
-            if (missing.length) throw new Error('ZIP に必要な原本がありません / Required originals unavailable:\n' + [...new Set(missing)].join('\n'));
+            if (missing.length) throw new Error(_uiT("ZIP に必要な原本がありません / Required originals unavailable:\n{0}", {"0":([...new Set(missing)].join('\n'))}));
             assertCurrent();
             for (const section of snapshot.sections || []) for (const entry of Object.values(section.msiSeries || {}))
                 entry.archiveProvenance = provenance(entry.archiveProvenance);
@@ -361,5 +378,5 @@
         }
         for (const item of ((manifest.roiMedia && manifest.roiMedia.items) || [])) present(item.sourcePath);
     }
-    return {clone, provenance, registeredSource, qualityLabel, prepareImport, summary, withImport, recoverImports, beginExport, verifyExport};
+    return {clone, provenance, registeredSource, qualityLabel, prepareImport, summary, summaryHtml, withImport, recoverImports, beginExport, verifyExport};
 });

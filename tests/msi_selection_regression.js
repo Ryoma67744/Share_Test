@@ -150,6 +150,27 @@ function testPanelAndKeyboard() {
   f.doc.dispatch('pointerdown', { target: f.doc.body }); assert.equal(c.panel, null);
 }
 
+function testEnsureWritesOnlyChangedState() {
+  const f = fixture(), c = f.controller;
+  let saves = 0, scopes = 0;
+  const save = f.hooks.storage.setItem, scope = f.hooks.scope;
+  f.hooks.storage.setItem = (...args) => { saves++; return save(...args); };
+  f.hooks.scope = (...args) => { scopes++; return scope(...args); };
+  c.ensure(); const state = c.state, selected = c.state.selected, revision = c.revision;
+  saves = 0; scopes = 0;
+  for (let i = 0; i < 5; i++) { assert.equal(c.ensure(), selected); c.refresh(); }
+  assert.equal(c.state, state); assert.equal(c.revision, revision);
+  assert.equal(saves, 0, 'layout reads cannot rewrite unchanged visibility settings');
+  assert.equal(scopes, 0, 'layout reads cannot republish unchanged viewer scope');
+  f.setProject({id:'project-1', sections:[...sections, {id:'new', organ:'Kidney'}]});
+  c.ensure(); assert.equal(c.state.selected.has('new'), true); assert.equal(saves, 1); assert.equal(scopes, 1);
+  c.ensure(); assert.equal(saves, 1); assert.equal(scopes, 1);
+  saves = 0; scopes = 0; const updated = c.state;
+  c.previewTransforms.deleted = {tx:1}; c.previewRotations.deleted = 90;
+  c.ensure(); assert.equal(c.state, updated); assert.equal(c.previewTransforms.deleted, undefined); assert.equal(c.previewRotations.deleted, undefined);
+  assert.equal(saves, 1, 'obsolete preview settings are still removed and persisted'); assert.equal(scopes, 0);
+}
+
 function testInlineSyntaxAndVisibilityIntegration() {
   const html = fs.readFileSync(path.join(__dirname, '../viewer/index.html'), 'utf8');
   for (const match of html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)) new vm.Script(match[1]);
@@ -159,9 +180,60 @@ function testInlineSyntaxAndVisibilityIntegration() {
   assert.equal(html.includes('delete App.msiUserWindow[App.focusCompoundKey]'), false, 'selection cannot discard manual Range');
 }
 
+function testLanguageRedrawDoesNotChangeSelection() {
+  const previous = globalThis.AppI18n;
+  let locale = 'ja', onLanguageChange;
+  const text = (source, params) => {
+    const translations = {'未分類':'Uncategorized', '表示切片 {0}/{1}':'Visible sections {0}/{1}'};
+    return (locale === 'en' ? translations[source] || source : source).replace(/\{(\w+)\}/g,
+      (token, key) => params && Object.hasOwn(params, key) ? String(params[key]) : token);
+  };
+  globalThis.AppI18n = {t:text, onChange:listener => { onLanguageChange = listener; },
+    setText:(node, source, params) => { node.textContent = text(source, params); },
+    setAttribute:(node, key, source, params) => node.setAttribute(key, text(source, params))};
+  try {
+    const f = fixture(), c = f.controller;
+    f.setProject({id:'language-fixture', sections:[
+      {id:'missing', displayName:'keep 1', organ:''},
+      {id:'user-en', displayName:'keep 2', organ:'Uncategorized'},
+      {id:'user-ja', displayName:'keep 3', organ:'未分類'},
+    ]});
+    let saves = 0, scopes = 0;
+    const save = f.hooks.storage.setItem, scope = f.hooks.scope;
+    f.hooks.storage.setItem = (...args) => { saves++; return save(...args); };
+    f.hooks.scope = (...args) => { scopes++; return scope(...args); };
+    const button = f.doc.createElement('button'); button.setAttribute('data-section-visibility', ''); f.doc.body.append(button);
+    c.open(button); c.search.value = 'keep'; c.renderList(); c.search.focus();
+    c.previewTransforms.missing = {tx:4, ty:7, scale:2}; c.pendingHidden.add('missing');
+    const state = c.state, search = c.search, transforms = JSON.stringify(c.previewTransforms);
+    saves = 0; scopes = 0; locale = 'en'; onLanguageChange(locale);
+    // A translated toolbar can trigger ResizeObserver and demand-loader reads.
+    c.ensure(); c.refresh(); c.ensure();
+    assert.equal(saves, 0, 'changing language never writes visibility storage');
+    assert.equal(scopes, 0, 'changing language never updates the viewer scope');
+    assert.equal(c.state, state, 'changing language does not reconcile or replace selection');
+    assert.equal(c.search, search); assert.equal(c.search.value, 'keep'); assert.equal(f.doc.activeElement, search);
+    assert.equal(JSON.stringify(c.previewTransforms), transforms); assert.deepEqual([...c.pendingHidden], ['missing']);
+    assert.equal(button.textContent, 'Visible sections 3/3');
+    const list = c.panel.querySelector('[data-list]');
+    assert.equal(list.children.length, 3, 'translated fallback never merges with user-named organs');
+    const unclassified = list.querySelectorAll('input').find(input => input.dataset.focusKey === 'unclassified');
+    const named = list.querySelectorAll('input').find(input => input.dataset.focusKey === 'group:Uncategorized');
+    assert.ok(unclassified); assert.ok(named);
+    unclassified.checked = false; unclassified.dispatch('change');
+    assert.equal(c.state.selected.has('missing'), false);
+    assert.equal(c.state.selected.has('user-en'), true, 'fallback group action cannot affect the same-named user group');
+    assert.equal(c.state.selected.has('user-ja'), true);
+    c.close(); saves = 0; scopes = 0; locale = 'ja'; onLanguageChange(locale);
+    assert.equal(saves, 0); assert.equal(scopes, 0); assert.equal(button.textContent, '表示切片 2/3');
+  } finally { if (previous === undefined) delete globalThis.AppI18n; else globalThis.AppI18n = previous; }
+}
+
 testSelectionContract();
 testImageCentredViewport();
 testSessionAndDrawing();
 testPanelAndKeyboard();
+testEnsureWritesOnlyChangedState();
 testInlineSyntaxAndVisibilityIntegration();
+testLanguageRedrawDoesNotChangeSelection();
 console.log('MSI section selection regressions: PASS');

@@ -5,6 +5,17 @@
   if (root) root.RoiMediaService = api;
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
+    // Only developer-owned UI text is registered here; project and input values stay unchanged.
+    const _uiT = (source, params) => globalThis.AppI18n ? globalThis.AppI18n.t(source, params) : String(source).replace(/\{(\w+)\}/g, (match, key) => params && Object.prototype.hasOwnProperty.call(params, key) ? String(params[key] ?? '') : match);
+    const _uiText = (node, source, params) => {
+        let target = node;
+        if (globalThis.AppI18n && String(node.tagName || '').toUpperCase() === 'LABEL') { target = node.ownerDocument.createElement('span'); node.appendChild(target); }
+        if (globalThis.AppI18n) globalThis.AppI18n.setText(target, source, params); else target.textContent = _uiT(source, params);
+        return node;
+    };
+    const _uiAttr = (node, name, source, params) => { if (globalThis.AppI18n) globalThis.AppI18n.setAttribute(node, name, source, params); else node.setAttribute(name, _uiT(source, params)); return node; };
+    const _uiTextNode = (doc, source, params) => _uiText(doc.createElement('span'), source, params);
+
 
   const DEFAULT_MAX_BYTES = 500 * 1024 * 1024;
   const DEFAULT_MAX_PIXELS = 64 * 1024 * 1024;
@@ -30,14 +41,14 @@
   }
   async function fileMime(file, maxBytes) {
     if (!file || typeof file.slice !== 'function' || !Number.isSafeInteger(file.size) || file.size < 1)
-      fail('invalid-file', '画像ファイルを選択してください。');
-    if (file.size > maxBytes) fail('file-too-large', '画像の容量が登録上限を超えています。');
+      fail('invalid-file', _uiT("画像ファイルを選択してください。"));
+    if (file.size > maxBytes) fail('file-too-large', _uiT("画像の容量が登録上限を超えています。"));
     const bytes = new Uint8Array(await file.slice(0, 16).arrayBuffer());
     if (bytes.length >= 8 && [137, 80, 78, 71, 13, 10, 26, 10].every((byte, index) => bytes[index] === byte)) return 'image/png';
     if (bytes.length >= 3 && bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg';
     if (bytes.length >= 4 && ((bytes[0] === 73 && bytes[1] === 73 && (bytes[2] === 42 || bytes[2] === 43) && bytes[3] === 0)
       || (bytes[0] === 77 && bytes[1] === 77 && bytes[2] === 0 && (bytes[3] === 42 || bytes[3] === 43)))) return 'image/tiff';
-    fail('unsupported-file', 'PNG・JPEG・単一画像のTIFFを選択してください。');
+    fail('unsupported-file', _uiT("PNG・JPEG・単一画像のTIFFを選択してください。"));
   }
 
   function create(options) {
@@ -56,16 +67,16 @@
     const source = (project, roi, section) => {
       const value = config.sourceRef ? config.sourceRef(project, roi, section)
         : ((model.snapshot(roi, section).geometry || {}).sourceRef || '');
-      if (typeof value !== 'string') fail('invalid-source', 'ROIの測定ソースを確認できません。');
+      if (typeof value !== 'string') fail('invalid-source', _uiT("ROIの測定ソースを確認できません。"));
       return value;
     };
     function validateTarget(project, roi, section) {
       if (!project || typeof project !== 'object' || project.__share || !roi || roi._collab)
-        fail('read-only', 'この画面ではROI画像を編集できません。');
+        fail('read-only', _uiT("この画面ではROI画像を編集できません。"));
       if (!(project.rois || []).includes(roi) || !(project.sections || []).includes(section))
-        fail('stale-target', '対象のROIまたは切片が変更されました。開き直してください。');
+        fail('stale-target', _uiT("対象のROIまたは切片が変更されました。開き直してください。"));
       if (config.isCurrent && !config.isCurrent(project, roi, section))
-        fail('stale-target', '対象が切り替わったため登録を中止しました。');
+        fail('stale-target', _uiT("対象が切り替わったため登録を中止しました。"));
       return model.snapshot(roi, section); // Also validates finite measurement coordinates.
     }
     function capture(project, roi, section, itemOrId) {
@@ -75,9 +86,9 @@
       if (itemOrId !== undefined) {
         const id = typeof itemOrId === 'string' ? itemOrId : itemOrId && itemOrId.id;
         const current = model.list(project, roi, section).find(item => item.id === id);
-        if (!current) fail('missing-item', 'このROI画像は削除または変更されています。');
+        if (!current) fail('missing-item', _uiT("このROI画像は削除または変更されています。"));
         if (typeof itemOrId === 'object' && itemOrId && itemOrId.revision !== current.revision)
-          fail('revision-conflict', '画像情報が更新されています。開き直してから操作してください。');
+          fail('revision-conflict', _uiT("画像情報が更新されています。開き直してから操作してください。"));
         context.itemId = id;
         context.itemFingerprint = canonical(current);
       }
@@ -88,11 +99,11 @@
       const snapshot = validateTarget(project, roi, section);
       if (canonical(snapshot) !== context.fingerprint || model.roiKey(roi) !== context.roiKey
         || model.sectionKey(project, section) !== context.sectionId || source(project, roi, section) !== context.sourceRef)
-        fail('geometry-changed', '処理中にROIまたは測定ソースが変更されました。確認してから再登録してください。');
+        fail('geometry-changed', _uiT("処理中にROIまたは測定ソースが変更されました。確認してから再登録してください。"));
       if (context.itemId) {
         const current = model.list(project, roi, section).find(item => item.id === context.itemId);
         if (!current || canonical(current) !== context.itemFingerprint)
-          fail('revision-conflict', '処理中に画像情報が更新されました。開き直してから操作してください。');
+          fail('revision-conflict', _uiT("処理中に画像情報が更新されました。開き直してから操作してください。"));
       }
     }
     function enqueue(project, job) {
@@ -115,11 +126,11 @@
         decoded = await config.decode(file, mime, { maxPixels, maxDimension, maxBytes });
         const width = decoded && decoded.width, height = decoded && decoded.height;
         if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1)
-          fail('invalid-dimensions', '画像の寸法を読み取れませんでした。');
+          fail('invalid-dimensions', _uiT("画像の寸法を読み取れませんでした。"));
         if (width > maxDimension || height > maxDimension || width * height > maxPixels)
-          fail('image-too-large', '画像の寸法が表示可能な上限を超えています。');
+          fail('image-too-large', _uiT("画像の寸法が表示可能な上限を超えています。"));
         if ((decoded.pages && decoded.pages !== 1) || decoded.multiPage === true)
-          fail('multi-page-image', '多ページ画像は、必要な1枚をPNGまたは単一画像のTIFFとして保存して登録してください。');
+          fail('multi-page-image', _uiT("多ページ画像は、必要な1枚をPNGまたは単一画像のTIFFとして保存して登録してください。"));
         const extension = mime === 'image/jpeg' ? 'jpg' : mime === 'image/tiff' ? 'tif' : 'png';
         return { file, mime, width, height, byteSize: file.size, filename: String(file.name || ('image.' + extension)) };
       } finally {
@@ -132,7 +143,7 @@
         const id = 'roi-photo-' + String(uid());
         if (!storage.getBlob || !(await storage.getBlob(id))) return id;
       }
-      fail('duplicate-file', '画像の保存先IDが重複しました。再度登録してください。');
+      fail('duplicate-file', _uiT("画像の保存先IDが重複しました。再度登録してください。"));
     }
     async function storeFile(decoded) {
       const blobId = await newBlobId();
@@ -144,16 +155,16 @@
       assertTarget(context);
       const project = context.project;
       if (canonical(model.getRegistry(project)) !== canonical(previous))
-        fail('registry-conflict', '処理中にROI画像の登録情報が更新されました。再度操作してください。');
+        fail('registry-conflict', _uiT("処理中にROI画像の登録情報が更新されました。再度操作してください。"));
       if (!project.meta) project.meta = {};
       const existed = own(project.meta, 'roiMedia'), original = project.meta.roiMedia;
       const nextFingerprint = canonical(next);
       project.meta.roiMedia = next;
       try {
         if (await config.save(project, next) === false)
-          fail('save-failed', '画像の登録情報を保存できませんでした。以前の登録を維持しました。');
+          fail('save-failed', _uiT("画像の登録情報を保存できませんでした。以前の登録を維持しました。"));
         if (canonical(model.getRegistry(project)) !== nextFingerprint)
-          fail('registry-conflict', '保存中に登録情報が更新されました。表示を開き直して確認してください。');
+          fail('registry-conflict', _uiT("保存中に登録情報が更新されました。表示を開き直して確認してください。"));
       } catch (error) {
         // Only roll back our own registry. Preserve unrelated project metadata
         // and any newer registry mutation performed outside this service.
@@ -183,7 +194,7 @@
     async function add(project, roi, section, files, info) {
       const context = capture(project, roi, section);
       const selected = Array.from(files || []), patch = metadata(info);
-      if (!selected.length) fail('missing-file', '登録する画像を選択してください。');
+      if (!selected.length) fail('missing-file', _uiT("登録する画像を選択してください。"));
       return enqueue(project, async () => {
         assertTarget(context);
         const previous = model.getRegistry(project), ids = [];
