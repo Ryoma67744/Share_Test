@@ -204,6 +204,44 @@ async function mountedWorkspaceContract() {
     assert.equal(changes, changesBeforeDestroy, 'destroy removes display listeners and queued updates');
 }
 
+async function differentCoordinateSpacesContract() {
+    const f = fixture();
+    f.images.he.naturalWidth = 4000; f.images.he.naturalHeight = 1500;
+    f.images.msi.naturalWidth = 100; f.images.msi.naturalHeight = 400;
+    // HE pixels are mirrored and rotated into MSI at 1/10 resolution.
+    const workspace = Workspace.mount(f.card, {
+        canSync: () => true,
+        mapSyncPoint: (side, [x,y]) => side === 'he' ? [170-y/10, 405-x/10] : [(405-y)*10, (170-x)*10]
+    });
+    await f.flush();
+    const heFit = Workspace.fitView(4000, 1500, 640, 480), msiFit = Workspace.fitView(100, 400, 640, 480);
+    assert.deepEqual(workspace.getViewState().he, heFit);
+    assert.deepEqual(workspace.getViewState().msi, msiFit);
+    workspace.setViewState({sync: true});
+    f.wraps.he.dispatch('keydown', {key: 'ArrowLeft'}); await f.flush();
+    let state = workspace.getViewState();
+    closeTo(state.msi.centerX*100, 170-state.he.centerY*150);
+    closeTo(state.msi.centerY*400, 405-state.he.centerX*400);
+    closeTo(state.msi.pixelScale, 10*state.he.pixelScale);
+    f.wraps.msi.dispatch('keydown', {key: '+'}); await f.flush();
+    state = workspace.getViewState();
+    closeTo(state.he.centerX*4000, (405-state.msi.centerY*400)*10);
+    closeTo(state.he.pixelScale, state.msi.pixelScale/10);
+    const fitBoth = f.card.querySelectorAll('button').find(button => button.textContent === '全体表示');
+    fitBoth.dispatch('click'); await f.flush();
+    assert.deepEqual(workspace.getViewState().he, heFit);
+    assert.deepEqual(workspace.getViewState().msi, msiFit, 'both images fit independently even with linked navigation');
+    const savedFit = workspace.getViewState();
+    f.wraps.he.clientWidth = 300; f.wraps.he.clientHeight = 500;
+    workspace.refresh(); await f.flush();
+    assert.deepEqual(workspace.getViewState().he, Workspace.fitView(4000, 1500, 300, 500));
+    workspace.setViewState(state); await f.flush();
+    assert.deepEqual(workspace.getViewState().he, state.he, 'manually navigated draft restores its view');
+    workspace.setViewState(savedFit); await f.flush();
+    assert.deepEqual(workspace.getViewState().he, Workspace.fitView(4000, 1500, 300, 500), 'fitted draft uses its current viewport on return');
+    workspace.destroy();
+}
+
 async function staleCompositeContract() {
     const f = fixture(), pending = [];
     const workspace = Workspace.mount(f.card, {
@@ -240,6 +278,7 @@ async function delayedImageContract() {
 (async () => {
     geometryContract();
     await mountedWorkspaceContract();
+    await differentCoordinateSpacesContract();
     await staleCompositeContract();
     await delayedImageContract();
     console.log('MSI alignment workspace regressions: PASS');

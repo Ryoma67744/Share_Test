@@ -2154,6 +2154,11 @@ function msiDisplayGeometryChanged(section, key) {
 function alignmentThumbClickPoint(ev, imgEl, section, key) {
     const rect=imgEl.getBoundingClientRect();
     const nW=imgEl.naturalWidth||rect.width, nH=imgEl.naturalHeight||rect.height;
+    if (imgEl.dataset.coordinateSpace === 'he-original') {
+        const x = ev.clientX - rect.left, y = ev.clientY - rect.top;
+        if (!(x >= 0 && y >= 0 && x < rect.width && y < rect.height)) return null;
+        return [x * nW / rect.width, y * nH / rect.height];
+    }
     const ss=Number(imgEl.dataset.ss)||1;
     const bx=(ev.clientX-rect.left)/Math.max(1,rect.width)*nW/ss;
     const by=(ev.clientY-rect.top)/Math.max(1,rect.height)*nH/ss;
@@ -2194,7 +2199,7 @@ function msiMaskInLegacyRaster(input, section, key, maxEdge) {
 // instead of changing T or fitting another affine to the old landmarks.
 // The inverse axis maps are display-only and do not retain evicted geometries.
 const heDisplayAxisCache = new WeakMap();
-function heMsiDisplayWarp(source, T, section, key, pixelScale) {
+function heMsiDisplayWarp(source, T, section, key, pixelScale, region) {
     const geometry = typeof msiLayerSourceGeometry === 'function' ? msiLayerSourceGeometry(section, key) : null;
     const legacy = geometry && geometry.legacy, grid = geometry && geometry.displayGeometry;
     if (!legacy || (legacy.confirmed === false && geometry.currentConfirmed !== true) || !grid || !(legacy.W > 0 && legacy.H > 0 && grid.W > 0 && grid.H > 0)) return null;
@@ -2206,16 +2211,28 @@ function heMsiDisplayWarp(source, T, section, key, pixelScale) {
     const k = Math.max(1e-3, Math.min(Number(pixelScale) || 1, 6144 / Math.max(grid.W, grid.H),
         Math.sqrt(16000000 / (grid.W * grid.H))));
     const out = document.createElement('canvas');
-    out.width = Math.max(1, Math.ceil(grid.W * k)); out.height = Math.max(1, Math.ceil(grid.H * k));
-    let axes = heDisplayAxisCache.get(geometry);
+    const kx = region ? region.scaleX : k, ky = region ? region.scaleY : k;
+    if (region) {
+        // Rasterize only at preview resolution, regardless of registration offsets or units.
+        const w = region.width * kx, h = region.height * ky;
+        const limit = Math.min(1, 6144 / Math.max(w, h), 4000 / Math.sqrt(w) / Math.sqrt(h));
+        out.width = Math.max(1, Math.ceil(w * limit));
+        out.height = Math.max(1, Math.ceil(h * limit));
+    } else {
+        out.width = Math.max(1, Math.ceil(grid.W * k)); out.height = Math.max(1, Math.ceil(grid.H * k));
+    }
+    let axes = region ? null : heDisplayAxisCache.get(geometry);
     if (!axes || axes.w !== out.width || axes.h !== out.height) {
         const x = new Float64Array(out.width), y = new Float64Array(out.height);
-        // Pixel centres are converted through the existing edge-based bridge.
-        // Use actual canvas dimensions: ceil(width*k) need not equal width*k.
-        for (let i = 0; i < x.length; i++) x[i] = msiDisplayEdgePointToLegacy(section, key, [(i + 0.5) * grid.W / out.width, 0.5])[0];
-        for (let j = 0; j < y.length; j++) y[j] = msiDisplayEdgePointToLegacy(section, key, [0.5, (j + 0.5) * grid.H / out.height])[1];
+        // Sample actual output pixel centres, including HE outside the acquired grid.
+        for (let i = 0; i < x.length; i++) x[i] = region
+            ? region.xAxis.toLegacy(region.x + (i + 0.5) * region.width / out.width)
+            : msiDisplayEdgePointToLegacy(section, key, [(i + 0.5) * grid.W / out.width, 0.5])[0];
+        for (let j = 0; j < y.length; j++) y[j] = region
+            ? region.yAxis.toLegacy(region.y + (j + 0.5) * region.height / out.height)
+            : msiDisplayEdgePointToLegacy(section, key, [0.5, (j + 0.5) * grid.H / out.height])[1];
         axes = { w:out.width, h:out.height, x, y };
-        heDisplayAxisCache.set(geometry, axes);
+        if (!region) heDisplayAxisCache.set(geometry, axes);
     }
     // Bound the photograph readback as well as the output. Canvas performs the
     // antialiased downsample before the final inverse, premultiplied-alpha sample.
@@ -2228,8 +2245,8 @@ function heMsiDisplayWarp(source, T, section, key, pixelScale) {
         return max || 1;
     };
     const gx = stretch(legacy.x, grid.x.step), gy = stretch(legacy.y, grid.y.step);
-    const pw = Math.max(1, Math.ceil(sw * Math.min(1, k * Math.hypot(T[0][0] * gx, T[1][0] * gy))));
-    const ph = Math.max(1, Math.ceil(sh * Math.min(1, k * Math.hypot(T[0][1] * gx, T[1][1] * gy))));
+    const pw = Math.max(1, Math.ceil(sw * Math.min(1, Math.hypot(kx * T[0][0] * gx, ky * T[1][0] * gy))));
+    const ph = Math.max(1, Math.ceil(sh * Math.min(1, Math.hypot(kx * T[0][1] * gx, ky * T[1][1] * gy))));
     const sk = Math.min(1, 6144 / Math.max(pw, ph), Math.sqrt(16000000 / (pw * ph)));
     const photo = document.createElement('canvas');
     photo.width = Math.max(1, Math.ceil(pw * sk)); photo.height = Math.max(1, Math.ceil(ph * sk));
@@ -2260,6 +2277,73 @@ function heMsiDisplayWarp(source, T, section, key, pixelScale) {
     }
     oc.putImageData(pixels, 0, 0);
     return out;
+}
+
+// Extend the same display-to-legacy map used inside the acquired raster.
+// An end cell may contain several source coordinates with the same legacy index.
+// Continue the nearest non-flat interval outside that edge so off-grid HE remains visible.
+function alignmentWarpAxis(pairs, grid, length) {
+    const inGrid = d => msiAxisInterpolate(pairs, grid.origin + (d - 0.5) * grid.step, false) + 0.5;
+    function endSlope(from, direction) {
+        for (let i = from; i + direction >= 0 && i + direction < pairs.length; i += direction) {
+            const a = pairs[i], b = pairs[i + direction];
+            const slope = grid.step * (b[1] - a[1]) / (b[0] - a[0]);
+            if (slope > 0 && Number.isFinite(slope)) return slope;
+        }
+        return grid.step;
+    }
+    const first = inGrid(0), last = inGrid(length);
+    const before = endSlope(0, 1), after = endSlope(pairs.length - 1, -1);
+    const toLegacy = d => d < 0 ? first + d * before
+        : d > length ? last + (d - length) * after : inGrid(d);
+    function displayBound(value, upper) {
+        if (value < first) return (value - first) / before;
+        if (value > last) return length + (value - last) / after;
+        // At a repeated legacy index keep the entire corresponding display interval.
+        let lo = 0, hi = length;
+        for (let i = 0; i < 52; i++) {
+            const mid = (lo + hi) / 2, v = inGrid(mid);
+            if (v < value || (upper && v === value)) lo = mid;
+            else hi = mid;
+        }
+        return upper ? hi : lo;
+    }
+    return {toLegacy, displayBound};
+}
+function alignmentOverlayGeometry(source, T, layerMatrix, msiImg, geometry, width, height) {
+    const ss = Number(msiImg.dataset.ss) || 1;
+    const mw = msiImg.naturalWidth / ss, mh = msiImg.naturalHeight / ss;
+    const cx = Number(msiImg.dataset.rawW) / 2, cy = Number(msiImg.dataset.rawH) / 2;
+    // The MSI thumbnail and both historical layer orientations pivot about the same raster centre.
+    const layer = layerMatrix.map(row => row.slice());
+    layer[0][2] = -layer[0][0] * cx - layer[0][1] * cy;
+    layer[1][2] = -layer[1][0] * cx - layer[1][1] * cy;
+    const sourceRect = {x:0, y:0, width:source.naturalWidth, height:source.naturalHeight};
+    let matrix = displayAffineMultiply(layer, T), region = null;
+    let bounds = MsiDisplayGeometry.bounds(sourceRect, matrix);
+    if (geometry) {
+        const grid = geometry.displayGeometry, legacy = geometry.legacy;
+        const xAxis = alignmentWarpAxis(legacy.x, grid.x, grid.W);
+        const yAxis = alignmentWarpAxis(legacy.y, grid.y, grid.H);
+        const raw = MsiDisplayGeometry.bounds(sourceRect, T);
+        const x = xAxis.displayBound(raw.x, false), y = yAxis.displayBound(raw.y, false);
+        region = {x, y, width:xAxis.displayBound(raw.x + raw.width, true) - x,
+            height:yAxis.displayBound(raw.y + raw.height, true) - y, xAxis, yAxis};
+        // The separable warp can bend rotated HE edges between their four corners.
+        // Its monotone axis bounds enclose every sample even under a section rotation.
+        matrix = layer;
+        bounds = MsiDisplayGeometry.bounds(region, layer);
+    }
+    const left = Math.min(-mw / 2, bounds.x), top = Math.min(-mh / 2, bounds.y);
+    const right = Math.max(mw / 2, bounds.x + bounds.width), bottom = Math.max(mh / 2, bounds.y + bounds.height);
+    const scale = Math.min(width / (right - left), height / (bottom - top));
+    const tx = (width - scale * (right - left)) / 2 - scale * left;
+    const ty = (height - scale * (bottom - top)) / 2 - scale * top;
+    if (region) {
+        region.scaleX = scale * Math.hypot(layer[0][0], layer[1][0]);
+        region.scaleY = scale * Math.hypot(layer[0][1], layer[1][1]);
+    }
+    return {matrix, region, mw, mh, scale, tx, ty};
 }
 
 // 3×3 homogeneous affine helpers (row-major arrays of 3 rows × 3 cols).
@@ -16412,16 +16496,12 @@ const Wizards = {
             ++autoGeneration;
             if (autoBtn) autoBtn.disabled = !imagesReady || saving;
             if (autoBox) { autoBox.style.display = 'none'; autoBox.innerHTML = ''; }
-            heImg.dataset.ready = 'false';
+            heImg.dataset.tMatrix = JSON.stringify(currentMatrix());
             captureCurrent();
             writeWorldCoords();
             if (rafId) cancelAnimationFrame(rafId);
-            rafId = requestAnimationFrame(async () => {
+            rafId = requestAnimationFrame(() => {
                 rafId = 0;
-                if (!stillOpen()) return;
-                // Modal HE thumbnail tracks T live so the user sees the same
-                // alignment they're tweaking on the section panel below.
-                try { await rebakeHeThumb(); } catch (e) { console.warn('HE thumb rebake failed', e); }
                 if (!stillOpen()) return;
                 try { renderLandmarks(); } catch (e) {}
                 if (workspace) workspace.requestComposite();
@@ -16516,10 +16596,11 @@ const Wizards = {
         msiUmYEl.readOnly = true;
         (globalThis.AppI18n ? AppI18n.setAttribute(msiUmXEl, "title", "{value}", () => ({value:(msiUmYEl.title = AppI18n.t("登録済みの物理ピクセルサイズ（表示の拡大率とは独立）"))})) : (msiUmXEl.title = msiUmYEl.title = '登録済みの物理ピクセルサイズ（表示の拡大率とは独立）'));
 
+        let displayedDraftKey = null;
         const captureCurrent = () => {
             if (!activeDraft) return;
             const revision=activeDraft.editRevision;
-            session.capture(state, workspace && workspace.getViewState());
+            session.capture(state, workspace && activeDraft.key === displayedDraftKey ? workspace.getViewState() : activeDraft.view);
             if((activeDraft.context.scope==='shared'||activeDraft.context.scope==='group')&&activeFrame&&activeFrame.confirmed&&activeDraft.editRevision!==revision) {
                 activeDraft.context.frame=clone(activeFrame);
                 activeDraft.frameKey=MsiAlignmentSession.frameKey(activeFrame);
@@ -16668,7 +16749,6 @@ const Wizards = {
                     previousState.renderContract===transforms.RENDER_CONTRACT?previousState:transforms.upgrade(previousState,'import')),{seedVerified:true});
                 const existingDraft=session.peek(context);
                 const keepSharedDraft=existingDraft&&session.isDirty(existingDraft.key);
-                const previous = activeDraft;
                 activeDraft = session.activate(context, seed);
                 if((createCommon||createGroup)&&!keepSharedDraft) {
                     Object.assign(activeDraft.state,seed);
@@ -16690,7 +16770,6 @@ const Wizards = {
                     if(perSourceEl)perSourceEl.checked=true;
                 }
                 if (!state.landmarks) state.landmarks = {he:[],msi:[]};
-                if (previous && previous.key !== activeDraft.key && workspace) workspace.setViewState(activeDraft.view || {});
                 lastMsiByMode.set(nextMode || '__legacy__', nextKey);
                 layerSel.value = nextLayer;
                 if (sourceSel) {sourceSel.innerHTML=buildSourceOpts();sourceSel.value = nextMode || '';}
@@ -16706,6 +16785,10 @@ const Wizards = {
                 setLoading(!complete || !frame.confirmed, !frame.confirmed
                     ? (globalThis.AppI18n ? AppI18n.t("座標系を確認できないため点の追加・保存を停止しています。元の対応点は保持されています。") : '座標系を確認できないため点の追加・保存を停止しています。元の対応点は保持されています。')
                     : !complete ? (globalThis.AppI18n ? AppI18n.t("画像を読み込めませんでした。別の分子を選択して再試行してください。") : '画像を読み込めませんでした。別の分子を選択して再試行してください。') : null);
+                if (complete && workspace && displayedDraftKey !== activeDraft.key) {
+                    workspace.setViewState(activeDraft.view || {});
+                    displayedDraftKey = activeDraft.key;
+                }
                 renderLandmarks();
                 if (workspace) workspace.refresh();
                 updatePreview();
@@ -16818,74 +16901,17 @@ const Wizards = {
         };
         const legacyToDisplay = p => msiLegacyEdgePointToDisplay(sec, alignmentMsiKey(), p) || p;
 
-        // Re-bake the HE thumbnail through the current state's T (the affine
-        // the modal is building) plus the section view transform. This is
-        // what makes modal HE align with modal MSI and the main canvas.
-        // Stamp T (+ MSI raw dims) onto the IMG dataset so click/landmark
-        // routines can invert or replay the same chain.
-        let heBakeSignature = '';
-        let heBakeGeneration = 0;
-        const rebakeHeThumb = async () => {
-            if (!stillOpen()) return;
-            const bakeToken = ++heBakeGeneration;
-            const selectionToken = selectionGeneration;
-            const heRaw = panel.imageSources && panel.imageSources[state.layerKey];
-            if (!heRaw || !heRaw.complete || !heRaw.naturalWidth) return;
-            const ref = panel.msiRasterSize(alignmentMsiKey()) || panel.getMsiRefSize();
-            const msiW = (ref && ref.w) || heRaw.naturalWidth;
-            const msiH = (ref && ref.h) || heRaw.naturalHeight;
+        // Navigation can follow a registered point even when the photograph
+        // and the colored MSI raster have different dimensions or orientations.
+        const mapSyncPoint = (from, point) => {
+            const B = JSON.parse(msiImg.dataset.displayMatrix);
             const T = currentMatrix();
-            const signature = JSON.stringify([state.layerKey, alignmentImageIdentity(sec.images[state.layerKey]), heRaw.naturalWidth, heRaw.naturalHeight, state.msiKey, activeFrame && activeFrame.key, msiW, msiH, T, sectionTransform('he')]);
-            if (signature === heBakeSignature && heImg.complete && heImg.naturalWidth) { heImg.dataset.ready='true'; return; }
-            heImg.dataset.ready = 'false';
-            // Step 1: HE → MSI raster frame via T. Supersample by `k` so the HE
-            // keeps its detail instead of collapsing to the (low-res) MSI grid —
-            // otherwise the panel shows HE at MSI resolution, which looks coarse.
-            // The extra pixels are purely visual: the landmark coordinate frame
-            // stays the LOGICAL MSI grid (rawW/rawH below) and the click/marker
-            // math divides `ss` back out, so ss=1 (MSI panels, legacy) behaves
-            // identically to before.
-            const heMax = Math.max(heRaw.naturalWidth, heRaw.naturalHeight);
-            const msiMax = Math.max(1, msiW, msiH);
-            const SS_TARGET = 1600;   // crisp preview cap (balances detail vs re-bake cost)
-            const k = Math.max(1, Math.min(
-                Math.round(SS_TARGET / msiMax),
-                Math.ceil(heMax / msiMax)   // never oversample past HE's own resolution
-            ));
-            const heInMsi = document.createElement('canvas');
-            heInMsi.width = Math.max(1, Math.round(msiW * k));
-            heInMsi.height = Math.max(1, Math.round(msiH * k));
-            const tctx = get2dContext(heInMsi);
-            // get2dContext disables smoothing (nearest-neighbor); re-enable it so
-            // the HE downsample area-averages instead of dropping pixels.
-            tctx.imageSmoothingEnabled = true;
-            tctx.imageSmoothingQuality = 'high';
-            tctx.scale(k, k);
-            tctx.transform(T[0][0], T[1][0], T[0][1], T[1][1], T[0][2], T[1][2]);
-            tctx.drawImage(heRaw, 0, 0);
-            // Step 2: section transform bake (rotation + flip).
-            const t = sectionTransform('he');
-            const warped = heMsiDisplayWarp(heRaw, T, sec, alignmentMsiKey(), k);
-            // Normalize to the supersampling already used by landmark math.
-            if (warped) { tctx.setTransform(1,0,0,1,0,0); tctx.clearRect(0,0,heInMsi.width,heInMsi.height); tctx.drawImage(warped,0,0,heInMsi.width,heInMsi.height); }
-            const baked = t.frame ? bakeMsiImageWithFrame(heInMsi,t.frame,k) : bakeImageWithSectionTransform(heInMsi, t.matrix);
-            if (!baked) return;
-            const nextHe = new Image();
-            nextHe.src = baked.toDataURL('image/png');
-            if (!await waitForImg(nextHe)) return;
-            if (!stillOpen() || bakeToken !== heBakeGeneration || selectionToken !== selectionGeneration) return;
-            heImg.src = nextHe.src;
-            // dataset: rawW/rawH = the LOGICAL MSI frame (msiW×msiH), NOT the
-            //          supersampled pixel dims. `ss` records the supersample so
-            //          the click/landmark math can divide it back out. T is stored
-            //          so click/landmark can invert it.
-            stampThumbDataset(heImg, msiW, msiH, t, k);
-            heImg.dataset.tMatrix = JSON.stringify(T);
-            await waitForImg(heImg);
-            if (!stillOpen() || bakeToken !== heBakeGeneration || selectionToken !== selectionGeneration) return;
-            heBakeSignature = signature;
-            heImg.dataset.ready = 'true';
-            if(workspace)workspace.refresh();
+            if (from === 'he') {
+                return applyAffinePoint(B, ...legacyToDisplay(applyAffinePoint(T, ...point)));
+            }
+            const displayed = applyAffinePoint(invertAffine(B), ...point);
+            const legacy = msiDisplayEdgePointToLegacy(sec, alignmentMsiKey(), displayed) || displayed;
+            return applyAffinePoint(invertAffine(T), ...legacy);
         };
 
         // Sum every MSI series' grayscale luminance into one image. Caller gets
@@ -16982,6 +17008,18 @@ const Wizards = {
             if (!await waitForImg(heRaw) || !current()) return;
             // The captured layer key prevents late HE loads from corrupting another layer.
             panel.imageSources[layer] = heRaw;
+            // The left pane uses the decoded photograph's own pixel edges. It
+            // stays complete even if registration places it outside the MSI scan.
+            const originalUrl = heRaw.currentSrc || heRaw.src;
+            if (heImg.src !== originalUrl) heImg.src = originalUrl;
+            if (!await waitForImg(heImg) || !current()) return;
+            heImg.dataset.coordinateSpace = 'he-original';
+            heImg.dataset.rawW = String(heRaw.naturalWidth);
+            heImg.dataset.rawH = String(heRaw.naturalHeight);
+            heImg.dataset.ss = '1';
+            heImg.dataset.displayMatrix = '[[1,0,0],[0,1,0],[0,0,1]]';
+            heImg.dataset.tMatrix = JSON.stringify(currentMatrix());
+            heImg.dataset.ready = 'true';
             const t = sectionTransform();
             const ent = sec.msiSeries[key] || {};
             if (App.roiOnlyMode && !isTicKey(key)) await App.ensureRoiDisplayRange(sec, key);
@@ -17012,12 +17050,8 @@ const Wizards = {
             msiImg.src = cached.url;
             msiImg.style.imageRendering=App.msiSmoothing==='linear'&&(App.msiLinearStrength||10)===10?'auto':'pixelated';
             stampThumbDataset(msiImg,cached.rawW,cached.rawH,t,cached.scale);
-            await waitForImg(msiImg);
-            if (!current()) return;
+            if (!await waitForImg(msiImg) || !current()) return;
             msiImg.dataset.ready = 'true';
-            await rebakeHeThumb();
-            if (!current()) return;
-            if (workspace) workspace.refresh();
         };
         // Initial image load runs after all handlers and cleanup are installed.
 
@@ -17127,32 +17161,14 @@ const Wizards = {
             const drawDots = (svg, pts, imgEl) => {
                 if (!imgEl.naturalWidth) { svg.innerHTML = ''; return; }
                 const rect = imgEl.getBoundingClientRect();
-                const rawW = Number(imgEl.dataset.rawW) || imgEl.naturalWidth;
-                const rawH = Number(imgEl.dataset.rawH) || imgEl.naturalHeight;
+                const originalHe = imgEl.dataset.coordinateSpace === 'he-original';
                 const displayMatrix = JSON.parse(imgEl.dataset.displayMatrix || '[[1,0,0],[0,1,0],[0,0,1]]');
-                // Divide the supersample out so markers land in the logical frame
-                // (HE panel: ss>1; MSI & legacy: ss=1 → unchanged).
                 const ss = Number(imgEl.dataset.ss) || 1;
-                const sx = rect.width  / (imgEl.naturalWidth  / ss);
+                const sx = rect.width  / (imgEl.naturalWidth / ss);
                 const sy = rect.height / (imgEl.naturalHeight / ss);
-                // For HE, stored landmarks are in raw HE pixel space — apply
-                // T to bring them into MSI's raster frame first, then bake
-                // the section transform. MSI landmarks live in raw MSI space
-                // and only need the section bake.
-                let T = null;
-                const tStr = imgEl.dataset.tMatrix;
-                if (tStr) {
-                    try { T = JSON.parse(tStr); } catch (e) { T = null; }
-                }
                 svg.setAttribute('viewBox', `0 0 ${rect.width} ${rect.height}`);
                 svg.innerHTML = pts.map((p, i) => {
-                    let mx = p[0], my = p[1];
-                    if (T) {
-                        const [tx, ty] = applyAffinePoint(T, mx, my);
-                        mx = tx; my = ty;
-                    }
-                    const displayPoint = legacyToDisplay([mx, my]);
-                    const [bx, by] = applyAffinePoint(displayMatrix, displayPoint[0], displayPoint[1]);
+                    const [bx, by] = originalHe ? p : applyAffinePoint(displayMatrix, ...legacyToDisplay(p));
                     return `<circle cx="${bx*sx}" cy="${by*sy}" r="6" fill="#fde047" stroke="#0f172a" stroke-width="1.5"></circle>` +
                            `<text x="${bx*sx}" y="${by*sy + 4}" text-anchor="middle" font-size="10" font-weight="700" fill="#0f172a">${i+1}</text>`;
                 }).join('');
@@ -17526,7 +17542,7 @@ const Wizards = {
         const origClose = card._close;
         card._close = val => {
             if (closed || (saving && val !== 'saved')) return;
-            closed = true; ++selectionGeneration; ++thumbGeneration; ++autoGeneration; ++heBakeGeneration;
+            closed = true; ++selectionGeneration; ++thumbGeneration; ++autoGeneration;
             if (rafId) cancelAnimationFrame(rafId);
             for (const cleanup of cleanups.splice(0)) { try { cleanup(); } catch (_) {} }
             if (workspace) workspace.destroy();
@@ -17591,30 +17607,47 @@ const Wizards = {
                 if (!closed) setLoading(!imagesReady);
             }
         });
-        // Compose only the selected HE/IF and MSI display images. Both are
-        // centered in the same logical MSI frame; HE supersampling changes
-        // detail, never the underlying registration or measurement coordinates.
+        let overlayWarpCache = null;
         const renderCompositePreview = ({canvas,width,height,opacity}) => {
             const ctx = get2dContext(canvas);
             ctx.clearRect(0,0,width,height);
             if (!imagesReady || heImg.dataset.ready !== 'true' || msiImg.dataset.ready !== 'true') return;
-            const heSS = Number(heImg.dataset.ss) || 1;
-            const hw=heImg.naturalWidth/heSS, hh=heImg.naturalHeight/heSS;
-            const msiSS=Number(msiImg.dataset.ss)||1;
-            const mw=msiImg.naturalWidth/msiSS, mh=msiImg.naturalHeight/msiSS;
-            const scale=Math.min(width/Math.max(hw,mw),height/Math.max(hh,mh));
-            ctx.imageSmoothingEnabled=true;
-            ctx.drawImage(heImg,(width-hw*scale)/2,(height-hh*scale)/2,hw*scale,hh*scale);
-            ctx.globalAlpha=opacity;
-            ctx.imageSmoothingEnabled=App.msiSmoothing==='linear'&&(App.msiLinearStrength||10)===10;
-            ctx.drawImage(msiImg,(width-mw*scale)/2,(height-mh*scale)/2,mw*scale,mh*scale);
-            ctx.globalAlpha=1;
+            const source = panel.imageSources[state.layerKey], key = alignmentMsiKey(), T = currentMatrix();
+            if (!source || !source.naturalWidth || !T) return;
+            const geometry = msiDisplayGeometryChanged(sec,key) && msiLegacyRasterSize(sec,key)
+                ? msiLayerSourceGeometry(sec,key) : null;
+            const view = alignmentOverlayGeometry(source, T, sectionTransform('he').matrix, msiImg, geometry, width, height);
+            const {matrix, region, scale, tx, ty, mw, mh} = view;
+            let he = source;
+            if (region) {
+                const signature = JSON.stringify([T,region.x,region.y,region.width,region.height,region.scaleX,region.scaleY]);
+                if (!overlayWarpCache || overlayWarpCache.source !== source || overlayWarpCache.geometry !== geometry
+                    || overlayWarpCache.signature !== signature) {
+                    const warped = heMsiDisplayWarp(source,T,sec,key,1,region);
+                    overlayWarpCache = {source, geometry, signature, warped};
+                }
+                he = overlayWarpCache.warped;
+            }
+            ctx.save();
+            ctx.transform(scale,0,0,scale,tx,ty);
+            if (he) {
+                ctx.save();
+                ctx.imageSmoothingEnabled = true;
+                ctx.transform(matrix[0][0],matrix[1][0],matrix[0][1],matrix[1][1],matrix[0][2],matrix[1][2]);
+                if (region) ctx.drawImage(he,region.x,region.y,region.width,region.height);
+                else ctx.drawImage(he,0,0);
+                ctx.restore();
+            }
+            ctx.globalAlpha = opacity;
+            ctx.imageSmoothingEnabled = App.msiSmoothing==='linear'&&(App.msiLinearStrength||10)===10;
+            ctx.drawImage(msiImg,-mw/2,-mh/2,mw,mh);
+            ctx.restore();
         };
         try {
             workspace = MsiAlignmentWorkspace.mount(card,{
                 onComposite:renderCompositePreview,
-                canSync:()=>!!(activeFrame && activeFrame.confirmed)
-                    && JSON.stringify(sectionTransform('he').matrix)===JSON.stringify(sectionTransform('msi').matrix),
+                canSync:()=>!!(imagesReady && activeFrame && activeFrame.confirmed && alignmentValidAffine(currentMatrix())),
+                mapSyncPoint,
                 onViewChange:()=>{ if(stillOpen())renderLandmarks(); },
                 onClose:()=>card._close(null)
             });

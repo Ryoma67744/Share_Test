@@ -213,7 +213,7 @@
             saveAttr(wrap, 'tabindex'); saveAttr(wrap, 'aria-label');
             wrap.tabIndex = 0;
             _uiAttr(wrap, "aria-label", "{0}画像。ドラッグで移動、ホイールまたは拡大縮小ボタンで表示変更", {"0":(label)});
-            const data = { side, wrap, content, source, svg, view: null, width: 0, height: 0,
+            const data = { side, wrap, content, source, svg, view: null, fitted: true, width: 0, height: 0,
                 viewportWidth: 0, viewportHeight: 0, suppressedUntil: 0, drag: null };
             panes[side] = data;
             listen(zoomIn, 'click', () => zoom(data, 1.25));
@@ -245,6 +245,7 @@
                     if (wrap.setPointerCapture) try { wrap.setPointerCapture(event.pointerId); } catch (error) { /* detached pointer */ }
                 }
                 event.preventDefault();
+                data.fitted = false;
                 data.view = panView(drag.view, dx, dy, data.width, data.height);
                 synchronize(data); schedule(true);
             });
@@ -264,7 +265,7 @@
                 if (event.target !== wrap || !data.view) return;
                 const deltas = { ArrowLeft: [30, 0], ArrowRight: [-30, 0], ArrowUp: [0, 30], ArrowDown: [0, -30] };
                 if (deltas[event.key]) {
-                    event.preventDefault(); data.view = panView(data.view, ...deltas[event.key], data.width, data.height);
+                    event.preventDefault(); data.fitted = false; data.view = panView(data.view, ...deltas[event.key], data.width, data.height);
                     synchronize(data); schedule(true);
                 } else if (event.key === '+' || event.key === '=') { event.preventDefault(); zoom(data, 1.25); }
                 else if (event.key === '-') { event.preventDefault(); zoom(data, 0.8); }
@@ -283,14 +284,29 @@
         function canSync() { return typeof options.canSync === 'function' && !!options.canSync(); }
         function synchronize(origin) {
             if (!syncing || !canSync() || !origin.view) return;
-            for (const pane of Object.values(panes)) if (pane !== origin) pane.view = Object.assign({}, origin.view);
+            const target = panes[origin.side === 'he' ? 'msi' : 'he'];
+            if (!(target.width > 0 && target.height > 0)) return;
+            const x = origin.view.centerX * origin.width, y = origin.view.centerY * origin.height;
+            const map = point => options.mapSyncPoint ? options.mapSyncPoint(origin.side, point) : point;
+            const center = map([x, y]), right = map([x+1, y]), down = map([x, y+1]);
+            if (![center, right, down].every(p => p && p.every(Number.isFinite))) return;
+            // A single zoom factor matches the local area magnification even
+            // for mirrored, rotated or anisotropic registration.
+            const area = Math.abs((right[0]-center[0]) * (down[1]-center[1])
+                - (right[1]-center[1]) * (down[0]-center[0]));
+            if (!(area > 0 && Number.isFinite(area))) return;
+            target.fitted = false;
+            target.view = { centerX: center[0] / target.width, centerY: center[1] / target.height,
+                pixelScale: clamp(origin.view.pixelScale / Math.sqrt(area), 0.00001, 1000) };
         }
         function fitPane(pane, notify) {
+            pane.fitted = true;
             pane.view = fitView(pane.width, pane.height, pane.wrap.clientWidth, pane.wrap.clientHeight);
             synchronize(pane); schedule(notify);
         }
         function zoom(pane, factor, x, y) {
             if (!pane.view) return;
+            pane.fitted = false;
             pane.view = zoomView(pane.view, factor, finite(x, pane.viewportWidth / 2), finite(y, pane.viewportHeight / 2),
                 pane.width, pane.height, pane.viewportWidth, pane.viewportHeight);
             synchronize(pane); schedule(true);
@@ -306,7 +322,9 @@
             pane.width = width; pane.height = height; pane.viewportWidth = vw; pane.viewportHeight = vh;
             if (!(width > 0 && height > 0)) { pane.content.style.visibility = 'hidden'; return changed; }
             pane.content.style.visibility = '';
-            if (!pane.view || resetView) pane.view = fitView(width, height, vw, vh);
+            if (resetView) pane.fitted = true;
+            if (!(vw > 0 && vh > 0)) return changed;
+            if (!pane.view || pane.fitted) pane.view = fitView(width, height, vw, vh);
             if (!pane.view) return changed;
             const rect = imageRect(pane.view, width, height, vw, vh);
             pane.content.style.width = width + 'px'; pane.content.style.height = height + 'px';
@@ -330,7 +348,6 @@
             let changed = false;
             for (const pane of Object.values(panes)) changed = updatePane(pane, !!(settings && settings.resetView)) || changed;
             syncInput.disabled = !canSync();
-            if (syncInput.disabled) { syncing = false; syncInput.checked = false; }
             overlayButton.disabled = typeof renderer !== 'function';
             if (changed) schedule(true);
             requestComposite();
@@ -346,11 +363,16 @@
         }
         function getViewState() {
             return { he: panes.he.view && Object.assign({}, panes.he.view),
-                msi: panes.msi.view && Object.assign({}, panes.msi.view), sync: syncing, mode, opacity: Number(opacityInput.value) };
+                msi: panes.msi.view && Object.assign({}, panes.msi.view),
+                fitted: { he: panes.he.fitted, msi: panes.msi.fitted }, sync: syncing, mode, opacity: Number(opacityInput.value) };
         }
         function setViewState(state) {
             state = state || {};
-            for (const side of ['he', 'msi']) panes[side].view = validView(state[side]) ? Object.assign({}, state[side]) : null;
+            for (const side of ['he', 'msi']) {
+                const pane = panes[side];
+                pane.fitted = !validView(state[side]) || !!(state.fitted && state.fitted[side]);
+                pane.view = pane.fitted ? null : Object.assign({}, state[side]);
+            }
             syncing = !!state.sync && canSync(); syncInput.checked = syncing;
             opacityInput.value = String(clamp(finite(state.opacity, 0.5), 0, 1));
             setMode(state.mode === 'overlay' && typeof renderer === 'function' ? 'overlay' : 'split');
@@ -399,8 +421,7 @@
         listen(overlayButton, 'click', () => { if (typeof renderer === 'function') setMode('overlay'); });
         listen(opacityInput, 'input', requestComposite);
         listen(fitButton, 'click', () => {
-            for (const pane of Object.values(panes)) pane.view = fitView(pane.width, pane.height, pane.wrap.clientWidth, pane.wrap.clientHeight);
-            if (syncing) synchronize(panes[activeSide]);
+            for (const pane of Object.values(panes)) pane.fitted = true;
             schedule(true); requestComposite();
         });
         listen(syncInput, 'change', () => {
