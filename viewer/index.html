@@ -1900,6 +1900,11 @@ function displayBakeGeometry(w, h, linear) {
     matrix[1][2] = height/2 - linear[1][0]*w/2 - linear[1][1]*h/2;
     return { width, height, matrix };
 }
+function displayBakeScale(w, h, orientation, requestedScale) {
+    if (!(requestedScale > 0)) return 1;
+    const base = displayBakeGeometry(w, h, orientation);
+    return Math.min(requestedScale, 6144 / Math.max(base.width, base.height), Math.sqrt(16000000 / base.width / base.height));
+}
 function displayLegacyLinear(deg, flipLr, flipUd) {
     if (Array.isArray(deg)) return deg;
     return displayAffineMultiply(displayRotation(deg),
@@ -1910,9 +1915,8 @@ function bakeImageWithSectionTransform(src, deg, flipLr, flipUd, smoothing, requ
     const w = src.naturalWidth || src.width, h = src.naturalHeight || src.height;
     if (!w || !h) return null;
     const orientation=displayLegacyLinear(deg, flipLr, flipUd);
-    const base=displayBakeGeometry(w,h,orientation);
     const out = document.createElement('canvas');
-    const k = requestedScale > 0 ? Math.min(requestedScale,6144/Math.max(base.width,base.height),Math.sqrt(16000000/base.width/base.height)) : 1;
+    const k = displayBakeScale(w, h, orientation, requestedScale);
     const g=displayBakeGeometry(w*k,h*k,orientation);
     out.width = g.width; out.height = g.height;
     const ctx = get2dContext(out), T = g.matrix;
@@ -2247,7 +2251,9 @@ function heMsiDisplayWarp(source, T, section, key, pixelScale, region) {
     const gx = stretch(legacy.x, grid.x.step), gy = stretch(legacy.y, grid.y.step);
     const pw = Math.max(1, Math.ceil(sw * Math.min(1, Math.hypot(kx * T[0][0] * gx, ky * T[1][0] * gy))));
     const ph = Math.max(1, Math.ceil(sh * Math.min(1, Math.hypot(kx * T[0][1] * gx, ky * T[1][1] * gy))));
-    const sk = Math.min(1, 6144 / Math.max(pw, ph), Math.sqrt(16000000 / (pw * ph)));
+    const photoEdge = region ? Math.min(6144, 2 * Math.hypot(out.width, out.height)) : 6144;
+    const photoArea = region ? Math.min(16000000, 4 * out.width * out.height) : 16000000;
+    const sk = Math.min(1, photoEdge / Math.max(pw, ph), Math.sqrt(photoArea / (pw * ph)));
     const photo = document.createElement('canvas');
     photo.width = Math.max(1, Math.ceil(pw * sk)); photo.height = Math.max(1, Math.ceil(ph * sk));
     const pc = get2dContext(photo, { willReadFrequently:true });
@@ -2347,9 +2353,6 @@ function alignmentOverlayGeometry(source, T, layerMatrix, msiImg, geometry, widt
 }
 
 // 3×3 homogeneous affine helpers (row-major arrays of 3 rows × 3 cols).
-// Used by the Align modal so we can render HE warped through T_he_to_msi
-// (matching the main canvas) and still record landmarks in raw HE pixel
-// space by inverting on click.
 function applyAffinePoint(T, x, y) {
     return [
         T[0][0] * x + T[0][1] * y + T[0][2],
@@ -16888,9 +16891,10 @@ const Wizards = {
                 imgEl.dataset.ss=String(g.scale);imgEl.dataset.displayMatrix=JSON.stringify(B);
                 return;
             }
-            imgEl.dataset.ss = String(k);
-            const B = displayBakeGeometry(rawW*k, rawH*k, t.matrix).matrix;
-            B[0][2] /= k; B[1][2] /= k;
+            const scale = displayBakeScale(rawW, rawH, t.matrix, k);
+            imgEl.dataset.ss = String(scale);
+            const B = displayBakeGeometry(rawW*scale, rawH*scale, t.matrix).matrix;
+            B[0][2] /= scale; B[1][2] /= scale;
             imgEl.dataset.displayMatrix = JSON.stringify(B);
         };
         const alignmentMsiKey = () => {

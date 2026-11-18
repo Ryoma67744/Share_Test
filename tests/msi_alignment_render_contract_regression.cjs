@@ -295,6 +295,11 @@ async function run({legacy=false,heAngle=5,msiAngle=0,physical=false,nonlinear=f
         assert.equal(c.resolveHeMsiAlignment(mixed,'HE_STAIN','MSI_RATIO_registration-test',panel).status,'ready');
     }
     if(!legacy&&heAngle===5&&msiAngle===0&&physical) await checkOverlayExtents(c,nonlinear);
+    if(!legacy&&!physical) {
+        const capped={dataset:{}};
+        c.stampThumbDataset(capped,12000,128,{matrix:c.displayRotation(0)},1);
+        assert.equal(Number(capped.dataset.ss),6144/12000,'MSI thumb metadata uses the actual backing resolution');
+    }
     h.assertNumericUnchanged();
     return distances;
 }
@@ -303,6 +308,6 @@ async function run({legacy=false,heAngle=5,msiAngle=0,physical=false,nonlinear=f
     const results=[];
     for(const options of [{legacy:true},{},{heAngle:5,msiAngle:5},{physical:true},{physical:true,nonlinear:true}])
         results.push(await run(options));
-    console.log('PASS real-canvas HE/MSI registration contracts, clicks, Save/reload, native export and physical/nonlinear display');
+    console.log('PASS real-canvas HE/MSI registration contracts, clicks, Save/reload, native export and physical/nonlinear display, four HE corners and bounded off-grid rendering');
     console.log(JSON.stringify(results,null,2));
 })().catch(error=>{console.error(error);process.exitCode=1;});
