@@ -68,14 +68,26 @@ async function main() {
             Object.assign(panel._ensureViewerTransform(),section.meta.viewerTransform);
             delete section.meta.world_coords.T_he_to_msi;
             section.meta.world_coords.msi_um_per_px={x:30,y:30};
-            // A test-only LUT isolates the two channels while retaining the
-            // production MSI window, raster, colorizer and render pipeline.
-            COLORMAPS.__alignment_test_green=Array.from({length:256},(_,i)=>[0,i,0]);
-            setActiveColormap('__alignment_test_green');
             App.setActiveSection(section.id);App.setViewMode('compound');App.setFocusCompoundKey('MSI_A');
             await App.setOtsuBgRemove(false);panel.setupCanvasSize();await App._flushSave();
             return {id,values:Array.from(panel.msiValueRasters.get('MSI_A').values)};
         },points);
+        async function installSyntheticPalette() {
+            const endpoints=await page.evaluate(()=>{
+                // Toolbar refresh, Cancel and reload restore the project's saved
+                // colormap name. Give that supported name its isolated test LUT
+                // within this page so those normal UI actions retain both channels.
+                const name=App.getMsiDisplaySettings().colormap;
+                COLORMAPS[name]=Array.from({length:256},(_,i)=>[0,i,0]);
+                App.refreshMsiDisplayControls();
+                const panel=App.panels.get(App.project.sections[0].id);
+                // Colorized canvases cache the palette name, not the test LUT.
+                panel._msiLutCache?.clear();panel.renderComposite();
+                return [getActiveColormap()[0],getActiveColormap()[255]];
+            });
+            assert.deepEqual(endpoints,[[0,0,0],[0,255,0]],'synthetic MSI palette');
+        }
+        await installSyntheticPalette();
         async function ready() {
             await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
             await page.waitForFunction(()=>['he','msi'].every(side=>{
@@ -224,8 +236,13 @@ async function main() {
                     }
                 }
                 const scale=kind==='modal'?1:panel._displayCanvasFrame.baseH/panel.getMsiRefSize().w;
-                const distances=sums.map(([red,green])=>{
-                    if(!red.w||!green.w)throw new Error('Missing synthetic marker in '+kind);
+                const distances=sums.map(([red,green],i)=>{
+                    if(!red.w||!green.w)throw new Error('Missing synthetic marker: '+JSON.stringify({
+                        kind,region:i,canvas:[c.width,c.height],greenBounds:[xmin,ymin,xmax,ymax],
+                        channelWeights:sums.map(pair=>pair.map(acc=>Math.round(acc.w))),
+                        palette:_activeColormapName,highColor:getActiveColormap()[255],
+                        opacity:document.querySelector('.msi-align-opacity input')?.value||panel.imageSettings.MSI_A.opacity
+                    }));
                     return Math.hypot(red.x/red.w-green.x/green.w,red.y/red.w-green.y/green.w)/scale;
                 });
                 return {total:distances.pop(),perMarker:distances};
@@ -257,7 +274,6 @@ async function main() {
         const restored=await page.evaluate(async()=>{
             const section=App.project.sections[0],panel=App.panels.get(section.id);
             await panel.ensureMsiLayerLoaded('MSI_A');await panel.ensureImageLayerLoaded('HE_STAIN');
-            COLORMAPS.__alignment_test_green=Array.from({length:256},(_,i)=>[0,i,0]);setActiveColormap('__alignment_test_green');
             App.setActiveSection(section.id);App.setViewMode('compound');App.setFocusCompoundKey('MSI_A');
             panel.imageSettings.MSI_A.opacity=.5;panel.setupCanvasSize();
             const r=resolveHeMsiAlignment(section,'HE_STAIN','MSI_A',panel);
@@ -266,6 +282,7 @@ async function main() {
         });
         assert.equal(restored.contract,'msi-shared-display-v1');assert.equal(restored.angles.rotHE,5);assert.equal(restored.angles.rotMSI,0);
         assert.deepEqual(restored.values,fixture.values);assert.deepEqual(restored.T,saved.T);
+        await installSyntheticPalette();
         const reloaded=await rasterDistance('main');assert.ok(reloaded.total<.6&&reloaded.perMarker.every(v=>v<1.25),
             'reloaded main renderer: '+JSON.stringify(reloaded));
         const persisted=await registrationAndOriginal();assert.deepEqual(persisted.hash,initial.hash);
