@@ -38,6 +38,9 @@ declare
     roi   jsonb;
     v_sec_id uuid;
     v_client_ids text[];
+    v_staged_section_id uuid;
+    v_temporary_ordinal bigint;
+    v_section_ordinal bigint;
 begin
     if _slug is null or length(trim(_slug)) = 0 then
         return jsonb_build_object('ok', false, 'reason', 'slug_required');
@@ -125,9 +128,51 @@ begin
             where project_id = v_pid
               and (meta->>'client_id' is null
                    or not (meta->>'client_id' = any(v_client_ids)));
+
+        -- An ambiguous legacy client identity cannot be repaired by ordering:
+        -- LIMIT 1 below would otherwise leave one staged row unfinalized.
+        if exists (select 1 from public.sections where project_id = v_pid
+                    group by meta->>'client_id' having count(*) > 1) then
+            raise exception 'invalid_stored_section_identity' using errcode = '22023';
+        end if;
+
+        -- Keep each retained section UUID (and its collaborator associations),
+        -- but free all final positive slots before applying the document order.
+        -- A direct swap of two UNIQUE(project_id, ordinal) values would fail
+        -- even when the final document has no duplicates. Legacy rows may
+        -- already use negative ordinals, so reserve only currently unused
+        -- slots; bigint arithmetic prevents INT_MIN from wrapping around.
+        v_temporary_ordinal := -1;
+        for v_staged_section_id in
+            select id from public.sections where project_id = v_pid order by id for update
+        loop
+            while v_temporary_ordinal >= -2147483648::bigint
+              and exists (select 1 from public.sections
+                          where project_id = v_pid and ordinal = v_temporary_ordinal)
+            loop
+                v_temporary_ordinal := v_temporary_ordinal - 1;
+            end loop;
+            if v_temporary_ordinal < -2147483648::bigint then
+                raise exception 'section_ordinal_staging_exhausted' using errcode = '22003';
+            end if;
+            update public.sections set ordinal = v_temporary_ordinal::integer
+             where id = v_staged_section_id;
+            v_temporary_ordinal := v_temporary_ordinal - 1;
+        end loop;
     end if;
-    for sec in select * from jsonb_array_elements(coalesce(_sections, '[]'::jsonb))
+
+    -- The array is the viewer's section order. Old local projects can carry
+    -- duplicate/missing ordinal fields after delete/add; never trust those
+    -- fields or alter the original request used for receipt hashing/retries.
+    for sec, v_section_ordinal in
+        select section_doc, section_position
+          from jsonb_array_elements(coalesce(_sections, '[]'::jsonb))
+               with ordinality as incoming(section_doc, section_position)
+         order by section_position
     loop
+        if v_section_ordinal > 2147483647::bigint then
+            raise exception 'section_ordinal_out_of_range' using errcode = '22003';
+        end if;
         v_sec_id := null;
         select id into v_sec_id from public.sections
             where project_id = v_pid
@@ -137,14 +182,14 @@ begin
             insert into public.sections(project_id, ordinal, display_name, meta, storage_paths)
                 values (
                     v_pid,
-                    coalesce((sec->>'ordinal')::int, 0),
+                    v_section_ordinal::integer,
                     coalesce(sec->>'displayName', 'Section'),
                     jsonb_set(coalesce(sec->'meta', '{}'::jsonb), '{client_id}', to_jsonb(sec->>'id')),
                     coalesce(sec->'storagePaths', '{}'::jsonb)
                 );
         else
             update public.sections set
-                ordinal       = coalesce((sec->>'ordinal')::int, 0),
+                ordinal       = v_section_ordinal::integer,
                 display_name  = coalesce(sec->>'displayName', 'Section'),
                 meta          = jsonb_set(coalesce(sec->'meta', '{}'::jsonb), '{client_id}', to_jsonb(sec->>'id')),
                 storage_paths = coalesce(sec->'storagePaths', '{}'::jsonb)
