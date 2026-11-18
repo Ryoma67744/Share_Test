@@ -94,26 +94,49 @@ async function alignmentSample(page,level) {
     'Align marker remains on its clicked display pixel at Linear '+level);
   await card.getByRole('button',{name:'重ね合わせ',exact:true}).click();
   await card.getByRole('slider',{name:'MSI の濃さ',exact:true}).fill('1');
-  await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
-  const composite=await card.evaluate(element=>{
-    const output=element.querySelector('.msi-align-composite canvas'),msi=element.querySelector('[data-msi-img]'),he=element.querySelector('[data-he-img]');
-    const pixels=output.getContext('2d').getImageData(0,0,output.width,output.height).data;
-    const hw=he.naturalWidth/Number(he.dataset.ss),hh=he.naturalHeight/Number(he.dataset.ss);
-    const mw=msi.naturalWidth/Number(msi.dataset.ss),mh=msi.naturalHeight/Number(msi.dataset.ss);
-    const scale=Math.min(output.width/Math.max(hw,mw),output.height/Math.max(hh,mh));
-    const matches=linear=>{
-      const canvas=document.createElement('canvas');canvas.width=output.width;canvas.height=output.height;
-      const ctx=canvas.getContext('2d');ctx.imageSmoothingEnabled=true;
-      ctx.drawImage(he,(canvas.width-hw*scale)/2,(canvas.height-hh*scale)/2,hw*scale,hh*scale);
-      ctx.imageSmoothingEnabled=linear;
-      ctx.drawImage(msi,(canvas.width-mw*scale)/2,(canvas.height-mh*scale)/2,mw*scale,mh*scale);
-      return ctx.getImageData(0,0,canvas.width,canvas.height).data.every((value,index)=>value===pixels[index]);
+  const composite=await card.evaluate(async element=>{
+    const output=element.querySelector('.msi-align-composite canvas'),msi=element.querySelector('[data-msi-img]');
+    const opacity=element.querySelector('.msi-align-opacity input');
+    const prototype=CanvasRenderingContext2D.prototype,drawImage=prototype.drawImage;
+    let references;
+    // Isolate the final MSI resampling step. Replay it on the actual HE
+    // backdrop with the actual destination transform, once per interpolation.
+    prototype.drawImage=function(source,...coordinates) {
+      if(source===msi&&this.globalAlpha===1) {
+        references=[true,false].map(linear=>{
+          const canvas=document.createElement('canvas');canvas.width=this.canvas.width;canvas.height=this.canvas.height;
+          const ctx=canvas.getContext('2d');
+          drawImage.call(ctx,this.canvas,0,0);
+          ctx.setTransform(this.getTransform());ctx.imageSmoothingEnabled=linear;
+          drawImage.call(ctx,source,...coordinates);
+          return ctx.getImageData(0,0,canvas.width,canvas.height).data;
+        });
+      }
+      return drawImage.call(this,source,...coordinates);
     };
-    return {linear:matches(true),nearest:matches(false),width:output.width,height:output.height};
+    try {
+      opacity.dispatchEvent(new Event('input',{bubbles:true}));
+      await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+    } finally {prototype.drawImage=drawImage;}
+    if(!references)throw new Error('No opaque MSI draw observed in the alignment composite');
+    const pixels=output.getContext('2d').getImageData(0,0,output.width,output.height).data;
+    const mismatches=references.map(reference=>{
+      if(reference.length!==pixels.length)throw new Error('Alignment composite size changed during sampling');
+      let count=0;
+      for(let i=0;i<pixels.length;i++)if(reference[i]!==pixels[i])count++;
+      return count;
+    });
+    return {linear:mismatches[0],nearest:mismatches[1],width:output.width,height:output.height};
   });
   assert.ok(composite.width>0&&composite.height>0);
-  if(level===10) {assert.equal(composite.linear,true,'Align composite retains full Linear at 10');assert.equal(composite.nearest,false);}
-  else {assert.equal(composite.nearest,true,'Align composite does not reapply Linear over a baked partial blend');assert.equal(composite.linear,false);}
+  const detail=' at level '+level+': '+JSON.stringify(composite);
+  if(level===10) {
+    assert.equal(composite.linear,0,'Align composite retains full Linear'+detail);
+    assert.ok(composite.nearest>0,'Nearest must produce different pixels'+detail);
+  } else {
+    assert.equal(composite.nearest,0,'Align composite does not reapply Linear over a baked partial blend'+detail);
+    assert.ok(composite.linear>0,'Linear must produce different pixels'+detail);
+  }
   await card.locator('[data-modal-cancel]').click();await card.waitFor({state:'detached'});
   return geometry;
 }
