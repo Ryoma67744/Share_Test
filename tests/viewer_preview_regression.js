@@ -2245,6 +2245,7 @@ async function testShareAlignmentsAreSharedWithEveryone() {
     App, SupabaseClient,
     _isExpiredTokenError: () => false,
     _noteShareTokenExpired() {},
+    ProjectArchive:require('../viewer/project-archive.js'),
     _shareAlignServerMissing: false,
     _shareAlignWriteGen: 0,
   });
@@ -2334,7 +2335,7 @@ function testShareAlignmentEditingIsLocked() {
   assert.match(body, /if \(shareAlign\) \{ try \{ App\._releaseRoiLock\(\); \} catch \(e\) \{\} \}/,
     '閉じるときにロックを返していない (握ったままだと誰も編集できなくなる)');
   // 保存は共有側へ回し、master の位置合わせ (sections.meta) は書き換えない。
-  assert.match(body, /ok = await pushShareAlignment\(realSec,\{payload,expectedVersion:baseShareVersion\}\);/,
+  assert.match(body, /ok = await pushShareAlignment\(realSec,\{payload,expectedVersion:baseShareVersion,isCurrent:stillOpen\}\);/,
     '作業中の設定と編集開始時の版を共有保存へ渡すこと');
   assert.match(body, /if \(!ok\) return;/, '保存できていないのにモーダルを閉じないこと');
   assert.match(body, /App\.alignChoice = 'shared';/, '保存後に「共有」へ切り替えていない');

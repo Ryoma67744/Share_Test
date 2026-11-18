@@ -83,6 +83,8 @@ jobs:
         run: node tests/project_report_sparse_browser_regression.cjs
       - name: Physical scale bars and calibration updates
         run: node tests/msi_scalebar_browser_regression.cjs
+      - name: HE MSI registration interactions and overlay rendering
+        run: node tests/msi_alignment_browser_regression.cjs
       - name: MSI display presets and compatibility
         run: node tests/msi_display_settings_browser_regression.cjs
       - name: Progressive section loading and persistent TIC backgrounds

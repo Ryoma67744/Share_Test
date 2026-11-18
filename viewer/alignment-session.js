@@ -7,7 +7,8 @@
     'use strict';
     const own = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
     const ALIGNMENT_FIELDS = ['flip_lr', 'flip_ud', 'scale_pct', 'rotate_deg', 'offx', 'offy',
-        'landmarks', 'autoAligned', 'T', 'alignment_raster_basis'];
+        'landmarks', 'autoAligned', 'T', 'T_he_to_msi', 'alignment_raster_basis',
+        'renderContract', 'alignmentContractVersion', 'transformModel', 'fitMode', 'fitProvenance'];
     const READER_FIELDS = ['kind', 'sheet', 'sheetName', 'sheetIndex', 'func', 'function',
         'x', 'y', 'xColumn', 'yColumn', 'xCol', 'yCol', 'xLabel', 'yLabel', 'coordinateColumns'];
 
@@ -105,7 +106,7 @@
     }
 
     function frameKey(frame) {
-        if (frame && frame.version === 'msi-alignment-frame-v1'
+        if (frame && (frame.version === 'msi-alignment-frame-v1' || frame.version === 'msi-alignment-frame-v2')
             && typeof frame.key === 'string' && frame.key) return frame.key;
         return 'msi-align-frame-v1:' + stableKey(frameDescriptor(frame));
     }

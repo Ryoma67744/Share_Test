@@ -4,6 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const html = fs.readFileSync(path.join(__dirname, '../viewer/index.html'), 'utf8');
 const ratioModelSource=fs.readFileSync(path.join(__dirname,'../viewer/msi-ratio-model.js'),'utf8');
+const alignmentResolverSource=html.slice(html.indexOf('function msiSourceReference('),html.indexOf('function createMsiSourceGeometry('));
 function standalone(name) {
   const start = html.indexOf('function ' + name + '(');
   if (start < 0) throw new Error('Missing production function: ' + name);
@@ -13,7 +14,11 @@ function installDisplayHelpers(context) {
   // Execute the production model and display-layer adapters in the same realm
   // as the extracted viewer code. This is not a measured-layer-only stub.
   if(!context.window)context.window=context;
-  vm.runInContext(ratioModelSource+'\n'+['isRatioDisplayKey','displayMsiEntry','displayMsiKeys'].map(standalone).join('\n'),context);
+  vm.runInContext(ratioModelSource+'\n'+['isRatioDisplayKey','displayMsiEntry','displayMsiKeys'].map(standalone).join('\n')
+    +'\n'+alignmentResolverSource,context);
+  if(typeof context.msiLayerSourceGeometry==='function')vm.runInContext(
+    ['msiAxisInterpolate','msiLegacyRasterSize','msiLegacyRasterPointToDisplay','msiDisplayRasterPointToLegacy']
+      .map(standalone).join('\n'),context);
   return context;
 }
 function displayContext(globals = {}) { return installDisplayHelpers(vm.createContext(globals)); }

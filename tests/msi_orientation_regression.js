@@ -210,7 +210,7 @@ for(const rot of [0,90,180,270,37])for(const axis of ['lr','ud']){
 for(const baseline of ['legacy-180','native-raster']){
   const T=[[1.2,.1,2],[-.3,.9,1],[0,0,1]];
   const sec={id:'s',meta:{displayTransform:{version:2,baseOrientation:baseline},viewerTransform:{rot:37,rotMSI:90,rotHE:-23},flip:{lr:true}},msiSeries:{MSI_a:{}}};
-  const p=panelFor(sec,7,3,true);p.imageSources.HE_STAIN={complete:true,naturalWidth:9,naturalHeight:4};p.imageSettings.HE_STAIN={opacity:1};p.visibleLayers.add('HE_STAIN');p._resolveTHeToMsi=()=>T;
+  const p=panelFor(sec,7,3,true);p.imageSources.HE_STAIN={complete:true,naturalWidth:9,naturalHeight:4};p.imageSettings.HE_STAIN={opacity:1};p.visibleLayers.add('HE_STAIN');sec.meta.world_coords={T_he_to_msi:T};
   p.renderComposite();const he=p.displayCtx.draws[0].matrix;
   const expected=mul(sectionMsiCanvasMatrix(sec,7,3,p._displayCanvasFrame,'he'),T);
   close(he.flat(),expected.flat(),'HE registration then its own rotation');

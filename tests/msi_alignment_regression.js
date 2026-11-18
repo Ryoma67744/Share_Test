@@ -234,12 +234,12 @@ async function harness(options = {}) {
     for (const name of ['captureSectionAlignment', 'applySectionAlignment', 'getShareAlignmentVersion']) {
         if (html.includes('function ' + name + '(')) vm.runInContext(sourceFunction(name), context);
     }
-    for (const name of ['_resolveTHeToMsi', '_sourceHasGenuineAlignment']) {
+    for (const name of ['_resolveHeMsiAlignment', '_resolveTHeToMsi', '_sourceHasGenuineAlignment']) {
         const at = html.indexOf('    ' + name + '(');
         const body = html.slice(at, html.indexOf('\n    }', at) + 6).trim();
         panel[name] = vm.runInContext('({' + body + '}).' + name, context);
     }
-    for (const filename of ['alignment-session.js']) {
+    for (const filename of ['alignment-transform.js', 'alignment-session.js']) {
         const full = path.join(__dirname, '../viewer', filename);
         if (fs.existsSync(full)) vm.runInContext(fs.readFileSync(full, 'utf8'), context, { filename });
     }
