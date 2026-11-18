@@ -23,9 +23,9 @@ function fresh(section) {
 }
 function clickPosition(h,side,p) {
   const image = h.$(`[data-${side}-img]`), rect = image.getBoundingClientRect();
-  const T = image.dataset.tMatrix ? JSON.parse(image.dataset.tMatrix) : I;
-  const B = JSON.parse(image.dataset.displayMatrix || JSON.stringify(I));
-  const q = apply(B,apply(T,p)), ss = Number(image.dataset.ss)||1;
+  // The HE pane shows original pixels even when the registration changes.
+  const q = side === 'he' ? p : apply(JSON.parse(image.dataset.displayMatrix),p);
+  const ss = Number(image.dataset.ss)||1;
   return {clientX:rect.left+q[0]*ss/image.naturalWidth*rect.width,
     clientY:rect.top+q[1]*ss/image.naturalHeight*rect.height};
 }

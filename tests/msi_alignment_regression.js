@@ -195,7 +195,7 @@ async function harness(options = {}) {
         _tryAcquireRoiLock: async () => true, _releaseRoiLock: () => releaseCalls.push(true), _refreshShareAlignments: async () => {},
         saveProject: async (...args) => { if (storageFail) throw new Error('simulated disk failure'); saves.push(plain(args)); },
         saveNow: async (...args) => { if (storageFail) throw new Error('simulated disk failure'); saves.push(plain(args)); } };
-    let workspaceCallbacks;
+    let workspaceCallbacks, workspaceView = {};
     const context = displayContext({ console, document, window, Image: class extends Element { constructor() { super('img', document); } },
         Math, Number, String, Boolean, Object, Array, Date, JSON, Map, Set, WeakMap, Promise, Float32Array, Float64Array, Uint8Array, Uint8ClampedArray, structuredClone,
         App, panel, MsiDisplayGeometry: require('../viewer/msi-display-geometry.js'), _shareAlignBySection: shareRecords, isShareAlignMode: () => !!options.shared,
@@ -245,8 +245,8 @@ async function harness(options = {}) {
     }
     // Layout and viewport integration have their own regression suite. Only
     // this display adapter is stubbed here; every modal handler is real.
-    context.MsiAlignmentWorkspace = { mount: (card, callbacks) => { workspaceCallbacks = callbacks; return { refresh() {}, requestComposite() {}, getViewState: () => ({}),
-        setViewState() {}, acceptsPoint: () => true, destroy() {}, setCompositeRenderer() {},
+    context.MsiAlignmentWorkspace = { mount: (card, callbacks) => { workspaceCallbacks = callbacks; return { refresh() {}, requestComposite() {}, getViewState: () => plain(workspaceView),
+        setViewState(view) { workspaceView = plain(view); }, acceptsPoint: () => true, destroy() {}, setCompositeRenderer() {},
         getContentRect: side => context.openModal._card.querySelector(`[data-${side}-img]`).getBoundingClientRect(),
         clientToImage: () => null }; } };
     const methodStart = html.indexOf('    async openAlignmentModal(panel) {');
@@ -254,6 +254,10 @@ async function harness(options = {}) {
     assert.ok(methodStart >= 0 && methodEnd > methodStart, 'actual Align method boundary');
     vm.runInContext('globalThis.Wizards = {' + html.slice(methodStart, methodEnd) + '};', context);
     if (options.images) options.images(imageSources);
+    for (const key of Object.keys(section.images)) {
+        const image = imageSources[key];
+        if (image && image.complete) image.src = `mock:${image.naturalWidth}x${image.naturalHeight}:${key}`;
+    }
     const pending = context.Wizards.openAlignmentModal(panel).then(value => { closed = true; outcome = value; }, error => { errors.push(error); closed = true; });
     async function flush() {
         for (let round = 0; round < 12; round++) {
@@ -278,6 +282,8 @@ async function harness(options = {}) {
     return { context, panel, section, initialSection, project, card, $, fire, change, input, click, addPair, flush, window, document,
         shareRecords, saves, sharedSaves, queueSaves, alerts, releaseCalls, imageSources, pending, assertNumericUnchanged,
         closeFromWorkspace: () => workspaceCallbacks.onClose(),
+        mapSyncPoint: (side, point) => workspaceCallbacks.mapSyncPoint(side, point),
+        get workspaceView() { return workspaceView; }, set workspaceView(view) { workspaceView = view; },
         get closed() { return closed; }, get outcome() { return outcome; }, setStorageFail(value) { storageFail = value; }, setShareFail(value) { shareFail = value; } };
 }
 
@@ -674,6 +680,43 @@ test('a broken common-only record cannot seed an apparently verified default ali
     await h.click('[data-modal-cancel]');
 });
 
+test('full HE and IF photographs keep their own corners, points and draft views outside the MSI scan', async () => {
+    const h = await harness({ images(images) {
+        Object.assign(images.HE_STAIN, { naturalWidth: 4000, naturalHeight: 1500 });
+        Object.assign(images.IF_STAIN, { naturalWidth: 1200, naturalHeight: 3000 });
+    } });
+    await h.input('[data-offx-num]', 34);
+    const savedView = { he: { centerX: 0.8, centerY: 0.2, pixelScale: 3 }, sync: false };
+    h.workspaceView = savedView;
+    for (const [key, width, height] of [['HE_STAIN', 4000, 1500], ['IF_STAIN', 1200, 3000]]) {
+        if (key === 'IF_STAIN') {
+            await h.change('[data-align-layer]', key);
+            assert.deepEqual(h.workspaceView, {}, 'a new image starts fitted');
+        }
+        const img = h.$('[data-he-img]'), rect = img.getBoundingClientRect();
+        assert.equal(img.src, h.imageSources[key].src);
+        assert.deepEqual([img.naturalWidth, img.naturalHeight], [width, height]);
+        assert.deepEqual([+img.dataset.rawW, +img.dataset.rawH], [width, height]);
+        await h.click('[data-pick="he"]');
+        for (const [x, y] of [[0.5, 0.5], [width-0.5, 0.5], [0.5, height-0.5], [width-0.5, height-0.5]]) {
+            const clientX = rect.left + rect.width * x / width, clientY = rect.top + rect.height * y / height;
+            await h.fire('[data-he-img]', 'click', { clientX, clientY });
+            const marker = h.$('[data-he-svg]').querySelectorAll('circle').at(-1);
+            assert.ok(Math.abs(+marker.getAttribute('cx') - (clientX-rect.left)) < 1e-8);
+            assert.ok(Math.abs(+marker.getAttribute('cy') - (clientY-rect.top)) < 1e-8);
+            const click = h.context.alignmentThumbClickPoint({clientX,clientY}, img, h.section, 'MSI_A');
+            assert.ok(Math.hypot(click[0]-x, click[1]-y) < 1e-8);
+        }
+        for (const [clientX,clientY] of [[rect.left-1, rect.top+2], [rect.right, rect.bottom-1], [rect.left+2, rect.bottom]]) {
+            await h.fire('[data-he-img]', 'click', { clientX, clientY });
+        }
+        expectPoints(h, 4, 0);
+    }
+    await h.change('[data-align-layer]', 'HE_STAIN');
+    expectPoints(h, 4, 0); assert.deepEqual(h.workspaceView, savedView);
+    await h.click('[data-modal-cancel]'); assert.deepEqual(plain(h.section), h.initialSection);
+});
+
 test('physical Align thumbnails and clicks preserve native HE/MSI landmarks through rotation', async () => {
     for (const angle of [0, 90, 37]) {
         const h = await harness({physical:true, prepare(section) {
@@ -682,15 +725,24 @@ test('physical Align thumbnails and clicks preserve native HE/MSI landmarks thro
             section.meta.viewerTransform={rotMSI:angle,rotHE:angle};
         }});
         const before=plain(h.section);
+        await h.input('[data-offx-num]', 12);
+        const hePoint = [4.25, 1.5];
+        const displayPoint = h.mapSyncPoint('he', hePoint);
+        const T = JSON.parse(h.$('[data-he-img]').dataset.tMatrix), B = JSON.parse(h.$('[data-msi-img]').dataset.displayMatrix);
+        const expected = h.context.applyAffinePoint(B, ...h.context.applyAffinePoint(T, ...hePoint));
+        assert.ok(Math.hypot(displayPoint[0]-expected[0], displayPoint[1]-expected[1]) < 1e-9);
+        const back = h.mapSyncPoint('msi', displayPoint);
+        assert.ok(Math.hypot(back[0]-hePoint[0], back[1]-hePoint[1]) < 1e-9, 'sync follows the registered anatomical location in either direction');
         for(const side of ['msi','he']) {
             const img=h.$(`[data-${side}-img]`), B=JSON.parse(img.dataset.displayMatrix), ss=+img.dataset.ss;
             assert.ok(ss>0,'physical thumbnail has a bounded uniform backing scale');
             const lx=Math.hypot(B[0][0],B[1][0]),ly=Math.hypot(B[0][1],B[1][1]);
-            assert.ok(Math.abs(ly/lx-2)<1e-10,'physical pixel aspect is applied before rotation exactly once');
+            if (side === 'he') {
+                assert.deepEqual(B, identity(), 'the source photograph keeps its native orientation and pixel aspect');
+                assert.equal(ss, 1);
+            } else assert.ok(Math.abs(ly/lx-2)<1e-10,'MSI physical pixel aspect is applied before rotation exactly once');
             const sourcePoint=[2.5,1.5];
-            const T=img.dataset.tMatrix?JSON.parse(img.dataset.tMatrix):identity();
-            const D=h.context.applyAffinePoint(T,...sourcePoint);
-            const p=h.context.applyAffinePoint(B,...D),rect=img.getBoundingClientRect();
+            const p=h.context.applyAffinePoint(B,...sourcePoint),rect=img.getBoundingClientRect();
             const ev={clientX:rect.left+p[0]*ss/img.naturalWidth*rect.width,clientY:rect.top+p[1]*ss/img.naturalHeight*rect.height};
             const recovered=h.context.alignmentThumbClickPoint(ev,img,h.section,'MSI_A');
             recovered.forEach((v,i)=>assert.ok(Math.abs(v-sourcePoint[i])<1e-9,`${side} click returns original pixel coordinate`));

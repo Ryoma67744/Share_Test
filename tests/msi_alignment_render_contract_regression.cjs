@@ -58,6 +58,60 @@ function assertClose(a,b,message,tolerance=1e-8) {
     assert.equal(a.length,b.length);
     a.forEach((v,i)=>assert.ok(Math.abs(v-b[i])<tolerance,`${message}: ${a} != ${b}`));
 }
+// Exercise the previously clipped HE margins through the actual compositor.
+// Solid corner patches remain countable after rotation and piecewise resampling.
+async function checkOverlayExtents(c, nonlinear) {
+    const W=120,H=80,displayW=nonlinear?185:W,viewW=600,viewH=400;
+    const geometry={legacy:{W,H,confirmed:true,
+        x:nonlinear?[[0,0],[5,0],[9,4],[40,25],[120,70],[180,119],[184,119]]:[[0,0],[W-1,W-1]],
+        y:[[0,0],[H-1,H-1]]},displayGeometry:{W:displayW,H,x:{origin:0,step:1},y:{origin:0,step:1}}};
+    const sec={msiSeries:{MSI_A:{sourceGeometry:geometry}}};
+    const he=canvas(240,160),hc=he.getContext('2d');
+    hc.fillStyle='#ebc1cf';hc.fillRect(0,0,240,160);
+    const corners=[[237,30,30],[222,142,10],[12,162,109],[117,60,204]];
+    for(const [i,rgb] of corners.entries()) {
+        hc.fillStyle='rgb('+rgb.join(',')+')';
+        hc.fillRect(i%2?222:0,i>1?142:0,18,18);
+    }
+    const raw=await loadImage(he.toBuffer('image/png'));
+    const msi=canvas(displayW,H),mc=msi.getContext('2d');
+    mc.fillStyle='#025387';mc.fillRect(0,0,displayW,H);
+    mc.fillStyle='#a7d8ed';mc.fillRect(3,3,displayW-6,H-6);
+    const layer=nonlinear?c.displayAffineMultiply(c.displayRotation(33),[[-1.3,0,0],[0,.85,0],[0,0,1]]):c.displayRotation(0);
+    const b=c.bakeImageWithSectionTransform(msi,layer),msiImg=await loadImage(b.toBuffer('image/png'));
+    msiImg.dataset={ready:'true',ss:'1',rawW:String(displayW),rawH:String(H)};
+    let T=nonlinear?[[-.8,-.21,154],[-.17,1.1,-22],[0,0,1]]:[[1,0,-60],[0,1,-40],[0,0,1]];
+    Object.assign(c,{heImg:{dataset:{ready:'true'}},msiImg,imagesReady:true,overlayWarpCache:null,sec,state:{layerKey:'HE_STAIN'},
+        panel:{imageSources:{HE_STAIN:raw}},currentMatrix:()=>T,alignmentMsiKey:()=>'MSI_A',sectionTransform:()=>({matrix:layer})});
+    const overlay=canvas(viewW,viewH);
+    const draw=opacity=>c.renderCompositePreview({canvas:overlay,width:viewW,height:viewH,opacity});
+    draw(.55);
+    const pixels=overlay.getContext('2d').getImageData(0,0,viewW,viewH).data;
+    for(const rgb of corners) {
+        let count=0;
+        for(let i=0;i<pixels.length;i+=4)if(pixels[i+3]===255&&rgb.every((v,j)=>pixels[i+j]===v))count++;
+        assert.ok(count>20,'all four original HE corners survive the union fit, including off-grid warped corners');
+    }
+    if(nonlinear) {
+        const axis=c.alignmentWarpAxis(geometry.legacy.x,geometry.displayGeometry.x,displayW);
+        // The first and last rows each share a legacy index. Crossing the
+        // acquired edge remains continuous and uses the nearest positive slope.
+        assertClose([axis.toLegacy(-1),axis.toLegacy(0),axis.toLegacy(185),axis.toLegacy(186)],
+            [-.5,.5,119.5,119.5+49/60],'flat terminal cells have an invertible off-grid extension');
+        assertClose([axis.displayBound(-.5,false),axis.displayBound(119.5+49/60,true)],[-1,186],'off-grid HE fits both tails');
+        const allocated=[],doc=c.document;
+        c.document={createElement(){const out=canvas();allocated.push(out);return out;}};
+        try {
+            for(const scale of [.00001,1e6]) {
+                T=[[scale,0,1e8],[0,scale,-1e9],[0,0,1]];
+                draw(.4);
+                assert.ok(allocated.length>0&&allocated.every(a=>a.width<=viewW+viewH&&a.height<=viewW+viewH),
+                    'off-grid registration matrices allocate only screen-sized intermediate rasters');
+            }
+        } finally { c.document=doc; }
+    }
+    return overlay;
+}
 async function run({legacy=false,heAngle=5,msiAngle=0,physical=false,nonlinear=false}={}) {
     const h=await harness({physical,prepare(sec) {
         sec.meta.displayTransform={version:2,baseOrientation:'native-raster'};
@@ -119,23 +173,20 @@ async function run({legacy=false,heAngle=5,msiAngle=0,physical=false,nonlinear=f
         const frame=c.sectionMsiPhysicalFrame(sec,'MSI_A',ref.w,ref.h,matrix);
         return {matrix:frame?frame.matrix:matrix,frame};
     };
-    // The same HE->MSI->optional proportional warp orchestration as
-    // rebakeHeThumb, using real production warp/bake implementations.
-    const k=2,heInMsi=canvas(ref.w*k,ref.h*k),hc=heInMsi.getContext('2d');
-    hc.scale(k,k);hc.transform(T[0][0],T[1][0],T[0][1],T[1][1],T[0][2],T[1][2]);hc.drawImage(heRaw,0,0);
-    const warped=c.heMsiDisplayWarp(heRaw,T,sec,'MSI_A',k);
-    if(warped){hc.setTransform(1,0,0,1,0,0);hc.clearRect(0,0,heInMsi.width,heInMsi.height);hc.drawImage(warped,0,0,heInMsi.width,heInMsi.height);}
-    const ht=transform(resolved.effectiveDisplayKind),mt=transform('msi');
-    const heBaked=ht.frame?c.bakeMsiImageWithFrame(heInMsi,ht.frame,k):c.bakeImageWithSectionTransform(heInMsi,ht.matrix);
+    const mt=transform('msi');
     const msiBaked=mt.frame?c.bakeMsiImageWithFrame(msiRaw,mt.frame,1,false):c.bakeImageWithSectionTransform(msiRaw,mt.matrix,false,false,false);
-    const heImg=await loadImage(heBaked.toBuffer('image/png')),msiImg=await loadImage(msiBaked.toBuffer('image/png'));
-    heImg.dataset={ready:'true',tMatrix:JSON.stringify(T)};msiImg.dataset={ready:'true'};
-    c.stampThumbDataset(heImg,ref.w,ref.h,ht,k);c.stampThumbDataset(msiImg,ref.w,ref.h,mt,1);
-    c.heImg=heImg;c.msiImg=msiImg;c.imagesReady=true;
+    const msiImg=await loadImage(msiBaked.toBuffer('image/png'));
+    msiImg.dataset={ready:'true'};
+    c.stampThumbDataset(msiImg,ref.w,ref.h,mt,1);
+    heRaw.dataset={ready:'true',coordinateSpace:'he-original',ss:'1',rawW:'400',rawH:'1600',
+        displayMatrix:'[[1,0,0],[0,1,0],[0,0,1]]',tMatrix:JSON.stringify(T)};
+    Object.assign(c,{heImg:heRaw,msiImg,imagesReady:true,overlayWarpCache:null,sec,state:{layerKey:'HE_STAIN'},
+        panel:{imageSources:{HE_STAIN:heRaw}},currentMatrix:()=>T,alignmentMsiKey:()=>'MSI_A',
+        sectionTransform:kind=>transform(kind==='he'?resolved.effectiveDisplayKind:kind)});
     const overlay=canvas(900,800);c.renderCompositePreview({canvas:overlay,width:900,height:800,opacity:.5});
-    for(const [img,isHe] of [[heImg,true],[msiImg,false]]) {
+    for(const [img,isHe] of [[heRaw,true],[msiImg,false]]) {
         const B=JSON.parse(img.dataset.displayMatrix),ss=Number(img.dataset.ss);
-        const p=c.applyAffinePoint(B,...mapped);
+        const p=isHe?points[0].map(v=>2*v):c.applyAffinePoint(B,...mapped);
         img.getBoundingClientRect=()=>({left:20,top:30,width:img.naturalWidth/ss,height:img.naturalHeight/ss});
         assertClose(c.alignmentThumbClickPoint({clientX:20+p[0],clientY:30+p[1]},img,sec,'MSI_A'),
             isHe?points[0].map(v=>2*v):points[0],'actual displayed marker clicks invert to saved raw coordinates');
@@ -243,6 +294,12 @@ async function run({legacy=false,heAngle=5,msiAngle=0,physical=false,nonlinear=f
         other.frame.version='msi-alignment-frame-v2';other.renderContract=contract;other.alignmentContractVersion=2;
         assert.equal(c.resolveHeMsiAlignment(mixed,'HE_STAIN','MSI_RATIO_registration-test',panel).status,'ready');
     }
+    if(!legacy&&heAngle===5&&msiAngle===0&&physical) await checkOverlayExtents(c,nonlinear);
+    if(!legacy&&!physical) {
+        const capped={dataset:{}};
+        c.stampThumbDataset(capped,12000,128,{matrix:c.displayRotation(0)},1);
+        assert.equal(Number(capped.dataset.ss),6144/12000,'MSI thumb metadata uses the actual backing resolution');
+    }
     h.assertNumericUnchanged();
     return distances;
 }
@@ -251,6 +308,6 @@ async function run({legacy=false,heAngle=5,msiAngle=0,physical=false,nonlinear=f
     const results=[];
     for(const options of [{legacy:true},{},{heAngle:5,msiAngle:5},{physical:true},{physical:true,nonlinear:true}])
         results.push(await run(options));
-    console.log('PASS real-canvas HE/MSI registration contracts, clicks, Save/reload, native export and physical/nonlinear display');
+    console.log('PASS real-canvas HE/MSI registration contracts, clicks, Save/reload, native export and physical/nonlinear display, four HE corners and bounded off-grid rendering');
     console.log(JSON.stringify(results,null,2));
 })().catch(error=>{console.error(error);process.exitCode=1;});
