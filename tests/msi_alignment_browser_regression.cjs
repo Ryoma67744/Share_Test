@@ -225,13 +225,13 @@ async function main() {
                     ymin=Math.min(ymin,y);ymax=Math.max(ymax,y);
                 }
                 const xmid=(xmin+xmax)/2,ymid=(ymin+ymax)/2;
-                const sums=Array.from({length:5},()=>[0,1].map(()=>({w:0,x:0,y:0})));
+                const sums=Array.from({length:4},()=>[0,1].map(()=>({w:0,x:0,y:0})));
                 for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++) {
                     const k=4*(y*c.width+x);
                     if(d[k+2]||(!d[k]&&!d[k+1]))continue;
                     const region=Number(x>xmid)+2*Number(y>ymid);
-                    for(const slot of [region,4])for(const channel of [0,1]) {
-                        const w=d[k+channel]*d[k+3]/255,acc=sums[slot][channel];
+                    for(const channel of [0,1]) {
+                        const w=d[k+channel]*d[k+3]/255,acc=sums[region][channel];
                         acc.w+=w;acc.x+=(x+.5)*w;acc.y+=(y+.5)*w;
                     }
                 }
@@ -245,11 +245,13 @@ async function main() {
                     }));
                     return Math.hypot(red.x/red.w-green.x/green.w,red.y/red.w-green.y/green.w)/scale;
                 });
-                return {total:distances.pop(),perMarker:distances};
+                // Give each landmark one vote. Different antialiasing weights can
+                // shift a whole-image centroid even when every pair is aligned.
+                return {rms:Math.hypot(...distances)/Math.sqrt(distances.length),perMarker:distances};
             },kind);
         }
         const overlay=await rasterDistance('modal');
-        assert.ok(overlay.total<1.5&&overlay.perMarker.every(v=>v<3),'modal raster alignment: '+JSON.stringify(overlay));
+        assert.ok(overlay.perMarker.every(v=>v<1.5),'modal raster alignment: '+JSON.stringify(overlay));
         await page.locator('[data-save]').click();await page.waitForFunction(()=>window.__alignmentDone);
         const saved=await page.evaluate(async()=>{
             const section=App.project.sections[0],panel=App.panels.get(section.id);
@@ -267,7 +269,7 @@ async function main() {
         }
         assert.equal(saved.angles.rotHE,5);assert.equal(saved.angles.rotMSI,0);
         assert.ok(saved.residual<.5,'actual pointer round-trip fit remains accurate');assert.deepEqual(saved.values,fixture.values);
-        const mainDistance=await rasterDistance('main');assert.ok(mainDistance.total<.6&&mainDistance.perMarker.every(v=>v<1.25),
+        const mainDistance=await rasterDistance('main');assert.ok(mainDistance.perMarker.every(v=>v<.6),
             'saved main renderer: '+JSON.stringify(mainDistance));
         await page.reload();
         await page.waitForFunction(id=>typeof App!=='undefined'&&App.project?.id===id&&App.panels.size===1,fixture.id);
@@ -283,7 +285,7 @@ async function main() {
         assert.equal(restored.contract,'msi-shared-display-v1');assert.equal(restored.angles.rotHE,5);assert.equal(restored.angles.rotMSI,0);
         assert.deepEqual(restored.values,fixture.values);assert.deepEqual(restored.T,saved.T);
         await installSyntheticPalette();
-        const reloaded=await rasterDistance('main');assert.ok(reloaded.total<.6&&reloaded.perMarker.every(v=>v<1.25),
+        const reloaded=await rasterDistance('main');assert.ok(reloaded.perMarker.every(v=>v<.6),
             'reloaded main renderer: '+JSON.stringify(reloaded));
         const persisted=await registrationAndOriginal();assert.deepEqual(persisted.hash,initial.hash);
         await openAlignment();await expectEntirePhotograph();await showOverlayWithAllCorners();
