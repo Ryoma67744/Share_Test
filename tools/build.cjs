@@ -15,7 +15,7 @@ const VIEWER_FILES = [
   'msi-ratio-core.js', 'msi-ratio-model.js', 'msi-ratio-worker.js', 'msi-ratio-app.js', 'msi-ratio.css',
   'msi-analysis-core.js', 'msi-analysis-service.js', 'msi-analysis-worker.js',
   'msi-display-settings.js', 'msi-display-geometry.js', 'msi-smoothing.js', 'msi-roi-range.js', 'msi-spatial-groups.js',
-  'alignment-session.js', 'alignment-workspace.css', 'alignment-workspace.js',
+  'alignment-transform.js', 'alignment-session.js', 'alignment-workspace.css', 'alignment-workspace.js',
   'fixed-colors.js', 'index.html', 'roi-cursor.svg', 'roi-media-app.js',
   'roi-media-model.js', 'roi-media-msi.js', 'roi-media-service.js',
   'roi-media-viewer.css', 'roi-media-viewer.js', 'section-visibility.js',

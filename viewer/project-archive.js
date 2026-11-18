@@ -24,6 +24,11 @@
         if(!model)throw new Error(_uiT("比の保存形式を検証できません。アプリを再読み込みしてください。"));
         return model;
     }
+    function alignmentModel() {
+        const model=typeof module==='object'&&module.exports?require('./alignment-transform.js'):root.MsiAlignmentTransform;
+        if(!model)throw new Error(_uiT("位置合わせの保存形式を検証できません。アプリを再読み込みしてください。"));
+        return model;
+    }
     const identifier = value => typeof value === 'string' && value.length > 0
         && !['__proto__', 'constructor', 'prototype'].includes(value);
     function cancelled(signal) {
@@ -61,6 +66,84 @@
         for (const [key, item] of out) { if (!identifier(key)) throw new Error('Invalid ZIP identifier: ' + key); object(item, label); }
         return out;
     }
+    const alignmentCollections = ['bySource', 'byFrame', 'sharedByCoordinate', 'byGroup'];
+    const has = (value, key) => Object.prototype.hasOwnProperty.call(value || {}, key);
+    function alignmentRoots(value) {
+        const result = [];
+        if (!value || typeof value !== 'object') return result;
+        if (has(value, 'alignment')) result.push(value.alignment);
+        if (value.meta && has(value.meta, 'alignment')) result.push(value.meta.alignment);
+        for (const section of Array.isArray(value.sections) ? value.sections : []) {
+            if (section && section.meta && has(section.meta, 'alignment')) result.push(section.meta.alignment);
+        }
+        return result;
+    }
+    function markedAlignment(record) {
+        return record && typeof record === 'object' && (has(record, 'renderContract')
+            || has(record, 'alignmentContractVersion')
+            || (record.frame != null && record.frame.version != null
+                && record.frame.version !== 'msi-alignment-frame-v1'));
+    }
+    // Capability detection deliberately visits only alignment records. Never
+    // recursively scan image bytes, source arrays, or unrelated project data.
+    // Unknown/partial markers also require the newer reader/server capability.
+    function requiresAlignmentV2(value) {
+        const visited = new Set();
+        function record(value) {
+            if (!value || typeof value !== 'object' || visited.has(value)) return false;
+            visited.add(value);
+            if (markedAlignment(value)) return true;
+            for (const key of alignmentCollections) if (value[key] && typeof value[key] === 'object') {
+                for (const child of Object.values(value[key])) if (record(child)) return true;
+            }
+            return false;
+        }
+        for (const root of alignmentRoots(value)) if (root && typeof root === 'object') {
+            for (const item of Object.values(root)) if (record(item)) return true;
+        }
+        return false;
+    }
+    function validateAlignmentContracts(value, format) {
+        let corrected = false;
+        function collection(value, label) {
+            object(value, label);
+            for (const [key, item] of Object.entries(value)) {
+                if (!identifier(key)) throw new Error('Invalid ZIP identifier: ' + key);
+                // Historical deletion placeholders are not registrations.
+                // Retain their null values without upgrading or rejecting an
+                // otherwise readable legacy archive; required v2 fields below
+                // still reject null on a declared, non-null record.
+                if (item != null) record(item);
+            }
+        }
+        function record(value) {
+            object(value, 'alignment record');
+            if (markedAlignment(value)) {
+                corrected = true;
+                if (value.alignmentContractVersion !== 2 || value.renderContract !== 'msi-shared-display-v1'
+                    || value.alignment_raster_basis !== 'legacy-msi-pixel-edges-v1'
+                    || !alignmentModel().valid(value.T_he_to_msi)
+                    || !value.frame || typeof value.frame !== 'object' || Array.isArray(value.frame)
+                    || value.frame.version !== 'msi-alignment-frame-v2'
+                    || typeof value.frame.key !== 'string' || !value.frame.key) {
+                    throw new Error('Unsupported or invalid ZIP alignment contract');
+                }
+            }
+            for (const key of alignmentCollections) if (value[key] != null) {
+                collection(value[key], 'alignment ' + key);
+            }
+        }
+        for (const root of alignmentRoots(value)) if (root != null) {
+            collection(root, 'alignment');
+        }
+        if (corrected && format != null && format !== 'desi_data_share_v3') {
+            throw new Error('Corrected alignment requires ZIP format desi_data_share_v3');
+        }
+        return corrected;
+    }
+    function formatForProject(project) {
+        return validateAlignmentContracts(project) ? 'desi_data_share_v3' : 'desi_data_share_v2';
+    }
     async function bytes(file) {
         const value = await file.async('uint8array');
         if (typeof value === 'string') return new TextEncoder().encode(value);
@@ -80,6 +163,7 @@
     }
     async function prepareImport(zip, originalDoc, options = {}) {
         const doc = clone(object(originalDoc, 'manifest')), overrides = new Map(), required = new Set();
+        validateAlignmentContracts(doc, doc.format);
         // Inputs and section IDs are reconstructed later. Validate only the
         // metadata contract here; unresolved references remain visible to users.
         for(const meta of [doc.meta,doc.offlineSettings && doc.offlineSettings.meta])
@@ -107,6 +191,7 @@
             for (const ap of atlasPaths) {
                 cancelled(options.signal);
                 const atlas = object(JSON.parse(await zip.file(ap).async('string')), 'atlas');
+                validateAlignmentContracts(atlas, doc.format);
                 addSection(atlas.id);
                 const dir = ap.slice(0, -'atlas.json'.length), files = Object.fromEntries(entries(atlas.msiFiles, 'source'));
                 const series = entries(atlas.msiSeries, 'MSI'), groups = new Map();
@@ -159,7 +244,7 @@
                 atlas.msiFiles = normalizedFiles;
                 overrides.set(ap, JSON.stringify(atlas));
             }
-        } else if (doc.format === 'desi_data_share_v2') {
+        } else if (doc.format === 'desi_data_share_v2' || doc.format === 'desi_data_share_v3') {
             if (!Array.isArray(doc.sections)) throw new Error('Invalid ZIP sections');
             for (const section of doc.sections) {
                 cancelled(options.signal); addSection(section.id);
@@ -300,6 +385,7 @@
     }
     async function beginExport(project, storage, options = {}) {
         const snapshot = clone(project), signature = fingerprint(project), records = new Map(), media = new Map(), missing = [];
+        validateAlignmentContracts(snapshot);
         if(options.ratioRegistry!==undefined) {
             snapshot.meta=snapshot.meta || {};
             snapshot.meta.msiRatios=clone(options.ratioRegistry);
@@ -369,6 +455,7 @@
         } catch (error) { await close().catch(() => {}); throw error; }
     }
     function verifyExport(zip, manifest) {
+        validateAlignmentContracts(manifest, manifest.format);
         const present = value => { const p = path(value); if (!zip.file(p)) throw new Error('ZIP reference is not bundled: ' + p); };
         for (const section of manifest.sections || []) {
             for (const image of Object.values(section.images || {})) { present(image.fullPath); if (image.alignedPath) present(image.alignedPath); }
@@ -378,5 +465,6 @@
         }
         for (const item of ((manifest.roiMedia && manifest.roiMedia.items) || [])) present(item.sourcePath);
     }
-    return {clone, provenance, registeredSource, qualityLabel, prepareImport, summary, summaryHtml, withImport, recoverImports, beginExport, verifyExport};
+    return {clone, provenance, registeredSource, qualityLabel, prepareImport, summary, summaryHtml, withImport, recoverImports,
+        beginExport, verifyExport, requiresAlignmentV2, formatForProject, validateAlignmentContracts};
 });

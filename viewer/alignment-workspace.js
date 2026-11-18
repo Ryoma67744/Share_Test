@@ -152,6 +152,8 @@
         const landmarkFieldset = landmark && landmark.closest('fieldset');
         const pointControls = landmark && landmark.parentElement;
         if (pointControls) relocate(pointControls, toolbar);
+        const fitStatus=q('[data-fit-status]');
+        if(fitStatus){relocate(fitStatus,toolbar);fitStatus.style.flexBasis='100%';}
         const reset = q('[data-reset]');
         if (reset) relocate(reset, toolbar);
         for (const selector of ['[data-qc]', '[data-auto-result]', '[data-lm-table]']) relocate(q(selector), detailsBody);

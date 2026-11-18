@@ -248,6 +248,55 @@ const stamp = input => Session.stableKey(input);
     assert.throws(()=>store.serialize(),/closed/);
 }
 
+// A v2 render contract does not change the raw coordinate frame or draft key.
+// Canonical matrices, fit policy, and provenance survive per-source switching
+// and participate in dirty tracking, independently of view-only changes.
+{
+    const Transform = require('../viewer/alignment-transform.js');
+    const measured = {version:'msi-alignment-frame-v1',key:'authoritative-raw-frame',confirmed:true};
+    const corrected = Object.assign({},measured,{version:'msi-alignment-frame-v2'});
+    assert.equal(Session.frameKey(corrected),Session.frameKey(measured));
+    assert.equal(Session.contextKey(context({frame:corrected}),'s'),Session.contextKey(context({frame:measured}),'s'));
+    const canonical = Transform.restore(Object.assign(rawState(),{
+        T_he_to_msi:[[0.01,0.002,10],[-0.003,0.02,-4],[0,0,1]],fitMode:'manual'}));
+    const baseline = stamp(canonical);
+    const store = Session.create({sectionId:'s'});
+    const active = store.activate(context({frame:corrected}),canonical);
+    store.capture(Transform.restore(active.state));
+    assert.equal(store.isDirty(),false,'opening/normalizing an affine never projects or upgrades it');
+    assert.deepEqual(store.serialize().entries,[]);
+    store.update(Transform.upgrade(active.state,'import'));
+    const secondContext = context({frame:frame({sourceRef:'another-measurement'})});
+    const automatic = store.activate(secondContext,Object.assign(rawState(),{fitMode:'automatic'}));
+    assert.equal(automatic.state.fitMode,'automatic');
+    assert.equal(store.activate(context({frame:measured}),rawState()),active);
+    assert.equal(active.state.fitMode,'manual');
+    const exported = store.serialize().entries[0].state;
+    assert.deepEqual(exported.T_he_to_msi,canonical.T_he_to_msi);
+    assert.equal(exported.renderContract,'msi-shared-display-v1');
+    assert.equal(exported.alignmentContractVersion,2);
+    assert.equal(exported.transformModel,'affine');
+    assert.equal(exported.fitMode,'manual');
+    assert.equal(exported.fitProvenance.method,'import');
+    exported.T_he_to_msi[0][0] = 999;
+    exported.fitProvenance.method = 'tampered-export';
+    assert.equal(active.state.T_he_to_msi[0][0],0.01);
+    assert.equal(active.state.fitProvenance.method,'import');
+    assert.equal(stamp(canonical),baseline);
+    for (const [field,value] of [
+        ['T_he_to_msi',[[1,0,12],[0,1,13],[0,0,1]]],
+        ['fitMode','automatic'],['renderContract','msi-shared-display-v1'],
+        ['alignmentContractVersion',2],['transformModel','affine'],
+        ['fitProvenance',{version:1,method:'manual'}]
+    ]) {
+        const isolated = Session.create({sectionId:'s'});
+        isolated.activate(context(),rawState());
+        isolated.update({[field]:value});
+        assert.equal(isolated.isDirty(),true,field+' must participate in dirty tracking');
+        assert.deepEqual(isolated.serialize().entries[0].state[field],value);
+    }
+}
+
 // Browser global is available without a module loader; the pure module itself
 // does not require browser APIs, IndexedDB, project state or network access.
 {

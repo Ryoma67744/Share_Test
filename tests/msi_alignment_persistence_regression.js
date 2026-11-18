@@ -19,6 +19,7 @@ const store=new Map(),calls=[],notices=[];
 let remoteVersion=4,conflictCode='PT409';
 const App={shareMode:{token:'token'},panels:new Map(),_refreshShareAlignments:async()=>{}};
 const ctx=displayContext({JSON,Object,Array,Map,Set,Number,Math,console,App,SectionPanel:{},
+  ProjectArchive:require('../viewer/project-archive.js'),
   _shareAlignBySection:store,_shareAlignServerMissing:false,_shareAlignWriteGen:0,
   showToast:s=>notices.push(s),_isMissingRpc:()=>false,
   SupabaseClient:{async upsertShareAlignment(token,id,payload,version) {
@@ -261,18 +262,18 @@ assert.equal((html.match(/alignmentImageReference:(?:ref|img|ent)\.alignmentImag
   // Execute PNG export itself: resolve only after lazy geometry loads and pin
   // the original MSI key while the user switches to a different-sized image.
   vm.runInContext(fn('bakeAlignedHeToMsiPng'),ctx);
-  let focus='MSI_C',loadCount=0,resolveKey=null,paintedTransform=null;
+  let focus='MSI_C',loadCount=0,paintedTransform=null;
   const exportSection=plain(commonSection);delete exportSection.msiSeries.MSI_C.sourceGeometry;
   const exportPanel={...commonPanel,section:exportSection,msiValueRasters:new Map(),
     _pickRefMsiKey:()=>focus,
     async ensureMsiLayerLoaded(key){loadCount++;assert.equal(key,'MSI_C');focus='MSI_A';this.msiValueRasters.set(key,{sourceGeometry:plain(geometry)});return true;},
-    msiRasterSize:key=>key==='MSI_C'?{w:2,h:2}:{w:99,h:100},
-    _resolveTHeToMsi(he,key){resolveKey=key;assert.equal(loadCount,1);return ctx.resolve.call(this,he,key);}};
+    msiRasterSize:key=>key==='MSI_C'?{w:2,h:2}:{w:99,h:100}};
   ctx._ensureHeImage=async()=>({complete:true,naturalWidth:20,naturalHeight:20});
   ctx.get2dContext=()=>({transform(...args){paintedTransform=args;},drawImage(){}});
   ctx.document={createElement:()=>({toBlob:cb=>cb({type:'image/png'})})};
   const png=await ctx.bakeAlignedHeToMsiPng(exportPanel,exportSection,'HE_STAIN');
-  assert.ok(png);assert.equal(png.w,2);assert.equal(png.h,2);assert.equal(resolveKey,'MSI_C');
+  assert.ok(png);assert.equal(png.w,2);assert.equal(png.h,2);assert.equal(loadCount,1);
+  assert.equal(png.alignedFrame.msiKey,'MSI_C');assert.equal(png.alignedFrame.basis,'legacy-msi-pixel-edges-v1');
   assert.deepEqual(paintedTransform,[1,0,0,1,11,12]);
   focus='MSI_C';loadCount=0;
   ctx._ensureHeImage=async()=>{exportSection.images.HE_STAIN.blobId='replaced-during-export';return {};};

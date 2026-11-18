@@ -6,6 +6,12 @@ Export ZIP captures the registered images, numeric sources, ROI photographs, and
 
 Import ZIP validates file references, sections, and ROI relationships before storing data. The review shows provenance counts. Recovery creates an independent project; it does not overwrite an existing project. Cancel stops at the next checkpoint. Failed or cancelled recovery cleans up only the temporary files created by that recovery operation.
 
+## v3 ZIP archives with corrected alignment
+
+Projects containing the corrected HE/IF–MSI rendering contract use `desi_data_share_v3`. Images, numeric sources, and ROIs retain the v2 layout. Alignment keeps its original matrix and coordinate frame; a general affine transform is not replaced with a uniform scale and rotation. Import validates the rendering contract, contract version, coordinate frame, and matrix before writing originals or a project. Unknown contracts and invalid matrices stop recovery.
+
+Applications supporting only v1/v2 reject v3 archives, preventing them from displaying corrected alignments with the old rendering rules. Open v3 archives in a compatible release. Projects without the corrected contract can still be exported as v2, and existing v1/v2 archives remain importable. Changing a corrected archive's format label to v2 does not make it acceptable to the new importer.
+
 ## Older formats
 
 - Initial v1 archives with `project.json` and per-section `atlas.json` are supported. Identical per-molecule copies share one restored original. Different byte sequences under one historical source ID are preserved as separate source variants.
