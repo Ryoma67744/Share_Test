@@ -71,7 +71,11 @@ async function main(){
     const writeError={code:'0A000',message:'spatial_alignment_downgrade: reload the current application',
         details:JSON.stringify({sectionName:'Section A',missing:[{layer:'HE_STAIN',groupId:'MSI-A'}]})};
     missingGroup.c.api.upsertShareAlignment=async()=>{throw writeError;};
-    assert.equal(await missingGroup.c.pushShareAlignment(section,{payload,expectedVersion:4}),false);
+    const editedLocations=['IF image A → MSI · acquisition A','HE image B → MSI · acquisition B'];
+    assert.equal(await missingGroup.c.pushShareAlignment(section,{payload,editedLocations,expectedVersion:4}),false);
+    const [attempted,protectedRecords]=alerts[0].split('公開版にある位置合わせ');
+    assert.match(attempted,/IF image A/);assert.match(attempted,/HE image B/);
+    assert.doesNotMatch(attempted,/MSI-A/);assert.match(protectedRecords,/MSI-A/);
     assert.match(alerts[0],/Section A/);assert.match(alerts[0],/HE_STAIN/);assert.match(alerts[0],/MSI-A/);
     assert.doesNotMatch(alerts[0],/未公開の変更を開いて/,'shared viewer has no master review button');
     assert.equal(missingGroup.c._shareAlignBySection.size,0);

@@ -40,6 +40,8 @@ async function main(){
   assert.match(await page.locator('[data-local-id="local-copy"] .badge.local').textContent(),/このPCのみ／未公開/);
   assert.equal(await page.locator('[data-local-id="local-copy"] [data-action="refresh-share"]').count(),0);
   assert.equal(await page.locator('[data-slug="server-one"] [data-action="refresh-share"]').count(),0);
+  assert.equal(await page.locator('[data-local-id="local-copy"] [data-action="review-changes"]').count(),1);
+  assert.equal(await page.locator('[data-slug="server-one"] [data-action="review-changes"]').count(),0);
   let childPromise=context.waitForEvent('page');await page.locator('[data-local-id="local-copy"] [data-action="open-local"]').click();let child=await childPromise;await child.waitForLoadState();
   assert.equal(child.url(),origin+'/Share_Test/viewer/index.html?project=local-copy');assert.equal(page.url(),parentUrl);assert.equal(await page.locator('[data-folder-body="folder-a"]').isVisible(),true);await child.close();await page.bringToFront();
   // A shared local copy can check for changes even while it has unpublished

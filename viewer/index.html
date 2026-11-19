@@ -9,7 +9,7 @@
 <script src="../app-i18n-viewer.js"></script>
 <script src="../app-i18n-viewer-modules.js"></script>
 <script src="../project-store-safety.js"></script>
-<script src="../project-navigation.js"></script>
+<script src="../project-navigation.js?v=unpublished-1"></script>
 <script src="share-refresh.js"></script>
 <script src="source-loader.js"></script>
 <script src="msi-display-settings.js"></script>
@@ -14707,7 +14707,7 @@ async function pushShareAlignment(sec, options) {
                         missing:PublishSafety.missingAlignmentGroups(saved.payload, payload)}];
                 } catch (_) { /* The existing section label remains available without the cloud read. */ }
             }
-            if (current()) alert(_spatialPublishWarning(details, sec));
+            if (current()) alert(_spatialPublishWarning(details, sec, options.editedLocations));
             return false;
         }
         console.warn('[share align] 保存に失敗しました', e);
@@ -16624,6 +16624,7 @@ const Wizards = {
             if (!activeDraft) return;
             const revision=activeDraft.editRevision;
             session.capture(state, workspace && activeDraft.key === displayedDraftKey ? workspace.getViewState() : activeDraft.view);
+            if (activeDraft.editRevision !== revision) activeDraft.context.channel = state.msiKey;
             if((activeDraft.context.scope==='shared'||activeDraft.context.scope==='group')&&activeFrame&&activeFrame.confirmed&&activeDraft.editRevision!==revision) {
                 activeDraft.context.frame=clone(activeFrame);
                 activeDraft.frameKey=MsiAlignmentSession.frameKey(activeFrame);
@@ -16732,7 +16733,7 @@ const Wizards = {
                 const frame = alignmentFrameDescriptor(sec, referenceKey, panel);
                 if(!activeDraft&&!persistedSourceMode&&!perSourceAlign&&frame.spatialGroup&&!isTicKey(nextKey))
                     nextMode=groupMode(frame.spatialGroup.groupId);
-                const context = { layerKey:nextLayer, imageIdentity:alignmentImageIdentity(sec.images[nextLayer]),
+                const context = { layerKey:nextLayer, channel:nextKey, imageIdentity:alignmentImageIdentity(sec.images[nextLayer]),
                     scope:nextMode === '__all__' ? 'shared' : isGroupMode(nextMode) ? 'group' : 'source', frame,
                     groupId:isGroupMode(nextMode)&&frame.spatialGroup?frame.spatialGroup.groupId:null,
                     groupFrameKey:isGroupMode(nextMode)&&frame.spatialGroup?frame.spatialGroup.frameKey:null,
@@ -17571,7 +17572,20 @@ const Wizards = {
             target.meta.alignmentSourceMode = state.sourceMode;
             target.meta.alignmentHeKey = state.layerKey;
             if (sec.meta.perSourceAlign != null) target.meta.perSourceAlign = sec.meta.perSourceAlign;
-            return captureSectionAlignment(target);
+            // serialize() returns dirty drafts only. Keep the user's edit locations
+            // separate from the server records that the rejected write would omit.
+            const editedLocations = shareAlign ? serialized.entries.map(({context}) => {
+                const layer = context.layerKey;
+                const image = sec.images?.[layer]?.filename;
+                const source = sourceLabels.get(context.frame?.sourceFileId) || context.frame?.sourceFileId;
+                const channel = context.channel && (isTicKey(context.channel) ? ticKeyLabel(context.channel) : formatDisplayName(context.channel));
+                const scope = context.scope === 'group' ? context.groupId : context.scope === 'shared'
+                    ? (globalThis.AppI18n ? AppI18n.t('全ソース共通') : '全ソース共通') : null;
+                const imageLabel = [layer, image !== layer && image].filter(Boolean).join(' / ');
+                const msiLabel = [...new Set([source, channel, scope].filter(Boolean))].join(' / ');
+                return [imageLabel, msiLabel && 'MSI · ' + msiLabel].filter(Boolean).join(' → ');
+            }).filter(Boolean) : [];
+            return {payload:captureSectionAlignment(target), editedLocations:[...new Set(editedLocations)]};
         };
         const origClose = card._close;
         card._close = val => {
@@ -17594,14 +17608,14 @@ const Wizards = {
             if (!imagesReady || !stillOpen() || saving) return;
             saving = true; setLoading(!imagesReady);
             try {
-                const payload = buildSavePayload();
+                const {payload, editedLocations} = buildSavePayload();
                 if (shareAlign) {
                     if(Object.values(payload.alignment||{}).some(layer=>Object.keys(layer.byGroup||{}).length)) {
                         if(typeof ensureSpatialServerSupport!=='function')throw new Error((globalThis.AppI18n ? AppI18n.t("共通座標の保存機能を確認できません。画面を更新してください。") : '共通座標の保存機能を確認できません。画面を更新してください。'));
                         await ensureSpatialServerSupport();
                     }
                     if (!stillOpen()) return;
-                    const ok = await pushShareAlignment(realSec,{payload,expectedVersion:baseShareVersion,isCurrent:stillOpen});
+                    const ok = await pushShareAlignment(realSec,{payload,editedLocations,expectedVersion:baseShareVersion,isCurrent:stillOpen});
                     if (!ok) return;
                     if (!stillOpen()) return;
                     applySectionAlignment(realSec,payload);
@@ -19867,8 +19881,10 @@ function _spatialErrorDetail(error) {
     return Array.isArray(detail?.missing) && detail.missing.length ? detail : null;
 }
 
-function _spatialPublishWarning(details, section) {
-    const lines = [_changeText('公開版にある位置合わせが今回の保存内容から抜けています。')];
+function _spatialPublishWarning(details, section, editedLocations = []) {
+    const lines = [];
+    if (editedLocations.length) lines.push(_changeText('この画面で編集した位置合わせ'), ...editedLocations, '');
+    lines.push(_changeText('公開版にある位置合わせが今回の保存内容から抜けています。'));
     const sections = details.length ? details : (section ? [{sectionName:section.displayName || section.id}] : []);
     for (const detail of sections) {
         const name = detail.sectionName || section?.displayName || detail.clientSectionId || section?.id || detail.sectionId;

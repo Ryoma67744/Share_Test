@@ -3,6 +3,7 @@
   if(global.AppI18n)global.AppI18n.register("viewer", {
   "未公開の変更": "Unpublished changes",
   "公開版との差分": "Differences from the published version",
+  "この画面で編集した位置合わせ": "Alignments edited in this window",
   "変更箇所": "Changed items",
   "このPCのみ": "This PC only",
   "公開版のみ": "Published version only",

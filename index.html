@@ -9,7 +9,7 @@
 <script src="app-i18n-manage.js"></script>
 <link rel="stylesheet" href="help.css?v=2026-11-16.1">
 <script src="project-store-safety.js"></script>
-<script src="project-navigation.js"></script>
+<script src="project-navigation.js?v=unpublished-1"></script>
 <script src="viewer/msi-display-settings.js"></script>
 <script src="offline/offline.js"></script>
 <script defer src="help.js?v=2026-11-16.1"></script>
@@ -1660,6 +1660,7 @@ function rowHtml(r) {
     const stypes = Array.isArray(memo.sampleTypes) ? memo.sampleTypes : [];
     const url = (r.local && r.local.shareInfo && r.local.shareInfo.url) || '';
     const canCheckShare = window.DESI_OFFLINE !== true && !!(r.local && r.local.shareInfo && r.local.shareInfo.slug);
+    const canReviewChanges = window.DESI_OFFLINE !== true && r.local && (!slug || r.local.publishPending);
     const badge = r.kind === 'server-only'
         ? '<span class="badge server">Server only</span>'
         : (r.kind === 'local+server' ? '<span class="badge both">Local + Server</span>'
@@ -1683,7 +1684,7 @@ function rowHtml(r) {
               ${r.local
                   ? "<button type=\"button\" class=\"btn primary\" data-action=\"open-local\" title=\"新しいタブで開きます\" data-i18n-title=\"新しいタブで開きます\">Open</button>"
                   : "<button type=\"button\" class=\"btn primary\" data-action=\"open-server\" title=\"サーバから取り込み、新しいタブの master mode で開きます (master password 要)\" data-i18n-title=\"サーバから取り込み、新しいタブの master mode で開きます (master password 要)\">Open (master)</button>"}
-              ${canCheckShare && r.local.publishPending ? '<button type="button" class="btn" data-action="review-changes" data-i18n="未公開の変更を確認">' + uiH("未公開の変更を確認") + '</button>' : ''}
+              ${canReviewChanges ? '<button type="button" class="btn" data-action="review-changes" data-i18n="未公開の変更を確認">' + uiH("未公開の変更を確認") + '</button>' : ''}
               ${canCheckShare ? "<button type=\"button\" class=\"btn\" data-action=\"refresh-share\" title=\"新しいタブで共有版の更新を確認します。ローカルの編集は保持します\" data-i18n-title=\"新しいタブで共有版の更新を確認します。ローカルの編集は保持します\"><span data-i18n=\"共有の最新版を確認\">共有の最新版を確認</span></button>" : ''}
               ${(!r.local && slug) ? '<a class="btn" data-action="open-share" href="' + safe(ProjectNavigation.shareUrl(slug)) + "\" target=\"_blank\" rel=\"noopener\" title=\"閲覧専用 share view を新しいタブで開きます\" data-i18n-title=\"閲覧専用 share view を新しいタブで開きます\">Share view</a>" : ''}
               ${window.DESI_OFFLINE === true ? '' : (url ? '<button type="button" class="btn" data-action="copy-url">Copy URL</button>' : (r.local ? "<button type=\"button\" class=\"btn\" disabled title=\"Publish to share してから URL を取得してください\" data-i18n-title=\"Publish to share してから URL を取得してください\"><span data-i18n=\"URL なし\">URL なし</span></button>" : ''))}
@@ -1920,7 +1921,7 @@ async function renderList(options = {}) {
             ProjectNavigation.openMaster({projectId:localId});
         });
         click('review-changes', () => {
-            if (localId && slug && window.DESI_OFFLINE !== true)
+            if (localId && window.DESI_OFFLINE !== true)
                 ProjectNavigation.openMaster({projectId:localId}, {reviewChanges:true});
         });
         click('refresh-share', () => {
