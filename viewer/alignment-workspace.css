@@ -32,6 +32,8 @@
 .msi-alignment-workspace .msi-align-viewport:focus-visible { outline:3px solid #60a5fa; outline-offset:-3px; }
 .msi-alignment-workspace .msi-align-content { position:absolute; top:0; left:0; transform-origin:0 0; }
 .msi-alignment-workspace .msi-align-content > img { display:block; width:100%; height:100%; max-width:none; max-height:none; user-select:none; -webkit-user-drag:none; }
+.msi-alignment-workspace [data-msi-img][data-ready="false"],
+.msi-alignment-workspace [data-msi-img][data-ready="false"] ~ [data-msi-svg] { visibility:hidden; }
 .msi-alignment-workspace .msi-align-content > svg { position:absolute; inset:0; width:100%; height:100%; pointer-events:none; overflow:visible; }
 .msi-alignment-workspace .msi-align-details { position:relative; z-index:5; width:180px; flex-shrink:0; background:#fff; border:1px solid #cbd5e1; border-radius:5px; }
 .msi-alignment-workspace .msi-align-details > summary { padding:7px 10px; font-size:11px; font-weight:600; cursor:pointer; }

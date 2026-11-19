@@ -15,7 +15,8 @@ function method(name){
 }
 const names=['msiSourceReference','msiOtsuSourceKey','otsuCurrentRecords','otsuAnalysisRecord',
   'computeSectionOtsuMasks','buildMsiGrid','computeOtsuThreshold','buildOtsuRecordFromTic',
-  'packBitsToB64','unpackBitsFromB64','otsuHasMasks','_otsuKeepGridRaw','otsuKeepGridForLayer'];
+  'packBitsToB64','unpackBitsFromB64','otsuHasMasks','_otsuKeepGridRaw','otsuKeepGridForLayer',
+  'alignmentOtsuSourceGrid','msiTissueMaskForAlign'];
 const calls=[];
 const ctx=displayContext({console,Uint8Array,Int32Array,Float64Array,Map,Set,
   btoa:s=>Buffer.from(s,'binary').toString('base64'),atob:s=>Buffer.from(s,'base64').toString('binary'),
@@ -71,6 +72,46 @@ async function main(){
   const auto={id:'auto',msiSeries:{MSI_A:{sourceFileId:'auto',kind:'xlsx',sheet:'first'}},meta:{}};
   auto.meta.otsu=await api.computeSectionOtsuMasks(auto,{},{});
   assert.equal(ctx.App._rethresholdSectionFromCache(auto),true);
+  // In Align, switching the visual filter must work independently of the main
+  // viewer and a stored mask must be reusable without access to the raw file.
+  ctx.App.otsuBgRemove=false;
+  const current=()=>true;
+  assert.deepEqual([...(await api.alignmentOtsuSourceGrid(sec,'MSI_A',{}, {},current)).keep],[1,0]);
+  const scoped={id:'align',meta:{},msiSeries:{
+    MSI_A:{blobId:'a',sheet:'first'},MSI_B:{blobId:'a',sheet:'first'},
+    MSI_C:{blobId:'b',sheet:'second'}}};
+  const cacheSize=ctx._otsuTicCache.size;
+  const privateGrid=await api.alignmentOtsuSourceGrid(scoped,'MSI_A',{}, {manualThreshold:50},current);
+  assert.deepEqual([...privateGrid.keep],[0,1]);
+  assert.equal(calls.at(-1).entries.length,2);
+  assert.equal(ctx._otsuTicCache.size,cacheSize);
+  assert.deepEqual(scoped.meta,{});
+
+  // Parquet with HE has no automatic backdrop. Build a private quantitative
+  // mask from the source, preserving holes and the source's row-to-cell map.
+  const pq={id:'p',meta:{},msiSeries:{MSI_A:{...ent,colIdx:2},MSI_B:{...ent,colIdx:3}}};
+  ctx.parquetSrcForEnt=async()=>({url:'fixture'});
+  ctx.parquetKeyForEnt=()=>'fixture';
+  let batches=0;
+  ctx.parquetAccumulateTicAndStats=async(key,src,features,targets,opts)=>{
+    assert.equal(key,'fixture');assert.deepEqual(Array.from(features,f=>f.colIdx),[2,3]);
+    assert.equal(targets[0].label,'section-A');assert.equal(opts.shouldAbort(),false);batches++;
+    return {ticBySection:new Map([['p',{ticRaw:[100,0,9,80],g:{W:2,H:2,cellIdx:[3,0,2]}}]]),
+      statsByKey:new Map([['MSI_A',{p:{}}],['MSI_B',{p:{}}]])};
+  };
+  assert.deepEqual([...(await api.alignmentOtsuSourceGrid(pq,'MSI_A',{}, {manualThreshold:20},current)).keep],[1,0,0,1]);
+  assert.equal(await api.alignmentOtsuSourceGrid(pq,'MSI_A',{}, {},()=>false),null);
+  assert.equal(batches,1);assert.deepEqual(pq.meta,{});
+
+  // An explicit silhouette must be precisely the selected tissue. Its holes
+  // stay holes, and a uniform mask must not silently trigger an intensity fit.
+  ctx.ALIGN_DICE_MAX_EDGE=256;
+  const keep=new Uint8Array(64);keep.fill(1,8,40);keep[20]=0;
+  const selected={W:8,H:8,keep};
+  const contour=api.msiTissueMaskForAlign({},null,'MSI_A',null,selected);
+  assert.deepEqual([...contour.mask],[...keep]);
+  selected.keep.fill(1);
+  assert.equal(api.msiTissueMaskForAlign({},null,'MSI_A',null,selected),null);
   console.log('MSI Otsu source-frame regression: PASS');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;});

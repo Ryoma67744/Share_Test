@@ -5068,13 +5068,18 @@ async function computeSectionOtsuMasks(sec, project, opts) {
         }
         let rec = null;
         try { rec = await ensureLocalBlob(grp.repr,project); } catch (e) { rec = null; }
+        if (opts.current && !opts.current()) break;
         if (!rec || !rec.blob) { unavailable.push(srcKey); reasons[srcKey] = 'no-blob'; continue; }
         let m = null, sig = null;
         try {
             const buf = await rec.blob.arrayBuffer();
+            if (opts.current && !opts.current()) break;
             m = await extractSourceMatrixForExport(buf, grp.repr, grp.entries);
         } catch (e) { console.warn('[otsu] source parse failed', srcKey, e); m = null; }
-        try { sig = await blobContentSig(rec.blob); } catch (e) { sig = null; }
+        if (opts.current && !opts.current()) break;
+        if (!opts.previewOnly) {
+            try { sig = await blobContentSig(rec.blob); } catch (e) { sig = null; }
+        }
         if (!m || !m.positions || !m.positions.length) {
             unavailable.push(srcKey); reasons[srcKey] = 'parse-failed'; continue;
         }
@@ -5205,10 +5210,41 @@ function _otsuKeepGridRaw(section, layerKey) {
     return { keep: grid, W: rec.W, H: rec.H };
 }
 
+// Read one acquisition's quantitative mask for the Align preview. Keep new
+// records private to this dialog. Shared Parquet sources support range reads.
+async function alignmentOtsuSourceGrid(section, layerKey, project, options, current) {
+    const stored = _otsuKeepGridRaw(section, layerKey);
+    if (stored) return stored;
+    const entry = section.msiSeries[layerKey], sourceKey = msiOtsuSourceKey(entry);
+    const entries = Object.entries(section.msiSeries).filter(([key, ent]) =>
+        /^MSI_/i.test(key) && ent && msiOtsuSourceKey(ent) === sourceKey);
+    let record;
+    if (entry.kind === 'parquet') {
+        const src = await parquetSrcForEnt(entry);
+        if (!src || !current()) return null;
+        const features = entries.map(([key, ent]) => ({key, colIdx: ent.colIdx}));
+        const target = {sectionId: section.id, label: entry.annotation};
+        const result = await parquetAccumulateTicAndStats(parquetKeyForEnt(entry), src, features,
+            [target], {shouldAbort: () => !current()});
+        if (result.aborted || !current()) return null;
+        const data = result.ticBySection.get(section.id);
+        if (!data || features.some(f => !result.statsByKey.get(f.key)?.[section.id])) return null;
+        const {W, H, cellIdx} = data.g;
+        const tic = Float64Array.from(cellIdx, index => data.ticRaw[index]);
+        record = buildOtsuRecordFromTic(tic, cellIdx, W, H, options, true).record;
+    } else {
+        const scoped = {msiSeries: Object.fromEntries(entries)};
+        const result = await computeSectionOtsuMasks(scoped, project, {...options, previewOnly: true, current});
+        record = result.bySource[sourceKey];
+    }
+    if (!record || !current()) return null;
+    return {W: record.W, H: record.H, keep: unpackBitsFromB64(record.keepB64, record.W * record.H)};
+}
+
 // MSI 側の組織マスク。既存の背景除去 (Otsu) 資産をそのまま使い、無ければ生強度
 // ラスタから、それも無ければ合成 TIC の grayscale から作る。返り値は
 // heTissueMask と同じ { mask, w, h, sx, sy } 形式 (sx/sy = 生 MSI px / マスク px)。
-function msiTissueMaskForAlign(section, panel, layerKey, fallbackImg) {
+function msiTissueMaskForAlign(section, panel, layerKey, fallbackImg, selectedKeep) {
     // Cap the working grid so each Dice evaluation stays cheap.
     const decimate = (mask, W, H) => {
         const k = Math.max(1, Math.ceil(Math.max(W, H) / ALIGN_DICE_MAX_EDGE));
@@ -5237,8 +5273,10 @@ function msiTissueMaskForAlign(section, panel, layerKey, fallbackImg) {
         if (n < 16 || n > mask.length * 0.995) return null;        // degenerate
         return decimate(mask, W, H);
     };
-    // 1) Existing Otsu keep grid (display toggle deliberately ignored).
-    const kg = _otsuKeepGridRaw(section, layerKey);
+    // Align uses the same grid for transparency and silhouette fitting. An
+    // empty or uniform explicit mask cannot provide an alternative silhouette.
+    if (selectedKeep) return finish(selectedKeep.keep, selectedKeep.W, selectedKeep.H);
+    const kg = selectedKeep === undefined ? _otsuKeepGridRaw(section, layerKey) : null;
     if (kg && kg.keep && kg.W && kg.H) {
         const m = new Uint8Array(kg.W * kg.H);
         for (let i = 0; i < m.length; i++) m[i] = kg.keep[i] ? 1 : 0;
@@ -16068,31 +16106,9 @@ const Wizards = {
         };
         enrollLoadedGroups();
         const realTicKey = allMsiKeys.find(k => /^MSI_TIC$/i.test(k));
-        // Synthetic TIC is offered when the user has 2+ MSI series and no real
-        // MSI_TIC is registered. The synthetic image is just the per-pixel sum
-        // of all MSI series intensities — useful for landmark picking on
-        // multi-MRM lipidomics data where TIC is never an explicit channel.
-        const offerSyntheticTic = allMsiKeys.length >= 2 && !realTicKey;
-        // candidateMsiKeys lists every value the persisted alignmentMsiKey
-        // hint may legally take. Per-source TIC keys (`__TIC_SRC|<fid>`)
-        // are added below once sourceFids is known, but the global
-        // `__TIC__` is included up-front so the validation below still
-        // accepts it on legacy projects.
-        const candidateMsiKeys = offerSyntheticTic ? ['__TIC__', ...allMsiKeys] : allMsiKeys;
-        const persistedMsi = sec.meta && sec.meta.alignmentMsiKey;
-        const isPersistedTicSrc = typeof persistedMsi === 'string'
-            && persistedMsi.startsWith('__TIC_SRC|');
-        state.msiKey = (persistedMsi && (candidateMsiKeys.includes(persistedMsi) || isPersistedTicSrc))
-                     ? persistedMsi
-                     : (realTicKey
-                        || (allMsiKeys.includes(App.focusCompoundKey) ? App.focusCompoundKey : null)
-                        || (offerSyntheticTic ? '__TIC__' : null)
-                        || allMsiKeys[0]
-                        || null);
-        // Pre-populate sliders from per-source state when the chosen MSI
-        // belongs to a source the user has already aligned in a previous
-        // session.
-        // Source-specific restoration is performed atomically by seedForFrame.
+        const persistedMsi = sec.meta.alignmentMsiKey;
+        const preferredCompound = realTicKey || (allMsiKeys.includes(App.focusCompoundKey) ? App.focusCompoundKey : null);
+        state.msiKey = persistedMsi || preferredCompound || allMsiKeys[0] || null;
 
         // Build the list of distinct source files used by this section's
         // MSI compounds. The Source dropdown lets the user pick one source
@@ -16151,78 +16167,50 @@ const Wizards = {
                 return ent && ent.sourceFileId === mode;
             });
         };
-        // If the persisted MSI key isn't in the current source's compound
-        // list, fall back to the first compound that is (otherwise the
-        // dropdown would show a phantom "selected" option that doesn't
-        // exist in its options).
-        const filteredInit = compoundsForMode(state.sourceMode);
-        if (state.sourceMode && state.sourceMode !== '__all__'
-            && state.msiKey
-            && !String(state.msiKey).startsWith('__TIC_SRC|')
-            && !filteredInit.includes(state.msiKey)) {
-            state.msiKey = filteredInit[0] || null;
-        }
-
-        // Synthetic TIC infrastructure. The user can pick from:
-        //   - TIC_KEY_ALL ('__TIC__')   = sum every MSI compound (existing behaviour)
-        //   - ticKeyForFid(fid)         = sum only the compounds belonging to one source
-        //
-        // The per-source variants make sense when the section holds multiple
-        // physical scans (each source has 2+ compounds) and the user wants
-        // to align HE against just one scan's bulk signal — useful when the
-        // global TIC is dominated by an off-tissue source. Source-specific
-        // TIC is only listed in single-source mode of the Source dropdown;
-        // in 両方 mode the global TIC is the natural fit.
+        // A synthetic TIC is a display image. Its original measured channels
+        // determine the reference grid and registration scope.
         const TIC_KEY_ALL = '__TIC__';
-        const ticKeyForFid = (fid) => '__TIC_SRC|' + fid;
+        const ticKeyForFid = fid => '__TIC_SRC|' + fid;
         const ticKeysToCompounds = new Map();
-        if (offerSyntheticTic) {
-            ticKeysToCompounds.set(TIC_KEY_ALL, allMsiKeys.slice());
-            for (const fid of sourceFids) {
-                const compounds = allMsiKeys.filter(k => {
-                    const ent = sec.msiSeries[k];
-                    return ent && ent.sourceFileId === fid;
-                });
-                if (compounds.length >= 2) {
-                    ticKeysToCompounds.set(ticKeyForFid(fid), compounds);
-                }
+        const isTicKey = key => ticKeysToCompounds.has(key);
+        const ticOptionsForMode = mode => {
+            const compounds = compoundsForMode(mode);
+            const options = [];
+            const add = (key, members) => {
+                if (members.includes(realTicKey)) return;
+                const measured = members.filter(k => !isRatioDisplayKey(k));
+                if (!measured.length) return;
+                ticKeysToCompounds.set(key, measured);
+                options.push(key);
+            };
+            if (isGroupMode(mode)) add('__TIC_GROUP|' + mode.slice(10), compounds);
+            else if (sourceFids.includes(mode)) add(ticKeyForFid(mode), compounds);
+            else {
+                add(TIC_KEY_ALL, compounds);
+                if (hasMultipleSources) for (const fid of sourceFids)
+                    add(ticKeyForFid(fid), compounds.filter(k => fidOf(k) === fid));
             }
+            return options;
+        };
+        const choicesForMode = mode => compoundsForMode(mode).concat(ticOptionsForMode(mode));
+        const filteredInit = choicesForMode(state.sourceMode);
+        if (!filteredInit.includes(state.msiKey)) {
+            state.msiKey = filteredInit.includes(preferredCompound) ? preferredCompound : filteredInit[0] || null;
         }
-        const isTicKey = (k) => typeof k === 'string' && ticKeysToCompounds.has(k);
-        const ticKeyLabel = (k) => {
-            if (k === TIC_KEY_ALL) return hasMultipleSources ? (globalThis.AppI18n ? AppI18n.t("TIC (合成: 全 source)") : 'TIC (合成: 全 source)') : (globalThis.AppI18n ? AppI18n.t("TIC (合成)") : 'TIC (合成)');
-            if (typeof k === 'string' && k.startsWith('__TIC_SRC|')) {
-                const fid = k.slice('__TIC_SRC|'.length);
-                const fname = sourceLabels.get(fid) || fid;
-                return (globalThis.AppI18n ? AppI18n.t("TIC (合成: ") : 'TIC (合成: ') + fname + ')';
-            }
-            return 'TIC';
+        const ticKeyLabel = key => {
+            const fid = fidOf(key);
+            const scope = fid ? sourceLabels.get(fid) || fid : key === TIC_KEY_ALL && hasMultipleSources
+                ? (globalThis.AppI18n ? AppI18n.t("全ソース") : '全ソース') : null;
+            if (scope) return globalThis.AppI18n ? AppI18n.t("TIC（表示強度の合成・{0}）", [scope]) : `TIC（表示強度の合成・${scope}）`;
+            return globalThis.AppI18n ? AppI18n.t("TIC（表示強度の合成）") : 'TIC（表示強度の合成）';
         };
 
         // ---- Modal HTML ------------------------------------------------------
         const layerOpts = heKeys.map(k => `<option value="${safe(k)}"${k===state.layerKey?' selected':''}>${safe(k)}</option>`).join('');
-        const buildMsiOpts = (mode) => {
-            const filtered = compoundsForMode(mode);
-            const realPart = filtered.map(k => `<option value="${safe(k)}"${k===state.msiKey?' selected':''}>${safe(formatDisplayName(k))}</option>`).join('');
-            // Synthetic TIC. In '両方' (__all__) mode list the global TIC
-            // (sum across every source). In single-source mode list that
-            // source's per-source TIC when one is registered (≥2 compounds
-            // in that source). This lets the user calibrate HE against
-            // just one scan's bulk signal instead of the cross-source mix.
-            let ticPart = '';
-            if (offerSyntheticTic) {
-                if (mode === '__all__' || !mode || !hasSources) {
-                    if (ticKeysToCompounds.has(TIC_KEY_ALL)) {
-                        ticPart = `<option value="${safe(TIC_KEY_ALL)}"${state.msiKey===TIC_KEY_ALL?' selected':''}>${safe(ticKeyLabel(TIC_KEY_ALL))}</option>`;
-                    }
-                } else if (sourceFids.includes(mode)) {
-                    const tk = ticKeyForFid(mode);
-                    if (ticKeysToCompounds.has(tk)) {
-                        ticPart = `<option value="${safe(tk)}"${state.msiKey===tk?' selected':''}>${safe(ticKeyLabel(tk))}</option>`;
-                    }
-                }
-            }
-            return (filtered.length || ticPart) ? (ticPart + realPart) : `<option value="" data-i18n="(MSI なし)">(MSI なし)</option>`;
+        const buildMsiOpts = mode => {
+            const keys = ticOptionsForMode(mode).concat(compoundsForMode(mode));
+            return keys.map(key => `<option value="${safe(key)}"${key===state.msiKey?' selected':''}>${safe(isTicKey(key)?ticKeyLabel(key):formatDisplayName(key))}</option>`).join('')
+                || '<option value="" data-i18n="(MSI なし)">(MSI なし)</option>';
         };
         const msiOpts = buildMsiOpts(state.sourceMode);
         // Source dropdown options. Hidden entirely when no compound has a
@@ -16272,7 +16260,12 @@ const Wizards = {
                   <input type="checkbox" data-align-persource${(sec.meta && sec.meta.perSourceAlign) ? ' checked' : ''}> <span data-i18n="測定回ごとに個別">測定回ごとに個別</span>
                 </label>` : ''}
                 <label style="font-size:11px;color:#475569;">
-                  MSI: <select data-align-msi ${(allMsiKeys.length || offerSyntheticTic) ? '' : 'disabled'} style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;">${msiOpts}</select>
+                  <span data-i18n="MSI（TIC・分子）">MSI（TIC・分子）</span>
+                  <select data-align-msi ${allMsiKeys.length ? '' : 'disabled'} style="font-size:11px;padding:2px 6px;border:1px solid #cbd5e1;border-radius:3px;">${msiOpts}</select>
+                </label>
+                <label style="font-size:11px;color:#475569;" title="この画面のMSI表示と輪郭合わせにOtsuの背景除去を適用します。" data-i18n-title="この画面のMSI表示と輪郭合わせにOtsuの背景除去を適用します。">
+                  <input type="checkbox" data-align-otsu>
+                  <span data-i18n="背景を非表示（Otsu）">背景を非表示（Otsu）</span>
                 </label>
               </div>
             </div>
@@ -16373,6 +16366,11 @@ const Wizards = {
         const layerSel  = $('[data-align-layer]');
         const sourceSel = $('[data-align-source]');
         const msiSel    = $('[data-align-msi]');
+        const otsuEl = $('[data-align-otsu]');
+        let useAlignmentOtsu = !!App.otsuBgRemove;
+        if (otsuEl) otsuEl.checked = useAlignmentOtsu;
+        const alignmentOtsuGrids = new Map();
+        let displayedKeep = null, requestedSelection = null;
         const flipLrEl = $('[data-flip-lr]');
         const flipUdEl = $('[data-flip-ud]');
         const scaleEl  = $('[data-scale]');
@@ -16674,7 +16672,7 @@ const Wizards = {
             solveBtn.disabled = busy || saving || state.landmarks.he.length < 2 || state.landmarks.he.length !== state.landmarks.msi.length;
             if (autoBtn) autoBtn.disabled = busy || saving;
             saveBtn.disabled = busy || saving;
-            for(const element of [layerSel,sourceSel,msiSel,perSourceEl])if(element)element.disabled=saving;
+            for(const element of [layerSel,sourceSel,msiSel,perSourceEl,otsuEl])if(element)element.disabled=saving;
             for(const el of [clearLmBtn,resetBtn,applyAllBtn,autoFitEl])if(el)el.disabled=busy||saving;
             syncUiFromState();
             if(applyGroupBtn) {
@@ -16685,25 +16683,23 @@ const Wizards = {
             }
             if (message) pickStatus.textContent = message;
         };
-        const ensureSelection = async (key, generation) => {
-            const keys = isTicKey(key) ? (ticKeysToCompounds.get(key) || []) : [key];
-            for (const k of keys) {
-                if (!stillOpen() || generation !== selectionGeneration) return false;
-                if (panel.ensureMsiLayerLoaded) await panel.ensureMsiLayerLoaded(k);
-            }
-            return keys.length > 0;
-        };
         const changeSelection = async (nextLayer, nextKey, nextMode, options) => {
             if (!stillOpen() || saving) return;
+            requestedSelection = [nextLayer, nextKey, nextMode, options];
             const generation = ++selectionGeneration;
             ++autoGeneration; ++thumbGeneration;
+            displayedKeep = null;
+            msiImg.dataset.ready = 'false';
             manualGesture=null;setFitMessage('');
             captureCurrent();
             const previousDraft=activeDraft,previousState=clone(state),previousFrame=activeFrame;
             setLoading(true, (globalThis.AppI18n ? AppI18n.t("画像を読み込み中…") : '画像を読み込み中…'));
+            if (workspace) workspace.requestComposite();
             if (autoBox) { autoBox.style.display = 'none'; autoBox.innerHTML = ''; }
             try {
-                await ensureSelection(nextKey,generation);
+                if (isTicKey(nextKey)) await prepareSyntheticTic(nextKey, generation);
+                else if (panel.ensureMsiLayerLoaded) await panel.ensureMsiLayerLoaded(nextKey);
+                if (!stillOpen() || generation !== selectionGeneration) return;
                 enrollLoadedGroups();
                 const anchor=sec.meta.alignmentMsiKey;
                 if (anchor && sec.msiSeries[anchor] && anchor !== nextKey && generation === selectionGeneration) {
@@ -16712,16 +16708,8 @@ const Wizards = {
                 if (!stillOpen() || generation !== selectionGeneration) return;
                 const referenceKey = frameKeyForSelection(nextKey);
                 const frame = alignmentFrameDescriptor(sec, referenceKey, panel);
-                if(!activeDraft&&!persistedSourceMode&&!perSourceAlign&&frame.spatialGroup)
+                if(!activeDraft&&!persistedSourceMode&&!perSourceAlign&&frame.spatialGroup&&!isTicKey(nextKey))
                     nextMode=groupMode(frame.spatialGroup.groupId);
-                // Synthetic TIC is a display aid only. Every contributor must
-                // have the same confirmed coordinate basis before pooling points.
-                if (isTicKey(nextKey)) {
-                    const frames = (ticKeysToCompounds.get(nextKey) || []).map(k => alignmentFrameDescriptor(sec,k,panel));
-                    if (!frame.confirmed || frames.some(f => !f.confirmed || f.coordinateKey !== frame.coordinateKey)) {
-                        throw new Error((globalThis.AppI18n ? AppI18n.t("このTICには異なる座標系が含まれます。測定データまたは個別分子を選択してください。") : 'このTICには異なる座標系が含まれます。測定データまたは個別分子を選択してください。'));
-                    }
-                }
                 const context = { layerKey:nextLayer, imageIdentity:alignmentImageIdentity(sec.images[nextLayer]),
                     scope:nextMode === '__all__' ? 'shared' : isGroupMode(nextMode) ? 'group' : 'source', frame,
                     groupId:isGroupMode(nextMode)&&frame.spatialGroup?frame.spatialGroup.groupId:null,
@@ -16782,6 +16770,7 @@ const Wizards = {
                 msiUmYEl.value=state.msi_um_y==null?'':state.msi_um_y;
                 pickHeBtn.style.background=state.pickMode==='he'?'#dbeafe':'';
                 pickMsiBtn.style.background=state.pickMode==='msi'?'#dbeafe':'';
+                requestedSelection = [nextLayer, nextKey, nextMode];
                 await populateThumbs();
                 if (!stillOpen() || generation !== selectionGeneration) return;
                 const complete = !!(heImg.naturalWidth && msiImg.naturalWidth && heImg.dataset.ready==='true' && msiImg.dataset.ready==='true');
@@ -16799,14 +16788,24 @@ const Wizards = {
                 if (!stillOpen() || generation !== selectionGeneration) return;
                 setLoading(true, error.message || String(error));
                 // Keep selection controls usable and leave every draft intact.
-                if (activeDraft) { layerSel.value = state.layerKey; if(sourceSel)sourceSel.value=state.sourceMode||''; msiSel.value=state.msiKey||''; }
+                if (activeDraft) {
+                    requestedSelection = [state.layerKey, state.msiKey, state.sourceMode];
+                    layerSel.value = state.layerKey;
+                    if (sourceSel) sourceSel.value = state.sourceMode || '';
+                    msiSel.value = state.msiKey || '';
+                }
             }
         };
         layerSel.addEventListener('change', () => changeSelection(layerSel.value, state.msiKey, state.sourceMode));
         msiSel.addEventListener('change', () => changeSelection(state.layerKey, msiSel.value, state.sourceMode));
+        if (otsuEl) otsuEl.addEventListener('change', () => {
+            if (saving || !stillOpen()) return;
+            useAlignmentOtsu = otsuEl.checked;
+            if (requestedSelection) changeSelection(...requestedSelection);
+        });
         if (sourceSel) sourceSel.addEventListener('change', () => {
             const mode = sourceSel.value;
-            const filtered = compoundsForMode(mode);
+            const filtered = choicesForMode(mode);
             const remembered = lastMsiByMode.get(mode || '__legacy__');
             const next = filtered.includes(remembered) ? remembered : filtered.includes(state.msiKey) ? state.msiKey : filtered[0];
             if (next) changeSelection(state.layerKey, next, mode,{createCommon:mode==='__all__',createGroup:isGroupMode(mode),
@@ -16822,7 +16821,7 @@ const Wizards = {
         // Returns a colored canvas (NOT a dataURL) so callers can apply the
         // section view-transform bake on top before encoding to PNG.
         // layerKey は実 MSI レイヤーのときだけ渡す(自己正規化 TIC では null)。
-        const paintMsiToColored = (srcImg, rawRange, win, layerKey) => {
+        const paintMsiToColored = (srcImg, rawRange, win, layerKey, keepGrid) => {
             if (!srcImg || !srcImg.complete || !srcImg.naturalWidth) return null;
             const c = document.createElement('canvas');
             c.width = srcImg.naturalWidth; c.height = srcImg.naturalHeight;
@@ -16832,21 +16831,16 @@ const Wizards = {
             const data = cctx.getImageData(0, 0, c.width, c.height);
             const d = data.data;
             const lut = getActiveColormap();
-            const bg = getColormapBackground();
             // メイン表示と同じく生強度ラスタから直接色にする(無ければ従来の輝度経路)。
             const vr = (layerKey && panel.msiValueRasters) ? panel.msiValueRasters.get(layerKey) : null;
             const useVals = !!(vr && vr.W === c.width && vr.H === c.height);
             const fb = msiRawFallbackMax(rawRange);
-            // 背景を非表示（Otsu）: renderComposite / renderMsiThumbnail は適用しているのに
-            // ここだけ抜けており、背景除去 ON のとき共有プレビューにだけ背景が残っていた。
-            const keepGrid = layerKey ? otsuKeepGridForLayer(sec, layerKey) : null;
-            const useKeep = !!(keepGrid && keepGrid.W === c.width && keepGrid.H === c.height);
             const smoothingStrength = layerKey && App.msiSmoothing === 'median' ? (App.msiSmoothingStrength || 1) : 0;
             const smoothMask = smoothingStrength > 0 ? new Uint8Array(c.width * c.height) : null;
             const smoothIndices = smoothMask ? new Uint8Array(c.width * c.height) : null;
             for (let i = 0; i < d.length; i += 4) {
                 if (d[i+3] === 0) continue;
-                if (useKeep && keepGrid.keep[i >> 2] === 0) { d[i] = bg[0]; d[i+1] = bg[1]; d[i+2] = bg[2]; continue; }
+                if (keepGrid && !keepGrid.keep[i >> 2]) { d[i+3] = 0; continue; }
                 const vRaw = useVals ? vr.values[i >> 2] : NaN;
                 if (smoothMask) smoothMask[i >> 2] = !useVals || (Number.isFinite(vRaw)
                     && (!vr.measuredMask || vr.measuredMask[i >> 2])) ? 1 : 0;
@@ -16897,12 +16891,7 @@ const Wizards = {
             B[0][2] /= scale; B[1][2] /= scale;
             imgEl.dataset.displayMatrix = JSON.stringify(B);
         };
-        const alignmentMsiKey = () => {
-            if (!isTicKey(state.msiKey)) return state.msiKey;
-            const keys = ticKeysToCompounds.get(state.msiKey) || [];
-            return keys.find(key => typeof msiLayerSourceGeometry === 'function' && msiLayerSourceGeometry(sec,key))
-                || keys.find(key => panel.msiRasterSize(key)) || panel._pickRefMsiKey();
-        };
+        const alignmentMsiKey = () => frameKeyForSelection(state.msiKey);
         const legacyToDisplay = p => msiLegacyEdgePointToDisplay(sec, alignmentMsiKey(), p) || p;
 
         // Navigation can follow a registered point even when the photograph
@@ -16918,78 +16907,90 @@ const Wizards = {
             return applyAffinePoint(invertAffine(T), ...legacy);
         };
 
-        // Sum every MSI series' grayscale luminance into one image. Caller gets
-        // an <img> backed by a fresh dataURL; downstream paintMsiToColored
-        // re-applies Plasma like for any other MSI thumbnail. Skips any series
-        // whose dimensions don't match the modal's chosen reference size.
-        // Cache one synthetic TIC <img> per ticKey (global '__TIC__' or
-        // per-source '__TIC_SRC|<fid>'). The grayscale TIC is built by
-        // averaging the luminance of each contributing compound's
-        // already-rendered raster, so this only re-runs the first time a
-        // given ticKey is requested.
+        // Build the same normalized display composite as the viewer backdrop.
+        // Accumulate each channel as soon as it decodes: the raster cache can
+        // evict an earlier channel while later originals are still loading.
         const syntheticTicCache = new Map();
-        const computeSyntheticTicForKey = (ticKey) => {
-            if (syntheticTicCache.has(ticKey)) return syntheticTicCache.get(ticKey);
-            const compounds = ticKeysToCompounds.get(ticKey);
-            if (!compounds || !compounds.length) return null;
-            const dims = new Map();
-            const usable = [];
-            for (const k of compounds) {
-                const img = panel.imageSources && panel.imageSources[k];
-                if (!img || !img.complete || !img.naturalWidth) continue;
-                const dk = img.naturalWidth + 'x' + img.naturalHeight;
-                dims.set(dk, (dims.get(dk) || 0) + 1);
-                usable.push({ k, img, dk });
-            }
-            if (!usable.length) return null;
-            let bestDim = null, bestN = 0;
-            for (const [dk, n] of dims) if (n > bestN) { bestDim = dk; bestN = n; }
-            const [W, H] = bestDim.split('x').map(Number);
-            const acc = new Float32Array(W * H);
-            const tmp = document.createElement('canvas');
-            tmp.width = W; tmp.height = H;
-            const tctx = get2dContext(tmp, { willReadFrequently: true });
-            let added = 0;
-            for (const { k, img, dk } of usable) {
-                if (dk !== bestDim) {
-                    console.warn('TIC合成: 寸法不一致でスキップ', k, dk, '!=', bestDim);
-                    continue;
+        const computeSyntheticTicForKey = key => syntheticTicCache.get(key)?.image || null;
+        const prepareSyntheticTic = async (key, generation) => {
+            const members = ticKeysToCompounds.get(key);
+            const current = () => stillOpen() && generation === selectionGeneration;
+            const ensureMember = async member => {
+                if (panel.ensureMsiLayerLoaded && await panel.ensureMsiLayerLoaded(member) === false)
+                    throw new Error(tr('画像を読み込めませんでした。別の分子を選択して再試行してください。'));
+            };
+            const signature = JSON.stringify(members.map(k => [k, msiSourceReference(sec.msiSeries[k])]));
+            if (syntheticTicCache.get(key)?.signature !== signature) {
+                const scratch = document.createElement('canvas');
+                const ctx = get2dContext(scratch, {willReadFrequently:true});
+                let accum, reference;
+                for (const member of members) {
+                    if (!current()) return;
+                    await ensureMember(member);
+                    if (!current()) return;
+                    const image = panel.imageSources[member];
+                    if (!await waitForImg(image) || !current()) {
+                        if (!current()) return;
+                        throw new Error(tr('画像を読み込めませんでした。別の分子を選択して再試行してください。'));
+                    }
+                    const frame = alignmentFrameDescriptor(sec,member,panel);
+                    const grid = frame.geometry?.displayGeometry;
+                    const coords = JSON.stringify([frame.coordinateKey, image.naturalWidth, image.naturalHeight,
+                        grid?.x?.origin, grid?.x?.step, grid?.y?.origin, grid?.y?.step]);
+                    if (!frame.confirmed || (accum && reference !== coords)) {
+                        throw new Error(tr('このTICには異なる座標系が含まれます。測定データまたは個別分子を選択してください。'));
+                    }
+                    if (!accum) {
+                        reference = coords;
+                        scratch.width = image.naturalWidth; scratch.height = image.naturalHeight;
+                        accum = TicCore.create(scratch.width,scratch.height);
+                    }
+                    ctx.clearRect(0,0,scratch.width,scratch.height);
+                    ctx.drawImage(image,0,0);
+                    const data = ctx.getImageData(0,0,scratch.width,scratch.height);
+                    TicCore.accumulate(accum,{width:scratch.width,height:scratch.height,pixels:data.data});
                 }
-                tctx.clearRect(0, 0, W, H);
-                tctx.drawImage(img, 0, 0);
-                const px = tctx.getImageData(0, 0, W, H).data;
-                for (let i = 0, p = 0; i < acc.length; i++, p += 4) {
-                    if (px[p+3] === 0) continue;
-                    acc[i] += 0.299*px[p] + 0.587*px[p+1] + 0.114*px[p+2];
-                }
-                added++;
+                const raster = TicCore.finish(accum);
+                const result = ctx.createImageData(raster.width,raster.height);
+                result.data.set(raster.pixels);
+                ctx.putImageData(result,0,0);
+                const image = new Image();
+                image.src = scratch.toDataURL('image/png');
+                if (!await waitForImg(image) || !current()) return;
+                syntheticTicCache.set(key,{signature,image});
             }
-            if (!added) return null;
-            let mn = Infinity, mx = -Infinity;
-            for (let i = 0; i < acc.length; i++) {
-                if (acc[i] < mn) mn = acc[i];
-                if (acc[i] > mx) mx = acc[i];
-            }
-            if (!(mx > mn)) { mn = 0; mx = 1; }
-            const out = tctx.createImageData(W, H);
-            for (let i = 0, p = 0; i < acc.length; i++, p += 4) {
-                const n = Math.max(0, Math.min(1, (acc[i] - mn) / (mx - mn)));
-                const g = Math.round(n * 255);
-                out.data[p] = out.data[p+1] = out.data[p+2] = g;
-                out.data[p+3] = 255;
-            }
-            tctx.putImageData(out, 0, 0);
-            const grayUrl = tmp.toDataURL('image/png');
-            const im = new Image();
-            im.src = grayUrl;
-            syntheticTicCache.set(ticKey, im);
-            return im;
+            // Restore the selected reference after streaming (including cache hits)
+            // for calibration, click inversion and the selected source's geometry.
+            if (current()) await ensureMember(members[0]);
         };
-        const computeSyntheticTic = () => computeSyntheticTicForKey(TIC_KEY_ALL);
 
         // Cache colored dataURLs per MSI key so flipping the dropdown back to a
         // previously-shown compound is instant (no recompute).
         const coloredCache = new Map();
+        const alignmentKeepFor = async (key, width, height, current) => {
+            const members = isTicKey(key) ? ticKeysToCompounds.get(key) : [key];
+            const sources = new Map();
+            for (const member of members) sources.set(msiOtsuSourceKey(sec.msiSeries[member]), member);
+            // Coordinate frames were verified in changeSelection. Retain tissue
+            // present in any contributing acquisition on the common grid.
+            let combined = null;
+            for (const [sourceKey, member] of sources) {
+                let grid = alignmentOtsuGrids.get(sourceKey);
+                if (!grid) {
+                    grid = await alignmentOtsuSourceGrid(sec, member, baseProject,
+                        {strength: App.otsuStrength, manualThreshold: App.otsuManualThreshold}, current);
+                    if (!current()) return null;
+                    if (!grid) throw new Error(tr('この測定の Otsu マスクを作成できませんでした。元の MSI データを確認するか、背景除去をオフにしてください。'));
+                    alignmentOtsuGrids.set(sourceKey, grid);
+                }
+                if (grid.W !== width || grid.H !== height)
+                    throw new Error(tr('Otsu マスクと MSI 画像の寸法が一致しません。背景除去をオフにするか、元の測定を確認してください。'));
+                if (sources.size === 1) return grid;
+                if (!combined) combined = {W: width, H: height, keep: new Uint8Array(width * height)};
+                for (let i = 0; i < combined.keep.length; i++) combined.keep[i] |= grid.keep[i];
+            }
+            return combined;
+        };
 
         // ---- Thumbnails for landmark picking --------------------------------
         const populateThumbs = async () => {
@@ -17029,15 +17030,21 @@ const Wizards = {
             if (App.roiOnlyMode && !isTicKey(key)) await App.ensureRoiDisplayRange(sec, key);
             if (!current()) return;
             const win = isTicKey(key) ? null : App.getMsiWindow(key, ent.rawRange || null, ent.rawDispMax, ent.rawTrueMax, sec);
-            const cacheKey = JSON.stringify([key, activeFrame && activeFrame.key, t.matrix, t.frame&&t.frame.bounds, win, App.msiSmoothing,
+            const cacheKey = JSON.stringify([key, syntheticTicCache.get(key)?.signature, activeFrame && activeFrame.key, t.matrix, t.frame&&t.frame.bounds, win, App.msiSmoothing,
                 App.msiSmoothingStrength || 1, App.msiLinearStrength || 10,
                 typeof getActiveColormap === 'function' ? getActiveColormap() : null,
-                !!App.otsuBgRemove, ent.rawRange || null]);
+                useAlignmentOtsu, ent.rawRange || null]);
             let cached = coloredCache.get(cacheKey);
             if (!cached) {
                 const srcImg = isTicKey(key) ? computeSyntheticTicForKey(key) : panel.imageSources[key];
                 if (!await waitForImg(srcImg) || !current()) return;
-                const colored = paintMsiToColored(srcImg, ent.rawRange || null, win, isTicKey(key) ? null : key);
+                let keep = null;
+                if (useAlignmentOtsu) {
+                    pickStatus.textContent = tr('Otsu マスクを準備しています…');
+                    keep = await alignmentKeepFor(key, srcImg.naturalWidth, srcImg.naturalHeight, current);
+                    if (!current()) return;
+                }
+                const colored = paintMsiToColored(srcImg, ent.rawRange || null, win, isTicKey(key) ? null : key, keep);
                 const smooth=App.msiSmoothing==='linear'?(App.msiLinearStrength||10):false;
                 const bounds=colored&&(t.frame?t.frame.bounds:displayBakeGeometry(colored.width,colored.height,t.matrix));
                 const scale=smooth&&smooth<10&&bounds?Math.min(8,600/Math.max(bounds.width,bounds.height)):1;
@@ -17045,7 +17052,7 @@ const Wizards = {
                 if (!baked) return;
                 const ready = new Image(); ready.src = baked.toDataURL('image/png');
                 if (!await waitForImg(ready) || !current()) return;
-                cached = {url:ready.src,rawW:colored.width,rawH:colored.height,scale};
+                cached = {url:ready.src,rawW:colored.width,rawH:colored.height,scale,keep};
                 coloredCache.set(cacheKey,cached);
                 // Bound session-local thumbnails; source grids retain their existing LRU.
                 if (coloredCache.size > 12) coloredCache.delete(coloredCache.keys().next().value);
@@ -17055,6 +17062,7 @@ const Wizards = {
             msiImg.style.imageRendering=App.msiSmoothing==='linear'&&(App.msiLinearStrength||10)===10?'auto':'pixelated';
             stampThumbDataset(msiImg,cached.rawW,cached.rawH,t,cached.scale);
             if (!await waitForImg(msiImg) || !current()) return;
+            displayedKeep = cached.keep;
             msiImg.dataset.ready = 'true';
         };
         // Initial image load runs after all handlers and cleanup are installed.
@@ -17328,7 +17336,7 @@ const Wizards = {
                     : (panel.imageSources && panel.imageSources[state.msiKey]);
                 await waitForImg(ticImg);
                 if (!autoCurrent()) return;
-                const displayMask = msiTissueMaskForAlign(sec, panel, state.msiKey, ticImg);
+                const displayMask = msiTissueMaskForAlign(sec, panel, state.msiKey, ticImg, displayedKeep);
                 const msiM = msiMaskInLegacyRaster(displayMask, sec, alignmentMsiKey(), ALIGN_DICE_MAX_EDGE);
                 if (!msiM) throw new Error((globalThis.AppI18n ? AppI18n.t("MSI から組織領域を抽出できませんでした (背景除去の閾値を確認してください)") : 'MSI から組織領域を抽出できませんでした (背景除去の閾値を確認してください)'));
                 // If both physical pitches are known the scale is not a free
@@ -17550,7 +17558,7 @@ const Wizards = {
             if (rafId) cancelAnimationFrame(rafId);
             for (const cleanup of cleanups.splice(0)) { try { cleanup(); } catch (_) {} }
             if (workspace) workspace.destroy();
-            coloredCache.clear(); syntheticTicCache.clear();
+            coloredCache.clear(); syntheticTicCache.clear(); alignmentOtsuGrids.clear();
             session.close();
             if (shareAlign) { try { App._releaseRoiLock(); } catch (e) {} }
             origClose(val === 'saved' ? 'saved' : null);
