@@ -23,7 +23,7 @@ async function main(){
    if(location.pathname==='/Share_Test/index.html')sessionStorage.setItem('desi:masterUnlocked',JSON.stringify({expiresAt:Date.now()+3600000}));
    window.navigationCalls=[];
    window.ProjectNavigation={resumeMasterDestination:()=>false,shareUrl:slug=>new URL('viewer/index.html#share='+encodeURIComponent(slug),location.href).href,
-    openMaster:(destination,options={})=>{window.navigationCalls.push({destination,options});if(window.blockNavigation)return false;const key=destination.projectId?'project':'import',value=destination.projectId||destination.importSlug;return !!window.open(new URL('viewer/index.html?'+key+'='+encodeURIComponent(value)+(options.refreshShare?'&refresh=share':''),location.href),'_blank');}};
+    openMaster:(destination,options={})=>{window.navigationCalls.push({destination,options});if(window.blockNavigation)return false;const key=destination.projectId?'project':'import',value=destination.projectId||destination.importSlug;return !!window.open(new URL('viewer/index.html?'+key+'='+encodeURIComponent(value)+(options.reviewChanges?'&refresh=changes':options.refreshShare?'&refresh=share':''),location.href),'_blank');}};
   });
   await page.goto(origin+'/Share_Test/index.html');await page.waitForFunction(()=>typeof _lastListRows!=='undefined'&&_lastListRows==='[]');
   await page.evaluate(async()=>{
@@ -40,11 +40,18 @@ async function main(){
   assert.match(await page.locator('[data-local-id="local-copy"] .badge.local').textContent(),/このPCのみ／未公開/);
   assert.equal(await page.locator('[data-local-id="local-copy"] [data-action="refresh-share"]').count(),0);
   assert.equal(await page.locator('[data-slug="server-one"] [data-action="refresh-share"]').count(),0);
+  assert.equal(await page.locator('[data-local-id="local-copy"] [data-action="review-changes"]').count(),1);
+  assert.equal(await page.locator('[data-slug="server-one"] [data-action="review-changes"]').count(),0);
   let childPromise=context.waitForEvent('page');await page.locator('[data-local-id="local-copy"] [data-action="open-local"]').click();let child=await childPromise;await child.waitForLoadState();
   assert.equal(child.url(),origin+'/Share_Test/viewer/index.html?project=local-copy');assert.equal(page.url(),parentUrl);assert.equal(await page.locator('[data-folder-body="folder-a"]').isVisible(),true);await child.close();await page.bringToFront();
   // A shared local copy can check for changes even while it has unpublished
   // edits, and even when the current server listing does not contain its slug.
   const beforeRefresh=await page.evaluate(()=>ProjectStorage.getProject('shared-local-copy'));
+  const review=page.locator('[data-local-id="shared-local-copy"] [data-action="review-changes"]');
+  assert.equal(await review.innerText(),'未公開の変更を確認');
+  childPromise=context.waitForEvent('page');await review.click();child=await childPromise;await child.waitForLoadState();
+  assert.equal(child.url(),origin+'/Share_Test/viewer/index.html?project=shared-local-copy&refresh=changes');
+  await child.close();await page.bringToFront();
   childPromise=context.waitForEvent('page');await page.locator('[data-local-id="shared-local-copy"] [data-action="refresh-share"]').click();child=await childPromise;await child.waitForLoadState();
   assert.equal(child.url(),origin+'/Share_Test/viewer/index.html?project=shared-local-copy&refresh=share');assert.equal(page.url(),parentUrl);
   assert.deepEqual(await page.evaluate(()=>ProjectStorage.getProject('shared-local-copy')),beforeRefresh,'checking never overwrites local edits in the manager');
@@ -52,6 +59,7 @@ async function main(){
   await child.close();await page.bringToFront();
   await page.evaluate(async()=>{await ProjectStorage.patchProject('shared-local-copy',project=>{project.__publishPending=false;});await renderList();});
   assert.equal(await page.locator('[data-local-id="shared-local-copy"] [data-action="refresh-share"]').count(),1,'checking is also available without pending edits');
+  assert.equal(await review.count(),0,'clean projects do not show a pending changes button');
   const share=page.locator('[data-slug="server-one"] [data-action="open-share"]');assert.equal(await share.getAttribute('target'),'_blank');assert.equal(await share.getAttribute('rel'),'noopener');
   await page.evaluate(()=>sessionStorage.setItem('desi:test-share-admin','parent-only'));
   childPromise=context.waitForEvent('page');await share.click();child=await childPromise;await child.waitForLoadState();assert.equal(child.url(),origin+'/Share_Test/viewer/index.html#share=server-one');assert.equal(page.url(),parentUrl);

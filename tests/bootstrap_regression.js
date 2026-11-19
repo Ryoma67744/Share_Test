@@ -22,7 +22,7 @@ for(const file of ['index.html','mrm.html','viewer/index.html']){
   if(file==='viewer/index.html')bootstrap.splice(4,0,'share-refresh.js','source-loader.js','msi-display-settings.js','msi-display-geometry.js','msi-spatial-groups.js');
   const catalogs=file==='viewer/index.html'?['app-i18n-viewer.js','app-i18n-viewer-modules.js']:[file==='mrm.html'?'app-i18n-mrm.js':'app-i18n-manage.js'];
   bootstrap.splice(2,0,...['app-i18n.js','app-i18n-common.js','app-i18n-storage.js',...catalogs].map(src=>relative+src));
-  equal(scripts.slice(0,bootstrap.length).map(tag=>attr(tag,'src')),bootstrap,file+' bootstrap order');
+  equal(scripts.slice(0,bootstrap.length).map(tag=>assetPath(attr(tag,'src') || '')),bootstrap,file+' bootstrap order');
   for(const tag of scripts.slice(0,bootstrap.length))check(!/\b(?:async|defer)\b/i.test(tag.attrs),file+' bootstrap must execute synchronously');
   for(const tag of scripts){
     const src=attr(tag,'src');if(!src)continue;

@@ -19,7 +19,7 @@ function fixture(){
  const nodes=new Map(),states=[],notices=[],scheduled=[],started=deferred(),completion=deferred();
  const project={id:'A',storageRevision:4,publishEditEpoch:2,__publishPending:true,sections:[],rois:[],memo:{text:'original'},
   shareInfo:{slug:'same-url',url:'https://example.invalid/#share=same-url',isPublic:true,serverRevision:1}};
- const context=vm.createContext({Map,console,PublishSafety:Safety,
+ const context=vm.createContext({Map,console,PublishSafety:Safety,_publishChangeDetailsHtml:()=>'',
   document:{getElementById(id){if(!nodes.has(id))nodes.set(id,{style:{},dataset:{},classList:{add(){},remove(){}},setAttribute(){},removeAttribute(){}});return nodes.get(id);}},
   SupabaseClient:{configured:()=>true,unlockProjectMaster:async()=>({token:'synthetic-read'}),
    fetchProjectDoc:async()=>({publish_revision:1,sections:[],meta:{project_meta:{memo:{text:'original'}}}}),listRois:async()=>[]},

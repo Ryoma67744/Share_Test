@@ -183,6 +183,10 @@
           "en": "A successful application updates the same local project and retains its previous version as a separate Projects entry named サーバー版取り込み前 ... (Before server import). This backup is detached from the share and is created even when automatic recovery drafts are OFF."
         },
         {
+          "ja": "オンライン版で公開待ちの編集を確認するには、Projects の「未公開の変更を確認」か master 画面の「未公開の変更」を開きます。公開版と異なる切片・項目・状態を表示します。位置合わせ情報の欠落で保存が止まった場合は、対象の切片・画像レイヤー・座標グループを確認できます。",
+          "en": "In the online app, select Review unpublished changes in Projects or Unpublished changes in the master viewer. The list identifies the section, item and how it differs from the published version. If a save omits an existing group alignment, the warning identifies the affected section, image layer and coordinate group."
+        },
+        {
           "ja": "原本や ROI を取得できない場合、取得中に別タブの内容やサーバーの公開版番号が変わった場合は、既存版への反映を中止します。同じ Google アカウントでログインしても、PC やブラウザー間のローカルプロジェクトは自動同期されません。",
           "en": "Application stops without replacing the existing project if a source or ROI cannot be retrieved, another tab changes the local record, or the server publication revision changes during retrieval. Signing in with the same Google account does not automatically synchronise local projects between PCs or browsers."
         }

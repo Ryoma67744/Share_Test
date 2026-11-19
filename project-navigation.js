@@ -31,24 +31,40 @@ function uiT(source, params) { const api=globalThis.AppI18n; if(typeof params===
             }
             return {key:keys[0], value:target[keys[0]]};
         }
-        function refreshOption(key, options) {
-            if (options === undefined) return false;
-            if (!options || typeof options !== 'object' || Array.isArray(options)
-                || Object.keys(options).some(name => name !== 'refreshShare')
-                || ('refreshShare' in options && typeof options.refreshShare !== 'boolean')
-                || (options.refreshShare && key !== 'projectId')) throw new Error('Invalid project navigation options');
-            return options.refreshShare === true;
+        const refreshModes = {refreshShare:'share', reviewChanges:'changes'};
+        function refreshMode(key, options = {}) {
+            if (!options || typeof options !== 'object' || Array.isArray(options))
+                throw new Error('Invalid project navigation options');
+            let mode;
+            for (const [name, enabled] of Object.entries(options)) {
+                if (!Object.hasOwn(refreshModes, name) || typeof enabled !== 'boolean')
+                    throw new Error('Invalid project navigation options');
+                if (!enabled) continue;
+                if (mode || key !== 'projectId') throw new Error('Invalid project navigation options');
+                mode = refreshModes[name];
+            }
+            return mode;
+        }
+        function optionsFromRefresh(values, localProject) {
+            if (!values.length) return {};
+            if (localProject && values.length === 1) {
+                for (const [key, mode] of Object.entries(refreshModes))
+                    if (values[0] === mode) return {[key]:true};
+            }
+            throw new Error('Invalid refresh destination');
         }
         function masterUrl(target, options) {
             const {key,value} = targetValue(target), url = new URL('viewer/index.html', appBase());
             url.searchParams.set(key === 'projectId' ? 'project' : 'import', value);
-            if (refreshOption(key, options)) url.searchParams.set('refresh', 'share');
+            const mode = refreshMode(key, options);
+            if (mode) url.searchParams.set('refresh', mode);
             return url.href;
         }
         function masterLoginUrl(target, options) {
             const {key,value} = targetValue(target), url = new URL('index.html', appBase());
             url.searchParams.set(key === 'projectId' ? 'openProject' : 'importProject', value);
-            if (refreshOption(key, options)) url.searchParams.set('refresh', 'share');
+            const mode = refreshMode(key, options);
+            if (mode) url.searchParams.set('refresh', mode);
             return url.href;
         }
         function masterLoginUrlFromViewer(href) {
@@ -59,8 +75,8 @@ function uiT(source, params) { const api=globalThis.AppI18n; if(typeof params===
                 const projects = url.searchParams.getAll('project'), imports = url.searchParams.getAll('import');
                 if (projects.length + imports.length !== 1) return fallback;
                 const refresh = url.searchParams.getAll('refresh');
-                if (refresh.length > 1 || (refresh.length && (refresh[0] !== 'share' || !projects.length))) return fallback;
-                return masterLoginUrl(projects.length ? {projectId:projects[0]} : {importSlug:imports[0]}, {refreshShare:refresh.length === 1});
+                const options = optionsFromRefresh(refresh, projects.length === 1);
+                return masterLoginUrl(projects.length ? {projectId:projects[0]} : {importSlug:imports[0]}, options);
             } catch (_) { return fallback; }
         }
         function shareUrl(slug) {
@@ -120,11 +136,11 @@ function uiT(source, params) { const api=globalThis.AppI18n; if(typeof params===
                 const entries = [...current.searchParams.entries()];
                 const targets = entries.filter(([key]) => key === 'openProject' || key === 'importProject');
                 const refresh = current.searchParams.getAll('refresh');
-                if (targets.length !== 1 || entries.length !== 1 + refresh.length || refresh.length > 1
-                    || (refresh.length && (refresh[0] !== 'share' || targets[0][0] !== 'openProject'))) return false;
+                if (targets.length !== 1 || entries.length !== 1 + refresh.length) return false;
+                const options = optionsFromRefresh(refresh, targets[0][0] === 'openProject');
                 const [key,value] = targets[0];
                 const target = key === 'openProject' ? {projectId:value} : {importSlug:value};
-                const destination = masterUrl(target, {refreshShare:refresh.length === 1});
+                const destination = masterUrl(target, options);
                 if (win.DESI_OFFLINE !== true && !masterAuth()) return false;
                 win.location.replace(destination);
                 return true;

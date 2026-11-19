@@ -9,7 +9,7 @@
 <script src="../app-i18n-viewer.js"></script>
 <script src="../app-i18n-viewer-modules.js"></script>
 <script src="../project-store-safety.js"></script>
-<script src="../project-navigation.js"></script>
+<script src="../project-navigation.js?v=unpublished-1"></script>
 <script src="share-refresh.js"></script>
 <script src="source-loader.js"></script>
 <script src="msi-display-settings.js"></script>
@@ -154,7 +154,7 @@ body.share-mode:not(.share-admin) #btn-share-admin-login { display:inline-flex; 
 .sync-status.sync-needs-master-pw { background:#ede9fe; color:#6d28d9; }
 .sync-status.sync-needs-share-pw  { background:#ede9fe; color:#6d28d9; }
 .sync-status.sync-error           { background:#fee2e2; color:#b91c1c; }
-body.share-mode .sync-status { display:none !important; }
+body.share-mode #btn-publish-changes, body.share-mode .sync-status { display:none !important; }
 /* Preview/embed mode (opened with #...&preview=1, e.g. the MRM "実測棚卸し"
    iframe). Keep the image canvas plus the range / opacity / colormap toolbar
    and per-section layer chips; hide only the ROI-editing panel and the
@@ -173,6 +173,11 @@ body.preview #panel-analysis { display:none !important; }
 .modal-card .field-row { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
 .modal-card .publish-comparison { border-collapse:collapse; margin:8px 0; }
 .modal-card .publish-comparison th, .modal-card .publish-comparison td { padding:3px 14px 3px 0; text-align:left; }
+.publish-change-details { margin:12px 0; font-size:12px; }
+.publish-change-details h3 { margin:4px 0; font-weight:600; }
+.publish-change-scroll { max-height:35vh; overflow:auto; }
+.publish-change-scroll table { width:100%; overflow-wrap:anywhere; }
+.publish-change-scroll td { vertical-align:top; }
 .modal-card.help-card { width:880px; max-width:96vw; max-height:90vh; padding:18px 24px; }
 .help-body { font-size:13px; line-height:1.65; color:#1f2937; }
 .help-body h1 { font-size:18px; font-weight:700; margin:18px 0 10px; color:#0f172a; border-bottom:1px solid #e2e8f0; padding-bottom:6px; }
@@ -798,7 +803,7 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
   /* View-only on phones: hide editing / admin / management affordances. */
   header h1, #project-picker,
   #btn-share-admin-login, #btn-projects, #btn-new-project, #btn-import-zip,
-  #btn-publish-share, #btn-share-info, #btn-add-section, #btn-add-parquet,
+  #btn-publish-share, #btn-publish-changes, #btn-share-info, #btn-add-section, #btn-add-parquet,
   #btn-replace-parquet, #btn-delete-project,
   #tb-add-heif, #tb-add-msi, #tb-add-raw, #tb-align-heif, #tb-del-section,
   /* 位置合わせの切替そのものは残す (どちらを見ているか分からないと困る)。
@@ -858,6 +863,7 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
             <button id="btn-export-zip" class="btn">Export ZIP</button>
             <button type="button" id="btn-export-ppt" class="btn" title="このプロジェクトの登録情報と全切片・分子画像からPowerPointレポートを作成" data-i18n-title="このプロジェクトの登録情報と全切片・分子画像からPowerPointレポートを作成" data-i18n="PPTレポート">PPTレポート</button>
             <span id="sync-status" class="sync-status" style="display:none;" title="クリックで強制再同期" data-i18n-title="クリックで強制再同期"></span>
+            <button type="button" id="btn-publish-changes" class="btn" style="display:none;" data-i18n="未公開の変更">未公開の変更</button>
             <button id="btn-publish-share" class="btn" title="Upload this project to Supabase and get a shareable URL">Publish to share</button>
             <button id="btn-share-info" class="btn" title="View the share URL and passwords from the last publish" style="display:none;">Share info</button>
             <button id="btn-refresh-share" class="btn" title="サーバーの公開版と比較し、このPCのプロジェクトを更新します" data-i18n-title="サーバーの公開版と比較し、このPCのプロジェクトを更新します" style="display:none;" data-i18n="共有の最新版を確認">共有の最新版を確認</button>
@@ -1187,7 +1193,7 @@ body.offline-mode > div > header > div:first-child { flex:1 1 580px; }
 <div id="toast-host" class="toast-host"></div>
 
 <script src="section-visibility.js"></script>
-<script src="publish-safety.js"></script>
+<script src="publish-safety.js?v=change-details-1"></script>
 <script src="alignment-transform.js"></script>
 <script src="alignment-session.js"></script>
 <script src="alignment-workspace.js"></script>
@@ -1222,7 +1228,7 @@ function setupOfflineViewer() {
         if (App._syncState === 'error') App._doSave().catch(e => App._showSaveError(e.message, 'retry'));
     });
     if (title && title.parentNode) title.parentNode.appendChild(badge);
-    for (const id of ['btn-publish-share', 'btn-share-info', 'btn-share-admin-login', 'sync-status']) {
+    for (const id of ['btn-publish-share', 'btn-publish-changes', 'btn-share-info', 'btn-share-admin-login', 'sync-status']) {
         const el = document.getElementById(id);
         if (el) { el.hidden = true; el.style.setProperty('display', 'none', 'important'); }
     }
@@ -3184,6 +3190,7 @@ const ProjectStorage = (() => {
             memo: project.memo || null,
             shareInfo: (si.slug || si.url) ? { slug: si.slug || '', url: si.url || '' } : null,
             // 切片が 0 のローカル記録を一覧で見分けるため (管理画面の「空」バッジ)。
+            publishPending: !!(project.__publishPending || si.pendingPublish),
             sectionCount: (project.sections || []).length,
         };
     }
@@ -3240,7 +3247,7 @@ const ProjectStorage = (() => {
             // 列を足しても件数は合ったままなので、これが無いと古いインデックスが
             // 永久に使われ続ける。
             if ((idx || []).length === (keys || []).length
-                && (idx || []).every(r => r && typeof r.sectionCount === 'number' && Number.isSafeInteger(r.storageRevision))) return sortRows(idx || []);
+                && (idx || []).every(r => r && typeof r.sectionCount === 'number' && Number.isSafeInteger(r.storageRevision) && typeof r.publishPending === 'boolean')) return sortRows(idx || []);
         } catch (e) {
             console.warn('project_index read failed; falling back to a full scan', e);
         }
@@ -14688,6 +14695,21 @@ async function pushShareAlignment(sec, options) {
             if (App && App._refreshShareAlignments) App._refreshShareAlignments().catch(() => {});
             return false;
         }
+        if (String(e?.message || '').includes('spatial_alignment_downgrade')) {
+            const reported = _spatialErrorDetail(e);
+            let details = reported ? [reported] : [];
+            if (!reported && Number.isSafeInteger(expectedVersion)) {
+                try {
+                    const records = await SupabaseClient.listShareAlignments(token, {timeoutMs:8000});
+                    if (!current()) return false;
+                    const saved = records?.find(row => row.section_id === sec.id && row.version === expectedVersion);
+                    if (saved) details = [{sectionName:sec.displayName || sec.id,
+                        missing:PublishSafety.missingAlignmentGroups(saved.payload, payload)}];
+                } catch (_) { /* The existing section label remains available without the cloud read. */ }
+            }
+            if (current()) alert(_spatialPublishWarning(details, sec, options.editedLocations));
+            return false;
+        }
         console.warn('[share align] 保存に失敗しました', e);
         showToast((globalThis.AppI18n ? AppI18n.t("位置合わせをサーバへ保存できませんでした: {0}", [((e && e.message) || e)]) : '位置合わせをサーバへ保存できませんでした: ' + ((e && e.message) || e)), 6000);
         return false;
@@ -16602,6 +16624,7 @@ const Wizards = {
             if (!activeDraft) return;
             const revision=activeDraft.editRevision;
             session.capture(state, workspace && activeDraft.key === displayedDraftKey ? workspace.getViewState() : activeDraft.view);
+            if (activeDraft.editRevision !== revision) activeDraft.context.channel = state.msiKey;
             if((activeDraft.context.scope==='shared'||activeDraft.context.scope==='group')&&activeFrame&&activeFrame.confirmed&&activeDraft.editRevision!==revision) {
                 activeDraft.context.frame=clone(activeFrame);
                 activeDraft.frameKey=MsiAlignmentSession.frameKey(activeFrame);
@@ -16710,7 +16733,7 @@ const Wizards = {
                 const frame = alignmentFrameDescriptor(sec, referenceKey, panel);
                 if(!activeDraft&&!persistedSourceMode&&!perSourceAlign&&frame.spatialGroup&&!isTicKey(nextKey))
                     nextMode=groupMode(frame.spatialGroup.groupId);
-                const context = { layerKey:nextLayer, imageIdentity:alignmentImageIdentity(sec.images[nextLayer]),
+                const context = { layerKey:nextLayer, channel:nextKey, imageIdentity:alignmentImageIdentity(sec.images[nextLayer]),
                     scope:nextMode === '__all__' ? 'shared' : isGroupMode(nextMode) ? 'group' : 'source', frame,
                     groupId:isGroupMode(nextMode)&&frame.spatialGroup?frame.spatialGroup.groupId:null,
                     groupFrameKey:isGroupMode(nextMode)&&frame.spatialGroup?frame.spatialGroup.frameKey:null,
@@ -17549,7 +17572,20 @@ const Wizards = {
             target.meta.alignmentSourceMode = state.sourceMode;
             target.meta.alignmentHeKey = state.layerKey;
             if (sec.meta.perSourceAlign != null) target.meta.perSourceAlign = sec.meta.perSourceAlign;
-            return captureSectionAlignment(target);
+            // serialize() returns dirty drafts only. Keep the user's edit locations
+            // separate from the server records that the rejected write would omit.
+            const editedLocations = shareAlign ? serialized.entries.map(({context}) => {
+                const layer = context.layerKey;
+                const image = sec.images?.[layer]?.filename;
+                const source = sourceLabels.get(context.frame?.sourceFileId) || context.frame?.sourceFileId;
+                const channel = context.channel && (isTicKey(context.channel) ? ticKeyLabel(context.channel) : formatDisplayName(context.channel));
+                const scope = context.scope === 'group' ? context.groupId : context.scope === 'shared'
+                    ? (globalThis.AppI18n ? AppI18n.t('全ソース共通') : '全ソース共通') : null;
+                const imageLabel = [layer, image !== layer && image].filter(Boolean).join(' / ');
+                const msiLabel = [...new Set([source, channel, scope].filter(Boolean))].join(' / ');
+                return [imageLabel, msiLabel && 'MSI · ' + msiLabel].filter(Boolean).join(' → ');
+            }).filter(Boolean) : [];
+            return {payload:captureSectionAlignment(target), editedLocations:[...new Set(editedLocations)]};
         };
         const origClose = card._close;
         card._close = val => {
@@ -17572,14 +17608,14 @@ const Wizards = {
             if (!imagesReady || !stillOpen() || saving) return;
             saving = true; setLoading(!imagesReady);
             try {
-                const payload = buildSavePayload();
+                const {payload, editedLocations} = buildSavePayload();
                 if (shareAlign) {
                     if(Object.values(payload.alignment||{}).some(layer=>Object.keys(layer.byGroup||{}).length)) {
                         if(typeof ensureSpatialServerSupport!=='function')throw new Error((globalThis.AppI18n ? AppI18n.t("共通座標の保存機能を確認できません。画面を更新してください。") : '共通座標の保存機能を確認できません。画面を更新してください。'));
                         await ensureSpatialServerSupport();
                     }
                     if (!stillOpen()) return;
-                    const ok = await pushShareAlignment(realSec,{payload,expectedVersion:baseShareVersion,isCurrent:stillOpen});
+                    const ok = await pushShareAlignment(realSec,{payload,editedLocations,expectedVersion:baseShareVersion,isCurrent:stillOpen});
                     if (!ok) return;
                     if (!stillOpen()) return;
                     applySectionAlignment(realSec,payload);
@@ -19806,6 +19842,76 @@ function _publishSizeError(task, size) {
 // queueSave 経由) が手動 publish と衝突しうる状態だった。
 let _publishGate = null;
 const _publishContexts = new Map();
+function _changeText(key) {
+    return globalThis.AppI18n ? AppI18n.t(key) : key;
+}
+
+function _publishChangeDetailsHtml(project, doc) {
+    const changes = PublishSafety.changeDetails(project, doc, {
+        encodeRoi: encodeRoiPolygon, isViewerOverlay, normalizeMemo: ensureMemoShape,
+        sourceReference: msiSourceReference, imageIdentity: alignmentImageIdentity,
+        localPhotos: roiMediaForTransport, publicPhotos: roiMediaRegistryFromDoc, publicRatios: ratioRegistryFromDoc,
+    });
+    const escape = value => String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const text = key => escape(_changeText(key));
+    const states = {local:'このPCのみ', server:'公開版のみ', different:'内容が異なる', unverified:'原本の一致は未確認'};
+    let note = '';
+    if (!doc) note = 'このプロジェクトは未公開です。';
+    else if (!Number.isSafeInteger(project.shareInfo?.serverRevision) || project.shareInfo.serverRevision !== doc.publish_revision)
+        note = 'このPCの基準版と現在の公開版が一致しないため、どちらで編集されたかは特定できません。';
+    const rows = changes.map(change => {
+        const status = change.protectedAlignment ? '公開版の位置合わせを保護' : states[change.kind];
+        return '<tr><td>' + (change.section ? escape(change.section) : text('プロジェクト全体')) + '</td><td>'
+            + text(change.field) + (change.item ? '<br>' + escape(change.item) : '') + '</td><td>'
+            + (change.protectedAlignment ? text('公開版のみ') + '<br>' : '') + text(status) + '</td></tr>';
+    }).join('');
+    return '<section class="publish-change-details" data-publish-changes><h3>' + text('変更箇所') + '</h3>'
+        + (note ? '<p>' + text(note) + '</p>' : '')
+        + (rows ? '<div class="publish-change-scroll"><table class="publish-comparison"><thead><tr><th>'
+            + text('場所') + '</th><th>' + text('項目') + '</th><th>' + text('状態') + '</th></tr></thead><tbody>'
+            + rows + '</tbody></table></div>' : '<p>' + text('比較できた公開項目に差はありません。') + '</p>')
+        + '</section>';
+}
+
+function _spatialErrorDetail(error) {
+    let detail = error?.details;
+    if (typeof detail === 'string') {
+        try { detail = JSON.parse(detail); } catch (_) { return null; }
+    }
+    return Array.isArray(detail?.missing) && detail.missing.length ? detail : null;
+}
+
+function _spatialPublishWarning(details, section, editedLocations = []) {
+    const lines = [];
+    if (editedLocations.length) lines.push(_changeText('この画面で編集した位置合わせ'), ...editedLocations, '');
+    lines.push(_changeText('公開版にある位置合わせが今回の保存内容から抜けています。'));
+    const sections = details.length ? details : (section ? [{sectionName:section.displayName || section.id}] : []);
+    for (const detail of sections) {
+        const name = detail.sectionName || section?.displayName || detail.clientSectionId || section?.id || detail.sectionId;
+        if (name) lines.push(_changeText('保存されなかった切片') + ' · ' + name);
+        for (const item of detail.missing || []) {
+            if (item?.layer && item?.groupId)
+                lines.push(_changeText('画像レイヤー') + ' · ' + item.layer + ' / ' + _changeText('座標グループ') + ' · ' + item.groupId);
+        }
+    }
+    if (!section) lines.push(_changeText('未公開の変更を開いて、公開版との差分を確認してください。'));
+    return lines.join('\n');
+}
+
+async function _readRejectedPublishGroups(attempt, masterPw, current, network) {
+    if (!attempt || !current() || !Number.isSafeInteger(attempt.revision)) return [];
+    try {
+        const raw = await SupabaseClient.unlockProjectMaster(attempt.slug, masterPw, network);
+        const session = Array.isArray(raw) ? raw[0] : raw;
+        if (!session?.token || !current()) return [];
+        const doc = await SupabaseClient.fetchProjectDoc(session.token, network);
+        if (!current() || doc?.publish_revision !== attempt.revision || doc?.meta?.project_slug !== attempt.slug) return [];
+        return PublishSafety.missingPublishedAlignmentSections(doc, attempt.sections);
+    } catch (_) {
+        return [];
+    }
+}
+
 function _publishContext(project, slug) {
     const key = JSON.stringify([project.id, slug || (project.shareInfo && project.shareInfo.slug) || '']);
     if (!_publishContexts.has(key)) _publishContexts.set(key, {timer:0,inflight:false,paused:false,state:'local-saved'});
@@ -19852,6 +19958,8 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
     if (!ProjectStorage.recordPublishReceipt || !ProjectStorage.pinBlobs) throw new Error((globalThis.AppI18n ? AppI18n.t("保存機能を更新してから再読み込みしてください。") : '保存機能を更新してから再読み込みしてください。'));
     let progress=null,cancelled=false; const abort=new AbortController();
     const context=_publishContext(project,meta.slug);
+    const sourceSlug = project.shareInfo?.slug;
+    let attempt = null;
     const ensureRunning=()=>{if(cancelled){const e=new Error('publish_cancelled');e.cancelled=true;throw e;}};
     try {
         return await PublishSafety.run(project,meta,{
@@ -19860,7 +19968,11 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
             url:slug=>location.origin+location.pathname+'#share='+encodeURIComponent(slug),
             state:(slug,id)=>SupabaseClient.getPublishStateV2(masterPw,slug,id),
             session:job=>SupabaseClient.requestPublishSessionV2(masterPw,job),
-            commit:args=>SupabaseClient.publishProjectDocV2(Object.assign({_master_pw:masterPw},args)),
+            commit:args=>{
+                // Keep the actual submitted sections, including any resumed publish intent.
+                attempt = {sections:args._sections, slug:args._slug, revision:args._expected_revision};
+                return SupabaseClient.publishProjectDocV2(Object.assign({_master_pw:masterPw},args));
+            },
             blob:id=>ProjectStorage.getBlob(id),exists:path=>SupabaseClient.headObject('atlases',path),
             remoteBlob:async path=>{const r=await fetch(SupabaseClient.publicUrl('atlases',path),{signal:abort.signal});if(!r.ok)throw new Error((globalThis.AppI18n ? AppI18n.t("原本を取得できません: {0}", [(path)]) : '原本を取得できません: '+path));return r.blob();},
             pin:(jobId,ids,projectId)=>ProjectStorage.pinBlobs(jobId,ids,{projectId}),
@@ -19893,6 +20005,13 @@ async function _publishCoreInner(project, meta, masterPw, opts) {
             ...(Object.prototype.hasOwnProperty.call(opts,'confirmedOverwrite')?{confirmedOverwrite:opts.confirmedOverwrite}:{})});
     } catch(e) {
         if(cancelled){e.cancelled=true;}
+        if (!cancelled && String(e?.message || '').includes('spatial_alignment_downgrade')) {
+            const reported = _spatialErrorDetail(e);
+            const current = () => App.project === project && project.shareInfo?.slug === sourceSlug;
+            const details = reported ? [reported] : await _readRejectedPublishGroups(attempt, masterPw, current,
+                {signal:abort.signal, timeoutMs:8000});
+            e.userMessage = _spatialPublishWarning(details);
+        }
         if(e.code==='PGRST202'||/publish_protocol_upgrade_required/i.test(e.message||''))
             e.userMessage=(globalThis.AppI18n ? AppI18n.t("公開APIの更新が必要です。管理者が supabase/publish_safety_v2.sql を適用した後、アプリを再読み込みしてください。旧APIへの再送は行いません。") : '公開APIの更新が必要です。管理者が supabase/publish_safety_v2.sql を適用した後、アプリを再読み込みしてください。旧APIへの再送は行いません。');
         throw e;
@@ -19932,6 +20051,7 @@ async function _comparePublishedProject(project, slug, masterPw, options = {}) {
         "<p><span data-i18n=\"ローカルの基準公開版:\">ローカルの基準公開版:</span> "+(Number.isSafeInteger(localRevision)&&localRevision>=0?localRevision:(globalThis.AppI18n ? AppI18n.t("未記録") : '未記録'))+(globalThis.AppI18n ? AppI18n.t(" ／ 共有の公開版: ") : ' ／ 共有の公開版: ')+(validRevision?revision:(globalThis.AppI18n ? AppI18n.t("未確認") : '未確認'))+'</p>'+
         "<p data-i18n=\"現在のROIを含むローカル版で、同じ共有URLの内容を置き換えられます。元のローカル版は保持します。\">現在のROIを含むローカル版で、同じ共有URLの内容を置き換えられます。元のローカル版は保持します。</p>"+
         "<table class=\"publish-comparison\"><thead><tr><th></th><th data-i18n=\"ローカル\">ローカル</th><th data-i18n=\"共有\">共有</th></tr></thead><tbody>"+rows+'</tbody></table>'+
+        _publishChangeDetailsHtml(project,doc)+
         '<p>Memo: '+(memoEqual?(globalThis.AppI18n ? AppI18n.t("同じ記録") : '同じ記録'):(globalThis.AppI18n ? AppI18n.t("差があります") : '差があります'))+"</p><p style=\"font-size:11px\" data-i18n=\"原本参照の識別数はファイル内容の比較ではありません。件数が同じでも内容の一致は保証しません。\">原本参照の識別数はファイル内容の比較ではありません。件数が同じでも内容の一致は保証しません。</p>"+
         "<p data-i18n=\"上書きすると、共有側の切片・画像・分子データ・masterのROI・Memoはこのローカル版の内容になります。\">上書きすると、共有側の切片・画像・分子データ・masterのROI・Memoはこのローカル版の内容になります。</p>"+
         (removed.length?"<p style=\"color:#b91c1c\"><span data-i18n=\"共有側だけの切片\">共有側だけの切片</span> "+removed.length+(globalThis.AppI18n ? AppI18n.t(" 件を削除します: ") : ' 件を削除します: ')+removed.slice(0,10).map(s=>safe(s.display_name||s.displayName||s.id)).join('、')+(removed.length>10?'…':'')+(globalThis.AppI18n ? AppI18n.t("。これらに属するROI ") : '。これらに属するROI ')+removedRois+" <span data-i18n=\"件や共同編集の画像・位置合わせも削除されます。\">件や共同編集の画像・位置合わせも削除されます。</span></p>":'')+
@@ -23639,7 +23759,7 @@ const SupabaseClient = (() => {
         deleteShareOverlay(token, id) { return rpc('delete_share_overlay', { p_token: token, p_id: id }); },
         // 共有の位置合わせ (HE/IF ⇔ MSI。共有 URL を開いた全員で共有する) --
         // これも share_locks.sql の 10. を適用していないと PGRST202。
-        listShareAlignments(token) { return rpc('list_share_alignments', { p_token: token }); },
+        listShareAlignments(token, options) { return rpc('list_share_alignments', { p_token: token }, options); },
         upsertShareAlignment(token, sectionId, payload, expectedVersion) {
             return rpc('upsert_share_alignment', {
                 p_token: token, p_section_id: sectionId, p_payload: Object.assign({},payload,{alignmentWriteProtocol:2}),
@@ -25595,12 +25715,20 @@ const App = {
             return;
         }
         const requestedId = params.get('project') || '';
+        const refreshIntent = params.getAll('refresh').length === 1 ? params.get('refresh') : null;
+        const requestedReview = !this.offline && requestedId && refreshIntent === 'changes';
         const last = localStorage.getItem('desi:lastProjectId');
         this.wireUi();
         let opened = false;
         if (requestedId) {
-            try { await this.openProject(requestedId); opened = !!this.project; }
-            catch (e) { console.warn('Failed to open requested project:', e); }
+            if (requestedReview) this._reviewOpeningId = requestedId;
+            try {
+                await this.openProject(requestedId);
+                opened = !!this.project;
+                if (requestedReview && this.project?.id === requestedId)
+                    _publishContext(this.project).reviewedEpoch = this.project.publishEditEpoch || 0;
+            } catch (e) { console.warn('Failed to open requested project:', e); }
+            finally { this._reviewOpeningId = null; }
         }
         const requestedMissing = !!requestedId && !opened;
         if (!opened && last && !requestedMissing) {
@@ -25612,9 +25740,9 @@ const App = {
         if (requestedMissing) {
             showToast((this.offline ? (globalThis.AppI18n ? AppI18n.t("指定されたプロジェクトがこのPCにありません。該当する Export ZIP を取り込んでから、もう一度開いてください。") : '指定されたプロジェクトがこのPCにありません。該当する Export ZIP を取り込んでから、もう一度開いてください。') : (globalThis.AppI18n ? AppI18n.t("指定されたプロジェクトはこのPCにありません。Projectsでサーバーから一覧を取得して開くか、Share URLを使用してください。同じGoogleアカウントでもローカルデータは同期されません。") : '指定されたプロジェクトはこのPCにありません。Projectsでサーバーから一覧を取得して開くか、Share URLを使用してください。同じGoogleアカウントでもローカルデータは同期されません。')),12000);
         }
-        if(!this.offline&&opened&&this.project?.id===requestedId&&params.getAll('refresh').length===1&&params.get('refresh')==='share'){
+        if(!this.offline&&opened&&this.project?.id===requestedId&&(requestedReview||refreshIntent==='share')){
             const next=new URL(location.href);next.searchParams.delete('refresh');history.replaceState(history.state,'',next.pathname+next.search+next.hash);
-            this.refreshFromShare().catch(e=>console.warn('requested share refresh failed',e));
+            this.refreshFromShare({reviewOnly:!!requestedReview}).catch(e=>console.warn('requested share refresh failed',e));
         }
         // ?openHelp=<audience> (sent from the manager page's Help button or
         // a direct link) opens the help modal directly after init. Accepts
@@ -25847,17 +25975,31 @@ const App = {
     //   (share_locks.sql)。つまり admin pw を入れずに公開したプロジェクトには
     //   正解のパスワードが存在せず、**どの PC からも永久に取り込めなかった**
     //   (何を入れても unlock_project が 28P01 を返し、一覧へ戻るだけ)。
-    async refreshFromShare() {
+    async refreshFromShare({reviewOnly = false} = {}) {
         const project=this.project,slug=project?.shareInfo?.slug;
         if(this.offline||this.shareMode||!project||project.__share)return;
+        if (reviewOnly && !slug) {
+            await openModal('<h2 data-i18n="未公開の変更">未公開の変更</h2>' + _publishChangeDetailsHtml(project, null)
+                + '<div class="actions"><button type="button" class="btn" data-modal-cancel data-i18n="閉じる">閉じる</button></div>');
+            return;
+        }
         if(!slug){showToast((globalThis.AppI18n ? AppI18n.t("このプロジェクトはこのPCのみです。Publish to share で公開すると別PCから取得できます。") : 'このプロジェクトはこのPCのみです。Publish to share で公開すると別PCから取得できます。'),8000);return;}
         if(this._shareRefreshOperation)return;
         const ctx=_publishContext(project,slug);
         if(ctx.inflight){showToast((globalThis.AppI18n ? AppI18n.t("公開処理が終わってから、共有の最新版を確認してください。") : '公開処理が終わってから、共有の最新版を確認してください。'),6000);return;}
         const operation={project,abort:new AbortController()};this._shareRefreshOperation=operation;
+        const autoWasScheduled = !!ctx.timer || !!(this._publishDirty && (this.saveTimer || this._saveInflight));
         ctx.refreshing=true;if(ctx.timer){clearTimeout(ctx.timer);ctx.timer=0;}
-        const button=document.getElementById('btn-refresh-share');
-        if(button){button.disabled=true;(globalThis.AppI18n ? AppI18n.setText(button, "共有版を確認中…") : (button.textContent = '共有版を確認中…'));}
+        const button=document.getElementById(reviewOnly ? 'btn-publish-changes' : 'btn-refresh-share');
+        const setButtonState = (loading) => {
+            if (!button) return;
+            button.disabled = loading;
+            const label = reviewOnly ? (loading ? '未公開の変更を確認中…' : '未公開の変更')
+                : (loading ? '共有版を確認中…' : '共有の最新版を確認');
+            if (globalThis.AppI18n) AppI18n.setText(button, label);
+            else button.textContent = label;
+        };
+        setButtonState(true);
         const signal=operation.abort.signal;let lease,progress,finished=false;
         let capturedEpoch,capturedRevision;
         const assertCurrent=()=>{
@@ -25874,6 +26016,27 @@ const App = {
             const doc=await SupabaseClient.fetchProjectDoc(session.token,{signal});
             assertCurrent();
             const comparison=ShareRefresh.compare(project,doc);
+            let changeDetails = '';
+            if (reviewOnly || comparison.dirty) {
+                try {
+                    const rois = [];
+                    await runWithConcurrency(doc.sections || [], 4, async section => {
+                        const rows = await SupabaseClient.listRois(session.token, section.id, {signal});
+                        if (!Array.isArray(rows)) throw new Error(_changeText('変更箇所を取得できませんでした。'));
+                        for (const row of rows) rois.push(row);
+                    });
+                    changeDetails = _publishChangeDetailsHtml(project, {...doc, rois});
+                } catch (error) {
+                    if (reviewOnly) throw error;
+                    changeDetails = '<p role="status" data-i18n="変更箇所を取得できませんでした。">変更箇所を取得できませんでした。</p>';
+                }
+                assertCurrent();
+            }
+            if (reviewOnly) {
+                await openModal('<h2 data-i18n="公開版との差分">公開版との差分</h2>' + changeDetails
+                    + '<div class="actions"><button type="button" class="btn" data-modal-cancel data-i18n="閉じる">閉じる</button></div>');
+                return;
+            }
             const safe=value=>String(value==null?'':value).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
             const names=items=>items.slice(0,8).map(s=>safe(s.displayName||s.display_name||s.id)).join('、')+(items.length>8?'…':'');
             const blocked=comparison.dirty?(globalThis.AppI18n ? AppI18n.t("このPCに未公開または結果未確認の変更があります。既存版への反映は行わず、共有版を別コピーで取得できます。") : 'このPCに未公開または結果未確認の変更があります。既存版への反映は行わず、共有版を別コピーで取得できます。')
@@ -25887,6 +26050,7 @@ const App = {
                 +(comparison.same?"<p data-i18n=\"公開版番号と切片構成は同じです。\">公開版番号と切片構成は同じです。</p>":'')
                 +"<p data-i18n=\"切片・画像・ROI・表示設定などをサーバーの公開版へ更新します。更新前の内容は別のローカルコピーとして残します。\">切片・画像・ROI・表示設定などをサーバーの公開版へ更新します。更新前の内容は別のローカルコピーとして残します。</p>"
                 +(blocked?'<p role="status" style="color:#b91c1c">'+blocked+'</p>':'')
+                +changeDetails
                 +'<form><div class="modal-actions" style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end">'
                 +"<button type=\"button\" class=\"btn\" data-modal-cancel data-i18n=\"閉じる\">閉じる</button>"
                 +"<button type=\"button\" class=\"btn\" data-refresh-copy data-i18n=\"別コピーで取得\">別コピーで取得</button>"
@@ -25953,9 +26117,10 @@ const App = {
             if(lease&&!finished){try{await ProjectStorage.finishBlobLease(lease,{discard:true});}catch(e){console.warn('share refresh cleanup failed',e);}}
             ctx.refreshing=false;
             if(this._shareRefreshOperation===operation)this._shareRefreshOperation=null;
-            if(button){button.disabled=false;(globalThis.AppI18n ? AppI18n.setText(button, "共有の最新版を確認") : (button.textContent = '共有の最新版を確認'));}
+            setButtonState(false);
             if(this.project===project||finished)this.refreshShareInfoButton();
-            if(this.project===project&&project.__publishPending&&!ctx.paused)this._scheduleAutoPublish();
+            const resumeAuto = !reviewOnly || autoWasScheduled || (capturedEpoch !== undefined && (project.publishEditEpoch || 0) !== capturedEpoch);
+            if(resumeAuto&&this.project===project&&project.__publishPending&&!ctx.paused)this._scheduleAutoPublish();
         }
     },
 
@@ -28755,7 +28920,9 @@ const App = {
         const project=this.project;
         if(this.offline||this.shareMode||!project||project.__share||!project.shareInfo?.slug||!project.__publishPending)return;
         const ctx=_publishContext(project);
-        if(ctx.refreshing)return;
+        // Opening the manager's read-only review must not publish the pending
+        // snapshot when hydration or a derived-statistics save finishes.
+        if(ctx.refreshing || this._reviewOpeningId === project.id || ctx.reviewedEpoch === (project.publishEditEpoch || 0))return;
         if(ctx.paused){this._setSyncStatus(ctx.state);return;}
         if(ctx.inflight)return;
         if(project.shareInfo.pendingPublish && project.shareInfo.pendingPublish.slug!==project.shareInfo.slug){_publishStatus(project,project.shareInfo.slug,'error',(globalThis.AppI18n ? AppI18n.t("別URLへの公開が未完了です。Publish to share から再試行してください。") : '別URLへの公開が未完了です。Publish to share から再試行してください。'));return;}
@@ -28819,6 +28986,9 @@ const App = {
             || this.shareMode
             || !this.project
             || this.project.__share;
+        const changesButton = document.getElementById('btn-publish-changes');
+        if (changesButton) changesButton.style.display = !hidden && state !== 'uploading' && (this.project.__publishPending || this.project.shareInfo?.pendingPublish
+            || ['local-only','local-saved','conflict','error','needs-baseline'].includes(state)) ? '' : 'none';
         if (hidden) { el.style.display = 'none'; return; }
         el.className = 'sync-status sync-' + state;
         let text = '';
@@ -28996,6 +29166,8 @@ const App = {
         const syncStatusEl = document.getElementById('sync-status');
         if (syncStatusEl) syncStatusEl.addEventListener('click', () => this._handleSyncStatusClick());
         const shareInfoBtn = document.getElementById('btn-share-info');
+        const changesButton = document.getElementById('btn-publish-changes');
+        if (changesButton) changesButton.addEventListener('click', () => this.refreshFromShare({reviewOnly:true}));
         const refreshShareBtn=document.getElementById('btn-refresh-share');
         if(refreshShareBtn)refreshShareBtn.addEventListener('click',()=>this.refreshFromShare());
         if (shareInfoBtn) shareInfoBtn.addEventListener('click', () => {

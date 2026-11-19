@@ -506,8 +506,23 @@ test('failed shared save retains the draft and uses the opening version', async 
     assert.equal(+h.$('[data-scale-num]').value, 133); assert.deepEqual(plain(h.section), h.initialSection);
     const options = h.sharedSaves[0].args[1];
     assert.equal(options?.expectedVersion, 7, 'share save must compare with the version from opening, not latest poll');
+    assert.equal(options.editedLocations.length,1);
+    assert.match(options.editedLocations[0],/HE_STAIN/);
+    assert.doesNotMatch(options.editedLocations[0],/IF_STAIN/);
     assert.equal(h.releaseCalls.length, 0, 'failed save retains editor lock while draft stays open');
     await h.click('[data-modal-cancel]'); assert.equal(h.releaseCalls.length, 1); h.assertNumericUnchanged();
+});
+
+test('shared save identifies all edited image and measurement contexts', async () => {
+    const h = await harness({ shared:true, shareFail:true });
+    await h.addPair();
+    await h.change('[data-align-source]', 'file-2');
+    await h.change('[data-align-layer]', 'IF_STAIN'); await h.addPair(220, 180);
+    await h.click('[data-save]');
+    const labels=h.sharedSaves[0].args[1].editedLocations;
+    assert.equal(labels.length,2);
+    assert.match(labels[0],/HE_STAIN.*MSI/);assert.match(labels[1],/IF_STAIN.*MSI/);
+    assert.equal(h.closed,false);await h.click('[data-modal-cancel]');
 });
 
 test('local save failure keeps private drafts and retry persists every edited frame', async () => {

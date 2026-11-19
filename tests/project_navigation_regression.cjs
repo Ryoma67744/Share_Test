@@ -57,6 +57,17 @@ function fixture(options={}){
  const loggedOut=fixture({records:{}});assert.equal(loggedOut.api.openMaster({projectId:'p'},{refreshShare:true}),true);
  assert.equal(loggedOut.navigated[0],base+'index.html?openProject=p&refresh=share');assert.equal(loggedOut.child().copied.size,0);
 }
+{
+ const f=fixture(), options={reviewChanges:true};
+ const viewer=base+'viewer/index.html?project=p&refresh=changes', login=base+'index.html?openProject=p&refresh=changes';
+ assert.equal(f.api.masterUrl({projectId:'p'},options),viewer);
+ assert.equal(f.api.masterLoginUrlFromViewer(viewer),login);
+ const gated=fixture({href:login});
+ assert.equal(gated.api.resumeMasterDestination(),true);
+ assert.equal(gated.navigated[0],viewer);
+ assert.throws(()=>f.api.masterUrl({importSlug:'p'},options));
+ assert.throws(()=>f.api.masterUrl({projectId:'p'},{...options,refreshShare:true}));
+}
 for(const records of [
  {}, {'desi:masterUnlocked':'not-json','desi:masterPw':JSON.stringify(password)},
  {'desi:masterUnlocked':JSON.stringify({expiresAt:now-1000}),'desi:masterPw':JSON.stringify(password)},

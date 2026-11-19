@@ -2335,7 +2335,7 @@ function testShareAlignmentEditingIsLocked() {
   assert.match(body, /if \(shareAlign\) \{ try \{ App\._releaseRoiLock\(\); \} catch \(e\) \{\} \}/,
     '閉じるときにロックを返していない (握ったままだと誰も編集できなくなる)');
   // 保存は共有側へ回し、master の位置合わせ (sections.meta) は書き換えない。
-  assert.match(body, /ok = await pushShareAlignment\(realSec,\{payload,expectedVersion:baseShareVersion,isCurrent:stillOpen\}\);/,
+  assert.match(body, /ok = await pushShareAlignment\(realSec,\{payload,editedLocations,expectedVersion:baseShareVersion,isCurrent:stillOpen\}\);/,
     '作業中の設定と編集開始時の版を共有保存へ渡すこと');
   assert.match(body, /if \(!ok\) return;/, '保存できていないのにモーダルを閉じないこと');
   assert.match(body, /App\.alignChoice = 'shared';/, '保存後に「共有」へ切り替えていない');
@@ -2559,7 +2559,7 @@ function testWorkerAssetsFollowApplicationBase() {
     }
   }
   const scriptSources = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(scriptSources.slice(0, 15), ['../runtime-config.js', '../app-runtime.js', '../app-i18n.js', '../app-i18n-common.js', '../app-i18n-storage.js', '../app-i18n-viewer.js', '../app-i18n-viewer-modules.js', '../project-store-safety.js', '../project-navigation.js', 'share-refresh.js', 'source-loader.js', 'msi-display-settings.js', 'msi-display-geometry.js', 'msi-spatial-groups.js', '../offline/offline.js']);
+  assert.deepEqual(scriptSources.slice(0, 15), ['../runtime-config.js', '../app-runtime.js', '../app-i18n.js', '../app-i18n-common.js', '../app-i18n-storage.js', '../app-i18n-viewer.js', '../app-i18n-viewer-modules.js', '../project-store-safety.js', '../project-navigation.js?v=unpublished-1', 'share-refresh.js', 'source-loader.js', 'msi-display-settings.js', 'msi-display-geometry.js', 'msi-spatial-groups.js', '../offline/offline.js']);
   assert.ok(scriptSources.includes('../vendor/supabase.min.js'));
   assert.ok(!scriptSources.some(src => src.startsWith('/') || /^https?:/.test(src)), 'viewer assets must work under a project Pages path');
   assert.doesNotMatch(html, /window\.SUPABASE_(?:URL|ANON_KEY)\s*=/, 'shared runtime owns cloud configuration');

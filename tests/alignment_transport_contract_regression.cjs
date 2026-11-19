@@ -28,12 +28,12 @@ function setup(){
         }})},
         App:{project:{id:'p'},shareMode:{token:'synthetic-token'}},
         _shareAlignServerMissing:false,_shareAlignBySection:new Map(),_shareAlignWriteGen:0,
-        showToast:message=>notices.push(message),getShareAlignmentVersion:()=>4,
+        PublishSafety:require('../viewer/publish-safety.js'),showToast:message=>notices.push(message),getShareAlignmentVersion:()=>4,
         captureSectionAlignment:section=>copy(section.meta),_isStaleVersionError:()=>false,
         _noteShareAlignServerMissing:()=>assert.fail('Capability failure is not a missing shared-alignment table')});
     const begin=html.indexOf('const SupabaseClient = (() => {'),end=html.indexOf('\n})();',begin)+6;
     vm.runInContext(html.slice(begin,end)+'\nglobalThis.api=SupabaseClient;',c);
-    for(const name of ['_isMissingRpc','ensureAlignmentServerSupport','pushShareAlignment'])vm.runInContext(fn(name),c);
+    for(const name of ['_changeText','_spatialErrorDetail','_spatialPublishWarning','_readRejectedPublishGroups','_isMissingRpc','ensureAlignmentServerSupport','pushShareAlignment'])vm.runInContext(fn(name),c);
     return {c,calls,notices,setCaps:value=>{caps=value;}};
 }
 async function main(){
@@ -66,6 +66,43 @@ async function main(){
     assert.equal(protectedSave.calls.at(-1).args.p_expected_version,4);
     assert.equal(protectedSave.c._shareAlignBySection.get('s').payload.alignmentWriteProtocol,undefined,
         'request-only protocol marker never enters the local shared cache');
+    const missingGroup=setup(),alerts=[];
+    missingGroup.c.alert=message=>alerts.push(message);
+    const writeError={code:'0A000',message:'spatial_alignment_downgrade: reload the current application',
+        details:JSON.stringify({sectionName:'Section A',missing:[{layer:'HE_STAIN',groupId:'MSI-A'}]})};
+    missingGroup.c.api.upsertShareAlignment=async()=>{throw writeError;};
+    const editedLocations=['IF image A → MSI · acquisition A','HE image B → MSI · acquisition B'];
+    assert.equal(await missingGroup.c.pushShareAlignment(section,{payload,editedLocations,expectedVersion:4}),false);
+    const [attempted,protectedRecords]=alerts[0].split('公開版にある位置合わせ');
+    assert.match(attempted,/IF image A/);assert.match(attempted,/HE image B/);
+    assert.doesNotMatch(attempted,/MSI-A/);assert.match(protectedRecords,/MSI-A/);
+    assert.match(alerts[0],/Section A/);assert.match(alerts[0],/HE_STAIN/);assert.match(alerts[0],/MSI-A/);
+    assert.doesNotMatch(alerts[0],/未公開の変更を開いて/,'shared viewer has no master review button');
+    assert.equal(missingGroup.c._shareAlignBySection.size,0);
+    assert.match(missingGroup.c._spatialPublishWarning([]),/未公開の変更を開いて/);
+    // A live database with the original error still identifies the rejected draft's
+    // exact paths. Ignore other sections and any later saved version.
+    delete writeError.details;
+    const savedPayload={alignment:{HE_STAIN:{byGroup:{OLD:{},KEEP:{}}}}};
+    const incoming={alignment:{HE_STAIN:{byGroup:{KEEP:{}}}}};
+    const shareRecord={section_id:'s',version:4,payload:savedPayload};
+    let alignReads=0;
+    missingGroup.c.api.listShareAlignments=async token=>{
+        assert.equal(token,'synthetic-token');alignReads++;
+        return [{...shareRecord,section_id:'other',payload:{alignment:{SECRET:{byGroup:{OTHER:{}}}}}},shareRecord];
+    };
+    assert.equal(await missingGroup.c.pushShareAlignment(section,{payload:incoming,expectedVersion:4}),false);
+    assert.equal(alignReads,1);assert.match(alerts.at(-1),/OLD/);assert.doesNotMatch(alerts.at(-1),/KEEP|SECRET|OTHER/);
+    shareRecord.version=5;
+    assert.equal(await missingGroup.c.pushShareAlignment(section,{payload:incoming,expectedVersion:4}),false);
+    assert.doesNotMatch(alerts.at(-1),/OLD/,'a later version cannot explain the failed save');
+    missingGroup.c.api.listShareAlignments=async()=>{throw Error('offline');};
+    assert.equal(await missingGroup.c.pushShareAlignment(section,{payload:incoming,expectedVersion:4}),false);
+    assert.match(alerts.at(-1),/保存されなかった切片/);
+    missingGroup.c.api.listShareAlignments=async()=>{missingGroup.c.App.shareMode={token:'another-token'};return [shareRecord];};
+    const alertCount=alerts.length;
+    assert.equal(await missingGroup.c.pushShareAlignment(section,{payload:incoming,expectedVersion:4}),false);
+    assert.equal(alerts.length,alertCount,'an expired editor does not receive a later diagnostic');
     const legacy=setup();legacy.setCaps(missing);
     assert.equal(await legacy.c.pushShareAlignment({id:'s',meta:{alignment:{HE_STAIN:{scale_pct:100}}}}),true);
     assert.deepEqual(legacy.calls.map(x=>x.name),['upsert_share_alignment'],'legacy saves do not require a new capability');
@@ -109,6 +146,34 @@ async function main(){
     comparedCurrent=false;completeCapability(validCaps);
     await assert.rejects(pending,/compared version changed/);
     assert.equal(assertions,2);assert.equal(started,0);assert.deepEqual(project,snapshot);
+    // A master publication reads only project metadata at the rejected revision.
+    // Its queued payload can differ from both the live local object and edited tabs.
+    master.setCaps(validCaps);master.c.App.project=project;project.shareInfo={slug:'fixture'};
+    const submittedArgs={_slug:'fixture',_expected_revision:7,_sections:[
+        {id:'s',meta:incoming},{id:'s2',meta:{alignment:{}}}
+    ]};
+    let reads=0, writes=0, remoteRevision=7;
+    master.c.api.publishProjectDocV2=async()=>{writes++;throw {...writeError};};
+    master.c.api.unlockProjectMaster=async(slug,pw)=>{
+        assert.equal(slug,'fixture');assert.equal(pw,'synthetic');return [{token:'meta-read'}];
+    };
+    master.c.api.fetchProjectDoc=async token=>{
+        assert.equal(token,'meta-read');reads++;
+        return {meta:{project_slug:'fixture'},publish_revision:remoteRevision,sections:[
+            {id:'db-s',display_name:'First tissue',meta:{client_id:'s',...savedPayload}},
+            {id:'db-s2',display_name:'Second tissue',meta:{client_id:'s2',alignment:{IF:{byGroup:{g2:{}}}}}}
+        ]};
+    };
+    master.c.PublishSafety={...require('../viewer/publish-safety.js'),run:async(_p,_m,hooks)=>hooks.commit(submittedArgs)};
+    await assert.rejects(()=>master.c._publishCoreInner(project,{slug:'fixture'},'synthetic',{}),err=>{
+        assert.match(err.userMessage,/First tissue/);assert.match(err.userMessage,/Second tissue/);
+        assert.match(err.userMessage,/OLD/);assert.match(err.userMessage,/g2/);assert.doesNotMatch(err.userMessage,/KEEP/);return true;
+    });
+    remoteRevision++;
+    await assert.rejects(()=>master.c._publishCoreInner(project,{slug:'fixture'},'synthetic',{}),err=>{
+        assert.doesNotMatch(err.userMessage,/First tissue|Second tissue/);return true;
+    });
+    assert.equal(reads,2);assert.equal(writes,2,'no extra write to resolve the error');
     console.log('PASS alignment transport: immutable protocol markers, capabilities, legacy writes, shared CAS, late responses and master gate');
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});
