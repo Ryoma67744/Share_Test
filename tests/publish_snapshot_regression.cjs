@@ -133,7 +133,7 @@ async function main(){
  checks+=await overwriteChecks(previous);
  // Both protocol generations stop at the first session/commit conflict. A
  // saved intent may be read once before resuming, never after a conflict.
- for(const code of ['PT409','40001'])for(const stage of ['session','commit'])for(const resume of [false,true]){
+ for(const code of ['PT409','40001','0A000'])for(const stage of ['session','commit'])for(const resume of [false,true]){
   const f=setup(),before=clone(f.project);
   if(resume)f.project.shareInfo={slug:f.meta.slug,pendingPublish:clone(previous)};
   f.hooks[stage]=async args=>{f.logs[stage==='session'?'sessions':'commits'].push(clone(args));throw Object.assign(new Error('publish_conflict'),{code});};
@@ -165,6 +165,13 @@ async function main(){
  let autos=0;ui.ui.autoPublishProject=async()=>{autos++;};ui.ui.project=pa;ui.ui._scheduleAutoPublish();const ta=ui._publishContext(pa).timer;
  ui.ui.project=pb;ui.ui._scheduleAutoPublish();const tb=ui._publishContext(pb).timer;assert.notEqual(ta,tb);
  ui.state='B-local';ui._publishStatus(pa,'a','synced');assert.equal(ui.state,'B-local');timers.get(ta)();assert.equal(autos,0);assert.ok(timers.has(tb));timers.get(tb)();assert.equal(autos,1);checks+=5;
+ // Reviewing pending work from Projects preserves the draft through hydration and close.
+ const inspect={id:'review',__publishPending:true,publishEditEpoch:4,shareInfo:{slug:'review',serverRevision:2}};
+ ui.ui.project=inspect;ui.ui._reviewOpeningId=inspect.id;ui.ui._scheduleAutoPublish();
+ const inspectCtx=ui._publishContext(inspect);assert.equal(inspectCtx.timer,0);
+ ui.ui._reviewOpeningId=null;inspectCtx.reviewedEpoch=4;ui.ui._scheduleAutoPublish();assert.equal(inspectCtx.timer,0);
+ inspect.publishEditEpoch++;ui.ui._scheduleAutoPublish();assert.ok(inspectCtx.timer,'a later edit resumes ordinary automatic publication');
+ ui.clearTimeout(inspectCtx.timer);checks+=3;
  // A conflict cancels queued work and later local edits cannot re-arm it.
  ui.ui.project=pb;ui.ui._scheduleAutoPublish();const pendingTimer=ui._publishContext(pb).timer;
  ui._publishStatus(pb,'b','conflict');assert.equal(ui._publishContext(pb).paused,true);
@@ -216,7 +223,7 @@ async function main(){
  assert.equal(Safety.summary({rois:[{polysBySection:{s1:[],s2:[]}}]}).rois,2);
  assert.equal(Safety.summary({rois:[{section_id:'s1'},{section_id:'s2'}]}).rois,2);
  const calls=[],comparisonProject={id:'comparison',sections:[],rois:[],shareInfo:{slug:'s'}},comparisonContext={inflight:false};
- const cmp=vm.createContext({PublishSafety:Safety,App:{project:comparisonProject},_publishContext:()=>comparisonContext,showToast:()=>assert.fail('Unchanged comparison cannot be rejected'),
+ const cmp=vm.createContext({PublishSafety:Safety,_publishChangeDetailsHtml:()=>'',App:{project:comparisonProject},_publishContext:()=>comparisonContext,showToast:()=>assert.fail('Unchanged comparison cannot be rejected'),
   SupabaseClient:{unlockProjectMaster:async()=>({token:'read'}),fetchProjectDoc:async()=>({publish_revision:1,sections:[{id:'s1'},{id:'s2'}]}),listRois:async(token,id)=>{calls.push(id);return [{section_id:id}];}},openModal:()=>Promise.resolve(false)});
  cmp.openModal._card={querySelector:()=>({addEventListener(){}})};const compareAt=html.indexOf('async function _comparePublishedProject(');vm.runInContext(html.slice(compareAt,html.indexOf('\n}',compareAt)+2),cmp);
  await cmp._comparePublishedProject(comparisonProject,'s','synthetic');assert.deepEqual(calls,['s1','s2']);assert.equal(comparisonContext.inflight,false);checks+=4;

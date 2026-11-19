@@ -244,6 +244,8 @@ Export ZIP backups regularly to another location in case browser storage is clea
 
 A successful application updates the same local project and retains its previous version as a separate Projects entry named サーバー版取り込み前 ... (Before server import). This backup is detached from the share and is created even when automatic recovery drafts are OFF.
 
+For a project with pending edits, select Review unpublished changes in Projects or Unpublished changes in the master viewer. The list identifies the section, item and how it differs from the published version. If a save omits an existing group alignment, the warning identifies the affected section, image layer and coordinate group.
+
 Application stops without replacing the existing project if a source or ROI cannot be retrieved, another tab changes the local record, or the server publication revision changes during retrieval. Signing in with the same Google account does not automatically synchronise local projects between PCs or browsers.
 
 ### Import sections and data

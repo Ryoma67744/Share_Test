@@ -139,6 +139,7 @@ AppI18n.register("manage", {
   "新しいタブで開きます": "Open in a new tab",
   "サーバから取り込み、新しいタブの master mode で開きます (master password 要)": "Import from the server and open in a new tab in master mode (master password required)",
   "新しいタブで共有版の更新を確認します。ローカルの編集は保持します": "Check the latest shared version in a new tab while keeping local edits",
+  "未公開の変更を確認": "Review unpublished changes",
   "共有の最新版を確認": "Check latest shared version",
   "閲覧専用 share view を新しいタブで開きます": "Open the read-only shared view in a new tab",
   "Publish to share してから URL を取得してください": "Use Publish to share before obtaining a URL",

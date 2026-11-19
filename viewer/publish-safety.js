@@ -185,7 +185,7 @@
      try{server=await hooks.commit(args);}catch(e){
        // The exact same immutable request is retried. SQL returns its receipt
        // if the first commit succeeded, and never runs a legacy writer.
-       if(isConflict(e)||e.code==='22023'||e.code==='28000'||e.code==='PGRST202'||e.cancelled)throw e;
+       if(isConflict(e)||e.code==='0A000'||e.code==='22023'||e.code==='28000'||e.code==='PGRST202'||e.cancelled)throw e;
        server=await hooks.commit(args);
      }
      assertReceipt(server,job);
@@ -198,5 +198,240 @@
      for(const e of Object.values(s.msiSeries||paths.msiSeries||{})){molecules++;sources.add(e.sourceReference||e.sourceFileId||e.blobId||e.path||'unknown');}}
    return {sections:sections.length,sources:sources.size,molecules,images,rois:(project.rois||[]).reduce((n,r)=>n+(r.polysBySection?Object.keys(r.polysBySection).length:(r.section_id||r.sectionId?1:0)),0)};
  }
- return {run,baseline,summary,parallel,ownedRois,isConflict};
+ // Mirrors _assert_spatial_alignment_preserved_v1. JSON null is an existing
+ // entry: this guard checks for a missing path, not transform validity.
+ function missingAlignmentGroups(savedPayload, attemptedPayload) {
+   const missing = [];
+   for (const [layer, record] of Object.entries(savedPayload?.alignment || {})) {
+     const groups = record?.byGroup;
+     if (!groups || typeof groups !== 'object' || Array.isArray(groups)) continue;
+     const next = attemptedPayload?.alignment?.[layer]?.byGroup;
+     for (const groupId of Object.keys(groups)) {
+       if (!next || !Object.hasOwn(next,groupId) || next[groupId] === undefined)
+         missing.push({layer,groupId});
+     }
+   }
+   return missing;
+ }
+ function missingPublishedAlignmentSections(doc, submittedSections) {
+   // The publish writer matches existing rows by meta.client_id. An omitted
+   // whole section is a different operation and never fires this update guard.
+   const saved = new Map((doc?.sections || []).filter(s => s.meta?.client_id)
+     .map(s => [s.meta.client_id,s]));
+   const findings = [];
+   for (const submitted of submittedSections || []) {
+     const section = saved.get(submitted.id);
+     if (!section) continue;
+     const missing = missingAlignmentGroups(section.meta,submitted.meta);
+     if (missing.length) findings.push({sectionId:section.id, clientSectionId:submitted.id,
+       sectionName:submitted.displayName || section.display_name || submitted.id, missing});
+   }
+   return findings;
+ }
+ // Compare the metadata used by the publisher with get_project_doc/list_rois.
+ // Server UUIDs identify ROI rows; section.meta.client_id identifies the local section.
+ function sameJson(a, b, stripNullKeys = false) {
+   if (a === b) return true;
+   if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+   if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length
+     && a.every((value, index) => sameJson(value,b[index],stripNullKeys));
+   if (Array.isArray(b)) return false;
+   // projects.meta is written through jsonb_strip_nulls. Null array entries
+   // and null fields in section metadata, ROI polygons, and the palette are retained.
+   const keysOf = obj => Object.keys(obj).filter(key =>
+     obj[key] !== undefined && (!stripNullKeys || obj[key] !== null));
+   const keys = keysOf(a);
+   return keys.length === keysOf(b).length
+     && keys.every(k => Object.hasOwn(b,k) && sameJson(a[k],b[k],stripNullKeys));
+ }
+ const keysOfBoth = (a, b) => new Set([...Object.keys(a || {}), ...Object.keys(b || {})]);
+ const withoutFields = (obj, fields) => Object.fromEntries(
+   Object.entries(obj || {}).filter(([key, value]) => value !== undefined && !fields.includes(key)));
+ const mapBy = (items, keyOf) => {
+   const map = Object.create(null);
+   for (const item of items || []) map[keyOf(item)] = item;
+   return map;
+ };
+ function changeDetails(project, doc, hooks = {}) {
+   const rows = [];
+   const localSections = project.sections || [], serverSections = doc?.sections || [];
+   const localById = mapBy(localSections, s => s.id);
+   const clientId = section => String(section?.meta?.client_id || section?.client_id || section?.id);
+   const remoteById = mapBy(serverSections, clientId);
+   const labels = new Map();
+   const names = new Map();
+   for (const id of keysOfBoth(localById, remoteById)) {
+     const name = localById[id]?.displayName || remoteById[id]?.display_name || remoteById[id]?.displayName || id;
+     labels.set(id, name);
+     names.set(name, 1 + (names.get(name) || 0));
+   }
+   const emit = (id, field, item, kind, protectedAlignment = false) => {
+     const name = labels.get(id) || id;
+     const section = names.get(name) > 1 ? name + ' (' + id + ')' : name;
+     rows.push({sectionId:id, section, field, item, kind, protectedAlignment});
+   };
+   const compare = (id, field, item, local, server, protectedAlignment = false) => {
+     const stripNullKeys = ['メモ','表示設定','MSI比'].includes(field);
+     if (!sameJson(local, server, stripNullKeys)) emit(id, field, item, local === undefined ? 'server'
+       : server === undefined ? 'local' : 'different', protectedAlignment && local === undefined);
+   };
+   const serverMeta = doc?.meta?.project_meta || {}, meta = project.meta || {};
+   compare('', 'プロジェクト名', '', project.displayName || project.shareInfo?.slug, doc?.meta?.display_name ?? doc?.display_name ?? doc?.displayName);
+   if (doc && typeof project.shareInfo?.isPublic === 'boolean' && typeof doc.is_public === 'boolean')
+     compare('', '公開範囲', '', project.shareInfo.isPublic, doc.is_public);
+   const memo = hooks.normalizeMemo || (m => m || {});
+   const leftMemo = memo(project.memo), rightMemo = memo(serverMeta.memo);
+   for (const key of keysOfBoth(leftMemo, rightMemo))
+     compare('', 'メモ', key, leftMemo[key], rightMemo[key]);
+   compare('', '配色', '', project.anatomyPalette || {}, doc?.anatomy_palette || {});
+   const defaults = {colormap:null, msiSmoothing:'none', otsuBgRemove:false, otsuStrength:0, msiDisplay:null};
+   for (const [key, fallback] of Object.entries(defaults))
+     compare('', '表示設定', key, meta[key] ?? fallback, serverMeta[key] ?? fallback);
+   const ratios = mapBy(meta.msiRatios?.definitions, item => item.id);
+   const ratioRegistry = serverMeta.msiRatios?.definitions?.length && hooks.publicRatios
+     ? hooks.publicRatios(doc) : serverMeta.msiRatios;
+   const publicRatios = mapBy(ratioRegistry?.definitions, item => item.id);
+   for (const key of keysOfBoth(ratios, publicRatios))
+     compare('', 'MSI比', ratios[key]?.name || publicRatios[key]?.name || key, ratios[key], publicRatios[key]);
+
+   // Paths attest to an existing Storage reference, never to byte-for-byte equality.
+   // A new local blob may retain its predecessor's storagePath, so only trust the
+   // blob-to-path mapping in the publish/import receipt while a blobId is present.
+   function compareAsset(id, field, key, local, server, normalizedLocal, normalizedServer) {
+     const filename = local?.filename || server?.filename;
+     const title = filename && filename !== key ? key + ' / ' + filename : key;
+     if (!local || !server || !sameJson(normalizedLocal, normalizedServer, field === 'ROI写真')) {
+       emit(id, field, title, !local ? 'server' : !server ? 'local' : 'different');
+       return;
+     }
+     const localPath = local.blobId ? project.shareInfo?.blobPaths?.[local.blobId]?.path : local.storagePath;
+     const serverPath = server.path || server.storagePath;
+     if (localPath && serverPath) {
+       if (localPath !== serverPath) emit(id, field, title, 'different');
+     } else {
+       emit(id, field, title, 'unverified');
+     }
+   }
+   const transport = ['path','storagePath','sourceUrl','sourcePath','blobId','mime'];
+   const localMedia = meta.roiMedia?.items?.length && hooks.localPhotos ? hooks.localPhotos(project) : meta.roiMedia;
+   const publicMedia = serverMeta.roiMedia?.items?.length && hooks.publicPhotos ? hooks.publicPhotos(doc) : serverMeta.roiMedia;
+   const photos = mapBy(localMedia?.items, item => item.id), publicPhotos = mapBy(publicMedia?.items, item => item.id);
+   for (const key of keysOfBoth(photos, publicPhotos)) {
+     const l = photos[key], r = publicPhotos[key];
+     compareAsset(l?.sectionId || r?.sectionId || '', 'ROI写真', l?.title || r?.title || key, l, r,
+       withoutFields(l, transport), withoutFields(r, transport));
+   }
+   const localOrder = new Map(localSections.map((section, i) => [section.id, i + 1]));
+   const localOverlays = (project.overlays || []).filter(o => !(hooks.isViewerOverlay ? hooks.isViewerOverlay(o) : o._local || o._server));
+   const roiSections = new Map(serverSections.map(s => [String(s.id), clientId(s)]));
+   const sectionRois = new Map();
+   const roiPair = (id, color) => {
+     if (!sectionRois.has(id)) sectionRois.set(id, new Map());
+     const map = sectionRois.get(id);
+     if (!map.has(color)) map.set(color, {local:[], server:[]});
+     return map.get(color);
+   };
+   for (const roi of project.rois || []) {
+     if (roi._collab) continue;
+     for (const [id, vertices] of Object.entries(roi.polysBySection || {})) {
+       const geometry = roi.geometryBySection?.[id];
+       const polygon = hooks.encodeRoi ? hooks.encodeRoi(roi,id)
+         : geometry ? {version:'msi-roi-polygon-v1',vertices,geometry} : vertices;
+       roiPair(id, roi.colorKey || 'default').local.push({name:roi.name || '', polygon});
+     }
+   }
+   for (const roi of doc?.rois || []) {
+     if (roi.created_by === 'viewer') continue;
+     const id = roiSections.get(String(roi.section_id)) || roi.section_id;
+     let polygon = roi.poly_msi;
+     if (polygon?.geometry?.version === 'msi-group-v1' && polygon.geometry.sectionId === roi.section_id)
+       polygon = {...polygon, geometry:{...polygon.geometry, sectionId:id}};
+     roiPair(id, roi.color_key || 'default').server.push({name:roi.name || '', polygon});
+   }
+   for (const id of keysOfBoth(localById, remoteById)) {
+     const l = localById[id], r = remoteById[id], paths = r?.storage_paths || r?.storagePaths || {};
+     if (!l || !r) {
+       emit(id, '切片', '', l ? 'local' : 'server');
+       if (!l) continue;
+     } else {
+       compare(id, '切片名', '', l.displayName || 'Section', r.display_name || r.displayName || 'Section');
+       compare(id, '切片順', '', localOrder.get(id), r.ordinal);
+     }
+     // Older exports only carried file references inside their molecule layers.
+     // The importer derives a file entry for these; don't report it as a new original.
+     const derivedFiles = new Map();
+     for (const ref of Object.values(paths.msiSeries || {})) {
+       const key = ref.sourceFileId;
+       if (!key || !l.msiFiles?.[key] || paths.msiFiles?.[key] || !ref.path) continue;
+       if (!derivedFiles.has(key))
+         derivedFiles.set(key,{id:key, filename:ref.filename, kind:ref.kind, path:ref.path});
+       else if (derivedFiles.get(key)?.path !== ref.path) derivedFiles.set(key,null);
+     }
+     for (const [type, field] of [['images','HE/IF画像'],['msiFiles','MSI原本'],['msiSeries','分子レイヤー']]) {
+       for (const key of keysOfBoth(l[type], paths[type])) {
+         const a = l[type]?.[key];
+         const b = paths[type]?.[key] ?? (type === 'msiFiles' ? derivedFiles.get(key) : undefined);
+         if (!b && type === 'msiFiles' && derivedFiles.has(key)) {
+           emit(id,field,key,'unverified');
+           continue;
+         }
+         let left, right;
+         if (type === 'images') {
+           left = {filename:a?.filename, identity:a && (hooks.imageIdentity ? hooks.imageIdentity(a) : a.alignmentImageReference)};
+           right = {filename:b?.filename, identity:b?.alignmentImageReference};
+           // Older published images may not have an explicit alignment identity.
+           if (!right.identity) {
+             delete left.identity;
+             delete right.identity;
+           }
+         } else {
+           left = withoutFields(a, transport); right = withoutFields(b, transport);
+           if (a && type === 'msiSeries' && !left.sourceReference && right.sourceReference && hooks.sourceReference)
+             left.sourceReference = hooks.sourceReference(a);
+         }
+         compareAsset(id, field, key, a, b, left, right);
+       }
+     }
+     const lm = l.meta || {}, rm = r?.meta || {};
+     for (const layer of keysOfBoth(lm.alignment, rm.alignment)) {
+       const a = lm.alignment?.[layer], b = rm.alignment?.[layer];
+       const image = l.images?.[layer]?.filename || paths.images?.[layer]?.filename;
+       const source = image && image !== layer ? layer + ' / ' + image : layer;
+       for (const group of keysOfBoth(a?.byGroup, b?.byGroup)) {
+         const registry = [lm,rm].flatMap(m => m.spatialGroups?.groups || []).find(g => g.id === group);
+         const filenames = (registry?.members || []).map(m =>
+           l.msiFiles?.[m.sourceFileId]?.filename || paths.msiFiles?.[m.sourceFileId]?.filename).filter(Boolean);
+         const title = [source,group,...new Set(filenames)].join(' / ');
+         compare(id, '共通位置合わせ', title, a?.byGroup?.[group], b?.byGroup?.[group], r?.meta?.client_id === l.id);
+       }
+       const scopes = ['bySource','byFrame','sharedByCoordinate'];
+       for (const scope of scopes) {
+         for (const key of keysOfBoth(a?.[scope], b?.[scope])) {
+           const left = a?.[scope]?.[key], right = b?.[scope]?.[key], record = left || right;
+           const fileId = record?.frame?.sourceFileId || key;
+           const filename = l.msiFiles?.[fileId]?.filename || paths.msiFiles?.[fileId]?.filename;
+           const measurement = record?.msiKey || record?.frame?.measurementKey;
+           const title = [source,scope,measurement || filename || key].join(' / ');
+           compare(id, '位置合わせ', title, left, right);
+         }
+       }
+       const left = withoutFields(a,['byGroup',...scopes]), right = withoutFields(b,['byGroup',...scopes]);
+       compare(id, '位置合わせ', source, Object.keys(left).length ? left : undefined, Object.keys(right).length ? right : undefined);
+     }
+     for (const key of keysOfBoth(lm.layerDisplay, rm.layerDisplay))
+       compare(id,'切片設定', 'layerDisplay / ' + key, lm.layerDisplay?.[key], rm.layerDisplay?.[key]);
+     const skip = ['client_id','__alignMaster','alignment','overlays','layerDisplay'];
+     for (const key of keysOfBoth(lm,rm))
+       if (!skip.includes(key)) compare(id,'切片設定',key,lm[key],rm[key]);
+     compare(id,'重ね合わせ','',localOverlays,rm.overlays || []);
+     for (const [color, pair] of sectionRois.get(id) || []) {
+       const title = (pair.local[0]?.name || pair.server[0]?.name || color);
+       compare(id, 'ROI', title === color ? title : title + ' (' + color + ')',
+         pair.local.length ? pair.local : undefined, pair.server.length ? pair.server : undefined);
+     }
+   }
+   const priority = row => row.protectedAlignment ? 0 : row.kind === 'unverified' ? 2 : 1;
+   return rows.sort((a,b) => priority(a) - priority(b));
+ }
+ return {run,baseline,summary,changeDetails,missingAlignmentGroups,missingPublishedAlignmentSections,parallel,ownedRois,isConflict};
 });

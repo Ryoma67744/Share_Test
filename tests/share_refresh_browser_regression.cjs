@@ -153,7 +153,24 @@ async function main(){
   await page.evaluate(()=>{refreshFixture.doc.sections[0].storage_paths.msiFiles.raw={kind:'parquet',filename:'Synthetic missing.parquet',path:refreshFixture.slug+'/missing.parquet'};});
   await compare();await page.locator('#modal-host [data-modal-ok]').click();await unchanged(parquetFailed);assert.match(dialogs.at(-1),/HTTP 503/);assert.ok(requests.some(r=>r.method==='HEAD'&&r.path.includes('missing.parquet')));await noImportLeases();
 
+  const review=await prepare('review',true);
+  await page.evaluate(()=>{
+   const section=refreshFixture.doc.sections[0];
+   section.meta.alignment={HE:{byGroup:{'group-<draft>':{scope:'group'}}}};
+  });
+  await page.locator('#btn-publish-changes').click();
+  const details=page.locator('[data-publish-changes]');
+  const protectedRow=details.locator('tr').filter({hasText:'group-<draft>'});
+  assert.match(await protectedRow.innerText(),/Synthetic section 1/);
+  assert.match(await protectedRow.innerText(),/original.png/);
+  assert.equal(await protectedRow.locator('draft').count(),0,'group IDs remain literal text');
+  assert.equal(await page.locator('#modal-host [data-modal-ok],#modal-host [data-refresh-copy]').count(),0);
+  await page.locator('#modal-host [data-modal-cancel]').click();await unchanged(review);
+  assert.equal(requests.length,0,'detail review does not fetch originals');
+  assert.equal(await page.evaluate(()=>refreshFixture.publishCalls),0,'detail review never publishes');
+
   const dirty=await prepare('dirty',true);await compare();assert.equal(await page.locator('#modal-host [data-modal-ok]').isDisabled(),true);assert.equal(await page.locator('[data-refresh-copy]').isEnabled(),true);
+  assert.match(await page.locator('[data-publish-changes]').innerText(),/Synthetic section 3/);
   await page.locator('[data-refresh-copy]').click();const copied=await complete();
   assert.deepEqual(copied.project,dirty.project);assert.notEqual(copied.active,dirty.id);
   const copy=await page.evaluate(id=>ProjectStorage.getProject(id),copied.active);assert.equal(copy.sections.length,6);assert.equal(copy.shareInfo.serverRevision,2);assert.equal(copied.projects.length,dirty.ids.length+1);await noImportLeases();
