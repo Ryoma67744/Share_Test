@@ -128,5 +128,45 @@ try{
  assert.deepEqual(await getAlignment(),alignment);checks++;
  const alignmentUpdated=await align(1,{transform:'updated'});
  assert.equal(alignmentUpdated.version,2);assert.deepEqual(alignmentUpdated.payload,{transform:'updated'});checks++;
+ // Public and password-protected folder links resolve the current published title.
+ // Keep the saved order, subfolders, extra fields and missing-project links.
+ const folderNamePatch = (await sql('folder_project_names.sql')).trim();
+ assert.ok((await sql('share_locks.sql')).includes(folderNamePatch), 'Fresh and existing databases use the same folder-name function');
+ await db.exec(folderNamePatch);
+ const folderDoc = {name: 'Root', children: [
+   {type: 'project', slug: 'fixture', displayName: 'Draft', note: 'keep'},
+   {type: 'folder', name: 'Subfolder', children: [
+     {type: 'project', slug: 'private-member', displayName: 'Old'},
+     {type: 'project', slug: 'fixture'},
+     {type: 'project', slug: 'removed', displayName: 'Archived'},
+     {type: 'project', slug: 'untitled', displayName: 'Old'}
+   ]}
+ ]};
+ await db.exec(`insert into public.projects(slug, display_name, is_public) values
+   ('private-member','Published private title',false),
+   ('untitled','',true),
+   ('unlisted','Unlisted project',false)`);
+ await db.query(`insert into public.folder_shares(slug, name, index_doc, is_public, password_hash)
+   values ('public-folder','Root',$1,true,null),
+          ('private-folder','Root',$1,false,extensions.crypt('fixture-password',extensions.gen_salt('bf',4)))`,
+   [JSON.stringify(folderDoc)]);
+ const folderIndex = (slug, pw = null) => value('select public.get_folder_index($1,$2) as value', [slug, pw]);
+ const expectedFolder = structuredClone(folderDoc);
+ expectedFolder.children[0].displayName = 'winning';
+ expectedFolder.children[1].children[0].displayName = 'Published private title';
+ expectedFolder.children[1].children[1].displayName = 'winning';
+ expectedFolder.children[1].children[3].displayName = 'untitled';
+ await db.exec('set role anon');
+ await rejects(() => folderIndex('private-folder'), err => err.code === '28P01');
+ await rejects(() => folderIndex('private-folder','incorrect'), err => err.code === '28P01');
+ await rejects(() => folderIndex('missing-folder'), err => err.code === 'P0002');
+ assert.deepEqual(await folderIndex('public-folder'), {name:'Root', index_doc:expectedFolder, is_public:true}); checks++;
+ assert.deepEqual(await folderIndex('private-folder','fixture-password'), {name:'Root', index_doc:expectedFolder, is_public:false}); checks++;
+ await db.exec('reset role');
+ await db.query("update public.projects set display_name=$1 where slug='fixture'", ['Renamed again']);
+ expectedFolder.children[0].displayName = 'Renamed again';
+ expectedFolder.children[1].children[1].displayName = 'Renamed again';
+ assert.deepEqual((await folderIndex('public-folder')).index_doc, expectedFolder); checks++;
+ assert.deepEqual(await value("select index_doc as value from public.folder_shares where slug='public-folder'"), folderDoc); checks++;
  console.log('Publish safety SQL regression: PASS ('+checks+' checks; isolated PGlite, not production)');
 }finally{await db.close();}

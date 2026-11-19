@@ -166,6 +166,24 @@ function testIndexDocReportsWhatItDropped() {
   assert.equal(stats.unpublished, 1, '未公開は分けて数える');
 }
 
+// A local rename can be newer than the project title visible to recipients.
+function testFolderShareUsesPublishedName() {
+  const tree = folderTree();
+  const context = makeContext(tree);
+  const { local, server } = rowsOnRegisteringPc[0];
+  const renamedLocal = { ...local, displayName: 'Unpublished draft title' };
+  context.FOLDER = tree.children[0];
+  context.FOLDER.children.push({ type: 'project', slug: server.slug });
+  for (const [row, expected] of [
+    [{ local: renamedLocal, server }, server.display_name],
+    [{ local: renamedLocal }, server.slug],
+  ]) {
+    context.ROWS = [row];
+    const doc = vm.runInContext('_buildFolderIndexDoc(FOLDER, _buildProjectResolver(ROWS), true)', context);
+    assert.deepEqual(Array.from(doc.children, child => child.displayName), [expected, expected]);
+  }
+}
+
 // 治ったノードは一覧に載る。
 function testHealedNodeSurvivesFolderShare() {
   const tree = folderTree();
@@ -269,6 +287,7 @@ async function main() {
   testRegisteringPcHealsTheTree();
   testDuplicateNodesFoldByTreeOrder();
   testIndexDocReportsWhatItDropped();
+  testFolderShareUsesPublishedName();
   testHealedNodeSurvivesFolderShare();
   await testFailedHealIsRetriedOnTheNextFetch();
   console.log('manage tree regression tests: PASS');

@@ -1,5 +1,7 @@
 # Supabase setup (Phase 1)
 
+> **共有フォルダのプロジェクト名**は、フォルダを開くたびに各プロジェクトの公開名から取得します。既存DBには [folder_project_names.sql](./folder_project_names.sql) を適用してください。既存の共有URLにも反映されます。
+
 > **HE/IF–MSI位置合わせの保存互換性:** 新しいアプリの前に [`alignment_contract_v2.sql`](./alignment_contract_v2.sql) を適用してください。[適用・検証・旧版互換性](../docs/ALIGNMENT_CONTRACT_V2.md) を参照してください。JSONBの既存列を使用し、データの一括変換は行いません。旧クライアントによる新形式の上書きを拒否し、既存の認証・版照合・spatial保護を維持します。既存DBでは先に切片番号の修正を確認してください。SQLの本番適用はコード更新とは別の作業です。
 
 > **公開時の切片番号重複エラー:** `sections_project_id_ordinal_key` のエラーには、既存DB用の [`section_ordinal_hotfix.sql`](./section_ordinal_hotfix.sql) と [修正・適用手順](../docs/SECTION_ORDINAL_PUBLISH_FIX.md) を使用してください。切片UUID・共同研究者ROIを保持して順番を更新し、既存のspatial保護も維持します。コード更新だけでは既存DBの関数は変わりません。本番SQLは既存の承認・バックアップ手順に従って適用します。
