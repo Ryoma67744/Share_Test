@@ -123,6 +123,7 @@ function fixture() {
     const priorInert = el('aside', doc.body); priorInert.inert = true; priorInert.setAttribute('aria-hidden', 'false');
     const host = el('div', doc.body), back = el('div', host), card = el('div', back); card._back = back; card.className = 'modal-card help-card';
     const header = el('div', card); el('h2', header); el('select', header, 'data-align-msi');
+    el('input', el('label', header), 'data-align-otsu').type = 'checkbox';
     el('p', card);
     const physical = el('fieldset', card); el('input', physical, 'data-msi-um-x');
     const manual = el('fieldset', card); el('input', manual, 'data-scale');
@@ -244,10 +245,13 @@ async function differentCoordinateSpacesContract() {
 
 async function staleCompositeContract() {
     const f = fixture(), pending = [];
+    const msiSelect = f.card.querySelector('[data-align-msi]'), otsu = f.card.querySelector('[data-align-otsu]');
     const workspace = Workspace.mount(f.card, {
         onComposite: ({ canvas, signal, isCurrent }) => new Promise(resolve => { pending.push({ canvas, signal, isCurrent, resolve }); })
     });
     workspace.setViewState({ mode: 'overlay' }); await f.flush();
+    const header = f.card.querySelector('.msi-align-header');
+    assert.ok(header.contains(msiSelect) && header.contains(otsu), 'MSI selection and Otsu remain accessible above the overlay');
     assert.equal(pending.length, 1);
     workspace.requestComposite(); await f.flush();
     assert.equal(pending.length, 2); assert.equal(pending[0].signal.aborted, true);

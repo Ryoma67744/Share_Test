@@ -200,6 +200,7 @@ async function harness(options = {}) {
         Math, Number, String, Boolean, Object, Array, Date, JSON, Map, Set, WeakMap, Promise, Float32Array, Float64Array, Uint8Array, Uint8ClampedArray, structuredClone,
         App, panel, MsiDisplayGeometry: require('../viewer/msi-display-geometry.js'), _shareAlignBySection: shareRecords, isShareAlignMode: () => !!options.shared,
         MsiSpatialGroups: options.spatial ? require('../viewer/msi-spatial-groups.js') : undefined,
+        TicCore: require('../viewer/tic-core.js'),
         ensureSpatialServerSupport: options.ensureSpatialServerSupport || (async () => {}),
         alert: x => alerts.push(String(x)), confirm: () => true, showToast: x => alerts.push(String(x)),
         requestAnimationFrame: callback => { const id = nextTimer++; frames.set(id, callback); return id; }, cancelAnimationFrame: id => frames.delete(id),
@@ -224,7 +225,7 @@ async function harness(options = {}) {
     window.document = document; window.innerWidth = 1366; window.innerHeight = 768;
     const helpers = html.slice(html.indexOf('function displayAffineMultiply('), html.indexOf('// ---- HE↔MSI registration math'));
     vm.runInContext(helpers, context);
-    for (const name of ['buildHeToMsiAffine', 'solveSimilarity', 'computeLandmarkResiduals', 'assessLandmarkGeometry', 'openModal']) vm.runInContext(sourceFunction(name), context);
+    for (const name of ['buildHeToMsiAffine', 'solveSimilarity', 'computeLandmarkResiduals', 'assessLandmarkGeometry', 'msiOtsuSourceKey', 'openModal']) vm.runInContext(sourceFunction(name), context);
     for (const name of ['SECTION_ALIGN_WC_KEYS', 'SECTION_ALIGN_META_KEYS']) {
         const declaration = new RegExp('const ' + name + ' = \\[[^\\]]*\\];').exec(html);
         if (declaration) vm.runInContext(declaration[0], context);
@@ -306,6 +307,109 @@ test('new landmarks and scale survive A → B → A in the same measurement', as
     await h.change('[data-align-msi]', 'MSI_A'); expectPoints(h, 2, 2);
     assert.equal(+h.$('[data-scale-num]').value, 142); h.assertNumericUnchanged();
     await h.click('[data-modal-cancel]');
+});
+
+test('coordinate-group TIC and its compounds share landmark coordinates and the active transform', async () => {
+    const h = await harness({spatial:true,prepare(s) {
+        delete s.meta.alignmentSourceMode;
+        s.meta.perSourceAlign = false;
+    }});
+    const msi = h.$('[data-align-msi]'), source = h.$('[data-align-source]');
+    assert.match(source.value,/^__group__\|/);
+    const options = msi.options.map(option => option.value);
+    const tic = options.find(value => value.startsWith('__TIC_GROUP|'));
+    assert.ok(tic,'the default matching-coordinate group offers a TIC');
+    assert.ok(!options.includes('MSI_C'),'another coordinate frame stays outside the group');
+    await h.addPair(); await h.input('[data-offx-num]', 3);
+    const coordinates = h.$('[data-lm-table]').innerHTML, transform = h.$('[data-he-img]').dataset.tMatrix;
+    for (const key of [tic,'MSI_B','MSI_A']) {
+        await h.change('[data-align-msi]', key);
+        assert.equal(msi.value,key); assert.equal(h.$('[data-save]').disabled,false);
+        expectPoints(h,1,1);
+        assert.equal(h.$('[data-lm-table]').innerHTML,coordinates);
+        assert.equal(h.$('[data-he-img]').dataset.tMatrix,transform);
+    }
+    await h.click('[data-modal-cancel]'); h.assertNumericUnchanged();
+});
+
+test('Otsu on a coordinate-group TIC unions acquisition masks for display and automatic fitting', async () => {
+    const h = await harness({spatial:true,prepare(s) {
+        compatibleSources(s);
+        s.msiSeries.MSI_C.sourceGeometry.sourceRef = s.msiSeries.MSI_C.sourceReference;
+        delete s.meta.alignmentSourceMode; s.meta.perSourceAlign = false;
+    }});
+    const tic = h.$('[data-align-msi]').options.find(option => option.value.startsWith('__TIC_GROUP|')).value;
+    await h.change('[data-align-msi]',tic);
+    const reads = [], expected = Uint8Array.from({length:48}, (_, i) => Number(i % 8 >= 1 && i % 8 <= 4));
+    h.context.alignmentOtsuSourceGrid = async (section, member) => {
+        const source = section.msiSeries[member].sourceFileId;
+        reads.push(source);
+        const first = source === 'file-1' ? 1 : 3;
+        return {W:8,H:6,keep:Uint8Array.from({length:48}, (_, i) => Number(i % 8 >= first && i % 8 < first + 2))};
+    };
+    let painted;
+    h.context.get2dContext = canvas => {
+        const ctx = canvas.getContext('2d');
+        ctx.putImageData = image => { painted = Uint8Array.from(expected, (_, i) => Number(image.data[i * 4 + 3] > 0)); };
+        return ctx;
+    };
+    const checkbox = h.$('[data-align-otsu]');
+    checkbox.checked = true; await h.fire('[data-align-otsu]','change');
+    assert.equal(h.$('[data-save]').disabled,false);
+    assert.deepEqual(reads.sort(),['file-1','file-2'],'each quantitative source is read once');
+    assert.deepEqual(painted,expected,'the rendered TIC retains pixels from either source');
+
+    // Observe which explicit mask the real auto-align click handler supplies
+    // to silhouette extraction. The mock HE has no fit to compute.
+    const masks = [];
+    h.context.heTissueMask = () => ({w:8,h:6,mask:expected,sx:1,sy:1});
+    h.context.msiTissueMaskForAlign = (_section,_panel,_key,_image,grid) => { masks.push(grid); return null; };
+    h.context.ALIGN_DICE_MAX_EDGE = 384;
+    h.context.console = {...console,warn() {}};
+    const autoClick = async () => {
+        const clicked = h.$('[data-auto-align]').click();
+        await h.flush(); await clicked;
+    };
+    await autoClick();
+    assert.equal(masks.length,1); assert.deepEqual(masks[0].keep,painted);
+    checkbox.checked = false; await h.fire('[data-align-otsu]','change');
+    await autoClick();
+    assert.equal(masks.length,2); assert.equal(masks[1],null,'the unfiltered silhouette has no forced Otsu grid');
+    assert.equal(h.context.App.otsuBgRemove,undefined);
+    await h.click('[data-modal-cancel]'); assert.deepEqual(h.section,h.initialSection); h.assertNumericUnchanged();
+});
+
+test('disabling an unavailable Otsu mask recovers the selected TIC, transform and landmark draft', async () => {
+    const h = await harness();
+    const key = '__TIC_SRC|file-1';
+    await h.change('[data-align-msi]',key); await h.addPair(); await h.input('[data-offx-num]',3);
+    const table = h.$('[data-lm-table]').innerHTML, matrix = h.$('[data-he-img]').dataset.tMatrix;
+    h.context.alignmentOtsuSourceGrid = async () => null;
+    const checkbox = h.$('[data-align-otsu]');
+    checkbox.checked = true; await h.fire('[data-align-otsu]','change');
+    assert.match(h.$('[data-pick-status]').textContent,/Otsu/); assert.equal(h.$('[data-save]').disabled,true);
+    assert.equal(checkbox.disabled,false);
+    checkbox.checked = false; await h.fire('[data-align-otsu]','change');
+    assert.equal(h.$('[data-align-msi]').value,key); assert.equal(h.$('[data-save]').disabled,false);
+    expectPoints(h,1,1); assert.equal(h.$('[data-lm-table]').innerHTML,table);
+    assert.equal(h.$('[data-he-img]').dataset.tMatrix,matrix); assert.deepEqual(h.saves,[]);
+    await h.click('[data-modal-cancel]'); assert.deepEqual(h.section,h.initialSection); h.assertNumericUnchanged();
+});
+
+test('TIC choices follow the selected acquisition and prefer its acquired TIC', async () => {
+    const h = await harness({prepare(s) {
+        s.msiSeries.MSI_TIC = plain(s.msiSeries.MSI_A);
+    }});
+    const msi = h.$('[data-align-msi]');
+    const ticChoices = () => msi.options.map(option => option.value).filter(value => /TIC/.test(value));
+    assert.deepEqual(ticChoices(),['MSI_TIC'],'measured TIC replaces the synthetic option in its own source');
+    await h.change('[data-align-msi]','MSI_TIC'); assert.equal(h.$('[data-save]').disabled,false);
+    await h.change('[data-align-source]','file-2');
+    assert.equal(msi.value,'MSI_C','a single-compound source initially displays its compound');
+    assert.deepEqual(ticChoices(),['__TIC_SRC|file-2'],'this source has its own synthesized display');
+    await h.change('[data-align-msi]','__TIC_SRC|file-2');
+    assert.equal(h.$('[data-save]').disabled,false);
+    await h.click('[data-modal-cancel]'); h.assertNumericUnchanged();
 });
 
 test('source and HE switches retain independent unfinished drafts', async () => {

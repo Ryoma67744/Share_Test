@@ -43,14 +43,19 @@ async function main() {
         const fixture=await page.evaluate(async points=>{
             const id=await App.createNewProject('Synthetic HE MSI registration');await App.addSection();
             const section=App.project.sections[0],panel=App.panels.get(section.id),W=80,H=240;
-            const rows=['x,y,signal'];
+            const rows=['x,y,signal,second'];
             for(let y=0;y<H;y++)for(let x=0;x<W;x++) {
                 const signal=points.some(p=>(x+.5-p[0])**2+(y+.5-p[1])**2<=16)?100:0;
-                rows.push([x,y,signal].join(','));
+                // Only compound B has a bright rectangular tissue region and a
+                // weak measured background. Both have landmarks in the same frame.
+                const second=x>=40&&y>=130?100:x>=4?14:0;
+                rows.push([x,y,signal,second].join(','));
             }
-            await panel.addMsiLayer('MSI_A',new File([rows.join('\n')+'\n'],'synthetic.csv',{type:'text/csv'}),
-                {kind:'txt',x:'x',y:'y',v:'signal',sep:',',bakeMode:'full'},
-                {sourceFileId:'synthetic-alignment-source',deferBulkRefresh:true});
+            const file=new File([rows.join('\n')+'\n'],'synthetic.csv',{type:'text/csv'});
+            const source={sourceFileId:'synthetic-alignment-source',deferBulkRefresh:true};
+            const columns={kind:'txt',x:'x',y:'y',sep:',',bakeMode:'full'};
+            await panel.addMsiLayer('MSI_A',file,{...columns,v:'signal'},source);
+            await panel.addMsiLayer('MSI_B',file,{...columns,v:'second'},{...source,sharedBlobId:section.msiSeries.MSI_A.blobId});
             // The scan covers only the middle of this larger photograph. The four
             // blue corner labels lie outside the true registered MSI footprint.
             const photo=document.createElement('canvas');photo.width=W*2+80;photo.height=H*2+80;
@@ -67,6 +72,7 @@ async function main() {
             section.meta.viewerTransform={rotHE:5,rotMSI:0,rot:0,scale:1,tx:0,ty:0};
             Object.assign(panel._ensureViewerTransform(),section.meta.viewerTransform);
             delete section.meta.world_coords.T_he_to_msi;
+            section.meta.alignmentMsiKey='MSI_A';
             section.meta.world_coords.msi_um_per_px={x:30,y:30};
             App.setActiveSection(section.id);App.setViewMode('compound');App.setFocusCompoundKey('MSI_A');
             await App.setOtsuBgRemove(false);panel.setupCanvasSize();await App._flushSave();
@@ -209,6 +215,54 @@ async function main() {
         assert.equal(await page.locator('[data-auto-fit]').isChecked(),true,'Solve returns to automatic fitting');
         assert.ok(Math.abs(Number(await page.locator('[data-scale-num]').inputValue())-50)<.6);
         await showOverlayWithAllCorners();
+        // Exercise the visible controls in Overlay with four fitted pairs.
+        // Probe the native MSI image at known raw coordinates and verify the
+        // composited canvas changes with it. The data in the saved file stay intact.
+        const reference=page.locator('[data-align-msi]'),otsu=page.locator('[data-align-otsu]');
+        assert.equal(await reference.isVisible(),true);assert.equal(await otsu.isVisible(),true);
+        assert.match(await page.locator('[data-align-source]').inputValue(),/^__group__\|/);
+        const ticOption=reference.locator('option').filter({hasText:/TIC/i});
+        assert.equal(await ticOption.count(),1,'the matched coordinate group offers its TIC');
+        async function overlaySample() {
+            await ready();
+            await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+            return page.evaluate(()=>{
+                const img=document.querySelector('[data-msi-img]'),section=App.project.sections[0];
+                const raw=document.createElement('canvas');raw.width=img.naturalWidth;raw.height=img.naturalHeight;
+                const ctx=raw.getContext('2d');ctx.drawImage(img,0,0);
+                const sample=(x,y)=>{
+                    const point=msiLegacyEdgePointToDisplay(section,'MSI_A',[x+.5,y+.5]);
+                    const [a,b]=applyAffinePoint(JSON.parse(img.dataset.displayMatrix),...(point||[x+.5,y+.5]));
+                    const ss=Number(img.dataset.ss)||1;
+                    return Array.from(ctx.getImageData(Math.floor(a*ss),Math.floor(b*ss),1,1).data);
+                };
+                const canvas=document.querySelector('.msi-align-composite canvas');
+                if(!canvas.getBoundingClientRect().width)throw new Error('Changing the reference left Overlay');
+                const pixels=canvas.getContext('2d').getImageData(0,0,canvas.width,canvas.height).data;
+                let green=0;
+                for(let i=0;i<pixels.length;i+=4)if(!pixels[i+2])green+=pixels[i+1]*pixels[i+3];
+                const pairs=Array.from(document.querySelector('[data-lm-table] tbody').rows,
+                    row=>[row.cells[1].textContent,row.cells[2].textContent]);
+                return {background:sample(16,160),tissue:sample(52,180),green,pairs,
+                    matrix:document.querySelector('[data-he-img]').dataset.tMatrix};
+            });
+        }
+        const compound=await overlaySample();
+        const selectedTic=await ticOption.getAttribute('value');
+        await reference.selectOption(selectedTic);
+        const tic=await overlaySample();
+        assert.equal(await reference.inputValue(),selectedTic);
+        assert.equal(compound.pairs.length,4);assert.deepEqual(tic.pairs,compound.pairs);assert.equal(tic.matrix,compound.matrix);
+        assert.ok(tic.tissue[1]>compound.tissue[1]+40&&tic.green>compound.green,'TIC includes signal present only in compound B');
+        assert.ok(tic.background[1]>0&&tic.background[3]>0,'TIC initially displays the weak background');
+        assert.equal(await otsu.isChecked(),false);
+        await otsu.check();
+        const filtered=await overlaySample();
+        assert.equal(filtered.background[3],0,'Otsu makes the weak TIC background transparent');
+        assert.deepEqual(filtered.tissue,tic.tissue);assert.ok(filtered.green<tic.green,'Otsu changes the actual overlay');
+        assert.deepEqual(filtered.pairs,compound.pairs);assert.equal(filtered.matrix,compound.matrix);
+        await otsu.uncheck();assert.deepEqual(await overlaySample(),tic,'turning Otsu off restores the same composite');
+        await reference.selectOption('MSI_A');assert.deepEqual(await overlaySample(),compound,'switching back restores the compound and pairs');
         async function rasterDistance(kind) {
             return page.evaluate(kind=>{
                 const panel=App.panels.get(App.project.sections[0].id);
