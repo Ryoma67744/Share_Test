@@ -1009,36 +1009,6 @@ function _folderDescendantIds(id) {
     if (f) walk(f.children || []);
     return ids;
 }
-// Shared folders (those with a shareSlug) whose subtree contains the given
-// project (matched by slug or localId). Used to auto-refresh a folder's
-// published index snapshot when a child project is renamed, so the listing
-// shows the new name at the SAME folder URL.
-function _sharedFoldersContainingProject(slug, localId) {
-    const out = [];
-    const subtreeHasProject = (folder) => {
-        let found = false;
-        const walk = (nodes) => {
-            for (const n of nodes) {
-                if (found) return;
-                if (n.type === 'project') {
-                    if ((slug && n.slug === slug) || (localId && n.localId === localId)) found = true;
-                } else if (n.type === 'folder') {
-                    walk(n.children || []);
-                }
-            }
-        };
-        walk(folder.children || []);
-        return found;
-    };
-    const walkFolders = (nodes) => {
-        for (const n of nodes) if (n.type === 'folder') {
-            if (n.shareSlug && subtreeHasProject(n)) out.push(n);
-            walkFolders(n.children || []);
-        }
-    };
-    walkFolders(workspaceTree.children || []);
-    return out;
-}
 function _flattenFolders() {
     const out = [{ id: null, label: uiT("（ルート）") }];
     const walk = (nodes, prefix) => {
@@ -1148,7 +1118,8 @@ function _buildProjectResolver(rows) {
     const knownLocalIds = new Set();
     for (const r of (rows || [])) {
         const slug = _rowSlug(r);
-        const name = (r.local && r.local.displayName) || (r.server && r.server.display_name) || slug;
+        // A local rename remains a draft until the project is published.
+        const name = (r.server && r.server.display_name) || slug;
         if (slug) slugToName.set(slug, name);
         if (r.local && r.local.id) knownLocalIds.add(r.local.id);
         if (r.local && r.local.id && slug) localToShare.set(r.local.id, { slug, displayName: name });
@@ -1162,7 +1133,7 @@ function _buildProjectResolver(rows) {
     //   (a) この PC で作ってまだ publish していない → 一覧に載らなくて当然。
     //   (b) 別 PC で作られ、この PC にローカル記録が無いだけ → **公開済み**。
     //   (b) を (a) と同じに扱って黙って落とすと、フォルダ共有の一覧から
-    //   公開済みプロジェクトが消える (改名の自動再共有では警告すら出ない)。
+    //   公開済みプロジェクトが消える。
     resolve.isForeign = (n) => !resolve(n) && !(n.localId && knownLocalIds.has(n.localId));
     return resolve;
 }
@@ -2040,47 +2011,7 @@ async function renderList(options = {}) {
                 }
                 catch (e) { alert(uiT("改名に失敗しました: ") + (e && e.message || e)); return; }
                 await renderList();
-                // Auto-refresh any shared folder whose listing includes this
-                // project so its snapshot shows the new name at the SAME folder
-                // URL. Public folders re-share with just the master pw; private
-                // folders need their password (not stored) — publish_folder_share
-                // rejects a null password unless the optional SQL relax is
-                // applied, so those are reported for manual re-share.
-                let folderMsg = '';
-                try {
-                    _ensureTree();
-                    const shared = _sharedFoldersContainingProject(proj.shareInfo && proj.shareInfo.slug, localId);
-                    if (shared.length && SupabaseClient.configured()) {
-                        const masterPw = await _ensureMasterPwForTree();
-                        if (masterPw) {
-                            const rows2 = await buildRows();
-                            const resolveProject = _buildProjectResolver(rows2);
-                            const failed = [];
-                            const skipped = [];
-                            for (const folder of shared) {
-                                // ★ この PC で解決できないノードを含むフォルダは触らない。
-                                //   _buildFolderIndexDoc はそれを黙って落とすので、改名した
-                                //   だけで公開済みの兄弟プロジェクトが受け手の一覧から消えて
-                                //   いた (ユーザー操作も警告も無しに、同じ URL のまま)。
-                                const stats = { unpublished: 0, foreign: 0 };
-                                const indexDoc = _buildFolderIndexDoc(folder, resolveProject, folder.shareIncludeSubfolders !== false, stats);
-                                if (stats.foreign) { skipped.push(folder.name); continue; }
-                                try {
-                                    await SupabaseClient.publishFolderShare(masterPw, folder.shareSlug, folder.name, indexDoc, folder.shareIsPublic, null);
-                                } catch (e) { console.warn('auto re-share folder failed', folder.name, e); failed.push(folder.name); }
-                            }
-                            folderMsg = (failed.length
-                                    ? uiT("\n\n共有フォルダ「") + failed.join('」「') + uiT("」の一覧名は自動更新できませんでした（パスワード保護のため）。フォルダの「共有」ボタンから再共有してください。")
-                                    : '')
-                                + (skipped.length
-                                    ? uiT("\n\n共有フォルダ「") + skipped.join('」「') + uiT("」の一覧は更新していません。この PC では中身の一部を解決できず、そのまま更新すると公開済みのプロジェクトが一覧から抜け落ちるためです。それらを登録した PC で一度この管理画面を開いてください。")
-                                    : '')
-                                + (!failed.length && !skipped.length ? uiT("\n\n共有フォルダの一覧名も更新しました。") : '');
-                        }
-                    }
-                } catch (e) { console.warn('folder auto re-share skipped', e); }
-                if (slug) alert(uiT("ローカル名を変更しました。") + folderMsg
-                    + uiT("\n\n※ プロジェクト共有ページ自体の表示名は、master で開いて再 Publish すると反映されます。"));
+                if (slug) alert(uiT("ローカル名を変更しました。共有ページと共有フォルダに新しい名前を反映するには、master で開いて再 Publish してください。"));
             } else if (slug) {
                 if (confirm(uiT("Server only のプロジェクトはここでは直接改名できません。\n「Open (master)」でローカルに取り込んでから改名 →（必要なら）再 Publish できます。\n今すぐ master mode で開きますか?"))) {
                     ProjectNavigation.openMaster({importSlug:slug});
