@@ -11,6 +11,7 @@ function install(ctx) {
     return (html.slice(start-6,start)==='async '?'async ':'')+standalone(name);
   }).join('\n'),ctx);
   ctx.ProjectArchive = Archive;
+  ctx.SourceLoader = require('../viewer/source-loader.js');
   ctx.MsiAlignmentTransform = require('../viewer/alignment-transform.js');
   const storage = ctx.ProjectStorage;
   if (storage.putArchiveJob) return;

@@ -12,7 +12,7 @@ const storageCode=html.slice(storageStart,html.indexOf('\n})();',storageStart)+6
 const names=['detachOfflineProject','sanitizeStorageKeySegment','guessMimeFromPath','remapRoiGeometry',
  'roiMediaForTransport','roiMediaReadOriginal','roiMediaPublicItem','ratioZipOptions','exportProjectAsZip','importZipFile'];
 const harness=`<!doctype html><meta charset="utf-8"><script src="/store.js"></script><script src="/archive.js"></script>
-<script src="/zip.js"></script><script src="/media.js"></script><script src="/ratio-model.js"></script><script>
+<script src="/zip.js"></script><script src="/media.js"></script><script src="/ratio-model.js"></script><script src="/source.js"></script><script>
 const uid=prefix=>prefix+'_'+crypto.randomUUID(),nowIso=()=>new Date().toISOString();
 const ensureMemoShape=value=>value||{},safeName=value=>value,DEFAULT_ANATOMY_PALETTE={};
 const LAZY_LIBS={jszip:'/zip.js'},loadScript=async()=>{},freezeMsiSourceReferences=()=>{};
@@ -54,7 +54,7 @@ async function waitForArchiveOwnerToEnd(page, jobId) {
  },jobId);
 }
 async function main(){
- const assets={'/store.js':'project-store-safety.js','/archive.js':'viewer/project-archive.js','/zip.js':'vendor/jszip.min.js','/media.js':'viewer/roi-media-model.js','/ratio-model.js':'viewer/msi-ratio-model.js'};
+ const assets={'/store.js':'project-store-safety.js','/archive.js':'viewer/project-archive.js','/zip.js':'vendor/jszip.min.js','/media.js':'viewer/roi-media-model.js','/ratio-model.js':'viewer/msi-ratio-model.js','/source.js':'viewer/source-loader.js'};
  const server=http.createServer((req,res)=>{if(req.url==='/'){res.setHeader('Content-Type','text/html; charset=utf-8');res.end(harness);return;}
   if(assets[req.url]){res.setHeader('Content-Type','text/javascript');res.end(fs.readFileSync(path.join(root,assets[req.url])));return;}res.writeHead(404);res.end();});
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));const origin='http://127.0.0.1:'+server.address().port;let browser;

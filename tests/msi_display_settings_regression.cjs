@@ -117,6 +117,19 @@ function fixture(storage=new Map()) {
 }
 
 async function main() {
+  const opening=fixture(),openingMeta=JSON.stringify(opening.app.project.meta);
+  opening.app.getMsiDisplaySettings();opening.app._msiOpenRangePolicy='maximum';
+  assert.equal(opening.app.getMsiDisplaySettings().rangePolicy,'maximum');
+  assert.equal(opening.calls.save,0);assert.equal(JSON.stringify(opening.app.project.meta),openingMeta);
+  opening.app.updateMsiDisplaySettings({colormap:'jet'},false);
+  assert.equal(opening.app.project.meta.msiDisplay.rangePolicy,'legacy','Colour edits do not persist the temporary Maximum opening policy');
+  assert.equal(opening.app.getMsiDisplaySettings().rangePolicy,'maximum');assert.equal(opening.app.getMsiDisplaySettings().colormap,'jet');
+  opening.app.updateMsiDisplaySettings({interpolation:'median',smoothingStrength:4},false);
+  assert.equal(opening.app.project.meta.msiDisplay.rangePolicy,'legacy');assert.equal(opening.app.getMsiDisplaySettings().interpolation,'median');
+  opening.app.updateMsiDisplaySettings({rangePolicy:'legacy'},false);
+  assert.equal(opening.app.getMsiDisplaySettings().rangePolicy,'legacy','An explicit range-policy edit replaces the opening override');
+  opening.app.updateMsiDisplaySettings({rangePolicy:'maximum'},false);
+  assert.equal(opening.app.project.meta.msiDisplay.rangePolicy,'maximum','An explicit Maximum choice retains the ordinary save contract');
   const local=fixture(),{app,calls,nodes}=local,science=JSON.stringify({sections:app.project.sections,rois:app.project.rois});
   app.getMsiDisplaySettings();app.refreshMsiDisplayControls();
   assert.equal(calls.save,0,'Opening an old project does not automatically persist display defaults');

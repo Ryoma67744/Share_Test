@@ -198,7 +198,7 @@ async function main() {
   // path. Its URL must identify the displayed project so reload is coherent.
   const localLocation = { href: 'http://127.0.0.1:8765/viewer/?project=previous&import=cloud&extra=kept#share=old&focus=MSI_A' };
   const lastProject = new Map();
-  const node = { value: '', style: {}, classList: { toggle() {} } };
+  const node = { value: '', style: {}, classList: { toggle() {} }, querySelectorAll: () => [] };
   const opening = vm.createContext({ console, URL, URLSearchParams, Map, Set, setTimeout, clearTimeout,MsiDisplaySettings,
     window: { DESI_OFFLINE: true }, location: localLocation,
     history: { state: { retained: true }, replaceState: (_state, _title, next) => { localLocation.href = new URL(next, localLocation.href).href; } },

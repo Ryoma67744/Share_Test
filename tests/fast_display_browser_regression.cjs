@@ -240,19 +240,23 @@ async function testTic(page,origin) {
 async function testTicOnly(page) {
   const style=await page.addStyleTag({content:'.sec-thumbs-cell { display:none !important; }'});
   const ids=await page.evaluate(async()=>{
-    const ids=await __fast.seed({id:'fast-tic-only',sections:[{factor:1,layers:2,tic:true}]});
-    const project=await ProjectStorage.getProject('fast-tic-only');project.sections[0].meta.visibleLayers=['HE_STAIN_TIC'];
-    for(const entry of Object.values(project.sections[0].msiSeries)){delete entry.rasterW;delete entry.rasterH;}
-    await ProjectStorage.putProject(project);__fast.open('fast-tic-only','free');return ids;
+    // Opening intentionally selects the first MRM now. Keep the TIC-only
+    // section excluded until the user switches to Free, then test its genuine
+    // first demand without previously decoding any of that section's MSI.
+    const ids=await __fast.seed({id:'fast-tic-only',sections:[{layers:1},{factor:1,layers:2,tic:true}],selected:[0]});
+    const project=await ProjectStorage.getProject('fast-tic-only');project.sections[1].meta.visibleLayers=['HE_STAIN_TIC'];
+    for(const entry of Object.values(project.sections[1].msiSeries)){delete entry.rasterW;delete entry.rasterH;}
+    await ProjectStorage.putProject(project);__fast.open('fast-tic-only');return ids;
   });
   await foreground(page);
-  await page.waitForFunction(id=>App.panels.get(id)._ticJob?.state==='ready',ids[0]);
+  await page.evaluate(ids=>{App.setViewMode('free');App.sectionVisibility().change([ids[1]],true);App.sectionVisibility().change([ids[0]],false);},ids);
+  await page.waitForFunction(id=>App.panels.get(id)._ticJob?.state==='ready',ids[1]);
   const state=await page.evaluate(id=>{
     const panel=App.panels.get(id),canvas=panel.dom.cdisp;
     return {loaded:Object.keys(panel.imageSources),probes:__fast.parses['tic-probe']||0,
       size:[panel.imageSources.HE_STAIN_TIC.naturalWidth,panel.imageSources.HE_STAIN_TIC.naturalHeight],
       drawn:panel.displayCtx.getImageData(0,0,canvas.width,canvas.height).data.some((v,i)=>i%4!==3&&v>0)};
-  },ids[0]);
+  },ids[1]);
   assert.deepEqual(state.loaded,['HE_STAIN_TIC'],'TIC-only display creates no hidden MSI layer images');
   assert.equal(state.probes,1);assert.deepEqual(state.size,[8,8]);assert.equal(state.drawn,true);
   await style.evaluate(el=>el.remove());

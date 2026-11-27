@@ -225,5 +225,67 @@
         }
         return {reserve, ensure, getState, dispose};
     }
-    return {create};
+    // Export-only resolver. Work on archive copies, never on the visible
+    // project's references. In particular, normal Parquet viewing continues
+    // to use HTTP Range; a ZIP explicitly needs every original byte. Remote
+    // originals are held as Blobs only for this export, not written to IDB.
+    function createArchiveReader(options = {}) {
+        const sources = new Map(), byId = new Map(), records = new Map();
+        const controller = new AbortController();
+        let serial = 0, disposed = false;
+        const check = signal => {
+            if (disposed || signal?.aborted || !active(options.current)) throw cancelled();
+        };
+        function prepare(entry) {
+            check();
+            const source = options.resolveSource?.(entry) || {};
+            const path = source.path || entry.storagePath || entry.path || '';
+            const url = source.url || entry.sourceUrl || '';
+            const key = path ? 'path:' + path : url ? 'url:' + url : entry.blobId ? 'id:' + entry.blobId : '';
+            if (!key) return null;
+            let handle = sources.get(key);
+            if (!handle) {
+                handle = {id:entry.blobId || options.createId?.() || 'archive-original-' + (++serial),
+                    localId:entry.blobId || null, path, url,
+                    mime:source.mime || entry.mime, filename:source.filename || entry.filename,
+                    bytes:Number(entry.sourceBytes) || null};
+                sources.set(key, handle);
+            }
+            if (!entry.blobId) entry.blobId = handle.id;
+            byId.set(entry.blobId, handle);
+            return handle;
+        }
+        async function ensure(entry, request = {}) {
+            check(request.signal);
+            const handle = byId.get(entry.blobId) || prepare(entry);
+            if (!handle) return null;
+            if (records.has(handle.id)) return records.get(handle.id);
+            let record = handle.localId && options.storage?.getBlob
+                ? await options.storage.getBlob(handle.localId) : null;
+            check(request.signal);
+            if (!hasBlob(record)) {
+                if (!handle.url || !options.fetchBlob) return null;
+                const abort = () => controller.abort();
+                request.signal?.addEventListener('abort', abort, {once:true});
+                try {
+                    const blob = await waitWithSignal(options.fetchBlob(handle.url, {
+                        signal:controller.signal, onProgress:request.onProgress
+                    }), controller.signal);
+                    check(request.signal);
+                    if (!hasBlob({blob})) throw failure('SOURCE_FETCH_FAILED', _uiT("原本の応答を読み取れませんでした。"));
+                    if (handle.bytes != null && blob.size !== handle.bytes)
+                        throw failure('SOURCE_SIZE_MISMATCH', _uiT("原本のサイズが公開情報と一致しません。再公開を確認してください。"));
+                    record = {id:handle.id,blob,mime:handle.mime || blob.type,filename:handle.filename};
+                } finally { request.signal?.removeEventListener('abort', abort); }
+            }
+            check(request.signal);
+            records.set(handle.id, record);
+            return record;
+        }
+        function dispose() {
+            disposed = true;controller.abort();records.clear();sources.clear();byId.clear();
+        }
+        return {prepare, ensure, dispose};
+    }
+    return {create, createArchiveReader};
 });

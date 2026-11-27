@@ -76,6 +76,12 @@ Max/Mean use the application's original measurement-row statistics, never values
 
 The viewer's `← Projects` button takes you back to the manager.
 
+### Initial view
+
+Every project opening starts the main view and Preview with the entire image fitted inside its frame, without restoring earlier pan or zoom. When MRM data is available, Compound mode selects the first usable MRM in Method order. A share link that explicitly names an MRM takes precedence.
+
+Manual Range bounds are cleared and automatic Maximum and Same scaling is used. Later pan, zoom and Range adjustments survive redraws and Preview open/close operations while the project remains open. Sources, ROIs, image registration, saved rotations/flips and physical calibration are retained.
+
 ---
 
 ## 3. Registering HE / IF layers
@@ -365,9 +371,9 @@ Toolbar / gear MSI Range is a temporary display setting for each project in this
 
 - A manual edge applies to all sections showing the same MSI key within that project; an unspecified edge remains automatic.
 - Whole-view and ROI-only manual Ranges are stored separately. ROI-view adjustments preserve whole-view values; turning ROI-only off restores the original whole-view Range. `Reset` clears manual values for the current view mode.
-- Switching A → B → A restores A's Range and Same / Individual mode without applying them to B. Replacing a measurement restores its automatic Range.
+- Every project opening clears manual Range and starts with Maximum and Same, including an A → B → A switch. Colour, interpolation and image registration are independent of this reset.
 - Shared URLs and viewer/admin display contexts are separate. Section selection and opening/closing Preview preserve manual Range.
-- Legacy 0–255 windows are retained but are not guessed into current source-intensity units. Range never changes source measurements or ROI statistics.
+- Legacy display values are not guessed into current source-intensity units. Resetting or adjusting Range never changes source measurements or ROI statistics.
 
 ---
 
@@ -1201,9 +1207,9 @@ Hide background (Otsu) classifies background from the TIC histogram. Adjust its 
 
 **Save and share**
 
-Author display settings are carried by project saving, ZIP and publication. Shared MSI style, colour and Median / Linear preferences are personal to this tab and survive reloads. Viewer and Admin preferences are separate. The published source remains unchanged.
+Author display settings are carried by project saving, ZIP and publication. Shared colour, Median / Linear and physical aspect preferences are personal to this tab. Every project opening starts Range with Maximum and Same. Viewer and Admin preferences are separate. The published source remains unchanged.
 
-Range is a temporary display setting per project. Record the bounds and Same / Individual mode when comparisons require fixed conditions.
+Range lasts while a project is open; reopening starts with Maximum and Same. Record the bounds and Same / Individual mode when comparisons require fixed conditions.
 
 ### Display a ratio (X / Y)
 

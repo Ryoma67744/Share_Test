@@ -17,7 +17,9 @@ async function main(){
       assert.ok((await page.locator('.gh-main img').first().getAttribute('src')).startsWith(origin+prefix+'docs/help/'));
       assert.match(await page.locator('[data-help-example=brain-ratio]').innerText(),/35,267[\s\S]*23,512/);
       assert.match(await page.locator('[data-help-example=brain-ratio]').innerText(),/無効点を灰色/);
-      assert.equal(new URL(await page.locator('.gh-main img').first().getAttribute('src')).searchParams.get('v'),'2026-11-16.1','versioned Help loads matching figures');
+      const helpRevision=await page.locator('script[src*="help.js"]').evaluate(script=>new URL(script.src).searchParams.get('v'));
+      assert.ok(helpRevision,'Help uses an explicit asset revision');
+      assert.equal(new URL(await page.locator('.gh-main img').first().getAttribute('src')).searchParams.get('v'),helpRevision,'versioned Help loads matching figures');
       await page.getByRole('tab',{name:'集計への影響',exact:true}).click();assert.match(await page.locator('[role=tabpanel]').innerText(),/ROI総信号比/);assert.match(await page.locator('[role=tabpanel]').innerText(),/10 \/ 3/);
       await page.getByRole('tab',{name:'保存と共有',exact:true}).click();assert.match(await page.locator('[role=tabpanel]').innerText(),/個人用/);
       await page.getByRole('button',{name:'Switch to English',exact:true}).click();assert.match(await page.locator('.gh-main h1').innerText(),/ratio/);

@@ -136,6 +136,18 @@ Unpublished projects show a disabled `URL なし` (No URL) button. `Open` → pu
 
 ---
 
+## 7-bis. Share a complete folder
+
+Folder sharing refreshes the published server list before confirming membership. Check the project count and whether subfolders are included. Local projects that have not been published must first use Publish to share individually.
+
+Unresolved placements, such as another PC's local ID without a known share ID, prevent saving an incomplete listing. In the recovery dialog, explicitly choose the corresponding published project or remove a placement only after confirming that it is obsolete, then retry. Removing a placement does not delete its project. Similar names are never used to guess an association.
+
+A folder URL contains the listing saved by the sharing operation. Share the folder again after changing its membership. Recipients can download all or selected projects, including nested folders, from the folder URL. See the [viewer guide](USER_GUIDE.en.md#shared-folder-zip-downloads).
+
+Managers can use “Open shared ZIP downloads” in an already shared folder's sharing dialog to reach the same download page.
+
+---
+
 ## 8. Where data is stored
 
 | Location | What | Scope |
@@ -436,9 +448,9 @@ Hide background (Otsu) classifies background from the TIC histogram. Adjust its 
 
 **Save and share**
 
-Author display settings are carried by project saving, ZIP and publication. Shared MSI style, colour and Median / Linear preferences are personal to this tab and survive reloads. Viewer and Admin preferences are separate. The published source remains unchanged.
+Author display settings are carried by project saving, ZIP and publication. Shared colour, Median / Linear and physical aspect preferences are personal to this tab. Every project opening starts Range with Maximum and Same. Viewer and Admin preferences are separate. The published source remains unchanged.
 
-Range is a temporary display setting per project. Record the bounds and Same / Individual mode when comparisons require fixed conditions.
+Range lasts while a project is open; reopening starts with Maximum and Same. Record the bounds and Same / Individual mode when comparisons require fixed conditions.
 
 ### Display a ratio (X / Y)
 

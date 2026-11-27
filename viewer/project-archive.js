@@ -385,6 +385,10 @@
     }
     async function beginExport(project, storage, options = {}) {
         const snapshot = clone(project), signature = fingerprint(project), records = new Map(), media = new Map(), missing = [];
+        // Transport identities may be reserved on the copy (e.g. remote
+        // Parquet). Freeze scientific references before doing so, and keep
+        // fingerprint/current checks against the untouched live project.
+        if (options.prepareSnapshot) options.prepareSnapshot(snapshot);
         validateAlignmentContracts(snapshot);
         if(options.ratioRegistry!==undefined) {
             snapshot.meta=snapshot.meta || {};
@@ -422,6 +426,7 @@
             const items = [];
             for (const section of snapshot.sections || []) for (const [kind, collection] of [['image', section.images], ['MSI', section.msiSeries], ['source', section.msiFiles]])
                 for (const [key, entry] of entries(collection, kind)) items.push({entry, label: (section.displayName || section.id) + ' / ' + (entry.filename || key)});
+            if (options.prepareEntry) for (const {entry} of items) options.prepareEntry(entry);
             const ids = [...new Set(items.map(item => item.entry.blobId).filter(Boolean))];
             await storage.pinBlobs(job.id, ids, {kind: job.kind, projectId: project.id});
             for (const {entry, label} of items) {

@@ -6,13 +6,13 @@
 <script src="app-i18n.js"></script>
 <script src="app-i18n-common.js"></script>
 <script src="app-i18n-storage.js"></script>
-<script src="app-i18n-manage.js"></script>
-<link rel="stylesheet" href="help.css?v=2026-11-16.1">
+<script src="app-i18n-manage.js?v=20261127b"></script>
+<link rel="stylesheet" href="help.css?v=2026-11-27.2">
 <script src="project-store-safety.js"></script>
 <script src="project-navigation.js?v=unpublished-1"></script>
 <script src="viewer/msi-display-settings.js"></script>
 <script src="offline/offline.js"></script>
-<script defer src="help.js?v=2026-11-16.1"></script>
+<script defer src="help.js?v=2026-11-27.2"></script>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
@@ -329,15 +329,26 @@ const SupabaseClient = (() => {
         // Callers must fall back to listProjects() on PGRST202 because the
         // SQL is applied by hand and the page ships ahead of it.
         listProjectsV2(masterPw) { return rpc('list_projects_v2', { _master_pw: masterPw }); },
+        // Sharing needs the entire master-visible catalogue, not the cached or
+        // per-project-password list. Exact counts also detect a server row cap.
+        listProjectsComplete(masterPw) {
+            const c = _client();
+            if (!c) throw new Error('supabase_not_configured');
+            return _fetchCompleteFolderProjectList((from, to) => c
+                .rpc('list_projects_v2', { _master_pw: masterPw }, { count: 'exact' })
+                .order('slug', { ascending: true }).range(from, to));
+        },
         verifyMasterPw(pw) { return rpc('verify_master_pw', { _pw: pw }); },
         changeMasterPw(cur, next) { return rpc('change_master_password', { _current_pw: cur, _new_pw: next }); },
         setProjectPasswordMaster(masterPw, slug, role, pw) { return rpc('set_project_password_master', { _master_pw: masterPw, _slug: slug, _role: role, _pw: pw }); },
         setAllAdminPw(masterPw, newPw) { return rpc('set_all_admin_passwords_master', { _master_pw: masterPw, _new_pw: newPw }); },
         getWorkspaceTree(masterPw) { return rpc('get_workspace_tree', { _master_pw: masterPw }); },
         setWorkspaceTree(masterPw, tree) { return rpc('set_workspace_tree', { _master_pw: masterPw, _tree: tree }); },
-        publishFolderShare(masterPw, slug, name, indexDoc, isPublic, password) {
-            return rpc('publish_folder_share', { _master_pw: masterPw, _slug: slug, _name: name, _index_doc: indexDoc, _is_public: !!isPublic, _password: password || null });
+        publishFolderShareChecked(masterPw, folderId, expectedTree, tree, indexDoc, password) {
+            return rpc('publish_folder_share_checked', { _master_pw: masterPw, _folder_id: folderId,
+                _expected_tree: expectedTree, _tree: tree, _index_doc: indexDoc, _password: password || null });
         },
+        getFolderIndex(slug, password) { return rpc('get_folder_index', { _slug: slug, _password: password || null }); },
         deleteFolderShare(masterPw, slug) { return rpc('delete_folder_share', { _master_pw: masterPw, _slug: slug }); },
         deleteProjectDoc(masterPw, slug) { return rpc('delete_project_doc', { _master_pw: masterPw, _slug: slug }); },
         unlockProjectMaster(slug, masterPw) { return rpc('unlock_project_master', { _master_pw: masterPw, _slug: slug }); },
@@ -1115,29 +1126,35 @@ async function treeMoveProject(slug, localId) {
 // inside a folder — stored with only a localId and published later — is matched
 // by its localId too, not only by an explicit slug written onto the node. This
 // is what makes "share the parent folder" also pick up the sub-folder projects.
-function _buildProjectResolver(rows) {
+function _buildProjectResolver(rows, authoritativeServerRows) {
     const slugToName = new Map();
     const localToShare = new Map();
     const knownLocalIds = new Set();
+    const localSlugs = new Map();
+    const strict = Array.isArray(authoritativeServerRows);
+    if (strict) for (const r of authoritativeServerRows) slugToName.set(r.slug, r.display_name || r.slug);
     for (const r of (rows || [])) {
         const slug = _rowSlug(r);
         // A local rename remains a draft until the project is published.
         const name = (r.server && r.server.display_name) || slug;
-        if (slug) slugToName.set(slug, name);
+        if (slug && !strict) slugToName.set(slug, name);
         if (r.local && r.local.id) knownLocalIds.add(r.local.id);
-        if (r.local && r.local.id && slug) localToShare.set(r.local.id, { slug, displayName: name });
+        if (r.local && r.local.id) localSlugs.set(r.local.id, slug);
+        if (r.local && r.local.id && slug && slugToName.has(slug)) localToShare.set(r.local.id, { slug, displayName: slugToName.get(slug) });
     }
     const resolve = (n) => {
+        if (strict && n.localId && knownLocalIds.has(n.localId)) return localToShare.get(n.localId) || null;
         if (n.slug && slugToName.has(n.slug)) return { slug: n.slug, displayName: slugToName.get(n.slug) };
         if (n.localId && localToShare.has(n.localId)) return localToShare.get(n.localId);
         return null;
     };
-    // ★ 解決できない理由は 2 通りあり、扱いが正反対なので呼び出し側に見分けさせる。
-    //   (a) この PC で作ってまだ publish していない → 一覧に載らなくて当然。
-    //   (b) 別 PC で作られ、この PC にローカル記録が無いだけ → **公開済み**。
-    //   (b) を (a) と同じに扱って黙って落とすと、フォルダ共有の一覧から
-    //   公開済みプロジェクトが消える。
+    // An unknown local ID proves neither publication nor duplication.
     resolve.isForeign = (n) => !resolve(n) && !(n.localId && knownLocalIds.has(n.localId));
+    resolve.reason = (n) => {
+        if (resolve(n)) return '';
+        const slug = n.localId && knownLocalIds.has(n.localId) ? localSlugs.get(n.localId) : n.slug;
+        return slug ? 'missing' : n.localId && knownLocalIds.has(n.localId) ? 'unpublished' : 'unknown';
+    };
     return resolve;
 }
 
@@ -1213,10 +1230,8 @@ function _reconcileTree(rowForNode) {
 // nested sub-folders are skipped and only this folder's direct published
 // projects are listed; otherwise sub-folders are preserved as nesting.
 // `stats` (optional) receives what was left out: { unpublished, foreign }.
-// foreign = published, but this PC cannot resolve the node (it was created on
-// another PC and carries only that PC's localId). Publishing an index that
-// silently drops those removes live projects from the recipient's listing, so
-// callers must check it rather than trusting the doc.
+// foreign = this PC cannot identify the node. It may be a published project,
+// an unpublished project, or an obsolete placement. Callers must not guess.
 function _buildFolderIndexDoc(folderNode, resolveProject, includeSubfolders, stats) {
     const incSub = includeSubfolders !== false;   // default: include sub-folders
     const conv = (nodes) => {
@@ -1238,51 +1253,225 @@ function _buildFolderIndexDoc(folderNode, resolveProject, includeSubfolders, sta
     return { name: folderNode.name, children: conv(folderNode.children || []) };
 }
 
-async function openFolderShareModal(folderId) {
-    if (window.DESI_OFFLINE === true) return;
-    _ensureTree();
-    const node = _treeFolderById(folderId);
-    if (!node) return;
-    const rows = await buildRows();
-    const resolveProject = _buildProjectResolver(rows);
-    const includeSub = node.shareIncludeSubfolders !== false;   // default ON, remembered per folder
-    // Count this folder's direct + (optionally) nested published projects for
-    // the summary line; recomputed live when the sub-folder toggle changes.
-    const computeCounts = (incSub) => {
-        let total = 0, withSlug = 0, foreign = 0;
-        (function walk(nodes) {
-            for (const n of (nodes || [])) {
-                if (n.type === 'folder') { if (incSub) walk(n.children || []); }
-                else if (n.type === 'project') {
-                    total++;
-                    if (resolveProject(n)) withSlug++;
-                    else if (resolveProject.isForeign && resolveProject.isForeign(n)) foreign++;
+async function _fetchCompleteFolderProjectList(fetchPage) {
+    const rows = [], seen = new Set();
+    let total = null;
+    for (;;) {
+        const { data, error, count } = await fetchPage(rows.length, rows.length + 199);
+        if (error) throw error;
+        if (!Array.isArray(data) || !Number.isSafeInteger(count) || count < 0
+                || (total !== null && count !== total)) throw new Error('folder_catalog_incomplete');
+        total = count;
+        for (const row of data) {
+            if (!row || typeof row.slug !== 'string' || !row.slug || seen.has(row.slug)) throw new Error('folder_catalog_incomplete');
+            seen.add(row.slug); rows.push(row);
+        }
+        if (rows.length > total || (!data.length && rows.length < total)) throw new Error('folder_catalog_incomplete');
+        if (rows.length === total) return rows;
+        // Advance by the actual response length: the server may cap rows below
+        // our requested page size. A short page alone never means "complete".
+    }
+}
+
+function _folderSharePlan(folder, rows, catalogue, includeSubfolders) {
+    const resolve = _buildProjectResolver(rows, catalogue);
+    const placements = [], issues = [], slugs = new Set();
+    const walk = (nodes, path, names) => {
+        for (let i = 0; i < nodes.length; i++) {
+            const n = nodes[i], next = path.concat(i);
+            if (n.type === 'folder' && includeSubfolders !== false) walk(n.children || [], next, names.concat(n.name));
+            else if (n.type === 'project') {
+                const project = resolve(n);
+                const entry = { key: next.join('.'), node: n, path: names.join(' / '), project };
+                placements.push(entry);
+                if (project) slugs.add(project.slug);
+                else issues.push(Object.assign(entry, { reason: resolve.reason(n) }));
+            }
+        }
+    };
+    walk(folder.children || [], [], [folder.name]);
+    return { placements, issues, slugs, indexDoc: _buildFolderIndexDoc(folder, resolve, includeSubfolders) };
+}
+
+function _folderShareLocations(tree, folderId, rows, catalogue, includeSubfolders) {
+    const resolve = _buildProjectResolver(rows, catalogue), inside = new Set(), outside = new Map();
+    const walk = (nodes, names, within) => {
+        for (const n of nodes || []) {
+            if (n.type === 'folder') walk(n.children || [], names.concat(n.name), n.id === folderId || (within && includeSubfolders !== false));
+            else if (n.type === 'project') {
+                const project = resolve(n);
+                if (project) {
+                    if (within) inside.add(project.slug);
+                    else outside.set(project.slug, names.join(' / ') || uiT('（ルート）'));
                 }
             }
-        })(node.children || []);
-        return { total, withSlug, foreign };
+        }
     };
-    // ★ 「解決できない = 未公開」と決めつけない。別 PC で作られたプロジェクトは
-    //   公開済みでもこの PC では解決できず、以前はそれを「未公開なので Publish
-    //   してください」と案内していた (publish 済みなので直しようがない上に、
-    //   そのまま共有すると受け手の一覧から消える)。
-    const countText = (incSub) => {
-        const { total, withSlug, foreign } = computeCounts(incSub);
-        const unpublished = total - withSlug - foreign;
-        return "<span data-i18n=\"配下の\">配下の</span><b><span data-i18n=\"公開済み\">公開済み</span></b><span data-i18n=\"プロジェクト\">プロジェクト</span> " + withSlug + uiH(" 件を一覧にします。")
-            + (unpublished ? "<br><span style=\"color:#b45309;\"><span data-i18n=\"未公開の\">未公開の</span> " + unpublished + " <span data-i18n=\"件は含まれません（先に各プロジェクトを Publish してください）。\">件は含まれません（先に各プロジェクトを Publish してください）。</span></span>" : '')
-            + (foreign ? "<br><span style=\"color:#b91c1c;\"><span data-i18n=\"この PC では解決できない\">この PC では解決できない</span> " + foreign + " <span data-i18n=\"件があります（公開済みでも一覧から抜け落ちます）。そのプロジェクトを登録した PC で一度この管理画面を開くと直ります。\">件があります（公開済みでも一覧から抜け落ちます）。そのプロジェクトを登録した PC で一度この管理画面を開くと直ります。</span></span>" : '');
+    walk(tree.children, [], false);
+    return { inside, outside };
+}
+
+// Repair only the placements the user explicitly chose. Existing children
+// keep their order and identity; duplicate aliases merge into a known placement
+// in this share scope. A project placed elsewhere must be moved explicitly via
+// the normal Move action, never guessed or silently moved by this dialog.
+function _repairFolderSharePlacements(tree, folderId, choices, rows, catalogue, includeSubfolders) {
+    const next = JSON.parse(JSON.stringify(tree));
+    const folder = _treeFolderById(folderId, next.children);
+    if (!folder) throw new Error('folder_tree_changed');
+    const plan = _folderSharePlan(folder, rows, catalogue, includeSubfolders);
+    const locations = _folderShareLocations(next, folderId, rows, catalogue, includeSubfolders);
+    if (Object.keys(choices).some(key => !plan.issues.some(issue => issue.key === key))) throw new Error('folder_tree_changed');
+    const validSlugs = new Set(catalogue.map(r => r.slug)), replacements = new Map();
+    for (const issue of plan.issues) {
+        const choice = choices[issue.key];
+        if (!choice) throw new Error('folder_share_unresolved');
+        if (choice.action === 'remove') replacements.set(issue.key, null);
+        else if (choice.action === 'link' && validSlugs.has(choice.slug)) {
+            if (locations.inside.has(choice.slug)) replacements.set(issue.key, null);
+            else {
+                if (locations.outside.has(choice.slug)) throw new Error('folder_project_placed_elsewhere');
+                replacements.set(issue.key, { type: 'project', slug: choice.slug });
+                locations.inside.add(choice.slug);
+            }
+        } else throw new Error('folder_share_unresolved');
+    }
+    const repair = (nodes, path) => nodes.flatMap((n, i) => {
+        const nextPath = path.concat(i), key = nextPath.join('.');
+        if (replacements.has(key)) return replacements.get(key) ? [replacements.get(key)] : [];
+        if (n.type === 'folder') n.children = repair(n.children || [], nextPath);
+        return [n];
+    });
+    folder.children = repair(folder.children || [], []);
+    return next;
+}
+
+function _folderShareIndexSignature(doc) {
+    const walk = (nodes) => (nodes || []).map(n => n.type === 'folder'
+        ? ['folder', n.name, walk(n.children)] : ['project', n.slug]);
+    return JSON.stringify([doc && doc.name, walk(doc && doc.children)]);
+}
+
+function _verifyFolderSharePlan(plan) {
+    if (plan.issues.length) throw new Error('folder_share_unresolved');
+    if (!plan.slugs.size) throw new Error('folder_share_empty');
+    const actual = [];
+    const walk = nodes => { for (const n of nodes || []) {
+        if (n.type === 'folder') walk(n.children);
+        else if (n.type === 'project') actual.push(n.slug);
+    } };
+    walk(plan.indexDoc.children);
+    const expected = plan.placements.map(entry => entry.project.slug).sort();
+    if (JSON.stringify(actual.sort()) !== JSON.stringify(expected)) throw new Error('folder_share_verify_failed');
+}
+
+function _folderTreeSignature(tree) {
+    // jsonb may return object keys in a different order after a write.
+    const canonical = value => Array.isArray(value) ? value.map(canonical)
+        : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])])) : value;
+    return JSON.stringify(canonical(tree));
+}
+
+function _folderShareError(e) {
+    const code = String((e && (e.message || e.details)) || '');
+    if (/unauthorized|28000/i.test(code)) return uiT('Master password が違います');
+    const messages = {
+        folder_catalog_unavailable: '全件確認用のサーバ機能がありません。管理者にサーバ設定の更新を依頼してください。既存の共有は変更していません。',
+        folder_share_protocol_required: '安全に共有を更新するためのサーバ更新が必要です。管理者に依頼してください。既存の共有は変更していません。',
+        folder_catalog_incomplete: '公開プロジェクトの全件取得を確認できませんでした。再度共有画面を開いてください。既存の共有は変更していません。',
+        folder_tree_changed: 'フォルダ構成が変更されました。共有画面を開き直して対象を確認してください。',
+        folder_share_slug_changed: 'フォルダ構成が変更されました。共有画面を開き直して対象を確認してください。',
+        folder_share_project_missing: '共有対象の公開プロジェクトが変更・削除されました。共有画面を開き直してください。既存の共有は変更していません。',
+        folder_share_invalid_tree: '共有対象とフォルダ構成が一致しないため更新を中止しました。共有画面を開き直してください。',
+        folder_share_invalid_index: '共有対象とフォルダ構成が一致しないため更新を中止しました。共有画面を開き直してください。',
+        folder_tree_unsaved: 'フォルダ構成の保存が完了していません。保存後に共有画面を開き直してください。',
+        folder_share_unresolved: '未解決の配置があります。対応する公開プロジェクトを選ぶか、不要な配置を除いてください。',
+        folder_project_placed_elsewhere: '選んだプロジェクトは別の場所に配置されています。先に「移動」でこのフォルダに配置してから、共有画面を開き直してください。',
+        folder_share_empty: '共有対象がありません。公開済みプロジェクトを配置してください。',
+        folder_share_verify_failed: '共有先の内容を確認できませんでした。成功とは判定していません。共有URLを確認してから、再度共有画面を開いてください。'
     };
+    return messages[code] ? uiT(messages[code]) : uiT('共有に失敗しました: ') + code;
+}
+
+async function _refreshFolderShareCatalogue(pw) {
+    let catalogue;
+    try { catalogue = await SupabaseClient.listProjectsComplete(pw); }
+    catch (e) { if (_isMissingRpc(e)) throw new Error('folder_catalog_unavailable'); throw e; }
+    serverRowsCache = catalogue;
+    return catalogue;
+}
+
+async function _publishCompleteFolderShare(folderId, sourceTree, choices, options, pw) {
+    // Validate again after the dialog: a publish/delete on another PC may have
+    // changed project identities while the user was reviewing the choices.
+    const catalogue = await _refreshFolderShareCatalogue(pw);
+    const rows = await buildRows();
+    const nextTree = _repairFolderSharePlacements(sourceTree, folderId, choices, rows, catalogue, options.includeSubfolders);
+    const folder = _treeFolderById(folderId, nextTree.children);
+    if (folder.shareSlug && options.slug !== folder.shareSlug) throw new Error('folder_tree_changed');
+    const plan = _folderSharePlan(folder, rows, catalogue, options.includeSubfolders);
+    _verifyFolderSharePlan(plan);
+    // The server cannot resolve browser-local IDs. Bake only identities proven
+    // by this PC's records and the complete catalogue into the reviewed scope.
+    for (const entry of plan.placements) entry.node.slug = entry.project.slug;
+    folder.shareSlug = options.slug; folder.shareIsPublic = options.isPublic;
+    folder.shareIncludeSubfolders = options.includeSubfolders;
+    const password = options.isPublic ? null : options.password;
+    let committed;
+    try {
+        // CAS + live membership validation + both writes are one server
+        // transaction. An older server must not fall back to two unsafe writes.
+        committed = await SupabaseClient.publishFolderShareChecked(pw, folderId, sourceTree, nextTree, plan.indexDoc, password);
+    } catch (e) { if (_isMissingRpc(e)) throw new Error('folder_share_protocol_required'); throw e; }
+    workspaceTree = nextTree; _treeLoaded = true; _treeDirty = false;
+    try {
+        if (!committed || committed.slug !== options.slug || committed.project_count !== plan.slugs.size
+                || committed.placement_count !== plan.placements.length || !Array.isArray(committed.project_slugs)
+                || JSON.stringify(committed.project_slugs.slice().sort()) !== JSON.stringify([...plan.slugs].sort())) throw new Error('folder_share_verify_failed');
+        let saved;
+        try { saved = await SupabaseClient.getFolderIndex(options.slug, password); }
+        catch (e) { throw new Error('folder_share_verify_failed'); }
+        if (!saved || saved.is_public !== options.isPublic
+                || _folderShareIndexSignature(saved.index_doc) !== _folderShareIndexSignature(plan.indexDoc)) throw new Error('folder_share_verify_failed');
+    } catch (e) {
+        // The transaction committed, even if readback failed. Keep the URL
+        // available instead of reporting a blind success or retrying a write.
+        e.publishedSlug = options.slug;
+        throw e;
+    }
+    return plan;
+}
+
+async function openFolderShareModal(folderId) {
+    if (window.DESI_OFFLINE === true) return;
+    const pw = await _ensureMasterPwForTree();
+    if (!pw) { alert(uiT('Master password が必要です')); return; }
+    let catalogue, rows, sourceTree, node;
+    try {
+        showToast(uiT('共有対象をサーバで確認中…'));
+        await saveTreeQuiet();
+        if (_treeDirty || _treePersisting) throw new Error('folder_tree_unsaved');
+        catalogue = await _refreshFolderShareCatalogue(pw);
+        sourceTree = await SupabaseClient.getWorkspaceTree(pw);
+        if (!sourceTree || !Array.isArray(sourceTree.children)) throw new Error('folder_tree_changed');
+        node = _treeFolderById(folderId, sourceTree.children);
+        if (!node) throw new Error('folder_tree_changed');
+        rows = await buildRows();
+        workspaceTree = JSON.parse(JSON.stringify(sourceTree)); _treeLoaded = true; _treeDirty = false;
+    } catch (e) { alert(_folderShareError(e)); return; }
+    const includeSub = node.shareIncludeSubfolders !== false;   // default ON, remembered per folder
     const cur = node.shareSlug || '';
     const folderUrl = (s) => location.origin + location.pathname.replace(/[^/]+$/, '') + 'viewer/index.html#folder=' + encodeURIComponent(s);
     const defaultSlug = cur || ('folder-' + (((node.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)) || 'x') + '-' + Math.random().toString(36).slice(2, 6));
     const html = `
         <h2><span data-i18n="フォルダを共有:">フォルダを共有:</span> ${safe(node.name)}</h2>
         ${cur ? "<div style=\"font-size:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;padding:8px;margin-bottom:8px;\"><span data-i18n=\"共有中（\">共有中（</span>" + (node.shareIsPublic ? 'public' : uiH("パスワード保護")) + '）<br><span style="word-break:break-all;">' + safe(folderUrl(cur)) + "</span><div style=\"margin-top:6px;display:flex;gap:6px;\"><button type=\"button\" class=\"btn\" data-copy><span data-i18n=\"URLコピー\">URLコピー</span></button><button type=\"button\" class=\"btn danger\" data-unshare><span data-i18n=\"共有解除\">共有解除</span></button></div></div>" : ''}
+        ${cur ? `<p style="margin:0 0 8px;"><a class="btn" data-bulk-zip href="${safe(folderUrl(cur))}" target="_blank" rel="noopener"><span data-i18n="共有ページで一括ZIP">共有ページで一括ZIP</span></a></p>` : ''}
         <p data-count style="font-size:12px;color:#475569;margin:0 0 8px;"></p>
         <form class="row" style="display:flex;flex-direction:column;gap:8px;">
-          <label style="font-size:13px;"><span data-i18n="共有 slug">共有 slug</span><br><input type="text" name="slug" value="${safe(defaultSlug)}" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
+          <label style="font-size:13px;"><span data-i18n="共有 slug">共有 slug</span><br><input type="text" name="slug" value="${safe(defaultSlug)}" ${cur ? 'readonly' : ''} style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
           <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="includesub" ${includeSub ? 'checked' : ''}> <span data-i18n="サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）">サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）</span></label>
+          <div data-recovery style="font-size:12px;"></div>
           <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="pwprotect" ${cur && !node.shareIsPublic ? 'checked' : ''}> <span data-i18n="パスワードで保護する（オフ＝public）">パスワードで保護する（オフ＝public）</span></label>
           <label style="font-size:13px;" data-pw-row><input type="password" name="password" placeholder="フォルダ パスワード (4文字以上)" data-i18n-placeholder="フォルダ パスワード (4文字以上)" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
           <p class="err" data-err style="color:#b91c1c;font-size:12px;"></p>
@@ -1300,18 +1489,61 @@ async function openFolderShareModal(folderId) {
     syncPw(); pwProtect.addEventListener('change', syncPw);
     const incSubEl = card.querySelector('[name="includesub"]');
     const countEl = card.querySelector('[data-count]');
-    const syncCount = () => { if (countEl) countEl.innerHTML = countText(incSubEl.checked); };
+    const recoveryEl = card.querySelector('[data-recovery]');
+    const choiceValues = new Map();
+    const syncCount = () => {
+        recoveryEl.querySelectorAll('[data-repair]').forEach(el => choiceValues.set(el.dataset.repair, el.value));
+        const plan = _folderSharePlan(node, rows, catalogue, incSubEl.checked);
+        countEl.innerHTML = uiH('確認済み: {projects} プロジェクト / {placements} 配置。未解決: {issues} 件。', { projects: plan.slugs.size, placements: plan.placements.length, issues: plan.issues.length });
+        const submit = card.querySelector('[data-modal-ok]');
+        uiBind(submit, uiMsg(plan.issues.length ? '配置を保存して共有' : cur ? '再共有 (更新)' : '共有する'));
+        if (!plan.issues.length) { recoveryEl.innerHTML = ''; return; }
+        const locations = _folderShareLocations(sourceTree, folderId, rows, catalogue, incSubEl.checked);
+        const reasonText = { unknown: '登録元の情報がこのPCにありません', unpublished: 'このPCの未公開プロジェクトです', missing: '公開先がサーバに見つかりません' };
+        recoveryEl.innerHTML = '<p style="color:#b91c1c;">' + uiH('未解決の配置を除いたまま共有を更新することはできません。') + '</p><p>'
+            + uiH('登録元のPCで公開・再読み込みするか、下で対応先を明示してください。選んだ公開版がこの共有範囲にあれば既存配置に統合し、未配置ならこの位置に配置します。')
+            + '</p><p>' + uiH('「配置だけ除く」はプロジェクトのデータを削除しません。別の場所にある公開版は、先に「移動」でこのフォルダに配置してください。') + '</p>'
+            + plan.issues.map(issue => {
+                const local = rows.find(r => r.local && r.local.id === issue.node.localId)?.local;
+                const label = (local && local.displayName) || issue.node.slug || issue.node.localId || '?';
+                return '<label style="display:block;border-top:1px solid #e2e8f0;padding:8px 0;"><b>' + safe(label) + '</b><br>' + safe(issue.path) + '<br>'
+                    + uiH(reasonText[issue.reason]) + '<br><select data-repair="' + safe(issue.key) + '" style="width:100%;margin-top:4px;">'
+                    + '<option value="" data-i18n="対応を選択してください">' + safe(uiT('対応を選択してください')) + '</option>'
+                    + '<option value="remove" data-i18n="不要な配置だけ除く">' + safe(uiT('不要な配置だけ除く')) + '</option>'
+                    + catalogue.map(project => {
+                        const elsewhere = locations.outside.has(project.slug) && !locations.inside.has(project.slug);
+                        const suffix = elsewhere ? ' — ' + locations.outside.get(project.slug) : '';
+                        return '<option value="link:' + safe(project.slug) + '"' + (elsewhere ? ' disabled' : '') + '>' + safe((project.display_name || project.slug) + ' [' + project.slug + ']' + suffix) + '</option>';
+                    }).join('') + '</select></label>';
+            }).join('');
+        recoveryEl.querySelectorAll('[data-repair]').forEach(el => {
+            const value = choiceValues.get(el.dataset.repair) || '';
+            const option = Array.from(el.options).find(option => option.value === value);
+            el.value = option && !option.disabled ? value : '';
+        });
+        const choices = {};
+        for (const el of recoveryEl.querySelectorAll('[data-repair]')) {
+            if (!el.value) return;
+            choices[el.dataset.repair] = el.value === 'remove' ? { action: 'remove' } : { action: 'link', slug: el.value.slice(5) };
+        }
+        const repaired = _repairFolderSharePlacements(sourceTree, folderId, choices, rows, catalogue, incSubEl.checked);
+        const ready = _folderSharePlan(_treeFolderById(folderId, repaired.children), rows, catalogue, incSubEl.checked);
+        countEl.innerHTML = uiH('共有予定: {projects} プロジェクト / {placements} 配置。未解決: 0 件。', { projects: ready.slugs.size, placements: ready.placements.length });
+    };
     syncCount(); incSubEl.addEventListener('change', syncCount);
+    recoveryEl.addEventListener('change', syncCount);
     const copyBtn = card.querySelector('[data-copy]');
     if (copyBtn) copyBtn.addEventListener('click', async () => { try { await navigator.clipboard.writeText(folderUrl(cur)); uiBind(copyBtn, uiMsg("Copied ✓")); } catch (e) {} });
     const unshareBtn = card.querySelector('[data-unshare]');
     if (unshareBtn) unshareBtn.addEventListener('click', async () => {
         if (!confirm(uiT("フォルダ「") + node.name + uiT("」の共有を解除しますか?"))) return;
         const pw = await _ensureMasterPwForTree(); if (!pw) return;
-        try { await SupabaseClient.deleteFolderShare(pw, cur); } catch (e) { console.warn('delete_folder_share failed', e); }
-        delete node.shareSlug; delete node.shareIsPublic;
-        if (card._close) card._close(null);
+        try { await SupabaseClient.deleteFolderShare(pw, cur); }
+        catch (e) { alert(_folderShareError(e)); return; }
+        const currentNode = _treeFolderById(folderId);
+        if (currentNode) { delete currentNode.shareSlug; delete currentNode.shareIsPublic; }
         await persistTreeAndRender();
+        if (card._close) card._close(null);
         alert(uiT("共有を解除しました。"));
     });
     card._collect = () => {
@@ -1320,30 +1552,31 @@ async function openFolderShareModal(folderId) {
         const isPublic = !pwProtect.checked;
         const password = (card.querySelector('[name="password"]').value || '').trim();
         if (!isPublic && password.length < 4) { uiBind(errEl, uiMsg("パスワードは4文字以上")); return null; }
-        return { slug, isPublic, password, includeSubfolders: incSubEl.checked };
+        const choices = {};
+        for (const el of recoveryEl.querySelectorAll('[data-repair]')) {
+            if (!el.value) { uiBind(errEl, uiMsg('未解決の配置があります。対応する公開プロジェクトを選ぶか、不要な配置を除いてください。')); el.focus(); return null; }
+            choices[el.dataset.repair] = el.value === 'remove' ? { action: 'remove' } : { action: 'link', slug: el.value.slice(5) };
+        }
+        try {
+            const repaired = _repairFolderSharePlacements(sourceTree, folderId, choices, rows, catalogue, incSubEl.checked);
+            _verifyFolderSharePlan(_folderSharePlan(_treeFolderById(folderId, repaired.children), rows, catalogue, incSubEl.checked));
+        } catch (e) { errEl.textContent = _folderShareError(e); return null; }
+        return { slug, isPublic, password, includeSubfolders: incSubEl.checked, choices };
     };
     const res = await p;
-    if (!res) return;
-    const pw = await _ensureMasterPwForTree();
-    if (!pw) { alert(uiT("Master password が必要です")); return; }
-    const stats = { unpublished: 0, foreign: 0 };
-    const indexDoc = _buildFolderIndexDoc(node, resolveProject, res.includeSubfolders, stats);
-    if (stats.foreign && !confirm(
-            uiT("この PC では ") + stats.foreign + uiT(" 件のプロジェクトを解決できません。\n")
-            + uiT("このまま共有すると、公開済みでもその ") + stats.foreign + uiT(" 件は受け手の一覧から抜け落ちます。\n\n")
-            + uiT("それらを登録した PC で一度この管理画面を開くと解決できるようになります。\n\n")
-            + uiT("それでも共有しますか?"))) return;
+    if (!res) { await renderList(); return; }
     try {
-        await SupabaseClient.publishFolderShare(pw, res.slug, node.name, indexDoc, res.isPublic, res.isPublic ? null : res.password);
-        node.shareSlug = res.slug; node.shareIsPublic = res.isPublic; node.shareIncludeSubfolders = res.includeSubfolders;
-        await persistTreeAndRender();
+        _treePersisting = true;
+        showToast(uiT('全件確認と共有内容の検証中…'));
+        const plan = await _publishCompleteFolderShare(folderId, sourceTree, res.choices, res, pw);
         const url = folderUrl(res.slug);
         try { await navigator.clipboard.writeText(url); } catch (e) {}
-        alert(uiT("共有しました（URL をコピーしました）:\n") + url);
+        alert(uiT('共有先で {projects} プロジェクトを確認しました。\n', { projects: plan.slugs.size }) + url);
     } catch (e) {
-        const msg = String((e && (e.message || e.details)) || '');
-        if (/unauthorized|28000/i.test(msg)) alert(uiT("Master password が違います"));
-        else alert(uiT("共有に失敗しました: ") + msg);
+        alert(_folderShareError(e) + (e.publishedSlug ? '\n' + folderUrl(e.publishedSlug) : ''));
+    } finally {
+        _treePersisting = false;
+        await loadWorkspaceTree(); await renderList();
     }
 }
 
