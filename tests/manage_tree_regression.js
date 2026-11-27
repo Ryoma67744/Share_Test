@@ -6,7 +6,7 @@
 // master に入るとフォルダが空になり、プロジェクトがルートに出てしまう」。
 // 原因はツリーのノードがそのブラウザ内でしか意味を持たない localId しか
 // 持たず、publish しても slug が書き戻らないこと。ここでは実際の
-// index.html から関数を切り出して、その身元解決だけを動かして確かめる。
+// index.html から関数を切り出して、その身元解決と移動後の保存を確かめる。
 //
 // renderNodes はノードを `rowForNode(n)` が引ければフォルダ内に描き、引けなければ
 // 未配置としてルート末尾へ回す。つまり下のテストが見ている「解決できるか」は
@@ -281,7 +281,127 @@ function testSameSlugCopiesKeepIndependentPlacement() {
   assert.equal(c._reconcileTree(idx.rowForNode).folded,0);
   assert.equal(tree.children.length,2);
 }
+
+// Exercise the real move -> render-time reconciliation -> persistence path.
+// Only the picker, project list, DOM rendering and external RPC are replaced;
+// checking the saved tree catches a move that the reconciler silently undoes.
+async function moveAndReadSavedTree(tree, rows, slug, localId, destinationId) {
+  const saved = [], alerts = [];
+  const context = makeContext(tree);
+  Object.assign(context, {
+    window: { DESI_OFFLINE: false },
+    _treeLoaded: true, _treeDirty: false, _treePersisting: false,
+    _treeSavePromise: null, _treeHealed: 0,
+    uiT: value => value,
+    readCachedMasterPw: () => 'test-master',
+    showToast: () => {},
+    alert: message => alerts.push(message),
+    buildRows: async () => rows,
+    pickFolderModal: async () => ({ id: destinationId }),
+    SupabaseClient: {
+      configured: () => true,
+      setWorkspaceTree: async (pw, value) => {
+        assert.equal(pw, 'test-master');
+        saved.push(JSON.parse(JSON.stringify(value)));
+      },
+    },
+    renderList: async () => {
+      const fixed = context._reconcileTree(context._indexRows(rows).rowForNode);
+      if (fixed.healed || fixed.folded) {
+        context._treeDirty = true;
+        context._treeHealed += fixed.healed;
+      }
+      if (context._treeDirty) await context.saveTreeQuiet();
+    },
+  });
+  for (const name of ['_emptyTree', '_ensureTree', '_ensureMasterPwForTree',
+                      '_treeFolderById', '_treeChildrenOf', '_treeRemove',
+                      'treeMoveProject', 'persistTreeAndRender',
+                      '_persistTreeAndRender', 'saveTreeQuiet']) {
+    vm.runInContext(extractFunction(name), context);
+  }
+  await context.treeMoveProject(slug, localId);
+  assert.deepEqual(alerts, [], 'moving must complete without a persistence warning');
+  assert.equal(saved.length, 1, 'the explicit move must save exactly once');
+  assert.equal(context._treePersisting, false, 'the persistence guard must be released');
+  assert.deepEqual(saved[0], JSON.parse(JSON.stringify(context.workspaceTree)));
+  return saved[0];
+}
+
+function projectPlacements(tree) {
+  const placements = [];
+  const visit = (nodes, folderId) => {
+    for (const node of nodes) {
+      if (node.type === 'folder') visit(node.children || [], node.id);
+      else if (node.type === 'project') placements.push({ folderId, ...node });
+    }
+  };
+  visit(tree.children, null);
+  return placements;
+}
+
+async function testMoveForeignLocalIdPersistsRegardlessOfTreeOrder() {
+  const slug = 'published-project';
+  const row = { local: { id: 'current-local', shareInfo: { slug } }, server: { slug } };
+  for (const destination of ['after-source', 'before-source', 'root']) {
+    const sourceFolder = { type: 'folder', id: 'source', children: [
+      { type: 'project', localId: 'other-pc-local', slug },
+    ] };
+    const destinationFolder = { type: 'folder', id: 'destination', children: [] };
+    const tree = { version: 1, children: destination === 'before-source'
+      ? [destinationFolder, sourceFolder] : [sourceFolder, destinationFolder] };
+    const destinationId = destination === 'root' ? null : 'destination';
+    const saved = await moveAndReadSavedTree(tree, [row], slug, row.local.id, destinationId);
+    assert.deepEqual(projectPlacements(saved), [
+      { folderId: destinationId, type: 'project', slug, localId: 'current-local' },
+    ], `a foreign local ID must not restore the old placement (${destination})`);
+  }
+}
+
+async function testMoveMatchingLocalIdAndServerOnlyPersist() {
+  const slug = 'published-project';
+  for (const serverOnly of [false, true]) {
+    const row = serverOnly ? { server: { slug } }
+      : { local: { id: 'current-local', shareInfo: { slug } }, server: { slug } };
+    const localId = serverOnly ? 'other-pc-local' : 'current-local';
+    const tree = { version: 1, children: [
+      { type: 'folder', id: 'source', children: [{ type: 'project', localId, slug }] },
+      { type: 'folder', id: 'destination', children: [] },
+    ] };
+    const saved = await moveAndReadSavedTree(tree, [row], slug, serverOnly ? '' : localId, 'destination');
+    assert.deepEqual(projectPlacements(saved), [
+      { folderId: 'destination', type: 'project', slug, localId },
+    ], `the existing ${serverOnly ? 'server-only' : 'matching local ID'} move must remain valid`);
+  }
+}
+
+async function testMoveSameSlugCopiesKeepsOtherCopyInPlace() {
+  const slug = 'published-project';
+  const rows = ['first-copy', 'second-copy'].map(id => ({ local: { id, shareInfo: { slug } }, server: { slug } }));
+  for (const foreignFirstId of [false, true]) {
+    for (const movingIndex of [0, 1]) {
+      const ids = [foreignFirstId ? 'other-pc-local' : 'first-copy', 'second-copy'];
+      const tree = { version: 1, children: [
+        { type: 'folder', id: 'first-folder', children: [{ type: 'project', localId: ids[0], slug }] },
+        { type: 'folder', id: 'second-folder', children: [{ type: 'project', localId: ids[1], slug }] },
+        { type: 'folder', id: 'destination', children: [] },
+      ] };
+      const moving = rows[movingIndex].local.id;
+      const saved = await moveAndReadSavedTree(tree, rows, slug, moving, 'destination');
+      const otherIndex = 1 - movingIndex;
+      assert.deepEqual(projectPlacements(saved), [
+        { folderId: otherIndex === 0 ? 'first-folder' : 'second-folder',
+          type: 'project', localId: ids[otherIndex], slug },
+        { folderId: 'destination', type: 'project', slug, localId: moving },
+      ], `moving ${moving} must preserve the other same-slug copy (foreign alias: ${foreignFirstId})`);
+    }
+  }
+}
+
 async function main() {
+  await testMoveForeignLocalIdPersistsRegardlessOfTreeOrder();
+  await testMoveMatchingLocalIdAndServerOnlyPersist();
+  await testMoveSameSlugCopiesKeepsOtherCopyInPlace();
   testSameSlugCopiesKeepIndependentPlacement();
   testLocalIdOnlyNodeIsUnresolvableElsewhere();
   testRegisteringPcHealsTheTree();

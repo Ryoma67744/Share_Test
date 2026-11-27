@@ -1086,7 +1086,9 @@ async function treeMoveProject(slug, localId) {
     const target = (localId && idx.byLocal.get(localId)) || (slug && idx.bySlug.get(slug)) || null;
     const targetKey = target ? _rowKey(target) : '';
     const isSameProject = (n) => {
-        if (localId && n.localId) return n.localId === localId;
+        if (localId && n.localId === localId) return true;
+        // A different localId may belong to another PC. Resolve it exactly as
+        // the renderer does, while keeping copies that exist locally distinct.
         if (!targetKey) return false;
         const r = idx.rowForNode(n);
         return !!r && _rowKey(r) === targetKey;
