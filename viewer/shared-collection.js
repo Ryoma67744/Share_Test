@@ -1,4 +1,4 @@
-/* Read-only collections of published project backups. No App/IDB mutations. */
+/* Read-only backups of published originals and saved collaboration. No App/IDB mutations. */
 (function(root, factory) {
     const api = factory(root);
     if (typeof module === 'object' && module.exports) module.exports = api;
@@ -133,10 +133,79 @@
         }
         return output;
     }
-    function roiSignature(rows) {
+    function rowsSignature(rows, key = 'id') {
         const canonical=value=>value && typeof value==='object'
             ? Array.isArray(value)?value.map(canonical):Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])) : value;
-        return JSON.stringify(rows.slice().sort((a,b)=>String(a.id).localeCompare(String(b.id))).map(canonical));
+        return JSON.stringify(rows.slice().sort((a,b)=>String(a[key]).localeCompare(String(b[key]))).map(canonical));
+    }
+    const roiSignature = rows => rowsSignature(rows);
+    const collaborationKinds = [
+        ['overlays','listShareOverlaysPage','id'],
+        ['alignments','listShareAlignmentsPage','section_id'],
+        ['images','listShareImagesPage','id']
+    ];
+    async function readCollaboration(api, token, doc, options = {}) {
+        const signal=options.signal,sections=new Set((doc.sections || []).map(section=>section.id));
+        const batches=await Promise.all(collaborationKinds.map(async([kind,method,key])=>{
+            const rows=[],seen=new Set();let expected=null;
+            for(;;) {
+                check(signal);
+                const page=await api[method](token,{...options,offset:rows.length,limit:500});
+                check(signal);
+                if(!Array.isArray(page?.rows) || !Number.isSafeInteger(page.count) || page.count<0)
+                    throw fail('COLLECTION_SHARED_COUNT',t('共有編集の総件数を確認できません。完全なZIPを作成できません。'));
+                if(expected===null)expected=page.count;
+                if(page.count!==expected)throw fail('COLLECTION_SHARED_CHANGED',t('取得中に共有編集が変更されました。再試行してください。'));
+                for(const row of page.rows) {
+                    if(!row || typeof row[key]!=='string' || !row[key] || seen.has(row[key])
+                        || doc.id && row.project_id!==doc.id || kind!=='overlays' && !sections.has(row.section_id))
+                        throw fail('COLLECTION_SHARED_ROWS',t('共有編集の全件と対応先を確認できません。再試行してください。'));
+                    seen.add(row[key]);rows.push(row);
+                }
+                if(rows.length===expected)return [kind,rows];
+                if(!page.rows.length || rows.length>expected)
+                    throw fail('COLLECTION_SHARED_COUNT',t('共有編集の全件を取得できません。再試行してください。'));
+            }
+        }));
+        return Object.fromEntries(batches);
+    }
+    function collaborationSignature(value) {
+        return JSON.stringify(collaborationKinds.map(([kind,,key])=>[kind,rowsSignature(value[kind],key)]));
+    }
+    function applyCollaboration(project, value, options) {
+        const byId=new Map(project.sections.map(section=>[section.id,section]));
+        // Use the exact viewer capture/apply contract. The saved shared
+        // registration becomes active; the published master remains a backup.
+        // No localStorage alignment choice or personal overlay is consulted.
+        for(const section of project.sections) section.meta.__alignMaster=options.captureAlignment(section);
+        for(const row of value.alignments) {
+            const section=byId.get(row.section_id);
+            if(!section || !row.payload || typeof row.payload!=='object' || Array.isArray(row.payload))
+                throw fail('COLLECTION_SHARED_ROWS',t('共有編集の全件と対応先を確認できません。再試行してください。'));
+            options.applyAlignment(section,row.payload);
+        }
+        for(const row of value.images) {
+            const section=byId.get(row.section_id),key=row.layer_key;
+            if(!section || typeof key!=='string' || !key || ['__proto__','constructor','prototype'].includes(key) || !row.storage_path)
+                throw fail('COLLECTION_SHARED_ROWS',t('共有編集の全件と対応先を確認できません。再試行してください。'));
+            if(Object.prototype.hasOwnProperty.call(section.images,key))
+                throw fail('COLLECTION_SHARED_IMAGE_CONFLICT',t('公開元と共有先の画像名が重複しています: {0}',[section.displayName+' / '+key]));
+            section.images[key]={blobId:null,mime:row.mime || '',filename:row.filename || '',
+                storagePath:row.storage_path,__shareImage:row.id};
+            // The normal shared hydration explicitly enables newly attached
+            // HE/IF layers, including when the master saved a visibility list.
+            if(Array.isArray(section.meta.visibleLayers) && !section.meta.visibleLayers.includes(key))
+                section.meta.visibleLayers.push(key);
+        }
+        const overlayIds=new Set(project.overlays.map(overlay=>overlay.id));
+        for(const row of value.overlays) {
+            if(overlayIds.has(row.id))throw fail('COLLECTION_SHARED_OVERLAY_CONFLICT',t('公開元と共有先の重ね合わせIDが重複しています。'));
+            overlayIds.add(row.id);project.overlays.push(options.overlayFromRow(row));
+        }
+        project.archiveCollaboration={version:1,source:'saved-shared-state',personalState:'excluded',
+            alignmentPolicy:'shared-with-master-fallback',masterAlignment:'section.meta.__alignMaster',
+            counts:Object.fromEntries(collaborationKinds.map(([kind])=>[kind,value[kind].length]))};
+        return project;
     }
 
     function projectFromDoc(doc, slug, options = {}) {
@@ -166,7 +235,7 @@
             }
             project.sections.push(section);
         }
-        return project;
+        return options.collaboration ? applyCollaboration(project,options.collaboration,options) : project;
     }
 
     // STORE ZIPs use Blob slices and a small CRC buffer. Do not feed all inner
@@ -248,7 +317,9 @@
         const project = clone(input), Archive = archive(), signal = options.signal;
         check(signal);
         options.freezeReferences?.(project);
-        Archive.validateAlignmentContracts(project);
+        let correctedAlignment=Archive.validateAlignmentContracts(project);
+        for(const section of project.sections || []) if(section.meta?.__alignMaster)
+            correctedAlignment=Archive.validateAlignmentContracts(section.meta.__alignMaster) || correctedAlignment;
         const sectionIds=new Set();
         for(const section of project.sections || []) {
             if(typeof section.id!=='string' || !section.id || sectionIds.has(section.id)
@@ -262,9 +333,11 @@
         }
         const reader = loader().createArchiveReader({resolveSource:options.resolveSource, fetchBlob:options.fetchBlob});
         const files = [], bundled = new Map();
-        const manifest = {format:Archive.formatForProject(project), sourceContract:'msi-source-rows-v1', bgRemoved:null,
+        const manifest = {format:correctedAlignment?'desi_data_share_v3':'desi_data_share_v2', sourceContract:'msi-source-rows-v1', bgRemoved:null,
             archiveContract:{version:1, completeness:'registered-snapshot', provenanceVersion:1},
-            exportMode:'published-originals', derivatives:{numericCsv:'not-generated', alignedPng:'rebuild-from-original-and-alignment'},
+            exportMode:project.archiveCollaboration?'shared-saved-originals':'published-originals',
+            collaborationSnapshot:clone(project.archiveCollaboration),
+            derivatives:{numericCsv:'not-generated', alignedPng:'rebuild-from-original-and-alignment'},
             id:project.id, displayName:project.displayName, anatomyPalette:project.anatomyPalette || {},
             sectionOrder:(project.sections || []).map(s => s.id), rois:clone(project.rois || []),
             roiHidden:clone(project.roiHidden || {}), memo:clone(project.memo || {}),
@@ -332,42 +405,53 @@
     async function run(entries, options) {
         const signal = options.signal, results = entries.map(entry => ({slug:entry.slug,name:entry.name,
             folders:clone(entry.folders),status:'pending'}));
+        // File System Access has no exclusive-create operation. Distinct tabs
+        // must choose distinct names before either begins checking/creating.
+        const runId = root.crypto.randomUUID();
         const parts = [], stamp = (options.date || new Date()).toISOString().replace(/[:.]/g,'-').slice(0,19);
-        const base = safeName(options.name || 'Shared projects') + '_' + stamp;
+        const base = safeName(options.name || 'Shared projects') + '_' + stamp + '_' + runId;
         const partLimit = Math.min(options.partBytes || DEFAULT_PART_BYTES, MAX_ZIP - 1024 * 1024);
         let pending = [], bytes = 0, cancelled = false;
         const emit = extra => options.onProgress?.({...extra,results:clone(results),total:entries.length});
         async function flush(final) {
             if (!pending.length) return;
             const number = parts.length + 1;
-            const filename = base + (final && !parts.length ? '' : '__part-' + String(number).padStart(3,'0')) + '.zip';
-            for (const item of pending) { item.result.status = 'ready';item.result.part = filename; }
-            const manifest = {format:'desi_shared_collection_v1',name:options.name || 'Shared projects',createdAt:new Date().toISOString(),
-                part:number,finalPart:final,partLimitBytes:partLimit,projectCount:entries.length,
-                content:'published originals, saved definitions, ROI and alignment; derived CSV/PNG are not generated',
-                restore:'Extract this collection, then Import ZIP each project archive.',
-                projects:results.map(row => ({slug:row.slug,name:row.name,folders:row.folders,archivePath:row.archivePath,part:row.part})),
-                results:clone(results),complete:final && results.every(row => row.status === 'ready')};
+            let filename = base + (final && !parts.length ? '' : '__part-' + String(number).padStart(3,'0')) + '.zip';
+            const filenameKind=options.filenameKind || 'suggested-download-name';
             try {
+                if(options.resolvePartFilename)filename=await options.resolvePartFilename({filename,number,count:pending.length});
+                check(signal);
+                if(zipPath(filename).includes('/'))throw fail('COLLECTION_PATH',t('ZIPの保存先名が不正です。'));
+                for (const item of pending) { item.result.status = 'ready';item.result.part = filename;item.result.partFilenameKind=filenameKind; }
+                const manifest = {format:'desi_shared_collection_v1',name:options.name || 'Shared projects',createdAt:new Date().toISOString(),
+                runId,filename,filenameKind,
+                part:number,finalPart:final,partLimitBytes:partLimit,projectCount:entries.length,
+                content:'published originals, saved shared images/overlays/alignments, ROI and definitions; personal browser state and derived CSV/PNG are not included',
+                restore:'Extract this collection, then Import ZIP each project archive.',
+                projects:results.map(row => ({slug:row.slug,name:row.name,folders:row.folders,archivePath:row.archivePath,part:row.part,partFilenameKind:row.partFilenameKind})),
+                results:clone(results),complete:final && results.every(row => row.status === 'ready')};
                 emit({stage:'collection',part:number});
                 const blob = await storedZip(pending.map(item => ({path:item.result.archivePath,blob:item.blob})).concat([
                     {path:'manifest.json',blob:new Blob([JSON.stringify(manifest,null,2)],{type:'application/json'})},
                     {path:'download-results.json',blob:new Blob([JSON.stringify(results,null,2)],{type:'application/json'})},
                     {path:'README.txt',blob:new Blob(['Extract this ZIP, then use Import ZIP for each project ZIP.\n'
                         + '原本と保存定義を含みます。外側のZIPを展開して、各プロジェクトZIPをImport ZIPで読み込んでください。\n'
+                        + 'Saved shared HE/IF, overlays and registrations are included. Shared registration is active, with published master registration retained in section.meta.__alignMaster. Personal browser choices are excluded.\n'
+                        + '共有先の保存済み画像・重ね合わせ・位置合わせも含みます。共有先の位置合わせを有効にし、公開元の位置合わせをsection.meta.__alignMasterに保持します。個人の表示設定は含みません。\n'
+                        + 'For browser downloads, part names are suggested names; the browser may rename files.\n'
                         + 'Aligned PNGs and numeric CSVs are derivatives: open an imported project and use Export ZIP when needed.\n'
                         + '派生CSV・位置合わせ済みPNGが必要な場合は、復元後のプロジェクトでExport ZIPを実行してください。\n'
                         + 'For completed split exports, the last part contains the final download report.\n'
                         + '分割出力が最後まで完了した場合、最後のZIPのdownload-results.jsonに全件の結果を記録します。\n'])}
                 ]), {signal,onProgress:(loaded,total) => emit({stage:'collection',part:number,loaded,bytesTotal:total})});
-                const part = {filename,blob,number,count:pending.length};
+                const part = {filename,filenameKind,blob,number,count:pending.length};
                 // The UI may immediately stream/save each part and release its
                 // Blob. Core keeps only small metadata about completed parts.
                 await options.onPart(part);
-                parts.push({filename,number,count:pending.length,bytes:blob.size});
+                parts.push({filename,filenameKind,number,count:pending.length,bytes:blob.size});
                 pending = [];bytes = 0;
             } catch (error) {
-                for (const item of pending) { item.result.status=signal?.aborted?'cancelled':'failed';item.result.error=error.message;delete item.result.part; }
+                for (const item of pending) { item.result.status=signal?.aborted?'cancelled':'failed';item.result.error=error.message;delete item.result.part;delete item.result.partFilenameKind; }
                 pending=[];bytes=0;
                 throw error;
             }
@@ -402,7 +486,7 @@
             row.status=cancelled?'cancelled':'failed';row.error=t(cancelled?'一括ZIPを中止しました。':'ZIPを保存できませんでした。');
         }
         emit({stage:'done',cancelled});
-        return {results,parts,cancelled};
+        return {runId,results,parts,cancelled};
     }
-    return {collect,createSessions,readRois,roiSignature,projectFromDoc,projectZip,storedZip,crc32,run,safeName,DEFAULT_PART_BYTES};
+    return {collect,createSessions,readRois,roiSignature,readCollaboration,collaborationSignature,projectFromDoc,projectZip,storedZip,crc32,run,safeName,DEFAULT_PART_BYTES};
 });

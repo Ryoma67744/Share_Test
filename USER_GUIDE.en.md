@@ -502,6 +502,8 @@ Projects are fetched sequentially with progress and failure details. Password-pr
 
 The collection contains one restorable ZIP per project, plus a list of membership, folder paths, published revisions and results. It preserves original images, MSI originals, ROIs and attached photographs, alignment and saved ratio definitions. The batch operation does not regenerate derived CSVs or aligned PNGs that depend on the open viewer; open an individual project and use Export ZIP when those outputs are needed.
 
+Saved shared HE/IF additions, overlays and registrations are included. When shared registration exists, it is active on restoration, with the published master registration retained as a backup. Personal display choices stored only in this browser are excluded. If the published originals, ROIs or shared edits change during retrieval, that project is marked for retry rather than reported as successfully downloaded.
+
 To restore, extract the outer ZIP and use Import ZIP for each inner project ZIP. The outer ZIP is not a bulk-import format. Large collections are split at project boundaries around 256 MiB to limit memory usage; a single project is not split. Check the results and save every generated part.
 
 Supported browsers also offer “Choose folder and save ZIP” to write completed parts directly to a chosen directory. If the browser blocks automatic downloads, click each displayed ZIP link. A retry creates additional ZIPs for items that were not obtained; keep the ZIPs from the first successful downloads as well. If a single project reaches the ZIP32 limit, that project's export stops with an explicit explanation.

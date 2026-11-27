@@ -8,13 +8,15 @@ const Ratio=require('../viewer/msi-ratio-model.js');
 const Transform=require('../viewer/alignment-transform.js');
 const JSZip=require('../vendor/jszip.min.js');
 const {context,MemoryZip}=require('./zip_compatibility_regression.js');
-const {standalone}=require('./viewer-runtime.cjs');
+const {standalone,displayContext}=require('./viewer-runtime.cjs');
 const clone=value=>JSON.parse(JSON.stringify(value));
 const sources={
     'p/original.txt':new Blob(['x\ty\tX\tY\n01\t2\tNA\t1\n3\t4\t0\t2\n']),
     'p/original.parquet':new Blob([Uint8Array.from([80,65,82,49,0,255,128,80,65,82,49])]),
     'p/HE.png':new Blob([Uint8Array.from([137,80,78,71,0,255,1])],{type:'image/png'}),
-    'p/photo.png':new Blob([Uint8Array.from([137,80,78,71,4,6,8])],{type:'image/png'})
+    'p/photo.png':new Blob([Uint8Array.from([137,80,78,71,4,6,8])],{type:'image/png'}),
+    'p/shared-he.png':new Blob([Uint8Array.from([137,80,78,71,9,7,5])],{type:'image/png'}),
+    'p/alignment-source.csv':new Blob(['x,y,X\n10,-1,1\n14,-1,2\n10,7,3\n14,7,4\n'])
 };
 const vertices=[[0,0],[3,0],[3,4],[0,4]];
 const affine=[[0.001234567890123,0.0005,2.34],[-0.0001,0.0015,-3.4],[0,0,1]];
@@ -35,11 +37,11 @@ function fixture() {
         display:{rangePolicy:'maximum'}};
     const media={version:1,items:[{id:'photo',roiKey:'ROI_1',sectionId:'client',filename:'photo.png',mime:'image/png',
         width:100,height:200,storagePath:'p/photo.png',sourceRef:'source-one',roiSnapshot:{vertices},title:'photo',revision:1}]};
-    const doc={publish_revision:7,updated_at:'2026-11-27T00:00:00Z',meta:{project_slug:'public',display_name:'日本語 project',
+    const doc={id:'published-server-project',publish_revision:7,updated_at:'2026-11-27T00:00:00Z',meta:{project_slug:'public',display_name:'日本語 project',
         project_meta:{memo:{freeNote:'exact note'},msiUserWindow:{MSI_A:{min:2,max:9}},physical:{pitchX:30,pitchY:60},
             msiRatios:{schemaVersion:1,definitions:[ratio]},roiMedia:media,shareInfo:{viewerPassword:'never-copy'}}},
         anatomy_palette:{ROI_1:{name:'ROI',rgba:[255,0,0,200]}},
-        sections:[{id:'server',ordinal:1,display_name:'Sample',meta:{client_id:'client',alignment:{HE:alignment},
+        sections:[{id:'server',ordinal:1,display_name:'Sample',meta:{client_id:'client',alignment:{HE:clone(alignment)},
             overlays:[{id:'published',name:'Published overlay',layers:[]}],physical:{widthUm:900,heightUm:3600}},
             storage_paths:{images:{HE:{path:'p/HE.png',filename:'HE.png',mime:'image/png',alignmentImageReference:'published-he'}},
                 msiSeries:{MSI_A:a,MSI_B:b,MSI_PQ:pq},msiFiles:{file:{...a,id:'file'},pq:{...pq,id:'pq'}}}}]};
@@ -49,6 +51,90 @@ function fixture() {
 }
 function project(f=fixture()) {
     return Collection.projectFromDoc(f.doc,'public',{rois:f.rois,roiMedia:f.media,ratios:f.doc.meta.project_meta.msiRatios});
+}
+function alignmentScope() {
+    const scope=displayContext({console,App:{panels:new Map()},MsiAlignmentTransform:Transform});
+    const html=fs.readFileSync(path.join(__dirname,'../viewer/index.html'),'utf8');
+    vm.runInContext(html.match(/^const SECTION_ALIGN_(?:WC|META)_KEYS = .*;$/gm).join('\n')+'\n'+[
+        'captureSectionAlignment','applySectionAlignment','_overlayFromRow','buildLegacyMsiGrid','buildMsiGrid','createMsiSourceGeometry'
+    ].map(standalone).join('\n'),scope);
+    return scope;
+}
+function collaborationFixture() {
+    const f=fixture(),scope=alignmentScope(),section=f.doc.sections[0];
+    section.meta.visibleLayers=['HE','MSI_A'];
+    const entry={kind:'txt',path:'p/alignment-source.csv',filename:'alignment-source.csv',sourceFileId:'alignment-source',
+        sourceReference:'alignment-original',sourceRevision:'revision-1',x:'x',y:'y',v:'X',sep:','};
+    const rows=[{x:10,y:-1,v:1},{x:14,y:-1,v:2},{x:10,y:7,v:3},{x:14,y:7,v:4}];
+    entry.sourceGeometry=clone(scope.createMsiSourceGeometry(rows,entry));
+    section.storage_paths.msiSeries.MSI_SHARED_ALIGN=entry;
+    section.storage_paths.msiFiles['alignment-source']={...entry};
+    const image={id:'shared-image',project_id:f.doc.id,section_id:section.id,layer_key:'HE_STAIN_shared',
+        filename:'shared-he.png',mime:'image/png',storage_path:'p/shared-he.png',updated_at:'2026-11-27T00:00:00Z'};
+    const preview=project(f),frame=clone(scope.alignmentFrameDescriptor(preview.sections[0],'MSI_SHARED_ALIGN'));
+    assert.equal(frame.confirmed,true);
+    const sharedT=[[1.2,0.15,7],[-0.2,0.95,-3],[0,0,1]];
+    const sharedRecord={...Transform.upgrade({T_he_to_msi:sharedT},'import'),scope:'source',
+        alignment_raster_basis:'legacy-msi-pixel-edges-v1',frame:{...frame,version:'msi-alignment-frame-v2'},
+        imageIdentity:scope.alignmentImageIdentity({__shareImage:image.id,storagePath:image.storage_path})};
+    const payload={alignment:{HE_STAIN_shared:{byFrame:{[frame.key]:sharedRecord}}},
+        alignmentFrameVersion:'msi-alignment-frame-v2',alignmentMsiKey:'MSI_SHARED_ALIGN',alignmentHeKey:'HE_STAIN_shared',
+        alignmentSourceMode:'alignment-source',perSourceAlign:true,
+        world_coords:{T_he_to_msi:sharedT,msi_um_per_px:{x:20,y:30}}};
+    f.collaboration={images:[image],alignments:[{project_id:f.doc.id,section_id:section.id,payload,version:4}],
+        overlays:[{id:'shared-overlay',project_id:f.doc.id,name:'Shared overlay',layers:[{key:'MSI_A',color:'#ff00ff'},
+            {key:'MSI_B',color:'#00ff00'}],bg:'he',match_brightness:true,version:3}]};
+    return {...f,sharedT,frame};
+}
+async function sharedRoundTrip() {
+    const f=collaborationFixture(),scope=alignmentScope(),before=clone(f);
+    const make=value=>Collection.projectFromDoc(value.doc,'public',{rois:value.rois,roiMedia:value.media,
+        collaboration:value.collaboration,captureAlignment:scope.captureSectionAlignment,
+        applyAlignment:scope.applySectionAlignment,overlayFromRow:scope._overlayFromRow});
+    const input=make(f),built=await Collection.projectZip(input,{resolveSource,fetchBlob:async path=>sources[path],
+        imageIdentity:scope.alignmentImageIdentity});
+    assert.deepEqual(clone(f),before,'saved shared rows and published source remain unchanged');
+    const zip=await loadZip(built.blob),manifest=await innerManifest(zip);
+    assert.equal(manifest.exportMode,'shared-saved-originals');assert.equal(built.originalCount,6);
+    assert.equal(manifest.collaborationSnapshot.alignmentPolicy,'shared-with-master-fallback');
+    assert.deepEqual(manifest.sections[0].meta.__alignMaster.alignment.HE.T_he_to_msi,affine);
+    const rawShared=manifest.sections[0].images.HE_STAIN_shared;
+    assert.deepEqual(await zip.file(rawShared.fullPath).async('uint8array'),new Uint8Array(await sources['p/shared-he.png'].arrayBuffer()));
+    for(const offline of [false,true]) {
+        const target=context(offline);await target.importZipFile(await toImportZip(zip),{review:()=>true});
+        const restored=target.saved,section=restored.sections[0];
+        const resolved=scope.resolveHeMsiAlignment(section,'HE_STAIN_shared','MSI_SHARED_ALIGN');
+        assert.equal(resolved.status,'ready');assert.equal(resolved.origin,'frame');
+        assert.equal(resolved.renderContract,'msi-shared-display-v1');assert.equal(resolved.effectiveDisplayKind,'msi');
+        assert.deepEqual(clone(resolved.T),f.sharedT,'the real renderer resolves the restored shared affine');
+        assert.equal(scope.alignmentFrameDescriptor(section,'MSI_SHARED_ALIGN').key,f.frame.key);
+        assert.deepEqual(section.meta.__alignMaster.alignment.HE.T_he_to_msi,affine);
+        assert.deepEqual(section.meta.world_coords.msi_um_per_px,{x:20,y:30});
+        assert.ok(section.meta.visibleLayers.includes('HE_STAIN_shared'),'shared hydration enables the attached layer');
+        assert.equal(restored.overlays.length,2);const overlay=restored.overlays.find(row=>row.id==='shared-overlay');
+        assert.equal(overlay.matchBrightness,true);assert.equal(overlay._server,undefined);assert.equal(overlay._serverVersion,undefined);
+        assert.deepEqual(overlay.layers,f.collaboration.overlays[0].layers);
+        assert.deepEqual(new Uint8Array(await target.blobs.get(section.images.HE_STAIN_shared.blobId).blob.arrayBuffer()),
+            new Uint8Array(await sources['p/shared-he.png'].arrayBuffer()));
+        assert.deepEqual(new Uint8Array(await target.blobs.get(restored.meta.roiMedia.items[0].blobId).blob.arrayBuffer()),
+            new Uint8Array(await sources['p/photo.png'].arrayBuffer()));
+        assert.deepEqual(restored.rois[0].polysBySection[section.id],vertices);
+        assert.equal(Ratio.validateProjectReferences(restored).valid,true);
+        const badImage=clone(section);badImage.images.HE_STAIN_shared.alignmentImageReference='wrong-image';
+        assert.equal(scope.resolveHeMsiAlignment(badImage,'HE_STAIN_shared','MSI_SHARED_ALIGN').reason,'image-changed');
+        const badGeometry=clone(section);badGeometry.msiSeries.MSI_SHARED_ALIGN.sourceGeometry.legacy.x=[[11,0],[15,1]];
+        assert.equal(scope.resolveHeMsiAlignment(badGeometry,'HE_STAIN_shared','MSI_SHARED_ALIGN').reason,'coordinate-mismatch');
+    }
+    await assert.rejects(Collection.projectZip(input,{resolveSource,imageIdentity:scope.alignmentImageIdentity,fetchBlob:async path=>{
+        if(path==='p/shared-he.png')throw new Error('shared original missing');return sources[path];
+    }}),/shared original missing/);
+    const conflict=collaborationFixture();conflict.collaboration.images[0].layer_key='HE';
+    assert.throws(()=>make(conflict),{code:'COLLECTION_SHARED_IMAGE_CONFLICT'});
+    const masterV2=collaborationFixture();masterV2.collaboration.alignments[0].payload.alignment={};
+    const masterOnly=await Collection.projectZip(make(masterV2),{resolveSource,imageIdentity:scope.alignmentImageIdentity,fetchBlob:async path=>sources[path]});
+    assert.equal(masterOnly.manifest.format,'desi_data_share_v3','the preserved master affine also requires a v3 archive');
+    const unsupported=collaborationFixture();unsupported.doc.sections[0].meta.alignment.HE.renderContract='future';
+    await assert.rejects(Collection.projectZip(make(unsupported),{resolveSource,fetchBlob:async path=>sources[path]}),/Unsupported/);
 }
 const resolveSource=entry=>({path:entry.storagePath || entry.path,url:entry.storagePath || entry.path});
 async function loadZip(blob) {return JSZip.loadAsync(await blob.arrayBuffer(),{checkCRC32:true});}
@@ -129,6 +215,17 @@ async function sessions() {
     const network=Collection.createSessions({api:{unlockPublicProject:async()=>{throw new Error('network unavailable');}},askPassword:()=>{throw new Error('must not prompt for a network error');}});
     await assert.rejects(network.get({slug:'x'}),/network unavailable/);
 }
+function clientWithFetch(fetchImpl) {
+    const html=fs.readFileSync(path.join(__dirname,'../viewer/index.html'),'utf8');
+    const start=html.indexOf('const SupabaseClient = (() => {');
+    const code=html.slice(start,html.indexOf('\n})();',start)+6);
+    const scope=vm.createContext({window:{DESI_OFFLINE:false},console,SUPABASE_URL:'https://example.test',SUPABASE_ANON_KEY:'test-only',
+        URL,Headers,Response,Request,AbortController,WebSocket:globalThis.WebSocket,crypto:globalThis.crypto,
+        fetch:fetchImpl,setTimeout,clearTimeout,setInterval,clearInterval,
+        ShareRefresh:require('../viewer/share-refresh.js')});
+    vm.runInContext(fs.readFileSync(path.join(__dirname,'../vendor/supabase.min.js'),'utf8')+'\n'+code+'\nglobalThis.api=SupabaseClient;',scope);
+    return scope.api;
+}
 async function paginatedRois() {
     // Execute the real Supabase wrapper with the shipped client and a fake
     // HTTP transport. A server cap smaller than our requested page size must
@@ -146,15 +243,7 @@ async function paginatedRois() {
         return new Response(JSON.stringify(page),{status:206,headers:{'Content-Type':'application/json',
             'Content-Range':offset+'-'+(offset+page.length-1)+'/'+rows.length}});
     };
-    const html=fs.readFileSync(path.join(__dirname,'../viewer/index.html'),'utf8');
-    const start=html.indexOf('const SupabaseClient = (() => {');
-    const code=html.slice(start,html.indexOf('\n})();',start)+6);
-    const scope=vm.createContext({window:{DESI_OFFLINE:false},console,SUPABASE_URL:'https://example.test',SUPABASE_ANON_KEY:'test-only',
-        URL,Headers,Response,Request,AbortController,WebSocket:globalThis.WebSocket,crypto:globalThis.crypto,
-        fetch:fetchImpl,setTimeout,clearTimeout,setInterval,clearInterval,
-        ShareRefresh:require('../viewer/share-refresh.js')});
-    vm.runInContext(fs.readFileSync(path.join(__dirname,'../vendor/supabase.min.js'),'utf8')+'\n'+code+'\nglobalThis.api=SupabaseClient;',scope);
-    const actual=await Collection.readRois(scope.api,'test-token',[{id:'section'}]);
+    const actual=await Collection.readRois(clientWithFetch(fetchImpl),'test-token',[{id:'section'}]);
     assert.equal(actual.length,1007);assert.equal(requests.length,8);assert.deepEqual(clone(actual),rows);
     const reverse=clone(rows).reverse();assert.equal(Collection.roiSignature(reverse),Collection.roiSignature(rows));
     reverse[0].version++;assert.notEqual(Collection.roiSignature(reverse),Collection.roiSignature(rows));
@@ -167,6 +256,41 @@ async function paginatedRois() {
     count=0;
     await assert.rejects(call({listRoisPage:async()=>({rows:++count===1?[rows[0]]:[],count:2})}),{code:'COLLECTION_ROI_COUNT'});
 }
+async function paginatedCollaboration() {
+    const sections=Array.from({length:1007},(_,n)=>({id:'section-'+String(n).padStart(5,'0')})),doc={id:'project',sections};
+    const records=Object.fromEntries(['overlays','alignments','images'].map(kind=>[kind,sections.map((s,n)=>({
+        ...(kind==='alignments'?{}:{id:kind+'-'+String(n).padStart(5,'0')}),project_id:'project',section_id:s.id,
+        ...(kind==='alignments'?{payload:{},version:1}:kind==='images'?{layer_key:'HE_STAIN_shared',storage_path:'p/shared/'+n+'.png'}:{layers:[],version:1})
+    }))]));
+    const requests=[];
+    const api=clientWithFetch(async(url,settings)=>{
+        const parsed=new URL(url),kind=parsed.pathname.split('/').pop().replace('list_share_',''),offset=Number(parsed.searchParams.get('offset')||0);
+        assert.match(new Headers(settings.headers).get('prefer'),/count=exact/);
+        assert.equal(JSON.parse(settings.body).p_token,'project-token');
+        assert.equal(parsed.searchParams.get('order'),kind==='alignments'?'section_id.asc':'id.asc');
+        assert.equal(parsed.searchParams.get('limit'),'500');requests.push([kind,offset]);
+        const page=records[kind].slice(offset,offset+137);
+        return new Response(JSON.stringify(page),{status:206,headers:{'Content-Type':'application/json',
+            'Content-Range':offset+'-'+(offset+page.length-1)+'/'+records[kind].length}});
+    });
+    const actual=await Collection.readCollaboration(api,'project-token',doc);
+    assert.deepEqual(clone(actual),records);assert.equal(requests.length,24,'all three RPCs traverse the lower server page cap');
+    const reordered=Object.fromEntries(Object.entries(actual).map(([key,rows])=>[key,rows.slice().reverse()]));
+    assert.equal(Collection.collaborationSignature(actual),Collection.collaborationSignature(reordered));
+    reordered.images[0]={...reordered.images[0],storage_path:'changed'};
+    assert.notEqual(Collection.collaborationSignature(actual),Collection.collaborationSignature(reordered));
+    const empty=async()=>({rows:[],count:0}),base={listShareOverlaysPage:empty,listShareImagesPage:empty,listShareAlignmentsPage:empty};
+    const call=overrides=>Collection.readCollaboration({...base,...overrides},'project-token',doc);
+    await assert.rejects(call({listShareImagesPage:async()=>({rows:[],count:null})}),{code:'COLLECTION_SHARED_COUNT'});
+    await assert.rejects(call({listShareImagesPage:async()=>({rows:[{...records.images[0],project_id:'wrong'}],count:1})}),{code:'COLLECTION_SHARED_ROWS'});
+    await assert.rejects(call({listShareAlignmentsPage:async()=>({rows:[{...records.alignments[0],section_id:'absent'}],count:1})}),{code:'COLLECTION_SHARED_ROWS'});
+    await assert.rejects(call({listShareOverlaysPage:async()=>({rows:[records.overlays[0]],count:2})}),{code:'COLLECTION_SHARED_ROWS'});
+    let read=0;
+    await assert.rejects(call({listShareImagesPage:async()=>({rows:++read===1?[records.images[0]]:[],count:2})}),{code:'COLLECTION_SHARED_COUNT'});
+    read=0;
+    await assert.rejects(call({listShareAlignmentsPage:async()=>({rows:[records.alignments[read]],count:++read===1?2:3})}),{code:'COLLECTION_SHARED_CHANGED'});
+    await assert.rejects(call({listShareImagesPage:async()=>{throw {code:'PGRST202'};}}),{code:'PGRST202'},'missing collaboration RPC cannot produce a complete backup');
+}
 async function collections() {
     const entries=Collection.collect({children:[{type:'project',slug:'public',displayName:'Same'},
         {type:'folder',name:'Nested',children:[{type:'project',slug:'second',displayName:'Same'},
@@ -177,7 +301,7 @@ async function collections() {
         loadProject:async entry=>{loading.push(entry.slug);if(entry.slug==='missing')throw new Error('original missing');return {project:project(),revision:7};}};
     const result=await Collection.run(entries,options);
     assert.deepEqual(loading,['public','second','missing']);
-    assert.deepEqual(result.results.map(row=>row.status),['ready','ready','failed']);assert.equal(parts.length,1);
+    assert.deepEqual(result.results.map(row=>row.status),['ready','ready','failed'],JSON.stringify(result.results));assert.equal(parts.length,1);
     const zip=await loadZip(parts[0].blob),manifest=JSON.parse(await zip.file('manifest.json').async('string'));
     assert.equal(manifest.complete,false);assert.equal(manifest.projectCount,3);assert.equal(manifest.results[2].error,'original missing');
     assert.equal(new Set(result.results.filter(r=>r.archivePath).map(r=>r.archivePath)).size,2,'same names cannot collide');
@@ -194,6 +318,15 @@ async function collections() {
     assert.equal(split.length,2);assert.ok(divided.parts.every(part=>part.count===1));
     const last=JSON.parse(await (await loadZip(split[1].blob)).file('manifest.json').async('string'));
     assert.equal(last.finalPart,true);assert.equal(last.complete,true);assert.ok(last.results.every(row=>row.status==='ready'));
+    const named=[];
+    const renamed=await Collection.run(entries.slice(0,1),{...options,filenameKind:'selected-destination-name',
+        resolvePartFilename:async({filename})=>filename.replace(/\.zip$/,'__2.zip'),onPart:part=>named.push(part)});
+    const renamedZip=await loadZip(named[0].blob),renamedManifest=JSON.parse(await renamedZip.file('manifest.json').async('string'));
+    const renamedReport=JSON.parse(await renamedZip.file('download-results.json').async('string'));
+    assert.match(named[0].filename,/__2\.zip$/);assert.equal(renamedManifest.filename,named[0].filename);
+    assert.equal(renamedManifest.projects[0].part,named[0].filename);assert.equal(renamedReport[0].part,named[0].filename);
+    assert.equal(renamed.parts[0].filename,named[0].filename);assert.equal(renamed.results[0].part,named[0].filename);
+    assert.equal(renamedReport[0].partFilenameKind,'selected-destination-name');
     const aborter=new AbortController(),cancelParts=[];let fetched=0;
     const cancelled=await Collection.run(entries,{...options,signal:aborter.signal,onPart:part=>cancelParts.push(part),
         fetchBlob:async path=>{fetched++;aborter.abort();return sources[path];}});
@@ -231,8 +364,8 @@ async function main() {
     const bounded=await Collection.storedZip([{path:'large-original.bin',blob:large}]);
     assert.ok(largestRead<=512*1024);assert.equal((await loadZip(bounded)).files['large-original.bin']._data.uncompressedSize,large.size);
     await assert.rejects(Collection.storedZip([{path:'too-large.bin',blob:{size:0xffffffff,slice(){throw new Error('must fail before reading');}}}]),{code:'COLLECTION_TOO_LARGE'});
-    await archiveRoundTrip();await sessions();await paginatedRois();await collections();await remoteParquetSingleExport();
-    console.log('Shared collection: PASS (nested/dedup selection, isolated auth, exact-source v3 import/ratio/ROI/physical/alignment restoration, partial/retry/cancel/split, remote Parquet single export)');
+    await archiveRoundTrip();await sharedRoundTrip();await sessions();await paginatedRois();await paginatedCollaboration();await collections();await remoteParquetSingleExport();
+    console.log('Shared collection: PASS (nested/auth, exact-source v3 import, saved collaboration/image/affine restoration, 3 RPC pagination, source/ROI/ratio preservation, filename collisions, partial/retry/cancel/split, remote Parquet single export)');
 }
 if(require.main===module)main().catch(error=>{console.error(error);process.exitCode=1;});
-module.exports={fixture,project,sources};
+module.exports={fixture,project,sources,collaborationFixture};

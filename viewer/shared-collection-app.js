@@ -1,4 +1,4 @@
-/* Recipient-facing collection downloads. Only reads published project data. */
+/* Recipient-facing collection downloads. Only reads saved shared project data. */
 (function(root) {
     'use strict';
     const dictionary = {
@@ -13,6 +13,7 @@
         '結果一覧を保存': 'Save download report',
         '共有プロジェクト {0} 件 / 選択 {1} 件（子フォルダを含む）': '{0} shared projects / {1} selected (including subfolders)',
         '原本・ROI・保存定義を含みます。展開後、各プロジェクトZIPをImport ZIPで復元できます。派生CSV・位置合わせ済みPNGは復元後のExport ZIPで作成できます。': 'Includes original data, ROI and saved definitions. Extract the collection and use Import ZIP for each project. Generate derived CSVs and aligned PNGs with Export ZIP after restoring a project.',
+        '共有先の保存済み画像・重ね合わせ・位置合わせも含みます。共有先の位置合わせで復元し、公開元の位置合わせも控えとして保持します。この端末だけの表示設定は含みません。': 'Includes saved shared images, overlays and registrations. Restoration uses the saved shared registration and retains the published master registration as a backup. Display choices made only in this browser are excluded.',
         '256 MiBを目安にプロジェクト単位で分割します。大きな1プロジェクトは分割しません。保存リンクはこのページを閉じるまで有効です。': 'Collections split at project boundaries around 256 MiB; an individual project remains whole. Download links remain available until this page is closed.',
         'ZIPを作成するプロジェクトを選択してください。': 'Select projects to include in the ZIP.',
         '{0} / {1}: {2}': '{0} / {1}: {2}',
@@ -55,6 +56,13 @@
         'ROIを重複なく取得できません。再試行してください。': 'Cannot retrieve ROI data without duplicate rows. Retry this project.',
         'ROIの全件を取得できません。再試行してください。': 'Cannot retrieve every ROI. Retry this project.',
         '同じ切片・色のROIが重複しています。公開元で確認してください。': 'Multiple ROIs share the same section and color. Check them in the source project.',
+        '共有編集の総件数を確認できません。完全なZIPを作成できません。': 'Cannot verify the total count of saved shared edits. A complete ZIP cannot be created.',
+        '取得中に共有編集が変更されました。再試行してください。': 'Saved shared edits changed during download. Retry this project.',
+        '共有編集の全件と対応先を確認できません。再試行してください。': 'Cannot verify all saved shared edits and their target sections. Retry this project.',
+        '共有編集の全件を取得できません。再試行してください。': 'Cannot retrieve every saved shared edit. Retry this project.',
+        '公開元と共有先の画像名が重複しています: {0}': 'Published and shared image layer names conflict: {0}',
+        '公開元と共有先の重ね合わせIDが重複しています。': 'Published and shared overlay IDs conflict.',
+        '保存先に同名のZIPが追加されました。再試行してください。': 'A ZIP with this name was added to the destination. Retry to choose a new name.',
         '失敗': 'Failed',
         '保存先を選んでZIP': 'Save ZIPs to a folder',
         '大容量では保存先フォルダを選ぶと、完成したZIPを順次保存して解放できます。': 'For large collections, choose a destination folder to save and release each completed ZIP in sequence.',
@@ -90,6 +98,7 @@
         const summary = element('p');summary.style.cssText='font-size:13px;margin:4px 0;';
         const note = element('p','原本・ROI・保存定義を含みます。展開後、各プロジェクトZIPをImport ZIPで復元できます。派生CSV・位置合わせ済みPNGは復元後のExport ZIPで作成できます。');
         note.style.cssText='font-size:12px;color:#475569;margin:4px 0;';
+        element('p','共有先の保存済み画像・重ね合わせ・位置合わせも含みます。共有先の位置合わせで復元し、公開元の位置合わせも控えとして保持します。この端末だけの表示設定は含みません。').style.cssText=note.style.cssText;
         const limits = element('p','256 MiBを目安にプロジェクト単位で分割します。大きな1プロジェクトは分割しません。保存リンクはこのページを閉じるまで有効です。');
         limits.style.cssText=note.style.cssText;
         const actions = element('div');actions.style.cssText='display:flex;gap:6px;flex-wrap:wrap;margin:10px 0;';
@@ -168,21 +177,30 @@
             return sessions.run(entry,async session=>{
                 const remote=await options.api.fetchProjectDoc(session.token,{signal});
                 const sections=remote?.sections || [];
-                const rows=await Collection.readRois(options.api,session.token,sections,{signal});
+                const [rows,collaboration]=await Promise.all([
+                    Collection.readRois(options.api,session.token,sections,{signal}),
+                    Collection.readCollaboration(options.api,session.token,remote,{signal})]);
                 const project=Collection.projectFromDoc(remote,entry.slug,{
                     rois:options.groupRois(rows,remote.anatomy_palette || remote.anatomyPalette || {}),
                     roiMedia:options.roiRegistry(remote),ratios:options.ratioRegistry(remote),
+                    collaboration,captureAlignment:options.captureAlignment,applyAlignment:options.applyAlignment,
+                    overlayFromRow:options.overlayFromRow,
                     memo:options.memo(remote.meta?.project_meta?.memo || remote.memo)});
                 const identity=value=>JSON.stringify([value?.publish_revision,value?.meta,value?.sections,value?.anatomy_palette]);
                 const signature=identity(remote);
                 const roiSignature=Collection.roiSignature(rows);
+                const sharedSignature=Collection.collaborationSignature(collaboration);
                 return {project,revision:remote.publish_revision,publishedAt:remote.updated_at,
                     validate:()=>sessions.run(entry,async current=>{
                         const latest=await options.api.fetchProjectDoc(current.token,{signal});
                         if(identity(latest)!==signature)throw new Error(t('取得中に公開内容が変更されました。再試行してください。'));
-                        const latestRows=await Collection.readRois(options.api,current.token,sections,{signal});
+                        const [latestRows,latestShared]=await Promise.all([
+                            Collection.readRois(options.api,current.token,sections,{signal}),
+                            Collection.readCollaboration(options.api,current.token,latest,{signal})]);
                         if(Collection.roiSignature(latestRows)!==roiSignature)
                             throw new Error(t('取得中にROIが変更されました。再試行してください。'));
+                        if(Collection.collaborationSignature(latestShared)!==sharedSignature)
+                            throw new Error(t('取得中に共有編集が変更されました。再試行してください。'));
                     },{signal})};
             },{signal});
         }
@@ -193,14 +211,25 @@
             text(link,'{0}（{1}プロジェクト、{2}）',[filename,projectCount,bytes(blob.size)]);
             if(auto)link.click();
         }
-        async function savePart(part) {
-            if(!destination) {offer(part.blob,part.filename,part.count);return;}
-            // Pick an unused name; never overwrite a prior completed backup.
+        async function resolvePartFilename(part) {
+            if(!destination)return part.filename;
+            // Resolve the disk name before the ZIP's manifest/report is built.
             let filename=part.filename,serial=1;
             for(;;) {
                 try{await destination.getFileHandle(filename);filename=part.filename.replace(/\.zip$/i,'__'+(++serial)+'.zip');}
                 catch(error){if(error.name==='NotFoundError')break;throw error;}
             }
+            return filename;
+        }
+        async function savePart(part) {
+            if(!destination) {offer(part.blob,part.filename,part.count);return;}
+            const filename=part.filename;
+            // A newly added file must not be silently overwritten or renamed
+            // after the manifest has committed to this destination name.
+            let exists=false;
+            try{await destination.getFileHandle(filename);exists=true;}
+            catch(error){if(error.name!=='NotFoundError')throw error;}
+            if(exists)throw new Error(t('保存先に同名のZIPが追加されました。再試行してください。'));
             const file=await destination.getFileHandle(filename,{create:true});
             let stream;
             try {
@@ -209,7 +238,8 @@
                 element('p','保存済み: {0}',downloads,[filename]);
             } catch(error) {
                 try{await stream?.abort();}catch(_){}
-                try{await destination.removeEntry(filename);}catch(_){}
+                // The API cannot prove this name still belongs to our write.
+                // Abort our stream, but never delete a possibly replaced file.
                 throw error;
             }
         }
@@ -239,6 +269,7 @@
                     resolveSource:entry=>{const path=entry.storagePath || entry.path;return {path,
                         url:path?options.api.publicUrl('atlases',path):entry.sourceUrl,mime:entry.mime,filename:entry.filename};},
                     fetchBlob:(url,settings)=>options.fetchBlob(url,settings),onPart:savePart,
+                    resolvePartFilename,filenameKind:destination?'selected-destination-name':'suggested-download-name',
                     onProgress:event=>{
                         meter.value=event.results.filter(row=>['ready','prepared','failed'].includes(row.status)).length;
                         if(event.entry)text(status,'{0} / {1}: {2}',[event.index+1,targets.length,event.entry.name]);

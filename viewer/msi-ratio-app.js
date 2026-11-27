@@ -413,7 +413,7 @@
                     else for(let i=0;i<r.values.length;i++)if(Number.isFinite(r.values[i])){const n=Math.round(Math.max(0,Math.min(1,r.values[i]/max))*255);image.data[i*4]=image.data[i*4+1]=image.data[i*4+2]=n;image.data[i*4+3]=255;}
                     ctx.putImageData(image,0,0);const url=canvas.toDataURL('image/png');
                     if(!await panel.attachImage(key,url,current)||!current())return false;
-                    panel.imageDataUrls[key]=url;panel.msiValueRasters.set(key,r);panel._initLayerSettings(key);panel._msiImageIdentity.set(key,stamp);panel._msiLoadErrors.delete(key);panel._touchMsiLru(key);
+                    panel.imageDataUrls[key]=url;panel.msiValueRasters.set(key,r);panel._initLayerSettings(key);(panel._msiImageIdentity||(panel._msiImageIdentity=new Map())).set(key,stamp);panel._msiLoadErrors.delete(key);panel._touchMsiLru(key);
                     updateStatus(panel,key,result.status==='empty'?_uiT("有効な比なし"):app.otsuBgRemove&&!result.keepGrid?_uiT("TIC背景maskを利用できません"):'');
                     return true;
                 }catch(e){if(current()&&!['RATIO_CANCELLED','ANALYSIS_CANCELLED'].includes(e.code)&&e.name!=='AbortError'){delete panel.imageSources[key];delete panel.imageDataUrls[key];panel.msiValueRasters.delete(key);panel._msiLoadErrors.set(key,{identity:stamp,error:e});updateStatus(panel,key,e.message);}return false;}

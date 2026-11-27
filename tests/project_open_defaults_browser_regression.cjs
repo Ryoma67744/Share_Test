@@ -85,7 +85,8 @@ async function assertOpening(page,{preview=false,focus='MSI_A',color='viridis',i
       roiOnly:App.roiOnlyMode,roiChecked:document.getElementById('roi-clip-toggle').checked,
       ratioSelection:document.getElementById('ratio-display-select').value,
       windows:Object.keys(App.msiUserWindow),roiWindows:Object.keys(App.msiRoiUserWindow),
-      methodFirst:preview?SharePreview.compoundKeys[0]:methodVisibleKeys(App.panels.get(App.activeSectionId),App.project).keys[0],
+      methodFirst:preview?SharePreview.compoundKeys.find(key=>App.project.sections.some(section=>section.msiSeries?.[key]))
+        :methodVisibleKeys(App.panels.get(App.activeSectionId),App.project).keys[0],
       range:all.map(panel=>{const e=panel.section.msiSeries[App.focusCompoundKey];
         return App.getMsiWindow(App.focusCompoundKey,e.rawRange,e.rawDispMax,e.rawTrueMax,panel.section);}),boxes,previewBoxes};
   },preview);
@@ -236,6 +237,11 @@ async function main() {
     await ready(page);await assertOpening(page);
     assert.equal(await page.evaluate(()=>App._msiOpenRangePolicy),'maximum');
     assert.deepEqual(await scienceSnapshot(page),withRatio,'Opening a ratio copy preserves its ratio definition and ordinary saved display policy');
+    data.doc.meta.project_meta.msiRatios=JSON.parse(withRatio.meta).msiRatios;
+    const publishedRatio=data.doc.meta.project_meta.msiRatios.definitions[0];
+    publishedRatio.display={...publishedRatio.display,rangePolicy:'legacy',scaleMode:'same',
+      ranges:{version:1,whole:{same:{min:.4,max:.8}}}};
+    const ratioKey=await page.evaluate(()=>MsiRatioModel.displayKey(App.getRatioDefinitions()[0].id));
     await context.close();
 
     // Shared viewer/admin use the same new-opening rules, including the
@@ -262,15 +268,26 @@ async function main() {
       await view.goto(server.origin+'/viewer/#share='+data.doc.slug);await ready(view,true);await assertOpening(view,{preview:true});
       const sharedBefore=await scienceSnapshot(view);
       await editDisplay(view,true);
+      await view.locator('#ratio-display-select').selectOption(ratioKey);
+      await view.waitForFunction(key=>App.focusCompoundKey===key&&[...App.panels.values()].every(p=>p.isMsiLayerReady(key)),ratioKey);
+      const selectedRatio=await view.evaluate(key=>({policy:App.getMsiDisplaySettings().rangePolicy,
+        range:App.getRatioManualRange(key,App.project.sections[0])}),ratioKey);
+      assert.deepEqual(selectedRatio,{policy:'legacy',range:{min:.4,max:.8}},'An explicit ratio selection retains its saved ratio display settings');
+      await view.locator('#ratio-display-select').selectOption('');
+      await view.waitForFunction(()=>App.focusCompoundKey==='MSI_A');
       await view.evaluate(()=>App.setFocusCompoundKey('MSI_Z'));
       await view.reload();await ready(view,true);await assertOpening(view,{preview:true});
       assert.deepEqual(await scienceSnapshot(view),sharedBefore,'Shared '+role+' opening leaves scientific and published state intact');
       await view.goto(server.origin+'/viewer/?explicit=1#share='+data.doc.slug+'&focus=Z');
       await ready(view,true);await assertOpening(view,{preview:true,focus:'MSI_Z'});
+      await view.goto(server.origin+'/viewer/?explicit-ratio=1#share='+data.doc.slug+'&focus='+encodeURIComponent(publishedRatio.name));
+      await ready(view,true);
+      assert.equal(await view.evaluate(()=>App.focusCompoundKey),ratioKey,'An explicit ratio deep link remains supported');
+      assert.deepEqual(await view.evaluate(key=>App.getRatioManualRange(key,App.project.sections[0]),ratioKey),{min:.4,max:.8});
       await shared.close();
     }
     assert.deepEqual(server.writes,[]);assert.deepEqual(external,[]);assert.deepEqual(errors,[]);
-    console.log('Project opening browser regression: PASS (local ZIP, same-project reopen, A/B/A, KMD selection, page reload, ratio-to-copy, ROI checkbox, shared viewer/admin, fitted HE/MSI/Preview, Range, Method order, deep link, delayed HE, scientific state)');
+    console.log('Project opening browser regression: PASS (local ZIP, same-project reopen, A/B/A, KMD selection, page reload, ratio-to-copy, ROI checkbox, shared viewer/admin with saved ratio, fitted HE/MSI/Preview, Range, Method order, explicit molecule/ratio, delayed HE, scientific state)');
   } finally {await browser?.close();await server.close();}
 }
 main().catch(error=>{console.error(error.stack||error);process.exitCode=1;});

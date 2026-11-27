@@ -27,7 +27,7 @@
 <script src="msi-analysis-core.js"></script>
 <script src="msi-analysis-service.js"></script>
 <script src="msi-analysis-worker.js"></script>
-<script src="msi-ratio-app.js"></script>
+<script src="msi-ratio-app.js?v=20261127b"></script>
 <link rel="stylesheet" href="msi-ratio.css">
 <link rel="stylesheet" href="../help.css?v=2026-11-27.2">
 <script defer src="../help.js?v=2026-11-27.2"></script>
@@ -54,8 +54,8 @@
     <script defer src="roi-media-viewer.js"></script>
     <script defer src="roi-media-app.js"></script>
     <script defer src="project-archive.js?v=20261127b"></script>
-    <script defer src="shared-collection.js?v=20261127b"></script>
-    <script defer src="shared-collection-app.js?v=20261127b"></script>
+    <script defer src="shared-collection.js?v=20261127d"></script>
+    <script defer src="shared-collection-app.js?v=20261127d"></script>
     <script defer src="project-report-app.js?v=ppt-20261110-1"></script>
 <script>
   // Libraries not needed just to view are loaded on first use (jszip =
@@ -23714,6 +23714,17 @@ const SupabaseClient = (() => {
         return data;
     }
 
+    // Exact, stable pages keep backup reads independent of the server's
+    // maximum row count. Authentication stays inside the existing read RPC.
+    async function rpcPage(name, args, orderKey, options = {}) {
+        const c=_client();if(!c)throw new Error('supabase_not_configured');
+        const offset=options.offset || 0,limit=Math.min(500,options.limit || 500);
+        const {data,error,count}=await ShareRefresh.withDeadline(signal=>c.rpc(name,args,{count:'exact'})
+            .order(orderKey,{ascending:true}).range(offset,offset+limit-1).abortSignal(signal),options);
+        if(error){lastError=error;throw error;}
+        return {rows:data,count};
+    }
+
     return {
         configured() { return !!_client(); },
         lastError() { return lastError; },
@@ -23753,14 +23764,8 @@ const SupabaseClient = (() => {
         // Read paths -------------------------------------------
         fetchProjectDoc(token, options) { return rpc('get_project_doc', { p_token: token }, options); },
         listRois(token, sectionId, options) { return rpc('list_rois', { p_token: token, p_section_id: sectionId || null }, options); },
-        async listRoisPage(token, sectionId, options = {}) {
-            const c=_client();if(!c)throw new Error('supabase_not_configured');
-            const offset=options.offset || 0,limit=Math.min(500,options.limit || 500);
-            const {data,error,count}=await ShareRefresh.withDeadline(signal=>c.rpc('list_rois',
-                {p_token:token,p_section_id:sectionId},{count:'exact'}).order('id',{ascending:true})
-                .range(offset,offset+limit-1).abortSignal(signal),options);
-            if(error){lastError=error;throw error;}
-            return {rows:data,count};
+        listRoisPage(token, sectionId, options) {
+            return rpcPage('list_rois',{p_token:token,p_section_id:sectionId},'id',options);
         },
         // ROI write paths --------------------------------------
         createRoi(token, payload) { return rpc('create_roi', { p_token: token, ...payload }); },
@@ -23776,6 +23781,7 @@ const SupabaseClient = (() => {
         // PGRST202 になる。呼び出し側は _isMissingRpc で見分けて、その端末だけの
         // localStorage 経路へ落とすこと。
         listShareOverlays(token) { return rpc('list_share_overlays', { p_token: token }); },
+        listShareOverlaysPage(token, options) { return rpcPage('list_share_overlays',{p_token:token},'id',options); },
         createShareOverlay(token, payload) { return rpc('create_share_overlay', { p_token: token, ...payload }); },
         updateShareOverlay(token, id, expectedVersion, payload) {
             return rpc('update_share_overlay', { p_token: token, p_id: id, p_expected_version: expectedVersion, ...payload });
@@ -23784,6 +23790,7 @@ const SupabaseClient = (() => {
         // 共有の位置合わせ (HE/IF ⇔ MSI。共有 URL を開いた全員で共有する) --
         // これも share_locks.sql の 10. を適用していないと PGRST202。
         listShareAlignments(token, options) { return rpc('list_share_alignments', { p_token: token }, options); },
+        listShareAlignmentsPage(token, options) { return rpcPage('list_share_alignments',{p_token:token},'section_id',options); },
         upsertShareAlignment(token, sectionId, payload, expectedVersion) {
             return rpc('upsert_share_alignment', {
                 p_token: token, p_section_id: sectionId, p_payload: Object.assign({},payload,{alignmentWriteProtocol:2}),
@@ -23796,6 +23803,7 @@ const SupabaseClient = (() => {
         },
         // 共有先が登録した HE/IF 画像 (share_locks.sql の 11.) -----------
         listShareImages(token) { return rpc('list_share_images', { p_token: token }); },
+        listShareImagesPage(token, options) { return rpcPage('list_share_images',{p_token:token},'id',options); },
         upsertShareImage(token, sectionId, layerKey, filename, mime, storagePath) {
             return rpc('upsert_share_image', {
                 p_token: token, p_section_id: sectionId, p_layer_key: layerKey,
@@ -27762,7 +27770,9 @@ const App = {
         const available = new Set(loadable.map(x=>x.key));
         for (const group of groups) {
             const entries = new Map();
-            for (const section of group) for (const key of preview ? displayMsiKeys(section) : Object.keys(section.msiSeries || {})) {
+            // Automatic opening starts at a measured MRM. Derived ratios keep
+            // their saved style and remain available through focus= or the UI.
+            for (const section of group) for (const key of Object.keys(section.msiSeries || {})) {
                 const ent = displayMsiEntry(section,key);
                 if (/^MSI_/i.test(key) && available.has(key) && !entries.has(key)
                     && (preview || ent && (ent.blobId || ent.sourceUrl || ent.kind==='ratio'))) entries.set(key, ent);
@@ -29575,6 +29585,7 @@ async function renderFolderIndex(slug) {
             + renderNodes(doc.children || [], 0) + '</div>');
         SharedCollectionApp.mount(host,{payload,api:SupabaseClient,
             groupRois:groupRoiRowsByColor,roiRegistry:roiMediaRegistryFromDoc,ratioRegistry:ratioRegistryFromDoc,
+            captureAlignment:captureSectionAlignment,applyAlignment:applySectionAlignment,overlayFromRow:_overlayFromRow,
             memo:ensureMemoShape,freezeReferences:freezeMsiSourceReferences,imageIdentity:alignmentImageIdentity,
             fetchBlob:(url,options)=>ShareRefresh.fetchBlob(url,options)});
     };
