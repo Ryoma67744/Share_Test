@@ -404,7 +404,7 @@ function folderShareContext(tree) {
   for (const name of ['_treeFolderById', '_fetchCompleteFolderProjectList', '_folderSharePlan',
     '_folderShareLocations', '_repairFolderSharePlacements', '_folderShareIndexSignature',
     '_folderTreeSignature', '_verifyFolderSharePlan', '_refreshFolderShareCatalogue',
-    '_publishCompleteFolderShare', '_isMissingRpc', 'buildRows']) vm.runInContext(extractFunction(name), context);
+    '_publishSelectedFolderShare', '_isMissingRpc', 'buildRows']) vm.runInContext(extractFunction(name), context);
   return context;
 }
 
@@ -449,10 +449,21 @@ function testFolderShareSeparatesKnownProjectsFromUnknownPlacements() {
   assert.equal(plan.issues.length, 4);
   assert.deepEqual(Array.from(plan.issues, issue => issue.reason), ['unknown', 'unknown', 'unknown', 'unknown']);
   assert.equal(plan.indexDoc.children.length, 3, 'three subfolders contain seven project links');
-  assert.throws(() => context._verifyFolderSharePlan(plan), /folder_share_unresolved/);
+  assert.equal(plan.sharedPlacements.length, 7);
+  assert.equal(plan.excludedPlacements.length, 4);
+  context._verifyFolderSharePlan(plan);
   const local = {id: 'known', shareInfo: {slug: 'deleted-slug'}};
   const missing = context._folderSharePlan({name: 'Draft', children: [{type: 'project', localId: 'known'}]}, [{local}], catalogue, true);
   assert.equal(missing.issues[0].reason, 'missing', 'local share metadata is not proof the server project exists');
+  for (const shareInfo of [null, {slug:'published-1'}]) {
+    const explicit = context._folderSharePlan({name:'Published placement',children:[
+      {type:'project',localId:'draft-copy',slug:'published-0'}, {type:'project',slug:'published-0'}
+    ]}, [{local:{id:'draft-copy',displayName:'Unpublished local title',shareInfo}}], catalogue, true);
+    assert.equal(explicit.sharedPlacements.length,2);
+    assert.deepEqual(Array.from(explicit.slugs),['published-0'], 'sharing respects an explicit live server slug even when a local draft has a different association');
+    assert.equal(explicit.sharedPlacements[0].project.displayName,catalogue[0].display_name,'the reviewed name belongs to the explicit published URL, not the local draft');
+    context._verifyFolderSharePlan(explicit);
+  }
 }
 
 function publishHarness(fixture, options = {}) {
@@ -461,13 +472,14 @@ function publishHarness(fixture, options = {}) {
   const state = {tree: clone(fixture.tree), index: {name: 'Existing', children: [{type: 'project', slug: 'existing'}]}, writes: 0, publishes: 0, reads: 0};
   context.serverRowsCache = fixture.catalogue.slice(0, 3);
   context.window = {DESI_OFFLINE: false};
+  context.crypto = require('node:crypto').webcrypto;
   context._treeLoaded = true; context._treeDirty = false;
   context.ProjectStorage = {listSummaries: async () => clone(options.local || [])};
   context.SupabaseClient = {
     listProjectsComplete: async () => { state.reads++; if (options.catalogueError) throw new Error('network failure'); return clone(options.catalogue || fixture.catalogue); },
     getWorkspaceTree: async () => JSON.parse(context._folderTreeSignature(state.tree)), // simulate jsonb key ordering
     setWorkspaceTree: async () => { throw new Error('unsafe setter fallback'); },
-    publishFolderShareChecked: async (_pw, folderId, expected, tree, index, password) => {
+    publishFolderShareSelectedChecked: async (_pw, folderId, expected, tree, index, selectedProjectSlugs, password) => {
       if (options.missingRpc) throw {code: 'PGRST202', message: 'Could not find the function'};
       if (options.beforeCommit) options.beforeCommit(state);
       if (context._folderTreeSignature(state.tree) !== context._folderTreeSignature(expected)) throw new Error('folder_tree_changed');
@@ -475,23 +487,39 @@ function publishHarness(fixture, options = {}) {
       const folder = context._treeFolderById(folderId, tree.children);
       const slugs = [], walk = nodes => { for (const n of nodes) n.type === 'folder' ? walk(n.children) : slugs.push(n.slug); };
       walk(index.children);
+      assert.deepEqual(Array.from(selectedProjectSlugs).sort(), [...new Set(slugs)].sort());
+      let placements = 0;
+      const count = nodes => { for (const n of nodes) {
+        if (n.type === 'folder' && folder.shareIncludeSubfolders) count(n.children);
+        else if (n.type === 'project') placements++;
+      } };
+      count(folder.children);
       state.publishes++; state.writes++; state.tree = clone(tree);
+      state.selectedProjectSlugs = clone(selectedProjectSlugs);
       state.slug = folder.shareSlug; state.index = clone(index); state.isPublic = folder.shareIsPublic; state.password = password;
-      return {slug: state.slug, project_count: new Set(slugs).size, placement_count: slugs.length, project_slugs: [...new Set(slugs)].sort()};
+      return {slug: state.slug, project_count: new Set(slugs).size, placement_count: slugs.length,
+        excluded_placement_count: placements - slugs.length, project_slugs: [...new Set(slugs)].sort()};
     },
     getFolderIndex: async (slug, password) => {
       assert.equal(slug, state.slug); assert.equal(password, state.password);
       return {is_public: state.isPublic, index_doc: options.readbackMismatch ? {name: state.index.name, children: []} : clone(state.index)};
     },
   };
-  const publish = (choices = {}, overrides = {}) => context._publishCompleteFolderShare('parent', fixture.tree, choices,
-    {slug: 'stable-share', isPublic: true, password: '', includeSubfolders: true, ...overrides}, 'master');
+  const reviewRows = [...(options.reviewLocal || options.local || []).map(local => ({local})), ...fixture.catalogue.map(server => ({server}))];
+  const publish = (choices = {}, overrides = {}) => {
+    const includeSubfolders = overrides.includeSubfolders !== false;
+    const reviewed = context._repairFolderSharePlacements(fixture.tree, 'parent', choices, reviewRows, fixture.catalogue, includeSubfolders);
+    const plan = context._folderSharePlan(reviewed.children[0], reviewRows, fixture.catalogue, includeSubfolders);
+    return context._publishSelectedFolderShare('parent', fixture.tree, choices,
+      {slug: 'stable-share', isPublic: true, password: '', includeSubfolders,
+        selectedProjectSlugs: [...plan.slugs], reviewedIndexSignature: context._folderShareIndexSignature(plan.indexDoc), ...overrides}, 'master');
+  };
   return {context, state, publish};
 }
 
 async function testIncompleteShareNeverOverwritesTheExistingSnapshot() {
   const fixture = shareFixture();
-  for (const options of [{}, {catalogueError: true}, {catalogue: fixture.catalogue.slice(0, 3)}]) {
+  for (const options of [{catalogueError: true}, {catalogue: fixture.catalogue.slice(0, 3)}]) {
     const {state, publish} = publishHarness(fixture, options);
     const original = JSON.stringify(state.index);
     await assert.rejects(publish());
@@ -504,6 +532,39 @@ async function testIncompleteShareNeverOverwritesTheExistingSnapshot() {
   changed.state.tree.children[0].name = 'Edited on another PC';
   await assert.rejects(changed.publish(), /folder_tree_changed/);
   assert.equal(changed.state.publishes, 0);
+}
+
+async function testConfirmedProjectsShareWithoutChangingUnknownPlacements() {
+  const fixture = shareFixture(), before = JSON.stringify(fixture.tree.children[0].children.slice(0, 4));
+  const {state, publish} = publishHarness(fixture);
+  const plan = await publish();
+  assert.equal(state.publishes, 1); assert.equal(state.writes, 1);
+  assert.equal(plan.slugs.size, 7); assert.equal(plan.sharedPlacements.length, 7); assert.equal(plan.excludedPlacements.length, 4);
+  assert.equal(JSON.stringify(state.tree.children[0].children.slice(0, 4)), before, 'unselected unknown nodes stay byte-for-byte identical');
+  assert.deepEqual(state.selectedProjectSlugs, fixture.catalogue.map(row => row.slug));
+  const optional = publishHarness(fixture);
+  const partial = await optional.publish({'0': {action: 'remove'}});
+  assert.equal(partial.excludedPlacements.length, 3);
+  assert.deepEqual(optional.state.tree.children[0].children.slice(0, 3), fixture.tree.children[0].children.slice(1, 4));
+  const empty = shareFixture(); empty.tree.children[0].children.splice(4);
+  const blocked = publishHarness(empty);
+  await assert.rejects(blocked.publish(), /folder_share_empty/);
+  assert.equal(blocked.state.writes, 0); assert.equal(blocked.state.publishes, 0);
+}
+
+async function testConfirmedSelectionDoesNotExpandDuringSubmit() {
+  const fixture = shareFixture();fixture.catalogue.push({slug:'published-later',display_name:'Later'});
+  const newlyResolved = publishHarness(fixture, {reviewLocal:[], local:[{id:'unknown-0',shareInfo:{slug:'published-later'}}]});
+  await newlyResolved.publish();
+  assert.equal(newlyResolved.state.selectedProjectSlugs.length, 7);
+  assert.ok(!newlyResolved.state.selectedProjectSlugs.includes('published-later'));
+  assert.deepEqual(newlyResolved.state.tree.children[0].children[0], fixture.tree.children[0].children[0], 'newly resolved but unreviewed identity is not written or shared');
+  const disappeared = publishHarness(fixture, {catalogue:fixture.catalogue.filter(row=>row.slug!=='published-4')});
+  await assert.rejects(disappeared.publish(), /folder_share_selection_changed/);
+  assert.equal(disappeared.state.writes, 0);
+  const alias = publishHarness(fixture, {reviewLocal:[], local:[{id:'unknown-0',shareInfo:{slug:'published-0'}}]});
+  await assert.rejects(alias.publish(), /folder_share_selection_changed/, 'an unreviewed additional placement is not silently added either');
+  assert.equal(alias.state.writes, 0);
 }
 
 async function testExplicitRecoveryRetainsHierarchyAndStableShareSlug() {
@@ -544,6 +605,15 @@ async function testShareCasRejectsLateEditsAndNeverFallsBack() {
   await publish();
   assert.deepEqual(state.tree.children[0].children[0], {type:'project',localId:'own-local-id',slug:'published'},
     'a proven local identity must carry its stable slug for the server membership check');
+  const repeatedFixture = shareFixture();
+  Object.assign(repeatedFixture.tree.children[0],{shareIsPublic:true,shareIncludeSubfolders:true,
+    shareRevision:'00000000-0000-4000-8000-000000000001'});
+  const repeated = publishHarness(repeatedFixture);
+  await repeated.publish();
+  assert.match(repeated.state.tree.children[0].shareRevision,/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  assert.notEqual(repeated.state.tree.children[0].shareRevision,repeatedFixture.tree.children[0].shareRevision);
+  await assert.rejects(repeated.publish(),/folder_tree_changed/,'even unchanged targets and flags invalidate a second stale dialog');
+  assert.equal(repeated.state.publishes,1);
 }
 
 function testRecoveryNeverGuessesOrMovesAnotherPlacement() {
@@ -559,7 +629,7 @@ function testRecoveryNeverGuessesOrMovesAnotherPlacement() {
   assert.equal(result.children[1].children[0].slug, 'elsewhere');
   assert.equal(tree.children[0].children.length, 7, 'unreviewed input stays untouched');
   assert.throws(() => context._repairFolderSharePlacements(tree, 'parent', {...choices, '0': {action: 'link', slug: 'elsewhere'}}, rows, catalogue, true), /folder_project_placed_elsewhere/);
-  assert.throws(() => context._repairFolderSharePlacements(tree, 'parent', {...choices, '0': {action: 'link', slug: 'invented'}}, rows, catalogue, true), /folder_share_unresolved/);
+  assert.throws(() => context._repairFolderSharePlacements(tree, 'parent', {...choices, '0': {action: 'link', slug: 'invented'}}, rows, catalogue, true), /folder_share_selection_changed/);
 }
 
 async function testShareVerifiesProjectIdsBeforeAndAfterSaving() {
@@ -584,6 +654,8 @@ async function testShareVerifiesProjectIdsBeforeAndAfterSaving() {
 async function main() {
   await testCompleteCatalogueReadsBeyondServerCapsAndFailsClosed();
   testFolderShareSeparatesKnownProjectsFromUnknownPlacements();
+  await testConfirmedProjectsShareWithoutChangingUnknownPlacements();
+  await testConfirmedSelectionDoesNotExpandDuringSubmit();
   await testIncompleteShareNeverOverwritesTheExistingSnapshot();
   await testExplicitRecoveryRetainsHierarchyAndStableShareSlug();
   await testShareCasRejectsLateEditsAndNeverFallsBack();

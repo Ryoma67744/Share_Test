@@ -6,7 +6,7 @@
 <script src="app-i18n.js"></script>
 <script src="app-i18n-common.js"></script>
 <script src="app-i18n-storage.js"></script>
-<script src="app-i18n-manage.js?v=20261127b"></script>
+<script src="app-i18n-manage.js?v=20261128a"></script>
 <link rel="stylesheet" href="help.css?v=2026-11-27.2">
 <script src="project-store-safety.js"></script>
 <script src="project-navigation.js?v=unpublished-1"></script>
@@ -344,9 +344,10 @@ const SupabaseClient = (() => {
         setAllAdminPw(masterPw, newPw) { return rpc('set_all_admin_passwords_master', { _master_pw: masterPw, _new_pw: newPw }); },
         getWorkspaceTree(masterPw) { return rpc('get_workspace_tree', { _master_pw: masterPw }); },
         setWorkspaceTree(masterPw, tree) { return rpc('set_workspace_tree', { _master_pw: masterPw, _tree: tree }); },
-        publishFolderShareChecked(masterPw, folderId, expectedTree, tree, indexDoc, password) {
-            return rpc('publish_folder_share_checked', { _master_pw: masterPw, _folder_id: folderId,
-                _expected_tree: expectedTree, _tree: tree, _index_doc: indexDoc, _password: password || null });
+        publishFolderShareSelectedChecked(masterPw, folderId, expectedTree, tree, indexDoc, selectedProjectSlugs, password) {
+            return rpc('publish_folder_share_selected_checked', { _master_pw: masterPw, _folder_id: folderId,
+                _expected_tree: expectedTree, _tree: tree, _index_doc: indexDoc,
+                _selected_project_slugs: selectedProjectSlugs, _password: password || null });
         },
         getFolderIndex(slug, password) { return rpc('get_folder_index', { _slug: slug, _password: password || null }); },
         deleteFolderShare(masterPw, slug) { return rpc('delete_folder_share', { _master_pw: masterPw, _slug: slug }); },
@@ -1143,8 +1144,10 @@ function _buildProjectResolver(rows, authoritativeServerRows) {
         if (r.local && r.local.id && slug && slugToName.has(slug)) localToShare.set(r.local.id, { slug, displayName: slugToName.get(slug) });
     }
     const resolve = (n) => {
-        if (strict && n.localId && knownLocalIds.has(n.localId)) return localToShare.get(n.localId) || null;
+        // Sharing reviews published identities, independently of a local draft.
+        // An explicit, live slug also matches the server's tree projection.
         if (n.slug && slugToName.has(n.slug)) return { slug: n.slug, displayName: slugToName.get(n.slug) };
+        if (strict && n.localId && knownLocalIds.has(n.localId)) return localToShare.get(n.localId) || null;
         if (n.localId && localToShare.has(n.localId)) return localToShare.get(n.localId);
         return null;
     };
@@ -1273,9 +1276,10 @@ async function _fetchCompleteFolderProjectList(fetchPage) {
     }
 }
 
-function _folderSharePlan(folder, rows, catalogue, includeSubfolders) {
+function _folderSharePlan(folder, rows, catalogue, includeSubfolders, selectedProjectSlugs) {
     const resolve = _buildProjectResolver(rows, catalogue);
-    const placements = [], issues = [], slugs = new Set();
+    const selected = selectedProjectSlugs == null ? null : new Set(selectedProjectSlugs);
+    const placements = [], sharedPlacements = [], excludedPlacements = [], issues = [], slugs = new Set();
     const walk = (nodes, path, names) => {
         for (let i = 0; i < nodes.length; i++) {
             const n = nodes[i], next = path.concat(i);
@@ -1284,13 +1288,16 @@ function _folderSharePlan(folder, rows, catalogue, includeSubfolders) {
                 const project = resolve(n);
                 const entry = { key: next.join('.'), node: n, path: names.join(' / '), project };
                 placements.push(entry);
-                if (project) slugs.add(project.slug);
-                else issues.push(Object.assign(entry, { reason: resolve.reason(n) }));
+                if (project && (!selected || selected.has(project.slug))) { sharedPlacements.push(entry); slugs.add(project.slug); }
+                else excludedPlacements.push(entry);
+                if (!project) issues.push(Object.assign(entry, { reason: resolve.reason(n) }));
             }
         }
     };
     walk(folder.children || [], [], [folder.name]);
-    return { placements, issues, slugs, indexDoc: _buildFolderIndexDoc(folder, resolve, includeSubfolders) };
+    const selectedProject = n => { const project = resolve(n); return project && (!selected || selected.has(project.slug)) ? project : null; };
+    return { placements, sharedPlacements, excludedPlacements, issues, slugs,
+        indexDoc: _buildFolderIndexDoc(folder, selectedProject, includeSubfolders) };
 }
 
 function _folderShareLocations(tree, folderId, rows, catalogue, includeSubfolders) {
@@ -1325,16 +1332,17 @@ function _repairFolderSharePlacements(tree, folderId, choices, rows, catalogue, 
     const validSlugs = new Set(catalogue.map(r => r.slug)), replacements = new Map();
     for (const issue of plan.issues) {
         const choice = choices[issue.key];
-        if (!choice) throw new Error('folder_share_unresolved');
+        if (!choice) continue; // Unselected placements remain exactly as recorded.
         if (choice.action === 'remove') replacements.set(issue.key, null);
-        else if (choice.action === 'link' && validSlugs.has(choice.slug)) {
+        else if (choice.action === 'link') {
+            if (!validSlugs.has(choice.slug)) throw new Error('folder_share_selection_changed');
             if (locations.inside.has(choice.slug)) replacements.set(issue.key, null);
             else {
                 if (locations.outside.has(choice.slug)) throw new Error('folder_project_placed_elsewhere');
                 replacements.set(issue.key, { type: 'project', slug: choice.slug });
                 locations.inside.add(choice.slug);
             }
-        } else throw new Error('folder_share_unresolved');
+        } else throw new Error('folder_share_invalid_selection');
     }
     const repair = (nodes, path) => nodes.flatMap((n, i) => {
         const nextPath = path.concat(i), key = nextPath.join('.');
@@ -1352,8 +1360,12 @@ function _folderShareIndexSignature(doc) {
     return JSON.stringify([doc && doc.name, walk(doc && doc.children)]);
 }
 
-function _verifyFolderSharePlan(plan) {
-    if (plan.issues.length) throw new Error('folder_share_unresolved');
+function _verifyFolderSharePlan(plan, selectedProjectSlugs) {
+    if (selectedProjectSlugs != null) {
+        if (!Array.isArray(selectedProjectSlugs) || selectedProjectSlugs.some(slug => typeof slug !== 'string' || !slug)
+                || new Set(selectedProjectSlugs).size !== selectedProjectSlugs.length) throw new Error('folder_share_invalid_selection');
+        if (JSON.stringify(selectedProjectSlugs.slice().sort()) !== JSON.stringify([...plan.slugs].sort())) throw new Error('folder_share_selection_changed');
+    }
     if (!plan.slugs.size) throw new Error('folder_share_empty');
     const actual = [];
     const walk = nodes => { for (const n of nodes || []) {
@@ -1361,7 +1373,7 @@ function _verifyFolderSharePlan(plan) {
         else if (n.type === 'project') actual.push(n.slug);
     } };
     walk(plan.indexDoc.children);
-    const expected = plan.placements.map(entry => entry.project.slug).sort();
+    const expected = plan.sharedPlacements.map(entry => entry.project.slug).sort();
     if (JSON.stringify(actual.sort()) !== JSON.stringify(expected)) throw new Error('folder_share_verify_failed');
 }
 
@@ -1384,6 +1396,8 @@ function _folderShareError(e) {
         folder_share_project_missing: '共有対象の公開プロジェクトが変更・削除されました。共有画面を開き直してください。既存の共有は変更していません。',
         folder_share_invalid_tree: '共有対象とフォルダ構成が一致しないため更新を中止しました。共有画面を開き直してください。',
         folder_share_invalid_index: '共有対象とフォルダ構成が一致しないため更新を中止しました。共有画面を開き直してください。',
+        folder_share_invalid_selection: '共有対象とフォルダ構成が一致しないため更新を中止しました。共有画面を開き直してください。',
+        folder_share_selection_changed: '確認した共有対象が変更されました。共有画面を開き直して一覧を確認してください。既存の共有は変更していません。',
         folder_tree_unsaved: 'フォルダ構成の保存が完了していません。保存後に共有画面を開き直してください。',
         folder_share_unresolved: '未解決の配置があります。対応する公開プロジェクトを選ぶか、不要な配置を除いてください。',
         folder_project_placed_elsewhere: '選んだプロジェクトは別の場所に配置されています。先に「移動」でこのフォルダに配置してから、共有画面を開き直してください。',
@@ -1401,32 +1415,36 @@ async function _refreshFolderShareCatalogue(pw) {
     return catalogue;
 }
 
-async function _publishCompleteFolderShare(folderId, sourceTree, choices, options, pw) {
+async function _publishSelectedFolderShare(folderId, sourceTree, choices, options, pw) {
     // Validate again after the dialog: a publish/delete on another PC may have
-    // changed project identities while the user was reviewing the choices.
+    // changed identities. Only the exact, previously displayed set may be shared.
+    if (!Array.isArray(options.selectedProjectSlugs)) throw new Error('folder_share_invalid_selection');
     const catalogue = await _refreshFolderShareCatalogue(pw);
     const rows = await buildRows();
     const nextTree = _repairFolderSharePlacements(sourceTree, folderId, choices, rows, catalogue, options.includeSubfolders);
     const folder = _treeFolderById(folderId, nextTree.children);
     if (folder.shareSlug && options.slug !== folder.shareSlug) throw new Error('folder_tree_changed');
-    const plan = _folderSharePlan(folder, rows, catalogue, options.includeSubfolders);
-    _verifyFolderSharePlan(plan);
+    const plan = _folderSharePlan(folder, rows, catalogue, options.includeSubfolders, options.selectedProjectSlugs);
+    _verifyFolderSharePlan(plan, options.selectedProjectSlugs);
+    if (options.reviewedIndexSignature && options.reviewedIndexSignature !== _folderShareIndexSignature(plan.indexDoc)) throw new Error('folder_share_selection_changed');
     // The server cannot resolve browser-local IDs. Bake only identities proven
     // by this PC's records and the complete catalogue into the reviewed scope.
-    for (const entry of plan.placements) entry.node.slug = entry.project.slug;
+    for (const entry of plan.sharedPlacements) entry.node.slug = entry.project.slug;
     folder.shareSlug = options.slug; folder.shareIsPublic = options.isPublic;
     folder.shareIncludeSubfolders = options.includeSubfolders;
+    folder.shareRevision = crypto.randomUUID(); // Every share/password update advances the tree CAS baseline.
     const password = options.isPublic ? null : options.password;
     let committed;
     try {
         // CAS + live membership validation + both writes are one server
         // transaction. An older server must not fall back to two unsafe writes.
-        committed = await SupabaseClient.publishFolderShareChecked(pw, folderId, sourceTree, nextTree, plan.indexDoc, password);
+        committed = await SupabaseClient.publishFolderShareSelectedChecked(pw, folderId, sourceTree, nextTree, plan.indexDoc, options.selectedProjectSlugs, password);
     } catch (e) { if (_isMissingRpc(e)) throw new Error('folder_share_protocol_required'); throw e; }
     workspaceTree = nextTree; _treeLoaded = true; _treeDirty = false;
     try {
         if (!committed || committed.slug !== options.slug || committed.project_count !== plan.slugs.size
-                || committed.placement_count !== plan.placements.length || !Array.isArray(committed.project_slugs)
+                || committed.placement_count !== plan.sharedPlacements.length
+                || committed.excluded_placement_count !== plan.excludedPlacements.length || !Array.isArray(committed.project_slugs)
                 || JSON.stringify(committed.project_slugs.slice().sort()) !== JSON.stringify([...plan.slugs].sort())) throw new Error('folder_share_verify_failed');
         let saved;
         try { saved = await SupabaseClient.getFolderIndex(options.slug, password); }
@@ -1465,55 +1483,74 @@ async function openFolderShareModal(folderId) {
     const defaultSlug = cur || ('folder-' + (((node.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 32)) || 'x') + '-' + Math.random().toString(36).slice(2, 6));
     const html = `
         <h2><span data-i18n="フォルダを共有:">フォルダを共有:</span> ${safe(node.name)}</h2>
-        ${cur ? "<div style=\"font-size:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;padding:8px;margin-bottom:8px;\"><span data-i18n=\"共有中（\">共有中（</span>" + (node.shareIsPublic ? 'public' : uiH("パスワード保護")) + '）<br><span style="word-break:break-all;">' + safe(folderUrl(cur)) + "</span><div style=\"margin-top:6px;display:flex;gap:6px;\"><button type=\"button\" class=\"btn\" data-copy><span data-i18n=\"URLコピー\">URLコピー</span></button><button type=\"button\" class=\"btn danger\" data-unshare><span data-i18n=\"共有解除\">共有解除</span></button></div></div>" : ''}
+        ${cur ? `<div style="font-size:12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;padding:10px;margin-bottom:8px;">
+          <b data-i18n="フォルダ一覧の共有URL">フォルダ一覧の共有URL</b><br>
+          <a data-folder-share-url href="${safe(folderUrl(cur))}" target="_blank" rel="noopener" style="word-break:break-all;color:#2563eb;text-decoration:underline;">${safe(folderUrl(cur))}</a>
+          <p data-i18n="複数のプロジェクトをまとめて案内するためのURLです。" style="margin:4px 0;">複数のプロジェクトをまとめて案内するためのURLです。</p>
+          <div style="display:flex;gap:6px;"><button type="button" class="btn" data-copy><span data-i18n="一覧URLをコピー">一覧URLをコピー</span></button><button type="button" class="btn danger" data-unshare><span data-i18n="共有解除">共有解除</span></button></div></div>` : ''}
         ${cur ? `<p style="margin:0 0 8px;"><a class="btn" data-bulk-zip href="${safe(folderUrl(cur))}" target="_blank" rel="noopener"><span data-i18n="共有ページで一括ZIP">共有ページで一括ZIP</span></a></p>` : ''}
-        <p data-count style="font-size:12px;color:#475569;margin:0 0 8px;"></p>
         <form class="row" style="display:flex;flex-direction:column;gap:8px;">
-          <label style="font-size:13px;"><span data-i18n="共有 slug">共有 slug</span><br><input type="text" name="slug" value="${safe(defaultSlug)}" ${cur ? 'readonly' : ''} style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
-          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="includesub" ${includeSub ? 'checked' : ''}> <span data-i18n="サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）">サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）</span></label>
-          <div data-recovery style="font-size:12px;"></div>
-          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="pwprotect" ${cur && !node.shareIsPublic ? 'checked' : ''}> <span data-i18n="パスワードで保護する（オフ＝public）">パスワードで保護する（オフ＝public）</span></label>
+          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="includesub" style="width:auto;flex:0 0 auto;" ${includeSub ? 'checked' : ''}> <span data-i18n="サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）">サブフォルダも含めて共有する（オフ＝このフォルダ直下のプロジェクトのみ）</span></label>
+          <h3 style="margin:4px 0 0;font-size:15px;" data-i18n="共有するプロジェクト">共有するプロジェクト</h3>
+          <p style="margin:0;font-size:12px;color:#475569;" data-i18n="以下の公開版をまとめて共有します。各リンクは個別プロジェクトの共有URLです。">以下の公開版をまとめて共有します。各リンクは個別プロジェクトの共有URLです。</p>
+          <p data-count style="font-size:13px;font-weight:600;margin:0;"></p>
+          <ul data-share-targets style="list-style:none;margin:0;padding:0;max-height:360px;overflow:auto;border:1px solid #cbd5e1;border-radius:6px;"></ul>
+          <p data-excluded-note style="font-size:12px;color:#64748b;margin:0;"></p>
+          <details data-recovery-details style="font-size:12px;border-top:1px solid #e2e8f0;padding-top:8px;">
+            <summary data-i18n="対象外の配置を確認・整理（任意）" style="cursor:pointer;">対象外の配置を確認・整理（任意）</summary>
+            <p data-i18n="対応を選ばなくても、上の一覧を共有できます。配置はそのまま保持されます。">対応を選ばなくても、上の一覧を共有できます。配置はそのまま保持されます。</p>
+            <p data-i18n="対応が分かる配置だけ、公開版との対応付けや配置の整理ができます。">対応が分かる配置だけ、公開版との対応付けや配置の整理ができます。</p>
+            <p>${uiH('「配置だけ除く」はプロジェクトのデータを削除しません。別の場所にある公開版は、先に「移動」でこのフォルダに配置してください。')}</p>
+            <div data-recovery></div>
+          </details>
+          <label style="font-size:13px;display:flex;align-items:center;gap:6px;"><input type="checkbox" name="pwprotect" style="width:auto;flex:0 0 auto;" ${cur && !node.shareIsPublic ? 'checked' : ''}> <span data-i18n="パスワードで保護する（オフ＝public）">パスワードで保護する（オフ＝public）</span></label>
           <label style="font-size:13px;" data-pw-row><input type="password" name="password" placeholder="フォルダ パスワード (4文字以上)" data-i18n-placeholder="フォルダ パスワード (4文字以上)" style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
+          <details data-share-url-details style="font-size:12px;">
+            <summary data-i18n="共有URLの詳細設定" style="cursor:pointer;">共有URLの詳細設定</summary>
+            <label><span data-i18n="フォルダ共有の識別子">フォルダ共有の識別子</span><br><input type="text" name="slug" value="${safe(defaultSlug)}" ${cur ? 'readonly' : ''} style="width:100%;padding:6px 9px;border:1px solid #cbd5e1;border-radius:4px;"></label>
+          </details>
           <p class="err" data-err style="color:#b91c1c;font-size:12px;"></p>
           <div class="actions" style="display:flex;gap:6px;justify-content:flex-end;">
             <button type="button" class="btn" data-modal-cancel><span data-i18n="閉じる">閉じる</span></button>
-            <button type="submit" class="btn primary" data-modal-ok>${cur ? uiH("再共有 (更新)") : uiH("共有する")}</button>
+            <button type="submit" class="btn primary" data-modal-ok>${cur ? uiH('この一覧で共有を更新') : uiH('この一覧を共有')}</button>
           </div>
         </form>`;
     const p = openModal(html);
     const card = openModal._card;
     const errEl = card.querySelector('[data-err]');
     const pwRow = card.querySelector('[data-pw-row]');
+    card.style.width = '760px';
     const pwProtect = card.querySelector('[name="pwprotect"]');
     const syncPw = () => { pwRow.style.display = pwProtect.checked ? '' : 'none'; };
     syncPw(); pwProtect.addEventListener('change', syncPw);
     const incSubEl = card.querySelector('[name="includesub"]');
     const countEl = card.querySelector('[data-count]');
     const recoveryEl = card.querySelector('[data-recovery]');
+    const recoveryDetails = card.querySelector('[data-recovery-details]');
+    const targetsEl = card.querySelector('[data-share-targets]');
+    const excludedNote = card.querySelector('[data-excluded-note]');
     const choiceValues = new Map();
-    const syncCount = () => {
+    let reviewed = null;
+    const syncReview = () => {
         recoveryEl.querySelectorAll('[data-repair]').forEach(el => choiceValues.set(el.dataset.repair, el.value));
         const plan = _folderSharePlan(node, rows, catalogue, incSubEl.checked);
-        countEl.innerHTML = uiH('確認済み: {projects} プロジェクト / {placements} 配置。未解決: {issues} 件。', { projects: plan.slugs.size, placements: plan.placements.length, issues: plan.issues.length });
         const submit = card.querySelector('[data-modal-ok]');
-        uiBind(submit, uiMsg(plan.issues.length ? '配置を保存して共有' : cur ? '再共有 (更新)' : '共有する'));
-        if (!plan.issues.length) { recoveryEl.innerHTML = ''; return; }
+        reviewed = null;
+        recoveryDetails.hidden = !plan.issues.length;
         const locations = _folderShareLocations(sourceTree, folderId, rows, catalogue, incSubEl.checked);
         const reasonText = { unknown: '登録元の情報がこのPCにありません', unpublished: 'このPCの未公開プロジェクトです', missing: '公開先がサーバに見つかりません' };
-        recoveryEl.innerHTML = '<p style="color:#b91c1c;">' + uiH('未解決の配置を除いたまま共有を更新することはできません。') + '</p><p>'
-            + uiH('登録元のPCで公開・再読み込みするか、下で対応先を明示してください。選んだ公開版がこの共有範囲にあれば既存配置に統合し、未配置ならこの位置に配置します。')
-            + '</p><p>' + uiH('「配置だけ除く」はプロジェクトのデータを削除しません。別の場所にある公開版は、先に「移動」でこのフォルダに配置してください。') + '</p>'
-            + plan.issues.map(issue => {
+        recoveryEl.innerHTML = plan.issues.map(issue => {
                 const local = rows.find(r => r.local && r.local.id === issue.node.localId)?.local;
                 const label = (local && local.displayName) || issue.node.slug || issue.node.localId || '?';
-                return '<label style="display:block;border-top:1px solid #e2e8f0;padding:8px 0;"><b>' + safe(label) + '</b><br>' + safe(issue.path) + '<br>'
+                return '<label style="display:block;border-top:1px solid #e2e8f0;padding:8px 0;">'
+                    + uiH('配置の識別情報（共有URLではありません）') + '<br><b>' + safe(label) + '</b><br>' + safe(issue.path) + '<br>'
                     + uiH(reasonText[issue.reason]) + '<br><select data-repair="' + safe(issue.key) + '" style="width:100%;margin-top:4px;">'
-                    + '<option value="" data-i18n="対応を選択してください">' + safe(uiT('対応を選択してください')) + '</option>'
+                    + '<option value="" data-i18n="そのまま残す（今回の共有には含めない）">' + safe(uiT('そのまま残す（今回の共有には含めない）')) + '</option>'
                     + '<option value="remove" data-i18n="不要な配置だけ除く">' + safe(uiT('不要な配置だけ除く')) + '</option>'
                     + catalogue.map(project => {
                         const elsewhere = locations.outside.has(project.slug) && !locations.inside.has(project.slug);
                         const suffix = elsewhere ? ' — ' + locations.outside.get(project.slug) : '';
-                        return '<option value="link:' + safe(project.slug) + '"' + (elsewhere ? ' disabled' : '') + '>' + safe((project.display_name || project.slug) + ' [' + project.slug + ']' + suffix) + '</option>';
+                        return '<option value="link:' + safe(project.slug) + '"' + (elsewhere ? ' disabled' : '') + '>' + safe((project.display_name || project.slug) + ' — ' + ProjectNavigation.shareUrl(project.slug) + suffix) + '</option>';
                     }).join('') + '</select></label>';
             }).join('');
         recoveryEl.querySelectorAll('[data-repair]').forEach(el => {
@@ -1523,15 +1560,32 @@ async function openFolderShareModal(folderId) {
         });
         const choices = {};
         for (const el of recoveryEl.querySelectorAll('[data-repair]')) {
-            if (!el.value) return;
+            if (!el.value) continue;
             choices[el.dataset.repair] = el.value === 'remove' ? { action: 'remove' } : { action: 'link', slug: el.value.slice(5) };
         }
-        const repaired = _repairFolderSharePlacements(sourceTree, folderId, choices, rows, catalogue, incSubEl.checked);
-        const ready = _folderSharePlan(_treeFolderById(folderId, repaired.children), rows, catalogue, incSubEl.checked);
-        countEl.innerHTML = uiH('共有予定: {projects} プロジェクト / {placements} 配置。未解決: 0 件。', { projects: ready.slugs.size, placements: ready.placements.length });
+        try {
+            const repaired = _repairFolderSharePlacements(sourceTree, folderId, choices, rows, catalogue, incSubEl.checked);
+            const ready = _folderSharePlan(_treeFolderById(folderId, repaired.children), rows, catalogue, incSubEl.checked);
+            const projects = new Map();
+            for (const entry of ready.sharedPlacements) if (!projects.has(entry.project.slug)) projects.set(entry.project.slug, entry);
+            targetsEl.innerHTML = [...projects.values()].map(entry => {
+                const url = ProjectNavigation.shareUrl(entry.project.slug);
+                return '<li data-share-project="' + safe(entry.project.slug) + '" style="padding:6px 10px;border-bottom:1px solid #e2e8f0;">'
+                    + '<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px;flex-wrap:wrap;"><b style="font-size:13px;">' + safe(entry.project.displayName)
+                    + '</b><span style="font-size:11px;color:#64748b;">' + safe(entry.path) + '</span></div>'
+                    + '<a data-share-project-url href="' + safe(url) + '" target="_blank" rel="noopener" style="font-size:12px;overflow-wrap:anywhere;color:#2563eb;text-decoration:underline;">' + safe(url) + '</a></li>';
+            }).join('') || '<li style="padding:10px;">' + uiH('共有対象がありません。公開済みプロジェクトを配置してください。') + '</li>';
+            countEl.innerHTML = uiH('共有対象: {projects} プロジェクト', { projects: ready.slugs.size });
+            excludedNote.hidden = !ready.excludedPlacements.length;
+            excludedNote.innerHTML = uiH('対象外の配置 {count} 件はそのまま残します。', { count: ready.excludedPlacements.length });
+            submit.disabled = !ready.slugs.size;
+            errEl.textContent = '';
+            reviewed = { choices, plan: ready, selectedProjectSlugs: [...ready.slugs],
+                indexSignature: _folderShareIndexSignature(ready.indexDoc) };
+        } catch (e) { submit.disabled = true; errEl.textContent = _folderShareError(e); }
     };
-    syncCount(); incSubEl.addEventListener('change', syncCount);
-    recoveryEl.addEventListener('change', syncCount);
+    syncReview(); incSubEl.addEventListener('change', syncReview);
+    recoveryEl.addEventListener('change', syncReview);
     const copyBtn = card.querySelector('[data-copy]');
     if (copyBtn) copyBtn.addEventListener('click', async () => { try { await navigator.clipboard.writeText(folderUrl(cur)); uiBind(copyBtn, uiMsg("Copied ✓")); } catch (e) {} });
     const unshareBtn = card.querySelector('[data-unshare]');
@@ -1552,23 +1606,19 @@ async function openFolderShareModal(folderId) {
         const isPublic = !pwProtect.checked;
         const password = (card.querySelector('[name="password"]').value || '').trim();
         if (!isPublic && password.length < 4) { uiBind(errEl, uiMsg("パスワードは4文字以上")); return null; }
-        const choices = {};
-        for (const el of recoveryEl.querySelectorAll('[data-repair]')) {
-            if (!el.value) { uiBind(errEl, uiMsg('未解決の配置があります。対応する公開プロジェクトを選ぶか、不要な配置を除いてください。')); el.focus(); return null; }
-            choices[el.dataset.repair] = el.value === 'remove' ? { action: 'remove' } : { action: 'link', slug: el.value.slice(5) };
-        }
         try {
-            const repaired = _repairFolderSharePlacements(sourceTree, folderId, choices, rows, catalogue, incSubEl.checked);
-            _verifyFolderSharePlan(_folderSharePlan(_treeFolderById(folderId, repaired.children), rows, catalogue, incSubEl.checked));
+            if (!reviewed) throw new Error('folder_share_invalid_selection');
+            _verifyFolderSharePlan(reviewed.plan, reviewed.selectedProjectSlugs);
         } catch (e) { errEl.textContent = _folderShareError(e); return null; }
-        return { slug, isPublic, password, includeSubfolders: incSubEl.checked, choices };
+        return { slug, isPublic, password, includeSubfolders: incSubEl.checked, choices: reviewed.choices,
+            selectedProjectSlugs: reviewed.selectedProjectSlugs.slice(), reviewedIndexSignature: reviewed.indexSignature };
     };
     const res = await p;
-    if (!res) { await renderList(); return; }
+    if (!res) { await renderList({preservePlacements: true}); return; }
     try {
         _treePersisting = true;
         showToast(uiT('全件確認と共有内容の検証中…'));
-        const plan = await _publishCompleteFolderShare(folderId, sourceTree, res.choices, res, pw);
+        const plan = await _publishSelectedFolderShare(folderId, sourceTree, res.choices, res, pw);
         const url = folderUrl(res.slug);
         try { await navigator.clipboard.writeText(url); } catch (e) {}
         alert(uiT('共有先で {projects} プロジェクトを確認しました。\n', { projects: plan.slugs.size }) + url);
@@ -1576,7 +1626,9 @@ async function openFolderShareModal(folderId) {
         alert(_folderShareError(e) + (e.publishedSlug ? '\n' + folderUrl(e.publishedSlug) : ''));
     } finally {
         _treePersisting = false;
-        await loadWorkspaceTree(); await renderList();
+        // Publication already committed the reviewed tree atomically. Do not
+        // run a second, implicit repair for newly discovered local copies.
+        await loadWorkspaceTree(); await renderList({preservePlacements: true});
     }
 }
 
@@ -2006,7 +2058,7 @@ async function renderList(options = {}) {
     //   焼き付け (これで別 PC でもフォルダの中に出る)、古い 2 ノード重複を
     //   ツリー格納順で 1 つに畳む。描画順ではなく格納順で畳むのは、実験日
     //   ソートの設定が違う PC 同士が別々の結果を保存して奪い合わないため。
-    if (!options.localRefresh) {
+    if (!options.localRefresh && !options.preservePlacements) {
         const fixed = _reconcileTree(rowForNode);
         if (fixed.healed || fixed.folded) { _treeDirty = true; _treeHealed += fixed.healed; }
         if (_treeDirty) saveTreeQuiet();   // fire-and-forget: 取得の前に流し切られる

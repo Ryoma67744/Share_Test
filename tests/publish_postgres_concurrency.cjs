@@ -43,6 +43,7 @@ async function race(slug,first,second,secondSucceeds=false){
  } finally {a.kill();b.kill();}
 }
 const folderPublish=(expected,next,index)=>`select public.publish_folder_share_checked('${pw}','folder-parent',${sqlString(JSON.stringify(expected))}::jsonb,${sqlString(JSON.stringify(next))}::jsonb,${sqlString(JSON.stringify(index))}::jsonb,null);`;
+const selectedFolderPublish=(expected,next,index,selected)=>`select public.publish_folder_share_selected_checked('${pw}','selected-parent',${sqlString(JSON.stringify(expected))}::jsonb,${sqlString(JSON.stringify(next))}::jsonb,${sqlString(JSON.stringify(index))}::jsonb,array[${selected.map(sqlString).join(',')}]::text[],null);`;
 async function folderRace(lockSql,firstSql,secondSql,message){
  const a=session('folder-race-A'),b=session('folder-race-B');
  try{
@@ -89,6 +90,72 @@ async function verifyFolderShareConcurrency(){
  assert.deepEqual(await json("select to_jsonb(f) from public.folder_shares f where slug='stable-folder';"),beforeDelete);
  console.log('PostgreSQL multi-connection folder sharing: PASS (concurrent workspace edit, stale competing share, concurrent target deletion, no partial writes)');
 }
+async function verifySelectedFolderShareConcurrency(){
+ await query(fs.readFileSync(path.join(__dirname,'../supabase/migrations/20261127230508_folder_share_selected_checked.sql'),'utf8'));
+ await query("insert into public.projects(slug,display_name,is_public) select 'selected-race-'||i,'Selected '||i,true from generate_series(0,6) i;");
+ const selected=Array.from({length:7},(_,i)=>'selected-race-'+i),projects=selected.map(slug=>({type:'project',slug}));
+ const unknown=Array.from({length:4},(_,i)=>({type:'project',localId:'old-unresolved-'+i}));
+ const original={version:1,children:[{type:'folder',id:'selected-parent',name:'Selected folder',shareSlug:'selected-share',
+  shareIsPublic:true,shareIncludeSubfolders:true,shareRevision:randomUUID(),children:[
+  ...unknown,{type:'folder',id:'selected-nested',name:'Nested',children:projects}]}]};
+ const doc={name:'Selected folder',children:[{type:'folder',name:'Nested',children:projects}]};
+ const candidate=expected=>{const next=JSON.parse(JSON.stringify(expected));Object.assign(next.children[0],{
+  shareIsPublic:true,shareIncludeSubfolders:true,shareRevision:randomUUID()});return next;};
+ await query(`select public.set_workspace_tree('${pw}',${sqlString(JSON.stringify(original))}::jsonb);
+  select public.publish_folder_share('${pw}','selected-share','Selected folder',${sqlString(JSON.stringify(doc))}::jsonb,true,null);`);
+ const before=await json("select to_jsonb(f) from public.folder_shares f where slug='selected-share';");
+ const concurrent={...original,children:[...original.children,{type:'folder',id:'selected-unrelated',name:'Other PC edit',children:[]}]};
+ const workspaceLock='select id from public.workspace_tree where id=1 for update;';
+ await folderRace(workspaceLock,
+  `select public.set_workspace_tree('${pw}',${sqlString(JSON.stringify(concurrent))}::jsonb);`,
+  selectedFolderPublish(original,candidate(original),doc,selected),/folder_tree_changed/);
+ assert.deepEqual(await json('select tree from public.workspace_tree where id=1;'),concurrent);
+ assert.deepEqual(await json("select to_jsonb(f) from public.folder_shares f where slug='selected-share';"),before);
+
+ // The flags and placements are already persisted and identical. Only the
+ // selected set differs; the fresh revision must still make stale B conflict.
+ let winner=candidate(concurrent);const loser=candidate(concurrent);
+ await folderRace(workspaceLock,selectedFolderPublish(concurrent,winner,doc,selected),
+  selectedFolderPublish(concurrent,loser,{name:'Selected folder',children:[{type:'folder',name:'Nested',children:[projects[0]]}]},[selected[0]]),
+  /folder_tree_changed/);
+ assert.deepEqual(await json('select tree from public.workspace_tree where id=1;'),winner);
+ assert.deepEqual(await json("select index_doc from public.folder_shares where slug='selected-share';"),doc);
+ assert.deepEqual((await json('select tree from public.workspace_tree where id=1;')).children[0].children.slice(0,4),unknown);
+
+ // Identical selections/settings also consume a revision, so a password-only
+ // change from a second stale editor cannot quietly overwrite the first save.
+ const sameSelectionBaseline=winner;winner=candidate(sameSelectionBaseline);
+ await folderRace(workspaceLock,selectedFolderPublish(sameSelectionBaseline,winner,doc,selected),
+  selectedFolderPublish(sameSelectionBaseline,candidate(sameSelectionBaseline),doc,selected),/folder_tree_changed/);
+ assert.deepEqual(await json('select tree from public.workspace_tree where id=1;'),winner);
+
+ const beforeDelete=await json("select to_jsonb(f) from public.folder_shares f where slug='selected-share';");
+ await folderRace("delete from public.projects where slug='selected-race-6';",'',
+  selectedFolderPublish(winner,candidate(winner),doc,selected),/folder_share_project_missing/);
+ assert.deepEqual(await json('select tree from public.workspace_tree where id=1;'),winner);
+ assert.deepEqual(await json("select to_jsonb(f) from public.folder_shares f where slug='selected-share';"),beforeDelete);
+
+ // The reverse ordering must also be protected: once publication acquired
+ // the selected project locks, another session cannot delete a target until
+ // both its index and its workspace transaction have committed.
+ await query("insert into public.projects(slug,display_name,is_public) values('selected-race-6','Selected 6',true);");
+ const a=session('selected-lock-A'),b=session('selected-lock-B'),lockedPublication=candidate(winner);
+ try{
+  a.write('begin; '+selectedFolderPublish(winner,lockedPublication,doc,selected)+'\n\\echo LOCKED');await a.waitFor('LOCKED');
+  const bDone=b.finish("delete from public.projects where slug='selected-race-5';");let blocked=false;
+  for(let n=0;n<100;n++){
+   blocked=(await query("select count(*) from pg_stat_activity where application_name='selected-lock-B' and wait_event_type='Lock';"))==='1';
+   if(blocked)break;await new Promise(r=>setTimeout(r,25));
+  }
+  assert.equal(blocked,true,'selected project KEY SHARE locks must survive until the RPC transaction commits');
+  assert.equal(await query("select count(*) from public.projects where slug='selected-race-5';"),'1');
+  const [ra,rb]=await Promise.all([a.finish('commit;'),bDone]);
+  assert.equal(ra.code,0,ra.stderr);assert.equal(rb.code,0,rb.stderr);
+ }finally{a.kill();b.kill();}
+ assert.deepEqual(await json('select tree from public.workspace_tree where id=1;'),lockedPublication);
+ assert.deepEqual(await json("select index_doc from public.folder_shares where slug='selected-share';"),doc);
+ console.log('PostgreSQL selected folder sharing: PASS (seven selected/four unknown retained, workspace CAS, same-tree selection/settings races, selected target deletion, held KEY SHARE locks, atomic failures)');
+}
 async function main(){
  assert.equal(await query("select count(*) from information_schema.tables where table_schema in ('public','storage');"),'0','database must be empty; no existing data is removed');
  await query(`create role anon;create role authenticated;create schema extensions;create extension pgcrypto with schema extensions;
@@ -117,6 +184,7 @@ async function main(){
  assert.notEqual(failure.code,0);assert.match(failure.stderr,/publish_source_missing/);
  assert.equal(await query("select publish_revision||':'||display_name from public.projects where slug='race';"),'3:Retried once');
  await verifyFolderShareConcurrency();
+ await verifySelectedFolderShareConcurrency();
  console.log('PostgreSQL multi-connection publish safety: PASS (update/create races, concurrent retry, atomic failure)');
 }
 main().catch(error=>{console.error(error.message);process.exitCode=1;});
