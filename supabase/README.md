@@ -1,5 +1,7 @@
 # Supabase setup (Phase 1)
 
+> **フォルダー共有の全件確認と同時編集:** アプリ `v2026-11-27.2` の配信前に [`migrations/20261127114758_folder_share_checked.sql`](./migrations/20261127114758_folder_share_checked.sql) を適用してください。既存の workspace / folder share 関数がある DB に、マスターパスワードで保護した `publish_folder_share_checked` RPC を追加します。現在のフォルダー配置との一致、共有階層、全対象プロジェクトの存在を確認してから、配置と共有一覧を同じトランザクションで保存します。競合時は `PT409` で全体を取り消します。既存の公開データ・配置・共有 URL は移行処理では変更しません。RPC 未適用のサーバーでは新しいフォルダー共有の保存を停止し、古い無条件保存へ自動的に戻しません。旧アプリへ戻す場合も追加した RPC を残せます。
+
 > **共有フォルダのプロジェクト名**は、フォルダを開くたびに各プロジェクトの公開名から取得します。既存DBには [folder_project_names.sql](./folder_project_names.sql) を適用してください。既存の共有URLにも反映されます。
 
 > **HE/IF–MSI位置合わせの保存互換性:** 新しいアプリの前に [`alignment_contract_v2.sql`](./alignment_contract_v2.sql) を適用してください。[適用・検証・旧版互換性](../docs/ALIGNMENT_CONTRACT_V2.md) を参照してください。JSONBの既存列を使用し、データの一括変換は行いません。旧クライアントによる新形式の上書きを拒否し、既存の認証・版照合・spatial保護を維持します。既存DBでは先に切片番号の修正を確認してください。SQLの本番適用はコード更新とは別の作業です。

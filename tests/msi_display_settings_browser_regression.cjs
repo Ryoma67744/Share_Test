@@ -517,14 +517,11 @@ async function main() {
     const viewer=await shared.newPage();viewer.on('pageerror',error=>errors.push(error.message));viewer.on('dialog',dialog=>dialog.accept());
     await viewer.goto(origin+'/viewer/#share='+slug);await sharedReady(viewer,'viewer');
     const sharedSource=await sourceSnapshot(viewer),sharedMeta=await viewer.evaluate(()=>JSON.stringify(App.project.meta));
-    assert.equal(await viewer.evaluate(()=>App.getMsiDisplaySettings().preset),'current');
+    assert.equal(await viewer.evaluate(()=>App.getMsiDisplaySettings().preset),'custom');
     const windows=()=>viewer.evaluate(()=>App.project.sections.map(section=>{const key='MSI_A',entry=section.msiSeries[key];
       return App.getMsiWindow(key,entry.rawRange,entry.rawDispMax,entry.rawTrueMax);}));
-    const legacy=await windows();
-    assert.ok(legacy.every(value=>value.max<20000),'Old Same range retains percentile clipping: '+JSON.stringify(await viewer.evaluate(()=>({
-      settings:App.getMsiDisplaySettings(),ranges:App.project.sections.map(section=>({window:App.getMsiWindow('MSI_A',section.msiSeries.MSI_A.rawRange,
-        section.msiSeries.MSI_A.rawDispMax,section.msiSeries.MSI_A.rawTrueMax),range:section.msiSeries.MSI_A.rawRange,
-        disp:section.msiSeries.MSI_A.rawDispMax,maximum:section.msiSeries.MSI_A.rawTrueMax,bakeMode:section.msiSeries.MSI_A.bakeMode}))}))));
+    assert.deepEqual((await windows()).map(value=>value.max),[20000,20000],
+      'Opening an old shared project uses Maximum + Same without persisting a style migration');
     await style(viewer,'hdi');assert.deepEqual((await windows()).map(value=>value.max),[20000,20000]);
     await verifyDisplayRefreshLifecycle(viewer);
     assert.deepEqual((await windows()).map(value=>value.max),[20000,20000],
@@ -553,7 +550,7 @@ async function main() {
     assert.equal(await viewer.locator('#tb-smoothing-strength').inputValue(),'8');
     await viewer.evaluate(slug=>{const key='desi:share:'+slug,session=JSON.parse(sessionStorage.getItem(key));session.role='admin';session.token='synthetic-admin-token';sessionStorage.setItem(key,JSON.stringify(session));},slug);
     await viewer.reload();await sharedReady(viewer,'admin');
-    assert.equal(await viewer.evaluate(()=>App.getMsiDisplaySettings().preset),'current','Admin has independent preferences');
+    assert.equal(await viewer.evaluate(()=>App.getMsiDisplaySettings().preset),'custom','Admin has independent preferences with the same Maximum opening policy');
     assert.equal(await viewer.evaluate(()=>App.msiSmoothing),'none','Viewer interpolation does not leak into the admin role');
     assert.equal(await viewer.evaluate(()=>App.msiSmoothingStrength),1,'Viewer Median strength does not leak into the admin role');
     assert.equal(await viewer.evaluate(()=>App.msiLinearStrength),10,'Viewer Linear strength does not leak into the admin role');

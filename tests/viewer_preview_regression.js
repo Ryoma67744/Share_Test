@@ -2559,7 +2559,8 @@ function testWorkerAssetsFollowApplicationBase() {
     }
   }
   const scriptSources = [...html.matchAll(/<script\b[^>]*\bsrc="([^"]+)"/g)].map(match => match[1]);
-  assert.deepEqual(scriptSources.slice(0, 15), ['../runtime-config.js', '../app-runtime.js', '../app-i18n.js', '../app-i18n-common.js', '../app-i18n-storage.js', '../app-i18n-viewer.js', '../app-i18n-viewer-modules.js', '../project-store-safety.js', '../project-navigation.js?v=unpublished-1', 'share-refresh.js', 'source-loader.js', 'msi-display-settings.js', 'msi-display-geometry.js', 'msi-spatial-groups.js', '../offline/offline.js']);
+  // Asset revisions may change independently of dependency order and base paths.
+  assert.deepEqual(scriptSources.slice(0, 15).map(src => src.split('?')[0]), ['../runtime-config.js', '../app-runtime.js', '../app-i18n.js', '../app-i18n-common.js', '../app-i18n-storage.js', '../app-i18n-viewer.js', '../app-i18n-viewer-modules.js', '../project-store-safety.js', '../project-navigation.js', 'share-refresh.js', 'source-loader.js', 'msi-display-settings.js', 'msi-display-geometry.js', 'msi-spatial-groups.js', '../offline/offline.js']);
   assert.ok(scriptSources.includes('../vendor/supabase.min.js'));
   assert.ok(!scriptSources.some(src => src.startsWith('/') || /^https?:/.test(src)), 'viewer assets must work under a project Pages path');
   assert.doesNotMatch(html, /window\.SUPABASE_(?:URL|ANON_KEY)\s*=/, 'shared runtime owns cloud configuration');

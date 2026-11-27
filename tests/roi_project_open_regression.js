@@ -89,6 +89,9 @@ async function main() {
   // Full image parsing needs browser resources. The panels above represent
   // loaded MSI layers; the rest of openProject and panel rendering are real.
   app.rebuildSectionPanels = async () => {
+    // The real panel builder now selects the first Method row at the opening
+    // boundary, instead of retaining the old global focus set above.
+    app.focusCompoundKey = 'MSI_focus';
     for (const p of app.panels.values()) {
       p.project = app.project;
       p.section = app.project.sections.find(section => section.id === p.section.id);

@@ -50,6 +50,12 @@ The session expires after **12 hours**. Closing the tab is fine — re-opening t
 
 > Use **🔑 Admin** in the top bar and enter the publisher's **admin password** to unlock the additional Method (MRM) columns **CE / CV**. **Precursor / Fragment** are also visible with a regular viewer password.
 
+### Initial view
+
+Every project opening starts the main view and Preview with the entire image fitted inside its frame, without restoring earlier pan or zoom. When MRM data is available, Compound mode selects the first usable MRM in Method order. A share link that explicitly names an MRM takes precedence.
+
+Manual Range bounds are cleared and automatic Maximum and Same scaling is used. Later pan, zoom and Range adjustments survive redraws and Preview open/close operations while the project remains open. Sources, ROIs, image registration, saved rotations/flips and physical calibration are retained.
+
 ---
 
 ## 3. Screen layout
@@ -334,7 +340,7 @@ Three groups in each section's toolbar:
 
 > **Automatic Range and highlights**: with outlier clipping on, automatic Range uses **p99.9 (the 99.9th percentile)** as its upper reference. Values above the ceiling share the upper colour. The number of saturated positions depends on sample size and ties; it is not always exactly 0.1%. Lower the ceiling manually if the image is too dark. Manual values take priority; `Reset` restores automatic Range. **Changing displayed sections or opening/closing Preview does not delete manual Range.**
 
-> **Range is temporary and scoped to a project**: the master's manual Range is not saved as a published default. Reloading restores automatic values calculated from the source data. Switching A → B → A within the same tab restores A's Range and Same / Individual mode without applying them to B. Whole-view and ROI-view manual values are stored separately. Shared URLs and viewer/admin contexts are separate. Replacing a measurement restores its automatic Range.
+> **Range lasts while a project is open**: every project opening clears whole-view and ROI-view manual bounds and starts with Maximum (source maximum) and Same (a common range across displayed sections). This also applies when switching A → B → A in one tab. Subsequent manual adjustments remain while that project is open. Resetting or adjusting Range does not change original measurements or ROI statistics and is not automatically saved as a published setting.
 
 > **Range stays the same window — same width — across sections of one compound**: changing the Range min or max on one section snaps the min/max of **every section showing the same MRM (compound)** to the same values (so the widths match too). Editing via the gear ⚙ Intensity range does the same. Other compounds are unaffected. This lets you compare several sections on one identical scale.
 
@@ -487,6 +493,20 @@ Each CSV has a `.source-cells.json` sidecar recording source row IDs, coordinate
 
 > Current v2 and supported legacy v1 ZIPs can be imported. Still older per-compound `msi_<layerKey>__` ZIPs are unsupported. Without original sources, precision and missing-state information already lost in old exports cannot be recovered from PNGs or derived CSVs.
 
+
+### Shared-folder ZIP downloads
+
+A `#folder=...` share URL can download all or selected projects, including subfolders. Check the displayed project count before starting. A project appearing in more than one location is fetched only once per share ID.
+
+Projects are fetched sequentially with progress and failure details. Password-protected projects require their own viewer passwords. You can cancel an operation and retry failed items. A failed project is never counted as a successful complete backup.
+
+The collection contains one restorable ZIP per project, plus a list of membership, folder paths, published revisions and results. It preserves original images, MSI originals, ROIs and attached photographs, alignment and saved ratio definitions. The batch operation does not regenerate derived CSVs or aligned PNGs that depend on the open viewer; open an individual project and use Export ZIP when those outputs are needed.
+
+To restore, extract the outer ZIP and use Import ZIP for each inner project ZIP. The outer ZIP is not a bulk-import format. Large collections are split at project boundaries around 256 MiB to limit memory usage; a single project is not split. Check the results and save every generated part.
+
+Supported browsers also offer “Choose folder and save ZIP” to write completed parts directly to a chosen directory. If the browser blocks automatic downloads, click each displayed ZIP link. A retry creates additional ZIPs for items that were not obtained; keep the ZIPs from the first successful downloads as well. If a single project reaches the ZIP32 limit, that project's export stops with an explicit explanation.
+
+
 ---
 
 ## PowerPoint report
@@ -526,7 +546,7 @@ Max/Mean use original measurement-row statistics. Display p99.8 uses raster repr
 Bottom line:
 
 - **ROIs, shared alignments and recipient-created overlays** persist on the server according to each feature’s permissions and supported environment.
-- Range, Opacity, Rotation, pan, zoom and Memo are temporary. MSI style, colour, Median / Linear strength and personal ratios survive reloads in this tab; viewer and Admin preferences are separate.
+- Range, pan, zoom and the selected MRM reset on every project opening. Colour, Median / Linear strength, physical aspect and personal ratios remain tab preferences; viewer and Admin preferences are separate. Shared-view Memo edits are temporary.
 - The session itself (12 h) lives in sessionStorage. Closing the tab clears it.
 - ROI edits require the **write lock** — others have to wait while you hold it.
 
@@ -751,9 +771,9 @@ Hide background (Otsu) classifies background from the TIC histogram. Adjust its 
 
 **Save and share**
 
-Author display settings are carried by project saving, ZIP and publication. Shared MSI style, colour and Median / Linear preferences are personal to this tab and survive reloads. Viewer and Admin preferences are separate. The published source remains unchanged.
+Author display settings are carried by project saving, ZIP and publication. Shared colour, Median / Linear and physical aspect preferences are personal to this tab. Every project opening starts Range with Maximum and Same. Viewer and Admin preferences are separate. The published source remains unchanged.
 
-Range is a temporary display setting per project. Record the bounds and Same / Individual mode when comparisons require fixed conditions.
+Range lasts while a project is open; reopening starts with Maximum and Same. Record the bounds and Same / Individual mode when comparisons require fixed conditions.
 
 ### Display a ratio (X / Y)
 

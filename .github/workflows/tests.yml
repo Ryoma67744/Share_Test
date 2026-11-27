@@ -125,6 +125,12 @@ jobs:
         run: node tests/share_refresh_browser_regression.cjs
       - name: New project tabs and isolated authentication
         run: node tests/project_navigation_browser_regression.cjs
+      - name: Complete folder shares and unresolved placement recovery
+        run: node tests/manage_folder_share_browser_regression.cjs
+      - name: Fresh project fit, automatic Range and first MRM
+        run: node tests/project_open_defaults_browser_regression.cjs
+      - name: Shared folder ZIP selection, authentication and cancellation
+        run: node tests/shared_collection_browser_regression.cjs
       - name: Manager list refresh after returning from another tab
         run: node tests/manager_navigation_browser_regression.cjs
       - name: Preserve in-flight imports and shared-view originals across tabs

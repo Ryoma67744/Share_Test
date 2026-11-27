@@ -11,7 +11,7 @@
 <script src="../project-store-safety.js"></script>
 <script src="../project-navigation.js?v=unpublished-1"></script>
 <script src="share-refresh.js"></script>
-<script src="source-loader.js"></script>
+<script src="source-loader.js?v=20261127b"></script>
 <script src="msi-display-settings.js"></script>
 <script src="msi-display-geometry.js"></script>
 <script src="msi-spatial-groups.js"></script>
@@ -29,8 +29,8 @@
 <script src="msi-analysis-worker.js"></script>
 <script src="msi-ratio-app.js"></script>
 <link rel="stylesheet" href="msi-ratio.css">
-<link rel="stylesheet" href="../help.css?v=2026-11-09.1">
-<script defer src="../help.js?v=2026-11-09.1"></script>
+<link rel="stylesheet" href="../help.css?v=2026-11-27.2">
+<script defer src="../help.js?v=2026-11-27.2"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="robots" content="noindex, nofollow">
@@ -53,7 +53,9 @@
     <script defer src="roi-media-msi.js"></script>
     <script defer src="roi-media-viewer.js"></script>
     <script defer src="roi-media-app.js"></script>
-    <script defer src="project-archive.js"></script>
+    <script defer src="project-archive.js?v=20261127b"></script>
+    <script defer src="shared-collection.js?v=20261127b"></script>
+    <script defer src="shared-collection-app.js?v=20261127b"></script>
     <script defer src="project-report-app.js?v=ppt-20261110-1"></script>
 <script>
   // Libraries not needed just to view are loaded on first use (jszip =
@@ -9239,6 +9241,11 @@ class SectionPanel {
         w = Math.round(w * scale); h = Math.round(h * scale);
         const t = this._ensureViewerTransform();
         const oldFit = this._viewerFit;
+        // A newly opened project stays fitted while its first images/layout
+        // arrive. Once the user pans or zooms, subsequent resizes preserve
+        // that viewport instead of resetting an in-progress inspection.
+        const autoFit = this.section._viewerAutoFit && t.tx === 0 && t.ty === 0 && t.scale === 1;
+        if (this.section._viewerAutoFit && !autoFit) this.section._viewerAutoFit = false;
         const displayKinds=refIsMsi?[...new Set(['msi',...heKeys.map(key=>key==='HE_STAIN_TIC'?'msi'
             :resolveHeMsiAlignment(this.section,key,msiKey,this).effectiveDisplayKind)])]:null;
         let frame = sectionCanvasFrame(this.section, w, h, !!heKey, refIsMsi ? 'msi' : (heKey ? 'he' : 'other'), displayKinds);
@@ -9279,7 +9286,7 @@ class SectionPanel {
             const nativeFit = fit * scale;
             // Keep the same image position and absolute magnification when a
             // column resizes. Translation is relative to the host centre.
-            if (oldFit && oldFit.key === fitKey && oldFit.nativeFit > 0 && nativeFit > 0) {
+            if (!autoFit && oldFit && oldFit.key === fitKey && oldFit.nativeFit > 0 && nativeFit > 0) {
                 t.scale *= oldFit.nativeFit / nativeFit;
             }
             this._viewerFit = { key:fitKey, fit, nativeFit };
@@ -10641,6 +10648,7 @@ class SectionPanel {
 
     applyViewerTransform() {
         const t = this._ensureViewerTransform();
+        if (this.section._viewerAutoFit && (t.tx !== 0 || t.ty !== 0 || t.scale !== 1)) this.section._viewerAutoFit = false;
         const rot = this.dom && this.dom.rot;
         if (rot) {
             rot.style.setProperty('--vt-tx', t.tx + 'px');
@@ -19111,7 +19119,7 @@ async function ratioZipOptions() {
 async function exportProjectAsZip() {
     if (_exportInProgress) { showToast('Export already running'); return; }
     _exportInProgress = true;
-    let progress = null, exportSession = null;
+    let progress = null, exportSession = null, archiveReader = null;
     try {
         const otsuMode = 'none';
         try { await loadScript(LAZY_LIBS.jszip); } catch (e) { alert((globalThis.AppI18n ? AppI18n.t("JSZip の読み込みに失敗しました") : 'JSZip の読み込みに失敗しました')); return; }
@@ -19124,13 +19132,19 @@ async function exportProjectAsZip() {
         if (!ratioOptions) return;
         const ratioRegistry = App.ratioExportRegistry ? App.ratioExportRegistry(ratioOptions.includePersonal) : undefined;
         const exportDisplaySettings = {otsuBgRemove: !!App.otsuBgRemove, otsuStrength: App.otsuStrength, otsuManualThreshold: App.otsuManualThreshold};
+        archiveReader = SourceLoader.createArchiveReader({storage:ProjectStorage, createId:()=>uid('blob'),
+            current:()=>App.project===exportOwner,
+            resolveSource:entry=>{const path=entry.storagePath || entry.path;return {
+                path,url:entry.sourceUrl || (path?SupabaseClient.publicUrl('atlases',path):null),
+                mime:entry.mime,filename:entry.filename};},
+            fetchBlob:(url,options)=>ShareRefresh.fetchBlob(url,options)});
         exportSession = await ProjectArchive.beginExport(App.project, ProjectStorage, {
             currentProject: () => App.project, readMedia: item => roiMediaReadOriginal(item), ratioRegistry,
+            prepareSnapshot: freezeMsiSourceReferences,
+            prepareEntry: entry => archiveReader.prepare(entry),
             ensureEntry: async (entry, options) => {
                 options.assertCurrent();
-                const record=exportOwner.__sourceLoader
-                    ? await exportOwner.__sourceLoader.ensure(entry,{signal:options.signal,current:()=>App.project===exportOwner})
-                    : await ProjectStorage.getBlob(entry.blobId);
+                const record=await archiveReader.ensure(entry,options);
                 options.assertCurrent();return record;
             },
             currentRatioRegistry: () => App.ratioExportRegistry ? App.ratioExportRegistry(ratioOptions.includePersonal) : undefined
@@ -19369,7 +19383,7 @@ async function exportProjectAsZip() {
     } finally {
         if (progress) { try { progress.close(); } catch (_) {} }
         try { if (exportSession) await exportSession.close(); }
-        finally { _exportInProgress = false; }
+        finally { archiveReader?.dispose(); _exportInProgress = false; }
     }
 }
 
@@ -22032,7 +22046,7 @@ const SharePreview = {
         this._gridSectionIds = sections.map(sec => String(sec.id));
         for (const sec of sections) {
             const id = String(sec.id);
-            if (!this._cellTransforms[id]) this._cellTransforms[id] = { tx: 0, ty: 0, scale: 1 };
+            if (!this._cellTransforms[id]) this._cellTransforms[id] = { tx: 0, ty: 0, scale: 1, autoFit: true };
             if (!Number.isFinite(this._sectionRotations[id])) {
                 const r = sec && sec.meta && sec.meta.shareDefaultRotation;
                 this._sectionRotations[id] = Number.isFinite(r) ? r : 0;
@@ -22170,8 +22184,9 @@ const SharePreview = {
     _applyCellTransform(idx, reset, restoreViewport) {
         const id = this._gridSectionIds[idx];
         if (id == null) return;
-        if (reset) this._cellTransforms[id] = { tx: 0, ty: 0, scale: 1 };
-        const t = this._cellTransforms[id] || (this._cellTransforms[id] = { tx: 0, ty: 0, scale: 1 });
+        if (reset) this._cellTransforms[id] = { tx: 0, ty: 0, scale: 1, autoFit: true };
+        const t = this._cellTransforms[id] || (this._cellTransforms[id] = { tx: 0, ty: 0, scale: 1, autoFit: true });
+        if (t.autoFit && (t.tx !== 0 || t.ty !== 0 || t.scale !== 1)) t.autoFit = false;
         const grid = this.overlay && this.overlay.querySelector('[data-image-grid]');
         const wrap = grid && grid.querySelector(`.cell-img-wrap[data-cell-idx="${idx}"]`);
         const stage = wrap && wrap.querySelector('[data-cell-stage]');
@@ -22180,7 +22195,7 @@ const SharePreview = {
         if(img)img.style.imageRendering=App.msiSmoothing==='linear'&&(App.msiLinearStrength||10)===10?'auto':'pixelated';
         const m = this._cellMetrics(wrap);
         if (m) {
-            const restored = restoreViewport && SectionVisibility.restoreViewport(t.viewport, m.width, m.height, m.fit);
+            const restored = !t.autoFit && restoreViewport && SectionVisibility.restoreViewport(t.viewport, m.width, m.height, m.fit);
             if (restored) Object.assign(t, restored);
             t.viewport = SectionVisibility.captureViewport(t, m.width, m.height, m.fit);
         }
@@ -22262,7 +22277,7 @@ const SharePreview = {
         if (wrapEl._previewInteractionsWired) return;
         wrapEl._previewInteractionsWired = true;
         const id = this._gridSectionIds[idx];
-        const ensure = () => this._cellTransforms[id] || (this._cellTransforms[id] = { tx: 0, ty: 0, scale: 1 });
+        const ensure = () => this._cellTransforms[id] || (this._cellTransforms[id] = { tx: 0, ty: 0, scale: 1, autoFit: true });
         let dragging = false, startX = 0, startY = 0, startTx = 0, startTy = 0, ptrId = null;
         wrapEl.addEventListener('wheel', (e) => {
             e.preventDefault();
@@ -23712,7 +23727,7 @@ const SupabaseClient = (() => {
         // Public-link unlock: returns a token only when the project's
         // is_public flag is true. Throws otherwise (caller falls back to
         // password modal).
-        unlockPublicProject(slug) { return rpc('unlock_public_project', { _slug: slug }); },
+        unlockPublicProject(slug, options) { return rpc('unlock_public_project', { _slug: slug }, options); },
         // Master-pw read token for ANY project by slug (preview/embed only).
         unlockProjectMaster(slug, masterPw, options) { return rpc('unlock_project_master', { _master_pw: masterPw, _slug: slug }, options); },
         // Probe a slug's is_public flag via column-restricted anon SELECT.
@@ -23738,6 +23753,15 @@ const SupabaseClient = (() => {
         // Read paths -------------------------------------------
         fetchProjectDoc(token, options) { return rpc('get_project_doc', { p_token: token }, options); },
         listRois(token, sectionId, options) { return rpc('list_rois', { p_token: token, p_section_id: sectionId || null }, options); },
+        async listRoisPage(token, sectionId, options = {}) {
+            const c=_client();if(!c)throw new Error('supabase_not_configured');
+            const offset=options.offset || 0,limit=Math.min(500,options.limit || 500);
+            const {data,error,count}=await ShareRefresh.withDeadline(signal=>c.rpc('list_rois',
+                {p_token:token,p_section_id:sectionId},{count:'exact'}).order('id',{ascending:true})
+                .range(offset,offset+limit-1).abortSignal(signal),options);
+            if(error){lastError=error;throw error;}
+            return {rows:data,count};
+        },
         // ROI write paths --------------------------------------
         createRoi(token, payload) { return rpc('create_roi', { p_token: token, ...payload }); },
         // SQL signatures use `p_id` for the ROI uuid; the earlier wrapper
@@ -24119,6 +24143,7 @@ const App = {
         if (key !== this._msiPresentationKey) {
             this._msiPresentationKey = key;
             this._msiDisplayOverride = null;
+            this._msiOpenRangePolicy = null;
             if (this.shareMode && key) {
                 try {
                     const value = JSON.parse(sessionStorage.getItem('desi:share:msi-display:' + key) || 'null');
@@ -24126,7 +24151,9 @@ const App = {
                 } catch (_) {}
             }
         }
-        return MsiDisplaySettings.resolve(this.project, this._msiDisplayOverride);
+        const settings = MsiDisplaySettings.resolve(this.project, this._msiDisplayOverride);
+        return this._msiOpenRangePolicy ? {...settings, rangePolicy:this._msiOpenRangePolicy,
+            preset:settings.rangePolicy === this._msiOpenRangePolicy ? settings.preset : 'custom'} : settings;
     },
     refreshMsiDisplayControls() {
         const settings = this.getMsiDisplaySettings();
@@ -24156,7 +24183,12 @@ const App = {
         if (!this.project || typeof MsiDisplaySettings === 'undefined') return;
         const resolved = this.getMsiDisplaySettings();
         const next = {...resolved,...patch};
-        const stored = MsiDisplaySettings.normalize(next);
+        const explicitRange = Object.prototype.hasOwnProperty.call(patch, 'rangePolicy');
+        if (explicitRange) this._msiOpenRangePolicy = null;
+        // Opening uses Maximum without migrating saved preferences. An edit
+        // to colour/interpolation must not silently save that opening default.
+        const stored = MsiDisplaySettings.normalize(!explicitRange && this._msiOpenRangePolicy
+            ? {...next, rangePolicy:MsiDisplaySettings.resolve(this.project, this._msiDisplayOverride).rangePolicy} : next);
         if (this.shareMode || this.project.__share) {
             this._msiDisplayOverride = {...stored,colormap:next.colormap,interpolation:next.interpolation};
             try { sessionStorage.setItem('desi:share:msi-display:' + this._msiPresentationKey, JSON.stringify(this._msiDisplayOverride)); } catch (_) {}
@@ -24202,6 +24234,47 @@ const App = {
         if (name === 'current') {
             await this.setMsiOutlierClipAll(true, {preserveDisplaySettings:true});
         }
+    },
+    _beginProjectDisplaySession() {
+        // Call only when a project has been adopted, never from redraw/load
+        // callbacks. Display defaults do not change measurements or metadata.
+        // Ratio display can wrap getMsiDisplaySettings. Clear the previous
+        // selection first so the new ordinary context is loaded here, even
+        // when a copied project contains the same saved ratio definition.
+        this.focusCompoundKey = null;
+        this.activeOverlay = null;
+        this.viewMode = 'compound';
+        delete this._ratioRenderingKey;
+        // KMD selections belong to the previous project. Clear that filter
+        // before the new project's first visible Method row is resolved.
+        if (typeof resetKmdSelectionIfProjectChanged === 'function') resetKmdSelectionIfProjectChanged(this.project);
+        ensureMsiDisplayContext(this);
+        const state = this._msiDisplayContexts && this._msiDisplayContexts.get(this._msiDisplayContextKey);
+        this.msiUserWindow = {}; this.msiRoiUserWindow = {};
+        this.msiScaleMode = 'same'; this.roiOnlyMode = false;
+        const roiToggle = document.getElementById('roi-clip-toggle');
+        if (roiToggle) roiToggle.checked = false;
+        this._roiDisplayRanges = new Map();
+        if (state) Object.assign(state, {windows:this.msiUserWindow,roiWindows:this.msiRoiUserWindow,mode:'same',signatures:{}});
+        this.getMsiDisplaySettings(); // Load this context's colour/interpolation before the range-only override.
+        this._msiOpenRangePolicy = 'maximum';
+        if (this.refreshViewModeUI) this.refreshViewModeUI();
+        this._initialProjectFocusPending = true;
+        for (const section of this.project.sections || []) {
+            const saved = section.meta && section.meta.viewerTransform || {};
+            const transform = {tx:0,ty:0,scale:1,rot:0,rotHE:0,rotMSI:0};
+            for (const key of ['rot','rotHE','rotMSI']) if (Number.isFinite(saved[key])) transform[key] = saved[key];
+            Object.defineProperty(section, '_viewerLocalTransform', {value:transform,configurable:true,enumerable:false});
+            Object.defineProperty(section, '_viewerAutoFit', {value:true,writable:true,configurable:true,enumerable:false});
+            const share = this.shareMode && this.shareMode.slug || '';
+            try { sessionStorage.removeItem('desi:msi-viewport:v2:' + JSON.stringify([this.project.id || '', share, String(section.id)])); } catch (_) {}
+        }
+        const visibility = this.sectionVisibility();
+        visibility.ensure();
+        visibility.previewTransforms = Object.create(null);
+        if (visibility.save) visibility.save();
+        const methodBody = document.getElementById('method-body');
+        if (methodBody) methodBody.scrollTop = 0;
     },
     roiOnlyMode: false,        // Clip to visible ROI union and use independent ROI display windows.
     // 共有先で、HE/IF ⇔ MSI の位置合わせをどちらで見るか。
@@ -26636,6 +26709,7 @@ const App = {
             await project.__sourceLoader?.dispose();
             await ProjectStorage.finishBlobLease(project.__blobLease,{discard:true});return;
         }
+        if (SharePreview.isOpen()) SharePreview.close();
         const projectMeta=project.meta;
         this.project = project;
         adopted=true;
@@ -26643,7 +26717,7 @@ const App = {
             await previousProject.__sourceLoader?.dispose();
             await ProjectStorage.finishBlobLease(previousProject.__blobLease,{discard:true});
         })().catch(error=>console.warn('previous shared load cleanup failed',error)) : Promise.resolve();
-        ensureMsiDisplayContext(this);
+        this._beginProjectDisplaySession();
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
         parquetReleaseAll();               // worker が抱えている parquet 索引も返す
         // Restore the project-level colormap before the first render so the
@@ -26755,9 +26829,7 @@ const App = {
             // and re-introduce the wrong-compound bug the lookup above just fixed.
             // 遅延読み込みでは loadedMsi が「最初の 1 本」まで縮むので、そこが空でも
             // 読み込める候補 (loadableMsi) から選べるようにしておく。
-            if (!this.focusCompoundKey || !loadableMsi.has(this.focusCompoundKey))
-                this.focusCompoundKey = loadedMsi.values().next().value
-                    || loadableMsi.values().next().value || null;
+            if (!this.focusCompoundKey || !loadableMsi.has(this.focusCompoundKey)) this._resolveInitialLayerFocus();
             const fk = this.focusCompoundKey;
             for (const p of this.panels.values()) {
                 try {
@@ -26979,13 +27051,13 @@ const App = {
         }
         this.project = project;
         if(previousShared)releaseSharedProjectSources(previousShared).catch(error=>console.warn('shared load cleanup failed',error));
-        ensureMsiDisplayContext(this);
         // 前回のセッションで公開しきれなかった編集があればここで拾い直す。
         if (this.offline) {
             detachOfflineProject(project);
             this.shareMode = null;
             document.body.classList.remove('share-mode', 'share-admin');
         }
+        this._beginProjectDisplaySession();
         this._publishDirty = !!project.__publishPending;
         this._publishEpoch = project.publishEditEpoch || 0;
         _roiRawGridCache.clear();          // 別プロジェクトの ROI 値グリッドを抱えない
@@ -27048,20 +27120,12 @@ const App = {
         // 常に OFF で開くので master 経路ではここは走らない。共有側で受信者が
         // 自分で ON にしていた場合のみ、パネル構築後にマスクを確保して再描画する。
         if (this.otsuBgRemove) { this.setOtsuBgRemove(true).catch(e => console.warn('[otsu] restore failed', e)); }
-        // In Compound mode pick a sane default focus compound if none persists
-        // or the persisted one no longer exists in this project.
+        // Focus was resolved in Method order before loading the first raster.
+        // Initial visibility is transient, including on an imported master.
         if (this.viewMode === 'compound') {
-            const allMsi = new Set();
-            for (const s of (this.project.sections || [])) {
-                for (const k of Object.keys(s.msiSeries || {})) if (/^MSI_/i.test(k)) allMsi.add(k);
-            }
-            if (!this.focusCompoundKey || !allMsi.has(this.focusCompoundKey)) {
-                this.focusCompoundKey = allMsi.values().next().value || null;
-                try { localStorage.setItem('desi:focusCompoundKey', this.focusCompoundKey || ''); } catch (e) {}
-            }
             for (const p of this.panels.values()) {
                 if (this.focusCompoundKey && p.imageSources[this.focusCompoundKey] && !p.visibleLayers.has(this.focusCompoundKey)) {
-                    p.toggleLayer(this.focusCompoundKey, true,{derivedSave:this._hydratingServerProjectId===this.project.id});
+                    p.toggleLayer(this.focusCompoundKey, true,{persist:false});
                 }
             }
         }
@@ -27676,14 +27740,40 @@ const App = {
             const ent=displayMsiEntry(sec,key);
             if(ent && (ent.blobId || ent.sourceUrl || ent.kind==='ratio')) loadable.push({key,ent});
         }
-        if(this._focusParam) {
+        const initial = !!this._initialProjectFocusPending;
+        this._initialProjectFocusPending = false;
+        if(this._focusParam && (initial || !loadable.some(x=>x.key===this.focusCompoundKey))) {
             const norm=s=>String(s||'').toLowerCase().replace(/[^a-z0-9]+/g,'');
             const match=loadable.find(x=>norm(x.ent.compoundMeta?.name)===norm(this._focusParam)
                 || norm(x.key.replace(/^MSI_/,''))===norm(this._focusParam));
             this._previewFocusKey=match?.key || null;this._previewFocusMissing=!match;
-            if(match)this.focusCompoundKey=match.key;
+            if(match){this.focusCompoundKey=match.key;return;}
         }
-        if(!loadable.some(x=>x.key===this.focusCompoundKey)) this.focusCompoundKey=loadable[0]?.key || null;
+        if(!initial && loadable.some(x=>x.key===this.focusCompoundKey)) return;
+        // Choose from the real Method order, not insertion/source load order.
+        // Shared DESI opens in Preview (a union of sections); the detailed
+        // view's Method table belongs to its first selected section.
+        const sections = this.project.sections || [];
+        const preview = this.shareMode && !this._previewMode && !projectHasNonTargetSection(this.project);
+        const selected = this.sectionVisibility().ensure();
+        const orderedSections = [...sections.filter(s=>!selected || selected.has(String(s.id))),
+            ...sections.filter(s=>selected && !selected.has(String(s.id)))];
+        const groups = preview ? [sections] : orderedSections.map(section=>[section]);
+        const available = new Set(loadable.map(x=>x.key));
+        for (const group of groups) {
+            const entries = new Map();
+            for (const section of group) for (const key of preview ? displayMsiKeys(section) : Object.keys(section.msiSeries || {})) {
+                const ent = displayMsiEntry(section,key);
+                if (/^MSI_/i.test(key) && available.has(key) && !entries.has(key)
+                    && (preview || ent && (ent.blobId || ent.sourceUrl || ent.kind==='ratio'))) entries.set(key, ent);
+            }
+            const getEntry = key=>entries.get(key);
+            const getMeta = (key,ent)=>ent && ent.compoundMeta || findCompoundMeta(this.project,key);
+            const keys = preview ? [...entries.keys()] : filterMethodKeys([...entries.keys()],getEntry,getMeta);
+            const first = sortMethodKeys(keys,getEntry,getMeta,this.methodSort && this.methodSort.key,this.methodSort && this.methodSort.dir)[0];
+            if (first) {this.focusCompoundKey=first;return;}
+        }
+        this.focusCompoundKey = null;
     },
     _updateSectionLoadDemand() {
         if(!this.project || !this._sectionLoadScheduler)return;
@@ -27748,6 +27838,7 @@ const App = {
         const first=this.project.sections.find(sec=>selected.has(String(sec.id)));
         if (first) this.setActiveSection(first.id);
         else Toolbar.refreshAll();
+        window.MsiRatioRuntime?.refreshControls();
         if(this._sectionLoadScheduler) {
             if(typeof IntersectionObserver==='function') {
                 this._sectionLoadObserver=new IntersectionObserver(()=>this._scheduleSectionLoadDemand(),{root:grid,rootMargin:'0px 320px'});
@@ -29468,7 +29559,8 @@ async function renderFolderIndex(slug) {
                           + renderNodes(n.children || [], depth + 1) + '</li>';
                 } else if (n && n.type === 'project' && n.slug) {
                     const url = linkBase + '#share=' + encodeURIComponent(n.slug);
-                    html += '<li style="margin:3px 0;">• <a href="' + esc(url) + '" style="color:#1d4ed8;text-decoration:none;">'
+                    html += '<li style="margin:3px 0;"><input type="checkbox" checked data-collection-project="' + esc(n.slug)
+                          + '" aria-label="ZIP: ' + esc(n.displayName || n.slug) + '"> <a href="' + esc(url) + '" style="color:#1d4ed8;text-decoration:none;">'
                           + esc(n.displayName || n.slug) + '</a></li>';
                 }
             }
@@ -29478,8 +29570,13 @@ async function renderFolderIndex(slug) {
             '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><span style="font-size:20px;">📁</span>'
             + '<h1 style="font-size:20px;font-weight:800;margin:0;">' + esc(title) + '</h1></div>'
             + "<p style=\"font-size:12px;color:#64748b;margin:0 0 16px;\" data-i18n=\"共有フォルダ。各プロジェクトを開くにはリンクをクリックしてください（プロジェクトごとにパスワードが必要な場合があります）。\">共有フォルダ。各プロジェクトを開くにはリンクをクリックしてください（プロジェクトごとにパスワードが必要な場合があります）。</p>"
+            + '<div data-collection-controls></div>'
             + '<div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:14px 16px;">'
             + renderNodes(doc.children || [], 0) + '</div>');
+        SharedCollectionApp.mount(host,{payload,api:SupabaseClient,
+            groupRois:groupRoiRowsByColor,roiRegistry:roiMediaRegistryFromDoc,ratioRegistry:ratioRegistryFromDoc,
+            memo:ensureMemoShape,freezeReferences:freezeMsiSourceReferences,imageIdentity:alignmentImageIdentity,
+            fetchBlob:(url,options)=>ShareRefresh.fetchBlob(url,options)});
     };
 
     const renderPasswordPrompt = (errMsg) => {
