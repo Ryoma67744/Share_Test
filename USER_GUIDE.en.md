@@ -496,7 +496,9 @@ Each CSV has a `.source-cells.json` sidecar recording source row IDs, coordinate
 
 ### Shared-folder ZIP downloads
 
-A `#folder=...` share URL can download all or selected projects, including subfolders. Check the displayed project count before starting. A project appearing in more than one location is fetched only once per share ID.
+A `#folder=...` share URL opens the project list reviewed by the manager when sharing. Each `#share=...` link opens one project. Unknown placements and unpublished projects excluded in the manager are not part of this shared list. If an intended project is absent, ask the manager to [review the sharing targets](USER_GUIDE.manage.en.md#7-bis-share-a-complete-folder).
+
+From this list, you can download all or selected projects, including subfolders. Check the displayed project count before starting. A project appearing in more than one location is fetched only once per share ID.
 
 Projects are fetched sequentially with progress and failure details. Password-protected projects require their own viewer passwords. You can cancel an operation and retry failed items. A failed project is never counted as a successful complete backup.
 

@@ -138,11 +138,24 @@ Unpublished projects show a disabled `URL なし` (No URL) button. `Open` → pu
 
 ## 7-bis. Share a complete folder
 
-Folder sharing refreshes the published server list before confirming membership. Check the project count and whether subfolders are included. Local projects that have not been published must first use Publish to share individually.
+The sharing dialog lists the folder's projects whose published targets can be identified, showing each **project name and individual share URL**. When this list contains the projects you want to share, you can share every project in the list together.
 
-Unresolved placements, such as another PC's local ID without a known share ID, prevent saving an incomplete listing. In the recovery dialog, explicitly choose the corresponding published project or remove a placement only after confirming that it is obsolete, then retry. Removing a placement does not delete its project. Similar names are never used to guess an association.
+1. Open the folder's sharing dialog and choose whether to include subfolders. The app refreshes the published server catalogue to identify the sharing targets.
+2. Check the **project names, individual share URLs and project count**. Open a URL to distinguish projects with the same name. A share ID appearing in more than one location counts as one project.
+3. Confirm that the list contains the intended projects and save the sharing settings. Every project in this reviewed list is included.
 
-A folder URL contains the listing saved by the sharing operation. Share the folder again after changing its membership. Recipients can download all or selected projects, including nested folders, from the folder URL. See the [viewer guide](USER_GUIDE.en.md#shared-folder-zip-downloads).
+Placements with unknown targets, unpublished local projects and items not found on the server appear separately in the **excluded-item details** and remain in the manager's folder structure. For example, if seven published projects are identified and four placements are unknown, you can share the seven projects once their names and URLs match your intended targets. Investigating or repairing the four unknown placements is optional.
+
+To include an excluded item, explicitly associate it with the correct published project, or use Publish to share for an unpublished project, then review the target list again. You may remove a placement after confirming that it is unnecessary. Removing a placement does not delete the project. Associations and removals are not automatic, and similar names are never used to guess a match.
+
+Saving stops if there are no targets, the server catalogue cannot be retrieved, a reviewed project disappears before saving, or the folder structure changes concurrently after review. Refresh the dialog and review the current list. A project that becomes identifiable just before saving is not added without review.
+
+| URL | What it opens |
+| --- | --- |
+| `.../viewer/#folder=<folder-slug>` | The reviewed list of shared projects. Give recipients this URL to share the folder |
+| `.../viewer/#share=<project-slug>` | One project. Use it to check a target or share that project individually |
+
+A folder URL contains the membership confirmed when the sharing settings were saved. Review and share again after changing the structure or targets. Folder sharing settings are separate from each project's public access setting and viewer password. Recipients can download all or selected projects in the folder's shared list. See the [viewer guide](USER_GUIDE.en.md#shared-folder-zip-downloads).
 
 Managers can use “Open shared ZIP downloads” in an already shared folder's sharing dialog to reach the same download page.
 
@@ -185,6 +198,9 @@ A small **`v:YYYY-MM-DD-rN`** badge is permanently visible in the bottom-right c
 | `Open (master)` bounces back to the list after entering a password | Older builds asked for the project's own **admin password**. Projects published without one have no correct answer, so every attempt bounced. Reload to get the current build, or set an admin password from `🔑 パスワード` |
 | The viewer says "no layers" right after opening | Check for the **空** (empty) badge in the list — that record was created but never populated. Open the one that holds the data |
 | Multiple rows have the same name or share slug | Different local IDs are separate preserved copies. Every copy is listed; compare the IDs and contents before deleting any |
+| A folder is empty on another PC and its projects appear at the root | An older placement may contain a local ID valid only in its original browser. In the sharing dialog's excluded-item details, explicitly associate it with the correct published project. Opening the latest app on the original PC is another way to recover the association |
+| Folder sharing shows unknown targets or excluded items | If the target list's names and individual URLs contain the intended projects, share that list. Investigating, associating or removing excluded placements is optional. Review an excluded item only when you also want to include it |
+| There are no targets, or saving stops after a change | Check individual publication and connectivity, then reopen the sharing dialog. If a reviewed project disappeared or the folder was edited concurrently, review the current list again |
 
 
 ## 11. Save conflicts and recoverable drafts

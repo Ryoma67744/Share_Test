@@ -1,6 +1,12 @@
 # Supabase setup (Phase 1)
 
-> **フォルダー共有の全件確認と同時編集:** アプリ `v2026-11-27.2` の配信前に [`migrations/20261127114758_folder_share_checked.sql`](./migrations/20261127114758_folder_share_checked.sql) を適用してください。既存の workspace / folder share 関数がある DB に、マスターパスワードで保護した `publish_folder_share_checked` RPC を追加します。現在のフォルダー配置との一致、共有階層、全対象プロジェクトの存在を確認してから、配置と共有一覧を同じトランザクションで保存します。競合時は `PT409` で全体を取り消します。既存の公開データ・配置・共有 URL は移行処理では変更しません。RPC 未適用のサーバーでは新しいフォルダー共有の保存を停止し、古い無条件保存へ自動的に戻しません。旧アプリへ戻す場合も追加した RPC を残せます。
+> **確認したプロジェクトをフォルダー共有する更新:** この更新の配信前に [`migrations/20261127230508_folder_share_selected_checked.sql`](./migrations/20261127230508_folder_share_selected_checked.sql) を適用してください。既存の workspace / folder share 関数と、先行する [`migrations/20261127114758_folder_share_checked.sql`](./migrations/20261127114758_folder_share_checked.sql) が前提です。先行 migration が未適用なら、先行版→今回版の順に適用します。既に適用した先行版の再実行は不要です。
+>
+> 新しい `publish_folder_share_selected_checked` RPC は、マスターパスワードを検証し、画面で確認した公開済みプロジェクトの slug 集合を受け取ります。確認時の workspace と現在の配置の一致、その集合に限定した共有階層・順序と index の一致、選んだプロジェクトの全件実在を確認し、共有一覧と workspace を同じトランザクションで保存します。確認した対象の消失や配置の同時変更は `PT409` で全体を取り消し、対象を減らした成功結果に置き換えません。
+>
+> 対応先が不明・未公開・サーバーに見つからない配置は、今回の共有対象から外し、既定では workspace に保持します。必要な場合だけ画面で明示的に対応付け・配置除去を選びます。対象一覧が揃っていれば、不明 ID の調査を済ませることは保存条件ではありません。保存前に別の項目が新しく解決できても、確認済み slug 集合へ自動追加しません。対象が0件、空・重複・不正な slug 集合、階層の不一致では保存しません。公開済み一覧を取得できない場合は、クライアント側でも共有保存を停止します。
+>
+> 応答の `project_count` は重複を除いた共有対象数、`placement_count` は対象の配置数、`excluded_placement_count` は今回の範囲にある対象外の配置数です。対象外の件数があること自体は保存エラーではありません。既存の `publish_folder_share_checked` は変更せず保持し、旧クライアントとの互換性を維持します。新 RPC が未適用の場合、新クライアントは更新案内を表示して停止し、旧 RPC や無条件保存へ自動的に戻しません。この migration は既存の公開データ・配置・共有 URL を一括変更しません。
 
 > **共有フォルダのプロジェクト名**は、フォルダを開くたびに各プロジェクトの公開名から取得します。既存DBには [folder_project_names.sql](./folder_project_names.sql) を適用してください。既存の共有URLにも反映されます。
 
